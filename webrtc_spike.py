@@ -1533,20 +1533,19 @@ class Handler(SimpleHTTPRequestHandler):
         payload = json.loads(self.body())
         kind = payload.pop("kind", "browser_event")
         token = self.headers.get("X-Dogwalk-Call")
-        if token and not self.calls.touch(token):
+        observer_token = self.headers.get("X-Dogwalk-Observer")
+        if token and self.calls.touch(token):
+            pass
+        elif observer_token and self.observers.touch(observer_token):
+            token = None
+        else:
             self.respond_json(
-                {"ok": False, "error": "Walker call lease is not active."},
-                status=HTTPStatus.CONFLICT,
-            )
-            return
-        if not token and self.calls.active():
-            self.respond_json(
-                {"ok": False, "error": "Walker call token is required."},
+                {"ok": False, "error": "A call or observer capability is required."},
                 status=HTTPStatus.CONFLICT,
             )
             return
         self.log.write(kind, **payload)
-        if kind == "browser_session_stopped":
+        if kind == "browser_session_stopped" and token:
             self.calls.release(token)
         self.respond_json({"ok": True})
 

@@ -492,6 +492,13 @@ def run_service_test() -> int:
             raise TestFailure("Observer capability authorized a consumptive endpoint")
         if request("/monitor", token=token)[0] != HTTPStatus.OK:
             raise TestFailure("Monitor rejected the active call token")
+        if request("/event", "POST", data={"kind": "browser_event"})[0] != HTTPStatus.CONFLICT:
+            raise TestFailure("Unauthenticated /event POST was not rejected")
+        status, body = request(
+            "/event", "POST", observer=observer, data={"kind": "browser_event"}
+        )
+        if status != HTTPStatus.OK:
+            raise TestFailure(f"Authenticated observer /event POST failed: {body}")
         status, _ = request(
             "/event", "POST", token, {"kind": "browser_session_stopped"}
         )
@@ -504,7 +511,8 @@ def run_service_test() -> int:
     else:
         print(
             "PASS service: private static root, health, readiness, "
-            "read-only observer, streaming exclusive call lease, release"
+            "read-only observer, streaming exclusive call lease, release, "
+            "authenticated /event"
         )
         return_code = 0
     finally:
