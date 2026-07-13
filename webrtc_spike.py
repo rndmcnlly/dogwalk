@@ -776,6 +776,14 @@ class SessionManager:
                         managed_session["turn_state"] = "in_progress"
                         managed_session["stop_reason"] = None
                         managed_session["report"] = ""
+                        managed_session["updates"].append(
+                            {
+                                "type": "PromptInput",
+                                "text": message,
+                                "detail": "Follow-up relayed by Walker",
+                                "chunks": 1,
+                            }
+                        )
                     self.log.write("acp_session_continued", dog=alias, session_id=session_id)
                     prompt_result = await connection.prompt(
                         session_id=session_id,
