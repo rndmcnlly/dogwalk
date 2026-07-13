@@ -81,6 +81,10 @@ The scenario timeout is one overall budget, not a fresh budget for every step.
 Use `restart`, `recall`, and `revive` to simulate a later voice call attaching an
 Agent-held session under a fresh Dog alias.
 
+Use `stop` to cancel only a Dog's active Prompt Turn, then `wait` and `continue`
+to verify corrective follow-up in the same session. Use `call_off` to close and
+detach the Managed Session; its alias may then be assigned to a new Dog.
+
 ## Test Layers
 
 1. Scripted ACP scenarios test Dog lifecycle, persistence, revival, aliases,
@@ -104,7 +108,7 @@ uv run --script text_spike.py service
 ```
 
 This launches Dogwalk from a temporary directory and verifies static asset
-serving, health and readiness probes, exclusive Walker call leases, protected
-sideband endpoints, denial of private source/state paths, lease release,
-reacquisition, and graceful `SIGTERM`
-shutdown. It does not create an OpenAI session or start a Dog.
+serving, health and readiness probes, read-only observer capabilities, exclusive
+Walker call leases, protected mutating and consumptive sideband endpoints, denial
+of private source/state paths, lease release, reacquisition, and graceful
+`SIGTERM` shutdown. It does not create an OpenAI session or start a Dog.

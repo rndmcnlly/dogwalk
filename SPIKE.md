@@ -92,6 +92,12 @@ local spike is not a sandbox; the remote version should keep the
 `SessionManager.dispatch()` surface but place the ACP subprocess behind a
 sandbox-side bridge.
 
+Each new voice call receives a current Pack snapshot before Walker greets the
+User, so Dogs retained across calls are already known by alias, state,
+assignment, activity, and Agent-reported usage. ACP usage updates may include
+cumulative cost as an amount plus ISO currency; `list_dogs` and `check_dog`
+expose that optional cost without starting another Prompt Turn.
+
 The bridge is exercised through declarative scenarios in `text_spike.py`. It still
 needs a harness integration test that causes OpenCode itself to issue
 `elicitation/create`: asking
@@ -107,8 +113,9 @@ The WebRTC spike gives Walker two sideband controls:
   call so the farewell can finish playing.
 - `set_timer`: Walker-hands owns the clock and queues a notification for the
   active browser session. On delivery, Walker tells the User the timer is due and
-  asks whether to act. A timer is not permission to inspect a Dog, so it never
-  causes automatic polling.
+  may read a relevant Dog's projected status before reporting. Checking is
+  side-effect free and requires no permission, but Walker does not tight-loop
+  poll.
 
 The timer event reaches the browser through a small local polling loop. It does
 not wake a Dog or send any request to the model until the timer is actually due.

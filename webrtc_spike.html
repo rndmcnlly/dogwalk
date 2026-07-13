@@ -36,20 +36,22 @@
     .call-controls button { align-self: stretch; min-width: 6.5rem; border: 0; border-left: 1px solid var(--line); padding: 0 .8rem; color: var(--muted); background: transparent; font-size: .66rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
     .call-controls .end { color: #ffd6cc; background: #632d25; }
     main { width: min(100% - 2rem,112rem); margin: 0 auto; padding: 1.2rem 0 4rem; }
-    .metrics { display: grid; grid-template-columns: repeat(6,1fr); margin-bottom: 1rem; border: 1px solid var(--line); background: rgba(12,24,22,.88); }
+    .metrics { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); margin-bottom: 1rem; border: 1px solid var(--line); background: rgba(12,24,22,.88); }
     .metric { min-width: 0; border-right: 1px solid var(--line); padding: .75rem .9rem; }
     .metric:last-child { border-right: 0; }
     .metric strong { display: block; margin-top: .32rem; font: 500 1.35rem var(--sans); }
     .metric strong.green { color: var(--green); } .metric strong.amber { color: var(--amber); }
     .metric small { display: block; margin-top: .18rem; overflow: hidden; color: var(--muted); font-size: .64rem; text-overflow: ellipsis; white-space: nowrap; }
-    .command-grid { display: grid; grid-template-columns: minmax(0,1fr) 19rem; gap: 1rem; }
-    .command-grid > *, .side-stack > * { min-width: 0; }
+    .workspace-grid { display: grid; grid-template-columns: minmax(20rem,3fr) minmax(36rem,5fr); gap: 1rem; align-items: start; }
+    .walker-column, .dogs-column { display: grid; min-width: 0; align-content: start; gap: 1rem; }
+    .walker-column > *, .dogs-column > * { min-width: 0; }
     .panel { border: 1px solid var(--line); background: rgba(12,24,22,.9); }
     .panel-head { display: flex; align-items: center; justify-content: space-between; min-height: 2.5rem; border-bottom: 1px solid var(--line); padding: .55rem .8rem; background: #0a1513; }
     .section-title { color: #a9beb5; }
     .fresh { color: var(--green); font-size: .66rem; }
     .fresh::before { content: ""; display: inline-block; width: .42rem; height: .42rem; margin-right: .4rem; border-radius: 50%; background: currentColor; }
     .session-columns, .session-row { display: grid; grid-template-columns: 9rem minmax(12rem,1.2fr) minmax(14rem,1.3fr) 8rem 7rem 6rem; align-items: stretch; }
+    .session-table { min-width: 0; overflow-x: auto; }
     .session-columns { border-bottom: 1px solid var(--line-hot); background: #0a1513; }
     .column-label { padding: .55rem .7rem; border-right: 1px solid var(--line); }
     .session-row { position: relative; width: 100%; min-height: 5rem; border: 0; border-bottom: 1px solid var(--line); padding: 0; color: inherit; text-align: left; background: transparent; }
@@ -69,7 +71,21 @@
     .readout { color: #c8d7d0; font-size: .72rem; }
     .bar { height: 3px; margin-top: .6rem; background: #20332f; } .bar i { display: block; height: 100%; background: var(--cyan); }
     .empty { padding: 2rem 1rem; color: var(--muted); text-align: center; }
-    .side-stack { display: grid; align-content: start; gap: 1rem; }
+    .walker-support, .dog-support { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .walker-feed { min-height: 34rem; }
+    .walker-feed .panel-head { border-bottom-color: var(--cyan); }
+    .conversation { display: flex; flex-direction: column; gap: .65rem; height: min(58vh,42rem); min-height: 25rem; overflow-y: auto; padding: 1rem; }
+    .conversation-empty { margin: auto; max-width: 20rem; color: var(--muted); font: .78rem/1.5 var(--sans); text-align: center; }
+    .walker-event { display: grid; grid-template-columns: 2rem minmax(0,1fr); gap: .65rem; align-items: start; }
+    .walker-icon { display: grid; place-items: center; width: 2rem; height: 2rem; border: 1px solid var(--line); border-radius: 50%; background: var(--panel-2); font-size: .95rem; }
+    .walker-bubble { min-width: 0; border-left: 2px solid var(--line-hot); padding: .12rem 0 .12rem .7rem; }
+    .walker-event.user .walker-bubble { border-color: var(--cyan); }
+    .walker-event.walker .walker-bubble { border-color: var(--green); }
+    .walker-event.earcon .walker-bubble { border-color: var(--amber); }
+    .walker-event.error .walker-bubble { border-color: var(--red); }
+    .walker-meta { display: flex; justify-content: space-between; gap: .6rem; color: var(--muted); font-size: .58rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .walker-copy { margin: .28rem 0 0; overflow-wrap: anywhere; color: #c8d8d1; font: .76rem/1.48 var(--sans); }
+    .walker-event.walker .walker-copy { color: #e2eee8; }
     .attention-card, .timer-card { border-bottom: 1px solid var(--line); padding: .85rem; }
     .attention-card:last-child, .timer-card:last-child { border-bottom: 0; }
     .attention-card { border-left: 3px solid var(--red); }
@@ -80,7 +96,7 @@
     .telemetry-list li { display: grid; grid-template-columns: 1fr auto; gap: .7rem; border-bottom: 1px solid var(--line); padding: .66rem .8rem; color: #a9bbb3; font-size: .68rem; }
     .telemetry-list li:last-child { border-bottom: 0; } .telemetry-list b { color: #dbe7e1; font-weight: 500; } .telemetry-list b.good { color: var(--green); } .telemetry-list b.warn { color: var(--amber); }
     progress { width: 100%; margin-top: .55rem; accent-color: var(--cyan); }
-    .focus { margin-top: 1rem; }
+    .focus { margin-top: 0; }
     .focus[hidden] { display: none; }
     .focus-layout { display: grid; grid-template-columns: minmax(0,1fr) 18rem; min-height: 23rem; }
     .stream { min-width: 0; border-right: 1px solid var(--line-hot); }
@@ -89,9 +105,22 @@
     .running { align-self: center; color: var(--green); font-size: .64rem; text-transform: uppercase; }
     .stream-events { padding: 0 1rem; }
     .event { display: grid; grid-template-columns: 5.2rem 7rem minmax(0,1fr); gap: .7rem; border-bottom: 1px solid var(--line); padding: .78rem 0; }
-    .event-kind.tool { color: var(--cyan); } .event-kind.message { color: var(--blue); } .event-kind.activity { color: var(--amber); }
+    .event-kind.tool { color: var(--cyan); } .event-kind.message { color: var(--blue); } .event-kind.activity { color: var(--amber); } .event-kind.thinking { color: #b594d6; }
+    .event.thinking { background: linear-gradient(90deg,rgba(181,148,214,.07),transparent); }
+    .event.thinking .event-content strong { color: #cab5df; font-style: italic; font-weight: 500; white-space: pre-wrap; }
     .event-content { min-width: 0; } .event-content strong { display: block; color: #dce7e2; font: 600 .75rem var(--sans); }
-    .event-content p { margin: .25rem 0 0; overflow-wrap: anywhere; color: var(--muted); font: .69rem/1.4 var(--sans); }
+    .markdown { overflow-wrap: anywhere; color: #d7e3dd; font: .73rem/1.5 var(--sans); }
+    .markdown > :first-child { margin-top: 0; } .markdown > :last-child { margin-bottom: 0; }
+    .markdown p, .markdown ul, .markdown ol, .markdown blockquote, .markdown pre { margin: .35rem 0; }
+    .markdown ul, .markdown ol { padding-left: 1.35rem; }
+    .markdown li + li { margin-top: .18rem; }
+    .markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 { margin: .5rem 0 .25rem; color: #edf5f1; font: 650 .78rem/1.35 var(--sans); }
+    .markdown strong { display: inline; color: inherit; font: inherit; font-weight: 700; }
+    .markdown code { border: 1px solid var(--line); border-radius: 2px; padding: .06rem .22rem; color: #b8dcd0; background: #081310; font: .66rem/1.45 var(--mono); }
+    .markdown pre { overflow-x: auto; border-left: 2px solid var(--cyan); padding: .55rem .65rem; background: #081310; }
+    .markdown pre code { border: 0; padding: 0; background: transparent; white-space: pre; }
+    .markdown blockquote { border-left: 2px solid var(--line-hot); padding-left: .65rem; color: #9eb1a9; }
+    .markdown a { color: var(--cyan); text-decoration-color: rgba(88,197,200,.45); }
     .inspector { min-width: 0; background: #0a1513; }
     .inspect-group { border-bottom: 1px solid var(--line); padding: .8rem; }
     .inspect-group h3 { margin: 0 0 .7rem; color: var(--muted); font-size: .62rem; letter-spacing: .1em; text-transform: uppercase; }
@@ -100,11 +129,10 @@
     .activity-gloss { border-left: 2px solid var(--amber); padding-left: .65rem; color: #d4dfda; font: .73rem/1.45 var(--sans); }
     details.raw summary { cursor: pointer; color: var(--muted); font-size: .61rem; letter-spacing: .07em; text-transform: uppercase; }
     details.raw pre { max-height: 14rem; margin: .7rem 0 0; overflow: auto; color: #9fc5b5; font-size: .57rem; line-height: 1.5; white-space: pre-wrap; }
-    .event-log { margin-top: 1rem; } #events { max-height: 12rem; margin: 0; overflow-y: auto; padding: .8rem; color: #9fc5b5; font-size: .65rem; white-space: pre-wrap; }
     .footline { display: flex; justify-content: space-between; gap: 1rem; margin-top: .75rem; color: #536c63; font-size: .59rem; text-transform: uppercase; }
-    @media (max-width: 1100px) { .system-strip .system-item:nth-child(n+4) { display:none; } .command-grid { grid-template-columns:1fr; } .side-stack { grid-template-columns:1fr 1fr; } }
-    @media (max-width: 800px) { .topbar { position:static; grid-template-columns:1fr auto; } .system-strip { display:none; } .metrics { grid-template-columns:repeat(3,1fr); } .metric:nth-child(3) { border-right:0; } .metric:nth-child(-n+3) { border-bottom:1px solid var(--line); } .session-table { overflow-x:auto; } .session-columns,.session-row { min-width:48rem; grid-template-columns:8rem minmax(11rem,1fr) minmax(13rem,1fr) 7rem 7rem 5rem; } .focus-layout { display:block; } .stream { border-right:0; } .inspector { display:grid; grid-template-columns:repeat(3,1fr); border-top:1px solid var(--line); } .inspect-group { border-right:1px solid var(--line); } }
-    @media (max-width: 560px) { .topbar { grid-template-columns:1fr; } .wordmark { min-height:3.4rem; border-right:0; border-bottom:1px solid var(--line); } .call-controls { display:grid; grid-template-columns:minmax(0,1fr) repeat(3,4rem); border-left:0; } .call-status { min-width:0; } .call-controls button { min-width:0; padding:0 .25rem; } main { width:min(100% - 1rem,112rem); } .metrics { grid-template-columns:1fr 1fr; } .metric:nth-child(2n) { border-right:0; } .metric:nth-child(-n+4) { border-bottom:1px solid var(--line); } .side-stack { grid-template-columns:1fr; } .event { grid-template-columns:4.5rem minmax(0,1fr); } .event-kind { display:none; } .inspector { display:block; } .inspect-group { border-right:0; } .footline { display:block; line-height:1.6; } }
+    @media (max-width: 1180px) { .system-strip .system-item:nth-child(n+4) { display:none; } .workspace-grid { grid-template-columns:minmax(18rem,2fr) minmax(32rem,3fr); } .walker-support,.dog-support { grid-template-columns:1fr; } }
+    @media (max-width: 900px) { .topbar { position:static; grid-template-columns:1fr auto; } .system-strip { display:none; } .workspace-grid { grid-template-columns:1fr; } .walker-feed { min-height:0; } .conversation { height:26rem; min-height:20rem; } .metrics { grid-template-columns:repeat(3,1fr); } .metric:nth-child(3) { border-right:0; } .metric:nth-child(-n+3) { border-bottom:1px solid var(--line); } .session-table { overflow-x:auto; } .session-columns,.session-row { min-width:48rem; grid-template-columns:8rem minmax(11rem,1fr) minmax(13rem,1fr) 7rem 7rem 5rem; } .focus-layout { display:block; } .stream { border-right:0; } .inspector { display:grid; grid-template-columns:repeat(3,1fr); border-top:1px solid var(--line); } .inspect-group { border-right:1px solid var(--line); } }
+    @media (max-width: 560px) { .topbar { grid-template-columns:1fr; } .wordmark { min-height:3.4rem; border-right:0; border-bottom:1px solid var(--line); } .call-controls { display:grid; grid-template-columns:minmax(0,1fr) repeat(3,4rem); border-left:0; } .call-status { min-width:0; } .call-controls button { min-width:0; padding:0 .25rem; } main { width:min(100% - 1rem,112rem); } .metrics { grid-template-columns:1fr 1fr; } .metric:nth-child(2n) { border-right:0; } .metric:nth-child(-n+4) { border-bottom:1px solid var(--line); } .walker-support,.dog-support { grid-template-columns:1fr; } .event { grid-template-columns:4.5rem minmax(0,1fr); } .event-kind { display:none; } .inspector { display:block; } .inspect-group { border-right:0; } .footline { display:block; line-height:1.6; } }
   </style>
 </head>
 <body>
@@ -122,29 +150,35 @@
     </div>
   </header>
   <main>
-    <section class="metrics" aria-label="Environment overview">
-      <div class="metric"><span>Managed sessions</span><strong id="session-count">00</strong><small id="session-summary">none attached</small></div>
-      <div class="metric"><span>Turns active</span><strong class="green" id="active-count">00</strong><small id="active-names">none</small></div>
-      <div class="metric"><span>Queued turns</span><strong id="queued-count">00</strong><small>projected by service</small></div>
-      <div class="metric"><span>Attention</span><strong class="amber" id="attention-count">00</strong><small id="attention-names">none pending</small></div>
-      <div class="metric"><span>Peak context</span><strong id="context-count">--</strong><small id="context-name">no usage update</small></div>
-      <div class="metric"><span>Observed cost</span><strong id="cost-count">--</strong><small>known session usage</small></div>
-    </section>
-    <div class="command-grid">
-      <section class="panel" aria-labelledby="sessions-title">
+    <div class="workspace-grid">
+      <section class="walker-column" aria-label="Walker console">
+        <section class="panel walker-feed" aria-labelledby="walker-title">
+          <header class="panel-head"><span class="section-title" id="walker-title">Walker channel</span><span class="fresh">Voice and earcons</span></header>
+          <div class="conversation" id="events" aria-live="polite"><div class="conversation-empty">Start a call to observe the conversation, sideband actions, and audible cues.</div></div>
+        </section>
+        <div class="walker-support">
+          <section class="panel"><header class="panel-head"><span class="section-title">System telemetry</span></header><ul class="telemetry-list"><li><span>Walker lease</span><b id="lease-state">RELEASED</b></li><li><span>Realtime channel</span><b id="channel-state">CLOSED</b></li><li><span>Audio inbound</span><b id="audio-state">OFFLINE</b></li><li><span>ACP sessions</span><b id="acp-count">0</b></li></ul></section>
+          <section class="panel"><header class="panel-head"><span class="section-title">Walker timers</span></header><div id="timers"><div class="empty">No timers.</div></div></section>
+        </div>
+      </section>
+      <section class="dogs-column" aria-label="Dog sessions">
+        <section class="metrics" aria-label="Dog overview">
+          <div class="metric"><span>Managed sessions</span><strong id="session-count">00</strong><small id="session-summary">none attached</small></div>
+          <div class="metric"><span>Turns active</span><strong class="green" id="active-count">00</strong><small id="active-names">none</small></div>
+          <div class="metric"><span>Queued turns</span><strong id="queued-count">00</strong><small>projected by service</small></div>
+          <div class="metric"><span>Attention</span><strong class="amber" id="attention-count">00</strong><small id="attention-names">none pending</small></div>
+          <div class="metric"><span>Peak context</span><strong id="context-count">--</strong><small id="context-name">no usage update</small></div>
+          <div class="metric"><span>Observed cost</span><strong id="cost-count">--</strong><small>known session usage</small></div>
+        </section>
+        <section class="panel" aria-labelledby="sessions-title">
         <header class="panel-head"><span class="section-title" id="sessions-title">Session operations matrix</span><span class="fresh">Live projection</span></header>
         <div class="session-table">
           <div class="session-columns" aria-hidden="true"><div class="column-label">Dog / state</div><div class="column-label">Assignment</div><div class="column-label">Current activity</div><div class="column-label">Turn</div><div class="column-label">Context</div><div class="column-label">Updates</div></div>
           <div id="dogs"><div class="empty">Start a call to observe Managed Sessions.</div></div>
         </div>
       </section>
-      <aside class="side-stack" aria-label="Environment alerts and telemetry">
-        <section class="panel"><header class="panel-head"><span class="section-title">Attention queue · <b id="attention-heading">00</b></span></header><div id="decisions"><div class="empty">No pending requests.</div></div></section>
-        <section class="panel"><header class="panel-head"><span class="section-title">System telemetry</span></header><ul class="telemetry-list"><li><span>Walker lease</span><b id="lease-state">RELEASED</b></li><li><span>Realtime channel</span><b id="channel-state">CLOSED</b></li><li><span>Audio inbound</span><b id="audio-state">OFFLINE</b></li><li><span>ACP sessions</span><b id="acp-count">0</b></li></ul></section>
-        <section class="panel"><header class="panel-head"><span class="section-title">Timers</span></header><div id="timers"><div class="empty">No timers.</div></div></section>
-      </aside>
-    </div>
-    <section class="panel focus" id="focus" hidden aria-labelledby="focus-title">
+        <section class="panel"><header class="panel-head"><span class="section-title">Dog attention queue · <b id="attention-heading">00</b></span></header><div id="decisions"><div class="empty">No pending requests.</div></div></section>
+        <section class="panel focus" id="focus" hidden aria-labelledby="focus-title">
       <header class="panel-head"><span class="section-title" id="focus-title">Focused session</span><span class="fresh" id="focus-state">Projected updates</span></header>
       <div class="focus-layout">
         <section class="stream" aria-label="ACP update stream"><header class="stream-head"><div><span class="kicker" id="focus-turn">Prompt Turn</span><h2 id="focus-task"></h2></div><span class="running" id="focus-live"></span></header><div class="stream-events" id="stream-events"></div></section>
@@ -155,8 +189,9 @@
           <section class="inspect-group"><details class="raw"><summary>Raw ACP updates</summary><pre id="raw-updates"></pre></details></section>
         </aside>
       </div>
-    </section>
-    <details class="panel event-log"><summary class="panel-head"><span class="section-title">Walker / browser event log</span></summary><pre id="events" aria-live="polite">Events will appear here. The complete structured log is written by the local server.</pre></details>
+        </section>
+      </section>
+    </div>
     <div class="footline"><span>Observer surface · selecting a session does not alter it</span><span>Call controls are the only environment mutations</span></div>
   </main>
   <audio id="walker" autoplay></audio>
@@ -181,14 +216,23 @@
     let monitorPoll;
     let earconContext;
     let callToken;
+    let observerToken;
     let heartbeatAbort;
     let selectedDogName;
     let latestMonitor;
     let callStartedAt;
     let callClock;
 
-    function display(message) {
-      events.textContent += `\n${new Date().toLocaleTimeString()}  ${message}`;
+    function display(message, kind = "system", icon = "·", label = kind) {
+      events.querySelector(".conversation-empty")?.remove();
+      const event = node("article", `walker-event ${kind}`);
+      event.append(node("span", "walker-icon", icon));
+      const bubble = node("div", "walker-bubble");
+      const meta = node("div", "walker-meta");
+      meta.append(node("span", "", label), node("time", "", new Date().toLocaleTimeString()));
+      bubble.append(meta, node("p", "walker-copy", message));
+      event.append(bubble);
+      events.append(event);
       events.scrollTop = events.scrollHeight;
     }
 
@@ -201,6 +245,7 @@
     function sideband(path, options = {}) {
       const headers = new Headers(options.headers || {});
       if (callToken) headers.set("X-Dogwalk-Call", callToken);
+      if (observerToken) headers.set("X-Dogwalk-Observer", observerToken);
       return fetch(path, { ...options, headers });
     }
 
@@ -264,10 +309,123 @@
       return { usage, used, size, percent: used && size ? Math.round(used / size * 100) : null };
     }
 
+    function formatCost(cost) {
+      const amount = Number(cost?.amount);
+      if (!Number.isFinite(amount) || !cost?.currency) return "--";
+      try {
+        return new Intl.NumberFormat(undefined, {
+          style: "currency", currency: cost.currency, minimumFractionDigits: 2, maximumFractionDigits: 6,
+        }).format(amount);
+      } catch {
+        return `${amount.toFixed(4)} ${cost.currency}`;
+      }
+    }
+
     function projectedState(dog, decisions) {
       if (decisions.some(decision => decision.dog === dog.name)) return "attention";
       if (dog.status === "failed" || dog.status === "cancelled") return dog.status;
       return dog.turn_state === "in_progress" || dog.turn_state === "queued" ? "working" : "resting";
+    }
+
+    function groupedUpdates(updates) {
+      const grouped = [];
+      for (const update of updates) {
+        if (["ToolCallStart", "ToolCallProgress"].includes(update.type)) {
+          const field = name => update.detail?.match(new RegExp(`${name}='([^']*)'`))?.[1];
+          const toolCallId = update.tool_call_id || field("tool_call_id") || `tool-${grouped.length}`;
+          let tool = grouped.find(item => item.type === "ToolCall" && item.tool_call_id === toolCallId);
+          if (!tool) {
+            tool = { type: "ToolCall", tool_call_id: toolCallId, text: "Tool call", chunks: 0 };
+            grouped.push(tool);
+          }
+          tool.text = field("title") || update.text || tool.text;
+          tool.tool_kind = field("kind") || tool.tool_kind;
+          tool.status = field("status") || tool.status;
+          tool.chunks += update.chunks || 1;
+        } else if (update.type.endsWith("Chunk") && grouped.at(-1)?.type === update.type) {
+          grouped.at(-1).text = (grouped.at(-1).text || "") + (update.text || "");
+          grouped.at(-1).chunks = (grouped.at(-1).chunks || 1) + (update.chunks || 1);
+        } else {
+          grouped.push({ ...update });
+        }
+      }
+      return grouped;
+    }
+
+    function walkerPackSnapshot() {
+      return (latestMonitor?.dogs || []).map(dog => ({
+        name: dog.name,
+        status: projectedState(dog, latestMonitor.decisions || []),
+        assignment: dog.task,
+        activity: dog.activity,
+        stop_reason: dog.stop_reason,
+        usage: dog.session?.usage || null,
+      }));
+    }
+
+    function inlineMarkdown(text) {
+      const fragment = document.createDocumentFragment();
+      const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^)\n]+\))/g;
+      let cursor = 0;
+      for (const match of text.matchAll(pattern)) {
+        fragment.append(document.createTextNode(text.slice(cursor, match.index)));
+        const token = match[0];
+        if (token.startsWith("`")) {
+          fragment.append(node("code", "", token.slice(1, -1)));
+        } else if (token.startsWith("**")) {
+          const strong = node("strong"); strong.append(inlineMarkdown(token.slice(2, -2))); fragment.append(strong);
+        } else if (token.startsWith("*")) {
+          const emphasis = node("em"); emphasis.append(inlineMarkdown(token.slice(1, -1))); fragment.append(emphasis);
+        } else {
+          const parts = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+          let url;
+          try { url = new URL(parts[2]); } catch {}
+          if (url && ["http:", "https:", "mailto:"].includes(url.protocol)) {
+            const link = node("a", "", parts[1]); link.href = url.href; link.rel = "noreferrer"; fragment.append(link);
+          } else {
+            fragment.append(document.createTextNode(token));
+          }
+        }
+        cursor = match.index + token.length;
+      }
+      fragment.append(document.createTextNode(text.slice(cursor)));
+      return fragment;
+    }
+
+    function renderMarkdown(markdown) {
+      const root = node("div", "markdown");
+      const lines = (markdown || "").replaceAll("\r\n", "\n").split("\n");
+      for (let index = 0; index < lines.length;) {
+        const line = lines[index];
+        if (!line.trim()) { index += 1; continue; }
+        if (line.startsWith("```")) {
+          const code = [];
+          for (index += 1; index < lines.length && !lines[index].startsWith("```"); index += 1) code.push(lines[index]);
+          index += index < lines.length ? 1 : 0;
+          const pre = node("pre"); pre.append(node("code", "", code.join("\n"))); root.append(pre); continue;
+        }
+        const heading = line.match(/^(#{1,6})\s+(.+)$/);
+        if (heading) { const title = node(`h${heading[1].length}`); title.append(inlineMarkdown(heading[2])); root.append(title); index += 1; continue; }
+        const quote = line.match(/^>\s?(.*)$/);
+        if (quote) { const blockquote = node("blockquote"); blockquote.append(inlineMarkdown(quote[1])); root.append(blockquote); index += 1; continue; }
+        const list = line.match(/^\s*(?:([-+*])|(\d+)\.)\s+(.+)$/);
+        if (list) {
+          const ordered = Boolean(list[2]);
+          const items = node(ordered ? "ol" : "ul");
+          while (index < lines.length) {
+            const item = lines[index].match(/^\s*(?:([-+*])|(\d+)\.)\s+(.+)$/);
+            if (!item || Boolean(item[2]) !== ordered) break;
+            const entry = node("li"); entry.append(inlineMarkdown(item[3])); items.append(entry); index += 1;
+          }
+          root.append(items); continue;
+        }
+        const paragraph = [];
+        while (index < lines.length && lines[index].trim() && !lines[index].startsWith("```") && !/^(#{1,6})\s+|^>\s?|^\s*(?:[-+*]|\d+\.)\s+/.test(lines[index])) {
+          paragraph.push(lines[index]); index += 1;
+        }
+        const copy = node("p"); copy.append(inlineMarkdown(paragraph.join(" "))); root.append(copy);
+      }
+      return root;
     }
 
     function renderFocus(dog) {
@@ -296,20 +454,26 @@
       const { usage, used, size, percent } = usageFor(dog);
       document.querySelector("#usage-facts").replaceChildren(
         fact("Context", percent === null ? "--" : `${used.toLocaleString()} / ${size.toLocaleString()} (${percent}%)`),
-        fact("Observed cost", usage?.cost ? `$${usage.cost}` : "--"),
+        fact("Observed cost", formatCost(usage?.cost)),
         fact("Updates retained", dog.updates.length),
       );
 
       const stream = document.querySelector("#stream-events");
       stream.replaceChildren();
-      if (!dog.updates.length) stream.append(node("div", "empty", "No ACP updates received yet."));
-      dog.updates.forEach((update, index) => {
-        const kind = update.type.includes("Tool") ? "tool" : update.type.includes("Message") ? "message" : "activity";
-        const event = node("article", "event");
-        event.append(node("span", "event-time", String(index + 1).padStart(2, "0")), node("span", `event-kind ${kind}`, update.type));
+      const updates = groupedUpdates(dog.updates);
+      if (!updates.length) stream.append(node("div", "empty", "No ACP updates received yet."));
+      updates.forEach((update, index) => {
+        const thinking = update.type === "AgentThoughtChunk";
+        const tool = update.type === "ToolCall";
+        const message = update.type === "AgentMessageChunk" || update.type === "UserMessageChunk";
+        const kind = thinking ? "thinking" : update.type.includes("Tool") ? "tool" : update.type.includes("Message") ? "message" : "activity";
+        const event = node("article", `event ${kind}`);
+        const toolState = tool ? [update.tool_kind, update.status].filter(Boolean).join(" · ") : "";
+        const label = thinking ? "Thinking" : tool ? `Tool${toolState ? ` · ${toolState}` : ""}` : update.type === "AgentMessageChunk" ? "Agent message" : update.type === "UserMessageChunk" ? "User message" : update.type;
+        event.append(node("span", "event-time", String(index + 1).padStart(2, "0")), node("span", `event-kind ${kind}`, label));
         const content = node("div", "event-content");
-        content.append(node("strong", "", update.text || update.type));
-        if (update.detail && update.detail !== update.text) content.append(node("p", "", update.detail));
+        if (thinking || message) content.append(renderMarkdown(update.text || ""));
+        else content.append(node("strong", "", update.text || label));
         event.append(content);
         stream.append(event);
       });
@@ -326,7 +490,11 @@
       const queued = dogs.filter(dog => dog.turn_state === "queued");
       const usages = dogs.map(dog => ({ dog, ...usageFor(dog) })).filter(item => item.percent !== null);
       const peak = usages.sort((a, b) => b.percent - a.percent)[0];
-      const totalCost = dogs.reduce((sum, dog) => sum + (Number(dog.session?.usage?.cost) || 0), 0);
+      const costs = dogs.map(dog => dog.session?.usage?.cost).filter(cost => Number.isFinite(Number(cost?.amount)) && cost?.currency);
+      const currencies = [...new Set(costs.map(cost => cost.currency))];
+      const totalCost = currencies.length === 1
+        ? { amount: costs.reduce((sum, cost) => sum + Number(cost.amount), 0), currency: currencies[0] }
+        : null;
       document.querySelector("#session-count").textContent = String(dogs.length).padStart(2, "0");
       document.querySelector("#session-summary").textContent = dogs.length ? "known to this service" : "none attached";
       document.querySelector("#active-count").textContent = String(active.length).padStart(2, "0");
@@ -337,7 +505,7 @@
       document.querySelector("#attention-names").textContent = [...new Set(decisions.map(decision => decision.dog))].join(" · ") || "none pending";
       document.querySelector("#context-count").textContent = peak ? `${peak.percent}%` : "--";
       document.querySelector("#context-name").textContent = peak ? `peak session: ${peak.dog.name}` : "no usage update";
-      document.querySelector("#cost-count").textContent = totalCost ? `$${totalCost.toFixed(2)}` : "--";
+      document.querySelector("#cost-count").textContent = formatCost(totalCost);
       document.querySelector("#acp-count").textContent = String(dogs.length);
       document.querySelector("#snapshot").textContent = new Date().toLocaleTimeString();
       document.querySelector("#snapshot").classList.add("ok");
@@ -391,6 +559,14 @@
       if (response.ok) renderMonitor(await response.json());
     }
 
+    async function beginObserving() {
+      const response = await fetch("/observer", { method: "POST" });
+      if (!response.ok) throw new Error("Could not acquire observer capability");
+      observerToken = (await response.json()).observer_token;
+      await pullMonitor();
+      monitorPoll = window.setInterval(() => pullMonitor().catch(error => log("monitor_poll_error", { error: String(error) })), 1000);
+    }
+
     async function pullSystem() {
       const [healthResponse, readyResponse] = await Promise.all([fetch("/healthz"), fetch("/readyz")]);
       const health = await healthResponse.json();
@@ -429,6 +605,18 @@
         microphone_muted: [[330, .12]],
         microphone_unmuted: [[523, .08], [659, .12]],
       };
+      const cues = {
+        call_started: ["✨", "Call opened"],
+        dog_sent: ["🐕", "Dog sent"],
+        dog_check: ["👂", "Dog checked"],
+        dog_done: ["✅", "Dog finished"],
+        timer_due: ["⏰", "Timer due"],
+        call_ending: ["👋", "Call ending"],
+        microphone_muted: ["🔇", "Microphone muted"],
+        microphone_unmuted: ["🎙️", "Microphone unmuted"],
+      };
+      const [icon, label] = cues[name] || ["🔔", name.replaceAll("_", " ")];
+      display(label, "earcon", icon, "Audible cue");
       if (!earconContext || earconContext.state !== "running") {
         log("earcon", { name, played: false, reason: "audio_context_unavailable" });
         return;
@@ -452,7 +640,7 @@
 
     async function executeTool(call) {
       const arguments_ = JSON.parse(call.arguments || "{}");
-      display(`tool: ${call.name}`);
+      display(call.name.replaceAll("_", " "), "tool", "↗", "Walker tool");
       if (call.name === "sic_dog") playEarcon("dog_sent");
       if (call.name === "check_dog") playEarcon("dog_check");
       const response = await sideband("/tool", {
@@ -465,7 +653,7 @@
         type: "function_call_output", call_id: call.call_id, output: JSON.stringify(result),
       }});
       if (result.end_call) {
-        display("Walker is ending the session");
+        display("Walker is ending the session", "system", "◌", "Call state");
         playEarcon("call_ending");
         log("end_call_requested", { delay_ms: result.delay_ms });
         window.setTimeout(stop, result.delay_ms);
@@ -480,13 +668,13 @@
       const response = await sideband("/due");
       const { due } = await response.json();
       for (const timer of due) {
-        display(`timer due: ${timer.purpose}`);
+        display(timer.purpose, "system", "◷", "Timer");
         playEarcon("timer_due");
         log("timer_delivered", timer);
         send({ type: "conversation.item.create", item: {
           type: "message", role: "user", content: [{
             type: "input_text",
-            text: `[SYSTEM TIMER] The ${timer.seconds}-second timer for "${timer.purpose}" has ended. Tell the User it is due. Do not check a Dog unless the User asks.`,
+            text: `[SYSTEM TIMER] The ${timer.seconds}-second timer for "${timer.purpose}" has ended. Tell the User it is due. Checking Dog status is read-only, so check a relevant Dog now if that would make the update useful.`,
           }],
         }});
         send({ type: "response.create" });
@@ -498,7 +686,7 @@
       const response = await sideband("/dog-events");
       const { completed } = await response.json();
       for (const dog of completed) {
-        display(`dog completed: ${dog.name} / ${dog.status}`);
+        display(`${dog.name} · ${dog.status}`, "system", "◇", "Dog report");
         playEarcon("dog_done");
         log("dog_completion_delivered", dog);
         send({ type: "conversation.item.create", item: {
@@ -516,7 +704,7 @@
       const response = await sideband("/decisions");
       const { decisions } = await response.json();
       for (const decision of decisions) {
-        display(`dog decision: ${decision.dog} / ${decision.kind}`);
+        display(`${decision.dog} · ${decision.kind}`, "system", "?", "Decision needed");
         playEarcon("dog_check");
         log("dog_decision_delivered", decision);
         const detail = decision.kind === "permission"
@@ -535,15 +723,15 @@
 
     function handleEvent(event) {
       if (event.type === "conversation.item.input_audio_transcription.completed") {
-        display(`user: ${event.transcript}`);
+        display(event.transcript, "user", "🎙️", "User");
         log("transcript", { speaker: "user", source: "microphone", text: event.transcript });
       }
       if (event.type === "response.output_audio_transcript.done") {
-        display(`walker: ${event.transcript}`);
+        display(event.transcript, "walker", "W", "Walker");
         log("transcript", { speaker: "walker", source: "realtime", text: event.transcript });
       }
       if (event.type === "input_audio_buffer.speech_started") {
-        display("speech started");
+        display("Listening to the User", "system", "◉", "Voice activity");
         log("speech_started", { audio_start_ms: event.audio_start_ms });
       }
       if (event.type === "input_audio_buffer.speech_stopped") {
@@ -557,7 +745,7 @@
         }
       }
       if (event.type === "error") {
-        display(`API error: ${event.error?.message || "unknown"}`);
+        display(event.error?.message || "Unknown API error", "error", "!", "API error");
         log("api_error", { error: event.error });
       }
     }
@@ -572,6 +760,7 @@
       callStartedAt = Date.now();
       callClock = window.setInterval(renderCallChrome, 1000);
       renderCallChrome();
+      await pullMonitor();
       holdCallLease().catch(error => {
         if (error.name !== "AbortError" && callToken) {
           display(String(error));
@@ -608,10 +797,16 @@
         duePoll = window.setInterval(() => pullDueTimers().catch(error => log("timer_poll_error", { error: String(error) })), 1000);
         dogPoll = window.setInterval(() => pullDogEvents().catch(error => log("dog_event_poll_error", { error: String(error) })), 1000);
         decisionPoll = window.setInterval(() => pullDecisions().catch(error => log("decision_poll_error", { error: String(error) })), 1000);
-        monitorPoll = window.setInterval(() => pullMonitor().catch(error => log("monitor_poll_error", { error: String(error) })), 1000);
         pullMonitor().catch(error => log("monitor_poll_error", { error: String(error) }));
         log("data_channel_open");
         playEarcon("call_started");
+        const pack = walkerPackSnapshot();
+        send({ type: "conversation.item.create", item: {
+          type: "message", role: "user", content: [{
+            type: "input_text",
+            text: `[SYSTEM PACK SNAPSHOT] These are the Managed Sessions currently attached to Dogwalk, including Dogs retained across earlier calls: ${JSON.stringify(pack)}. Treat this as authoritative current state. Use it to recognize existing Dogs and avoid creating duplicates. Do not recite the whole snapshot unless the User asks.`,
+          }],
+        }});
         send({ type: "response.create", response: {
           instructions: "The session has just opened. Say: 'I'll be your dog walker for today.' Then briefly invite the User to say what is on their mind. Do not ask whether they can hear you.",
         }});
@@ -631,7 +826,6 @@
       window.clearInterval(duePoll);
       window.clearInterval(dogPoll);
       window.clearInterval(decisionPoll);
-      window.clearInterval(monitorPoll);
       window.clearInterval(callClock);
       dataChannel?.close();
       peerConnection?.getSenders().forEach(sender => sender.track?.stop());
@@ -666,6 +860,7 @@
     window.addEventListener("beforeunload", stop);
     pullSystem().catch(error => display(`system check failed: ${error}`));
     window.setInterval(() => pullSystem().catch(error => display(`system check failed: ${error}`)), 5000);
+    beginObserving().catch(error => display(String(error), "error", "!", "Observer"));
     renderCallChrome();
   </script>
 </body>

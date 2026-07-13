@@ -73,12 +73,14 @@ in this prototype. Keep spoken replies short enough for a hands-free conversatio
 
 Open every new session with this brief, warm welcome: "I'll be your dog walker
 for today." Then invite the User to say what is on their mind. Do not ask
-whether they can hear you. Never poll a Dog. Check a Dog only when the User
-explicitly asks, or when a timer you set has fired. If the User asks you to wait and check later, call set_timer
-after siccing the Dog, then continue the conversation normally. When the timer
-notification arrives, tell the User it is time to check and ask whether they want
-you to do so. To end this conversation hands-free, speak a brief farewell first
-and then call end_call as your final action. Treat ordinary closings such as
+whether they can hear you. Checking a Dog is read-only and has no side effects:
+you may check whenever its current status would help the conversation, without
+asking the User for permission. Do not repeatedly poll in a tight loop. If the
+User asks you to wait and check later, call set_timer after siccing the Dog, then
+continue the conversation normally. When the timer notification arrives, check
+the relevant Dog when useful and report what you find. To end this conversation
+hands-free, speak a brief farewell first and then call end_call as your final
+action. Treat ordinary closings such as
 "bye", "we're good", "that's it", or "stop here" as a request to end the call
 unless the User clearly asks to keep talking.
 
@@ -92,6 +94,10 @@ say only the essential update.
 When a system notification says a Dog completed, immediately give the User a
 brief plain-language result. Do not claim success when the report says the Dog
 did not produce one: say that it finished without confirming the requested result.
+
+If the User wants a Dog to stop its current work, call stop_dog. This interrupts
+only the current Prompt Turn and keeps the Dog available for corrective follow-up.
+Call off a Dog only when the User wants to close and detach that retained session.
 
 When a system notification says a Dog needs a decision, briefly explain its
 question or requested action and the available choices. Ask the User, then use
@@ -136,7 +142,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "check_dog",
-        "description": "Check a Dog only when the User asks or after a timer notification. A working Dog returns a concise activity gloss based on its ACP tool activity, not its private reasoning or full transcript.",
+        "description": "Read a Dog's current projected status, context usage, and cumulative cost when reported by the Agent. This has no side effects: it never starts a turn or changes Agent work, so use it whenever status would help without asking permission. A working Dog returns a concise activity gloss based on ACP tool activity, not private reasoning or a full transcript.",
         "parameters": {
             "type": "object",
             "properties": {"name": {"type": "string"}},
@@ -147,7 +153,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "list_dogs",
-        "description": "List Dogs whose ACP sessions remain available. Use this before related work to find a resting Dog to resume. Never speak opaque session identifiers aloud.",
+        "description": "List Dogs whose ACP sessions remain available, including current status and Agent-reported usage and cumulative cost. Use this before related work to find a resting Dog to resume. Never speak opaque session identifiers aloud.",
         "parameters": {
             "type": "object",
             "properties": {},
@@ -211,8 +217,19 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "stop_dog",
+        "description": "Interrupt a Dog's current Prompt Turn while retaining its session and spoken name for follow-up instructions.",
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
         "name": "call_off_dog",
-        "description": "Close a Dog's retained ACP session. If its Prompt Turn is active, that turn is cancelled first.",
+        "description": "Close and detach a Dog's retained ACP session, releasing its spoken name. Use stop_dog instead when the User may give corrective follow-up.",
         "parameters": {
             "type": "object",
             "properties": {"name": {"type": "string"}},
@@ -417,6 +434,7 @@ class SessionManager:
                     "updated_at": None,
                     "usage": None,
                     "queue": None,
+                    "connection": None,
                 }
                 self.sessions[session_key]["future"] = self.runtime.submit(
                     self._run(session_key, arguments["task"])
@@ -435,7 +453,12 @@ class SessionManager:
             session_key, session = entry
             if tool == "check_dog":
                 status = self._dog_status(session)
-                result = {"ok": True, "name": name, "status": status}
+                result = {
+                    "ok": True,
+                    "name": name,
+                    "status": status,
+                    "usage": session["usage"],
+                }
                 if status == "resting":
                     result["report"] = session["report"]
                 elif status == "failed":
@@ -454,6 +477,36 @@ class SessionManager:
                 self._background.add(queued)
                 queued.add_done_callback(self._background.discard)
                 return {"ok": True, "name": session["alias"], "status": "working", "message": "Dog is continuing its retained session."}
+            if tool == "stop_dog":
+                if session["session_state"] != "ready" or session["turn_state"] not in {
+                    "queued",
+                    "in_progress",
+                }:
+                    return {
+                        "ok": False,
+                        "error": f"{session['alias']} is not currently working.",
+                    }
+                connection = session["connection"]
+                session_id = session["session_id"]
+                if connection is None or session_id is None:
+                    return {
+                        "ok": False,
+                        "error": f"{session['alias']}'s ACP session is still starting.",
+                    }
+                try:
+                    self.runtime.submit(connection.cancel(session_id=session_id)).result(timeout=6)
+                except Exception as exc:
+                    return {
+                        "ok": False,
+                        "error": f"Could not stop {session['alias']}: {type(exc).__name__}: {exc}",
+                    }
+                session["activity"] = "stopping current work"
+                return {
+                    "ok": True,
+                    "name": session["alias"],
+                    "status": "stopping",
+                    "message": "The current turn is being cancelled; the Dog remains available.",
+                }
             if tool == "call_off_dog":
                 if session["session_state"] in {"closed", "unavailable"}:
                     return {
@@ -558,6 +611,7 @@ class SessionManager:
                 "updated_at": discovered.get("updated_at"),
                 "usage": None,
                 "queue": None,
+                "connection": None,
             }
             self.sessions[session_key]["future"] = self.runtime.submit(
                 self._run(session_key, persisted_session_id=session_id)
@@ -582,6 +636,7 @@ class SessionManager:
                 (key, session)
                 for key, session in self.sessions.items()
                 if session["alias"].casefold() == normalized
+                and session["session_state"] != "closed"
             ),
             None,
         )
@@ -608,6 +663,7 @@ class SessionManager:
                     "activity": session["activity"],
                     "title": session["session_title"],
                     "last_updated": session["updated_at"],
+                    "usage": session["usage"],
                 }
                 for session in self.sessions.values()
                 if session["session_state"] == "ready"
@@ -696,6 +752,7 @@ class SessionManager:
                     managed_session["session_id"] = session_id
                     managed_session["session_state"] = "ready"
                     managed_session["queue"] = queue
+                    managed_session["connection"] = connection
                     if persisted_session_id is not None:
                         managed_session["report"] = ""
                 self.log.write(
@@ -782,8 +839,47 @@ class SessionManager:
         )
         with self._lock:
             session = self.sessions[session_key]
-            session["updates"].append({"type": kind, "text": text, "detail": detail})
-            session["updates"] = session["updates"][-50:]
+            updates = session["updates"]
+            if kind in {"ToolCallStart", "ToolCallProgress"}:
+                tool_call_id = str(getattr(update, "tool_call_id", "") or "")
+                tool_update = next(
+                    (
+                        item
+                        for item in reversed(updates)
+                        if item["type"] == "ToolCall"
+                        and item.get("tool_call_id") == tool_call_id
+                    ),
+                    None,
+                )
+                title = getattr(update, "title", None)
+                tool_kind = getattr(update, "kind", None)
+                status = str(getattr(update, "status", None) or "") or None
+                if tool_update is None:
+                    updates.append(
+                        {
+                            "type": "ToolCall",
+                            "text": title or self.activity_gloss(update),
+                            "detail": self.activity_gloss(update),
+                            "tool_call_id": tool_call_id,
+                            "tool_kind": tool_kind,
+                            "status": status,
+                            "chunks": 1,
+                        }
+                    )
+                else:
+                    tool_update["text"] = title or tool_update["text"]
+                    tool_update["detail"] = self.activity_gloss(update)
+                    tool_update["tool_kind"] = tool_kind or tool_update.get("tool_kind")
+                    tool_update["status"] = status or tool_update.get("status")
+                    tool_update["chunks"] = tool_update.get("chunks", 1) + 1
+            elif kind.endswith("Chunk") and updates and updates[-1]["type"] == kind:
+                updates[-1]["text"] = (updates[-1]["text"] or "") + (text or "")
+                updates[-1]["chunks"] = updates[-1].get("chunks", 1) + 1
+                updates[-1]["detail"] = f"{updates[-1]['chunks']} streamed chunks"
+            else:
+                updates.append(
+                    {"type": kind, "text": text, "detail": detail, "chunks": 1}
+                )
             if kind in {"ToolCallStart", "ToolCallProgress"}:
                 session["activity"] = self.activity_gloss(update)
             if kind == "AgentMessageChunk" and text:
@@ -792,10 +888,16 @@ class SessionManager:
                 session["session_title"] = getattr(update, "title", None)
                 session["updated_at"] = getattr(update, "updated_at", None)
             if kind == "UsageUpdate":
+                cost = getattr(update, "cost", None)
                 session["usage"] = {
                     "used": getattr(update, "used", None),
                     "size": getattr(update, "size", None),
-                    "cost": str(getattr(update, "cost", None) or "") or None,
+                    "cost": {
+                        "amount": float(getattr(cost, "amount")),
+                        "currency": getattr(cost, "currency"),
+                    }
+                    if cost is not None
+                    else None,
                 }
 
     @staticmethod
@@ -843,6 +945,7 @@ class SessionManager:
                     },
                 }
                 for session in self.sessions.values()
+                if session["session_state"] != "closed"
             ]
 
     def take_turn_results(self) -> list[dict[str, Any]]:
@@ -1156,11 +1259,46 @@ class CallLease:
             return False
 
 
+class ObserverTokens:
+    """Expiring read-only capabilities for diagnostic monitor clients."""
+
+    def __init__(self, timeout_seconds: float = 3600) -> None:
+        self.timeout_seconds = timeout_seconds
+        self._tokens: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def issue(self) -> str:
+        token = secrets.token_urlsafe(24)
+        with self._lock:
+            self._prune(time.monotonic())
+            self._tokens[token] = time.monotonic()
+        return token
+
+    def touch(self, token: str | None) -> bool:
+        if not token:
+            return False
+        now = time.monotonic()
+        with self._lock:
+            self._prune(now)
+            if token not in self._tokens:
+                return False
+            self._tokens[token] = now
+            return True
+
+    def _prune(self, now: float) -> None:
+        self._tokens = {
+            token: touched
+            for token, touched in self._tokens.items()
+            if now - touched <= self.timeout_seconds
+        }
+
+
 class Handler(SimpleHTTPRequestHandler):
     log: SessionLog
     manager: SessionManager
     timers: TimerQueue
     calls: CallLease
+    observers: ObserverTokens
     api_key: str
     started_at: float
     workspace: Path
@@ -1173,6 +1311,8 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if self.path == "/call":
             self.begin_call()
+        elif self.path == "/observer":
+            self.begin_observer()
         elif self.path == "/session":
             self.create_session()
         elif self.path == "/tool":
@@ -1211,8 +1351,9 @@ class Handler(SimpleHTTPRequestHandler):
             "/due",
             "/dog-events",
             "/decisions",
-            "/monitor",
         } and not self.require_call():
+            return
+        elif self.path == "/monitor" and not self.require_monitor():
             return
         elif self.path == "/due":
             self.respond_json({"due": self.timers.take_due()})
@@ -1246,6 +1387,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         self.log.write("call_started")
         self.respond_json({"ok": True, "call_token": call_token})
+
+    def begin_observer(self) -> None:
+        self.respond_json({"ok": True, "observer_token": self.observers.issue()})
 
     def stream_call_heartbeat(self) -> None:
         token = self.headers.get("X-Dogwalk-Call")
@@ -1407,6 +1551,17 @@ class Handler(SimpleHTTPRequestHandler):
         )
         return False
 
+    def require_monitor(self) -> bool:
+        if self.calls.touch(self.headers.get("X-Dogwalk-Call")) or self.observers.touch(
+            self.headers.get("X-Dogwalk-Observer")
+        ):
+            return True
+        self.respond_json(
+            {"ok": False, "error": "A call or observer capability is required."},
+            status=HTTPStatus.CONFLICT,
+        )
+        return False
+
     def respond_json(
         self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK
     ) -> None:
@@ -1467,6 +1622,7 @@ def main() -> None:
     Handler.api_key = api_key
     Handler.timers = TimerQueue(Handler.log)
     Handler.calls = CallLease(args.call_lease_seconds)
+    Handler.observers = ObserverTokens()
     Handler.started_at = time.monotonic()
     Handler.workspace = workspace
     Handler.agent_command = args.agent_command

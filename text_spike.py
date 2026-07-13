@@ -160,6 +160,8 @@ def validate_scenario(data: Any) -> None:
         "wait",
         "remember",
         "continue",
+        "stop",
+        "call_off",
         "rename",
         "timer",
         "restart",
@@ -201,6 +203,17 @@ def validate_scenario(data: Any) -> None:
             if value.get("dog") not in settled:
                 raise TestFailure(f"Step {index} continues a Dog that is not resting")
             settled.discard(value["dog"])
+        elif operation == "stop":
+            name = value.get("dog")
+            if name not in started:
+                raise TestFailure(f"Step {index} stops an unknown Dog")
+            settled.discard(name)
+        elif operation == "call_off":
+            name = value.get("dog")
+            if name not in started:
+                raise TestFailure(f"Step {index} calls off an unknown Dog")
+            started.remove(name)
+            settled.discard(name)
         elif operation == "restart":
             started.clear()
             settled.clear()
@@ -253,6 +266,30 @@ def run_steps(driver: TextDriver, scenario: dict[str, Any]) -> None:
             name = value["dog"]
             driver.tool("relay_to_dog", name=name, message=value["message"])
             driver.turns[name] = driver.turns.get(name, 0) + 1
+        elif operation == "stop":
+            name = value["dog"]
+            while time.monotonic() < driver.deadline:
+                driver.resolve_test_permissions()
+                dog = driver.dog(name)
+                tool_started = any(
+                    update["type"] == "ToolCall"
+                    and update.get("status") in {"pending", "in_progress"}
+                    for update in dog["updates"]
+                )
+                if (
+                    dog["session_state"] == "ready"
+                    and dog["turn_state"] == "in_progress"
+                    and (tool_started or not value.get("after_tool"))
+                ):
+                    driver.tool("stop_dog", name=name)
+                    break
+                time.sleep(0.05)
+            else:
+                raise TestFailure(f"{name} never became interruptible")
+        elif operation == "call_off":
+            name = value["dog"]
+            driver.tool("call_off_dog", name=name)
+            driver.turns.pop(name, None)
         elif operation == "rename":
             old_name, new_name = value["dog"], value["to"]
             driver.tool("name_dog", current_name=old_name, name=new_name)
@@ -337,9 +374,13 @@ def run_test(args: argparse.Namespace) -> int:
         args.verbose,
         deadline=started + float(scenario.get("timeout", 180)),
     )
+    sessions = turns = files = 0
     try:
         run_steps(driver, scenario)
         run_assertions(driver, scenario.get("assert", []))
+        sessions = len(driver.manager.monitor())
+        turns = sum(driver.turns.values())
+        files = sum(1 for path in workspace.iterdir() if path.is_file())
     except Exception as exc:
         elapsed = time.monotonic() - started
         print(f"FAIL {scenario['name']} ({elapsed:.1f}s): {exc}")
@@ -349,9 +390,6 @@ def run_test(args: argparse.Namespace) -> int:
     finally:
         driver.close()
     elapsed = time.monotonic() - started
-    sessions = len(driver.manager.monitor())
-    turns = sum(driver.turns.values())
-    files = sum(1 for path in workspace.iterdir() if path.is_file())
     print(f"PASS {scenario['name']} ({elapsed:.1f}s): {sessions} sessions, {turns} turns, {files} files")
     if temporary:
         shutil.rmtree(workspace)
@@ -394,8 +432,11 @@ def run_service_test() -> int:
         method: str = "GET",
         token: str | None = None,
         data: dict[str, Any] | None = None,
+        observer: str | None = None,
     ) -> tuple[int, bytes]:
         headers = {"X-Dogwalk-Call": token} if token else {}
+        if observer:
+            headers["X-Dogwalk-Observer"] = observer
         body = json.dumps(data).encode() if data is not None else None
         if body:
             headers["Content-Type"] = "application/json"
@@ -440,7 +481,15 @@ def run_service_test() -> int:
         if request("/call", "POST")[0] != HTTPStatus.CONFLICT:
             raise TestFailure("A second Walker call was not rejected")
         if request("/monitor")[0] != HTTPStatus.CONFLICT:
-            raise TestFailure("Monitor accepted a request without the call token")
+            raise TestFailure("Monitor accepted a request without a capability")
+        status, body = request("/observer", "POST")
+        if status != HTTPStatus.OK:
+            raise TestFailure("Could not acquire observer capability")
+        observer = json.loads(body)["observer_token"]
+        if request("/monitor", observer=observer)[0] != HTTPStatus.OK:
+            raise TestFailure("Monitor rejected the observer capability")
+        if request("/due", observer=observer)[0] != HTTPStatus.CONFLICT:
+            raise TestFailure("Observer capability authorized a consumptive endpoint")
         if request("/monitor", token=token)[0] != HTTPStatus.OK:
             raise TestFailure("Monitor rejected the active call token")
         status, _ = request(
@@ -455,7 +504,7 @@ def run_service_test() -> int:
     else:
         print(
             "PASS service: private static root, health, readiness, "
-            "streaming exclusive call lease, release"
+            "read-only observer, streaming exclusive call lease, release"
         )
         return_code = 0
     finally:

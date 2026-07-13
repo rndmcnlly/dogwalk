@@ -32,6 +32,7 @@ assert:
   - same: [Poet.session_state, ready]
   - same: [Poet.turn_state, stopped]
   - same: [Poet.stop_reason, end_turn]
+  - same: [Poet.session.usage.cost.currency, USD]
   - turns:
       Poet: 2
       Lingo: 1

@@ -50,11 +50,13 @@ The agent command is parsed as arguments without invoking a shell.
 
 ## Lifecycle
 
-One Dogwalk process owns one pack of Dogs. A browser call acquires an exclusive,
-short-lived Walker lease and sends its opaque token on sideband requests. A
-second Walker is rejected so it cannot consume the first Walker's completion or
-decision queues. Clean disconnects release the lease immediately; dropped calls
-release it after the heartbeat timeout.
+One Dogwalk process owns one pack of Dogs. The diagnostic page acquires an
+expiring read-only observer capability so it can display Managed Sessions without
+starting a voice call. A browser call separately acquires an exclusive,
+short-lived Walker lease and sends its opaque token on mutating or consumptive
+sideband requests. A second Walker is rejected so it cannot consume the first
+Walker's completion or decision queues. Clean disconnects release the lease
+immediately; dropped calls release it after the heartbeat timeout.
 
 Dogs are not tied to that lease. They retain their local ACP processes and
 sessions across browser calls until called off or the Dogwalk process stops.
