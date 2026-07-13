@@ -5,8 +5,8 @@
 ## The premise
 
 Do real software work while away from the keyboard, hands-free and eyes-free.
-The motivating scene: Adam on the exercise bike in the garage, phone screen
-locked, bluetooth headphones in. He loads `https://dogwalk.adamsmith.as`, starts
+The motivating scene: the User on the exercise bike in the garage, phone screen
+locked, bluetooth headphones in. They load the Dogwalk site, start
 an audio session, and just talks. He asks about projects, reviews git history,
 proposes changes, kicks off work, and hears back about the results, all in plain
 language, never speaking a technical identifier precisely.
@@ -14,7 +14,7 @@ language, never speaking a technical identifier precisely.
 This is the thing Simon Willison keeps gesturing at: coding by voice while
 walking the dog, treating the model as a fast intern you supervise by ear, where
 verification (tests pass, artifact runs) replaces line-by-line review as the
-supervision mechanism. Adam has no dog. The dog is beside the point. The point
+supervision mechanism. The User has no dog. The dog is beside the point. The point
 is hands-free supervision of real engineering work.
 
 - Simon's lived proof-of-concept: <https://fedi.simonwillison.net/@simon/112147026040154264>
@@ -26,8 +26,8 @@ Three entities, with a deliberately **inverted competence gradient**.
 
 | Role | Is | Runs where | Speaks |
 |------|-----|-----------|--------|
-| **Adam** | the human, hands-free, imprecise on purpose | garage bike | plain language |
-| **Walker** | voice conversationalist, engineering-*weak*, self-aware about it | gpt-realtime (cloud) | voice to Adam; ACP client to Dogs |
+| **User** | the human, hands-free, imprecise on purpose | garage bike | plain language |
+| **Walker** | voice conversationalist, engineering-*weak*, self-aware about it | gpt-realtime (cloud) | voice to the User; ACP client to Dogs |
 | **Dog(s)** | strong coding harness (opencode, Claude Code, ...) | subprocess in the sandbox | ACP agent over stdio |
 | the sandbox | Daytona VM, hosts the pack + files + `~/.dogwalk` | cloud | n/a |
 
@@ -47,18 +47,18 @@ orchestration puts the smartest model on top as manager. dogwalk inverts it: the
 weaker, socially-fluent model is the interface *because* it is cheap enough to
 run at low latency in a realtime voice loop, and *safe* because its very
 limitation (no engineering judgment) forces every consequential decision to route
-through Adam. The Walker cannot go rogue on architecture because it genuinely
+through the User. The Walker cannot go rogue on architecture because it genuinely
 does not know enough to. The Dog *could*, which is exactly why it never talks to
-Adam directly and never acts without a relayed instruction.
+the User directly and never acts without a relayed instruction.
 
 ### Vocabulary
 
 - **Relay** is the verb. The Walker *relays* intent down to a Dog and *relays*
-  results back up to Adam. Not "delegate" (no false hierarchy: the Dog is
+  results back up to the User. Not "delegate" (no false hierarchy: the Dog is
   smarter), not "command."
 - **Sic** a Dog: spawn a fresh coding-harness subprocess and give it a task.
 - Dogs are **ephemeral per-task**: sicced fresh for a job, work, report, released.
-- Dogs get **pronounceable names coined on the fly**, riffing on Adam's own
+- Dogs get **pronounceable names coined on the fly**, riffing on the User's own
   language for the task (a scout became "Ranger", a narrow bug-fix became
   "Fixer"). The Walker may seed from a few example names but should name dynamic
   Dogs playfully from context.
@@ -101,7 +101,7 @@ transport is still WIP. So the ACP client must live *close to* the Dogs, i.e.
 inside or adjacent to the sandbox, **not** up in the gpt-realtime cloud session.
 That splits the Walker into two pieces:
 
-- **Walker-voice**: the gpt-realtime session (Adam's phone <-> OpenAI).
+- **Walker-voice**: the gpt-realtime session (the User's phone <-> OpenAI).
 - **Walker-hands**: a server-side process (the realtime "sideband") that holds
   the ACP client, sics Dogs in the sandbox, and exposes `relay_to_dog` /
   `check_dog` / `sic_dog` / `call_off_dog` as realtime **function tools**.
@@ -128,10 +128,10 @@ The Walker narrates a Dog's work by translating ACP notifications into speech:
 ### Onboarding
 
 On session start the sandbox wakes and the Walker receives an onboarding message
-assembled from files in `~/.dogwalk` (project inventory, how Adam refers to
+assembled from files in `~/.dogwalk` (project inventory, how the User refers to
 things, house rules). This is what lets the Walker resolve plain-language
 reference ("the maps thing", "the distance thing") to a real project by
-*purpose*, then confirm, without Adam ever speaking a filename. Latency of the
+*purpose*, then confirm, without the User ever speaking a filename. Latency of the
 cold start is masked by the Walker talking immediately and folding the
 onboarding in mid-conversation when it lands.
 
@@ -139,7 +139,7 @@ onboarding in mid-conversation when it lands.
 
 1. The Walker **never speaks code** and **never makes an engineering judgment**.
    Every consequential choice (add a dependency or not, save work or not, keep
-   going or stop) bounces to Adam, framed as *shape and consequence*, not code.
+   going or stop) bounces to the User, framed as *shape and consequence*, not code.
 2. **Reference by purpose, not identifier.** Plain-language handles resolved via
    onboarding knowledge plus confirmation. No filenames spoken aloud.
 3. The engineering intelligence is **entirely borrowed** (opencode/ACP). dogwalk's
@@ -162,7 +162,7 @@ onboarding in mid-conversation when it lands.
   ("I don't know what the bug was"). Decide how much project memory lives in
   `~/.dogwalk` vs. must be re-derived by a Dog each session.
 - **Pack concurrency in speech.** One-at-a-time is conversationally clean; decide
-  how to narrate two Dogs working at once without confusing Adam.
+   how to narrate two Dogs working at once without confusing the User.
 - **ACP fidelity varies by harness/version.** opencode's ACP server historically
   flagged gaps (streaming updates, full tool-call reporting, session
   persistence). Verify against the actual build before relying on any event.
@@ -178,13 +178,13 @@ and realtime seams are provider-agnostic in principle.
 
 ## Appendix: a transcript (design fiction)
 
-*Adam on the bike, screen locked, headphones in. Session opens with a chime.*
+*User on the bike, screen locked, headphones in. Session opens with a chime.*
 
-**Walker:** Morning, Adam. I'm here. Give me a beat, the workspace is still
+**Walker:** I'll be your dog walker for today. Give me a beat, the workspace is still
 stretching and yawning, machine's coming up from cold. While it does: what's on
 your mind for this ride? You can just talk at me, I'll sort out the details.
 
-**Adam:** yeah uh I want to look at that project from last week, the one with the
+**User:** yeah uh I want to look at that project from last week, the one with the
 maps. the distance thing.
 
 **Walker:** Maps, distances. Okay. I don't have the workspace open yet so I'm
@@ -195,7 +195,7 @@ little service that computes distances between coordinates, last touched
 Thursday. The other's older, a mapping UI you haven't opened in a month. You said
 "the distance thing," so I'm betting the first one. Sound right?
 
-**Adam:** yeah that one. what's the state of it.
+**User:** yeah that one. what's the state of it.
 
 **Walker:** Let me send a Dog in to look. I'm not going to eyeball this myself,
 I'd get it wrong. Spinning one up now, pointing it at that project... I'll call
@@ -206,20 +206,20 @@ there's a batch of changes sitting on top that were never saved, they're just...
 loose. Ranger says it's mostly one file, the part that does the actual distance
 math, and it looks half-finished. Like you stopped mid-thought.
 
-**Adam:** right right. the haversine thing. was I in the middle of fixing the bug?
+**User:** right right. the haversine thing. was I in the middle of fixing the bug?
 
 **Walker:** I don't know what the bug was, that's past my depth, but I can have
 Ranger check whether the tests pass right now, which'll tell us if it's broken or
 just unfinished. Want me to?
 
-**Adam:** yeah do that.
+**User:** yeah do that.
 
 **Walker:** Sending it. ... Okay. Ranger ran the tests. Most pass. One fails, and
 it's the one about distances near the poles, the far north-south edges. So: your
 loose changes didn't break the working stuff, but the thing you were fixing is
 still broken. You were in the middle of it, like you thought.
 
-**Adam:** ok. can you have it try to fix that one failing test. but don't let it
+**User:** ok. can you have it try to fix that one failing test. but don't let it
 go crazy rewriting everything.
 
 **Walker:** Good, because left off the leash a Dog absolutely will rewrite
@@ -234,7 +234,7 @@ either pull in an outside tool, or write the fix by hand with what's already
 there. Outside tool is faster and probably more correct; by-hand keeps the
 project lean with nothing new added. Which way?
 
-**Adam:** ugh. no new dependencies. do it by hand.
+**User:** ugh. no new dependencies. do it by hand.
 
 **Walker:** By hand, no new dependencies. Telling Fixer. ... It's working. It
 rewrote the polar case using what's already in the project. Reran the tests. All
@@ -243,14 +243,14 @@ and it left everything else alone, like I asked. Those changes are still loose,
 though, not saved. Want me to have it save the work, or leave it loose so you can
 look at it properly on a real screen later?
 
-**Adam:** leave it loose. but write me a note about what it did so I remember.
+**User:** leave it loose. but write me a note about what it did so I remember.
 
 **Walker:** Leaving it unsaved. And I'll have Fixer drop a short note in the
 project, plain English, saying what changed and why, so future-you isn't
 confused. ... Done, note's written. Fixer's off duty. That's the pack empty
 again, no Dogs running.
 
-**Adam:** cool. anything else look scary in there?
+**User:** cool. anything else look scary in there?
 
 **Walker:** Nothing screaming at me. The onboarding flagged one thing worth a
 sentence: there's another project with unsaved work sitting around from a while
@@ -258,7 +258,7 @@ back, so it's not just this one. But nothing's on fire. You want me to send a Do
 sniffing through the other projects for anything half-finished, or is that a
 rabbit hole for another day?
 
-**Adam:** another day. I'm almost done pedaling anyway.
+**User:** another day. I'm almost done pedaling anyway.
 
 **Walker:** Then let's leave it clean. Quick recap for your ears: the maps
 distance project had a broken polar-distance case, we fixed just that one thing
@@ -267,9 +267,9 @@ unsaved on purpose, and there's a note explaining it. Everything else untouched.
 When you're back at a real keyboard, you review the loose changes and decide
 whether to keep them.
 
-**Adam:** perfect. bye.
+**User:** perfect. bye.
 
 **Walker:** Nice ride. I'll shut the workspace down so it's not burning time
-idle. Later, Adam.
+idle. Later, User.
 
 *(chime; session closes)*

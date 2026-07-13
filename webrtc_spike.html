@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dogwalk WebRTC Spike</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    body { background: #101719; color: #e7eee9; margin: 0; min-height: 100vh; display: grid; place-items: center; }
+    main { width: min(42rem, calc(100% - 2rem)); }
+    h1 { font-size: 1.6rem; letter-spacing: .08em; margin: 0; }
+    p { color: #adc0b4; line-height: 1.55; }
+    .panel { border: 1px solid #527563; background: #17221d; padding: 1.2rem; margin-top: 1rem; }
+    button { background: #b7e26c; border: 0; color: #132017; cursor: pointer; font: inherit; font-weight: 700; padding: .8rem 1rem; }
+    button[disabled] { background: #4a5a50; color: #bcc7bf; cursor: not-allowed; }
+    #state { color: #b7e26c; font-weight: 700; }
+    #events { background: #0d1310; color: #c3d1c8; font-size: .8rem; height: 16rem; overflow-y: auto; padding: .8rem; white-space: pre-wrap; }
+    .note { font-size: .8rem; }
+    .monitor-grid { display: grid; gap: .7rem; }
+    .monitor-card { border-left: 3px solid #b7e26c; background: #0d1310; padding: .7rem; }
+    .monitor-card[data-status="failed"], .monitor-card[data-status="cancelled"] { border-color: #dc8a78; }
+    .monitor-card p { font-size: .8rem; margin: .35rem 0; }
+    .monitor-card pre { max-height: 12rem; overflow: auto; white-space: pre-wrap; }
+    progress { accent-color: #b7e26c; width: 100%; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>DOGWALK / WEBRTC</h1>
+    <p>Browser-managed microphone, playback, and echo cancellation. The local Python server only creates the session, runs tools, and keeps the log.</p>
+    <section class="panel">
+      <button id="start">Start audio session</button>
+      <button id="mute" disabled>Mute microphone</button>
+      <button id="stop" disabled>Stop</button>
+      <p id="state">idle</p>
+      <p class="note">Use the laptop speakers for this test. Chrome's WebRTC audio processing should prevent the assistant from being heard as a new user turn. Headphones remain the stronger production baseline.</p>
+    </section>
+    <section class="panel">
+      <div id="events" aria-live="polite">Events will appear here. The complete structured log is written by the local server.</div>
+    </section>
+    <section class="panel">
+      <h2>Dog Monitor</h2>
+      <p class="note">Development telemetry. Walker receives only each Dog's concise activity gloss; these panels retain the verbose ACP event stream.</p>
+      <div id="dogs" class="monitor-grid">No Dogs yet.</div>
+    </section>
+    <section class="panel">
+      <h2>Timers</h2>
+      <div id="timers" class="monitor-grid">No timers yet.</div>
+    </section>
+    <section class="panel">
+      <h2>Pending Dog Decisions</h2>
+      <div id="decisions" class="monitor-grid">No pending decisions.</div>
+    </section>
+  </main>
+  <audio id="walker" autoplay></audio>
+  <script>
+    const startButton = document.querySelector("#start");
+    const muteButton = document.querySelector("#mute");
+    const stopButton = document.querySelector("#stop");
+    const state = document.querySelector("#state");
+    const events = document.querySelector("#events");
+    const dogsPanel = document.querySelector("#dogs");
+    const timersPanel = document.querySelector("#timers");
+    const decisionsPanel = document.querySelector("#decisions");
+    const audio = document.querySelector("#walker");
+    let peerConnection;
+    let dataChannel;
+    let microphone;
+    let microphoneMuted = false;
+    let duePoll;
+    let dogPoll;
+    let decisionPoll;
+    let monitorPoll;
+    let earconContext;
+
+    function display(message) {
+      events.textContent += `\n${new Date().toLocaleTimeString()}  ${message}`;
+      events.scrollTop = events.scrollHeight;
+    }
+
+    function send(event) {
+      if (dataChannel?.readyState === "open") {
+        dataChannel.send(JSON.stringify(event));
+      }
+    }
+
+    function log(kind, data = {}) {
+      fetch("/event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, ...data }),
+      }).catch(() => {});
+    }
+
+    function setMicrophoneMuted(muted) {
+      microphoneMuted = muted;
+      microphone?.getAudioTracks().forEach(track => { track.enabled = !muted; });
+      muteButton.textContent = muted ? "Unmute microphone" : "Mute microphone";
+      state.textContent = muted ? "listening (microphone muted)" : "listening";
+      log("microphone_muted", { muted });
+      display(muted ? "microphone muted" : "microphone unmuted");
+      playEarcon(muted ? "microphone_muted" : "microphone_unmuted");
+      send({ type: "conversation.item.create", item: {
+        type: "message", role: "user", content: [{
+          type: "input_text",
+          text: muted
+            ? "[SYSTEM MUTE] The User muted their microphone and is not listening. Enter silent mode now: do not speak, create responses, or poll Dogs. Running Dogs and local monitoring continue."
+            : "[SYSTEM UNMUTE] The User unmuted their microphone and is listening again. This authorizes one concise catch-up. Check each known working Dog once if needed for an accurate update, then say only the essential news.",
+        }],
+      }});
+      if (muted) send({ type: "response.cancel" });
+      else send({ type: "response.create" });
+    }
+
+    function monitorCard(title, status) {
+      const card = document.createElement("article");
+      card.className = "monitor-card";
+      card.dataset.status = status;
+      const heading = document.createElement("strong");
+      heading.textContent = `${title} / ${status}`;
+      card.append(heading);
+      return card;
+    }
+
+    function monitorLine(card, label, value) {
+      const line = document.createElement("p");
+      const labelNode = document.createElement("b");
+      labelNode.textContent = `${label}: `;
+      line.append(labelNode, value);
+      card.append(line);
+    }
+
+    function renderMonitor({ dogs, timers, decisions }) {
+      dogsPanel.replaceChildren();
+      if (!dogs.length) dogsPanel.textContent = "No Dogs yet.";
+      for (const dog of dogs) {
+        const card = monitorCard(dog.name, dog.status);
+        monitorLine(card, "Task", dog.task);
+        monitorLine(card, "Activity", dog.activity);
+        if (dog.report) monitorLine(card, "Report", dog.report);
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = `ACP updates (${dog.updates.length})`;
+        const raw = document.createElement("pre");
+        raw.textContent = dog.updates.map(update =>
+          `${update.type}${update.text ? `: ${update.text}` : ""}\n${update.detail}`
+        ).join("\n\n");
+        details.append(summary, raw);
+        card.append(details);
+        dogsPanel.append(card);
+      }
+
+      timersPanel.replaceChildren();
+      if (!timers.length) timersPanel.textContent = "No timers yet.";
+      for (const timer of timers) {
+        const card = monitorCard(timer.purpose, timer.status);
+        const progress = document.createElement("progress");
+        progress.max = 1;
+        progress.value = timer.progress;
+        monitorLine(card, "Time remaining", `${timer.remaining_seconds}s of ${timer.seconds}s`);
+        card.append(progress);
+        timersPanel.append(card);
+      }
+
+      decisionsPanel.replaceChildren();
+      if (!decisions.length) decisionsPanel.textContent = "No pending decisions.";
+      for (const decision of decisions) {
+        const card = monitorCard(`${decision.dog} / ${decision.kind}`, "pending");
+        monitorLine(card, "Question", decision.message);
+        if (decision.options) monitorLine(card, "Options", decision.options.map(option => option.name).join(" | "));
+        if (decision.schema) monitorLine(card, "Requested schema", JSON.stringify(decision.schema));
+        decisionsPanel.append(card);
+      }
+    }
+
+    async function pullMonitor() {
+      const response = await fetch("/monitor");
+      if (response.ok) renderMonitor(await response.json());
+    }
+
+    function playEarcon(name) {
+      const patterns = {
+        call_started: [[392, .07], [523, .07], [659, .14]],
+        dog_sent: [[523, .09], [659, .11]],
+        dog_check: [[392, .07]],
+        dog_done: [[523, .07], [659, .07], [784, .15]],
+        timer_due: [[880, .12], [880, .16]],
+        call_ending: [[440, .11], [330, .16]],
+        microphone_muted: [[330, .12]],
+        microphone_unmuted: [[523, .08], [659, .12]],
+      };
+      if (!earconContext || earconContext.state !== "running") {
+        log("earcon", { name, played: false, reason: "audio_context_unavailable" });
+        return;
+      }
+      let when = earconContext.currentTime + .02;
+      for (const [frequency, duration] of patterns[name] || []) {
+        const oscillator = earconContext.createOscillator();
+        const gain = earconContext.createGain();
+        oscillator.type = "sine";
+        oscillator.frequency.value = frequency;
+        gain.gain.setValueAtTime(.0001, when);
+        gain.gain.exponentialRampToValueAtTime(.055, when + .012);
+        gain.gain.exponentialRampToValueAtTime(.0001, when + duration);
+        oscillator.connect(gain).connect(earconContext.destination);
+        oscillator.start(when);
+        oscillator.stop(when + duration + .02);
+        when += duration + .045;
+      }
+      log("earcon", { name, played: true });
+    }
+
+    async function executeTool(call) {
+      const arguments_ = JSON.parse(call.arguments || "{}");
+      display(`tool: ${call.name}`);
+      if (call.name === "sic_dog") playEarcon("dog_sent");
+      if (call.name === "check_dog") playEarcon("dog_check");
+      const response = await fetch("/tool", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: call.name, call_id: call.call_id, arguments: arguments_ }),
+      });
+      const result = await response.json();
+      send({ type: "conversation.item.create", item: {
+        type: "function_call_output", call_id: call.call_id, output: JSON.stringify(result),
+      }});
+      if (result.end_call) {
+        display("Walker is ending the session");
+        playEarcon("call_ending");
+        log("end_call_requested", { delay_ms: result.delay_ms });
+        window.setTimeout(stop, result.delay_ms);
+        return;
+      }
+      if (call.name === "check_dog" && result.status === "done") playEarcon("dog_done");
+      send({ type: "response.create" });
+    }
+
+    async function pullDueTimers() {
+      if (dataChannel?.readyState !== "open") return;
+      const response = await fetch("/due");
+      const { due } = await response.json();
+      for (const timer of due) {
+        display(`timer due: ${timer.purpose}`);
+        playEarcon("timer_due");
+        log("timer_delivered", timer);
+        send({ type: "conversation.item.create", item: {
+          type: "message", role: "user", content: [{
+            type: "input_text",
+            text: `[SYSTEM TIMER] The ${timer.seconds}-second timer for "${timer.purpose}" has ended. Tell the User it is due. Do not check a Dog unless the User asks.`,
+          }],
+        }});
+        send({ type: "response.create" });
+      }
+    }
+
+    async function pullDogEvents() {
+      if (microphoneMuted || dataChannel?.readyState !== "open") return;
+      const response = await fetch("/dog-events");
+      const { completed } = await response.json();
+      for (const dog of completed) {
+        display(`dog completed: ${dog.name} / ${dog.status}`);
+        playEarcon("dog_done");
+        log("dog_completion_delivered", dog);
+        send({ type: "conversation.item.create", item: {
+          type: "message", role: "user", content: [{
+            type: "input_text",
+            text: `[SYSTEM DOG COMPLETED] ${dog.name} finished with status ${dog.status}. Report: ${dog.report} Give the User a brief plain-language result now.`,
+          }],
+        }});
+        send({ type: "response.create" });
+      }
+    }
+
+    async function pullDecisions() {
+      if (microphoneMuted || dataChannel?.readyState !== "open") return;
+      const response = await fetch("/decisions");
+      const { decisions } = await response.json();
+      for (const decision of decisions) {
+        display(`dog decision: ${decision.dog} / ${decision.kind}`);
+        playEarcon("dog_check");
+        log("dog_decision_delivered", decision);
+        const detail = decision.kind === "permission"
+          ? `Options: ${decision.options.map(option => `${option.option_id}: ${option.name}`).join("; ")}.`
+          : `Requested answer schema: ${JSON.stringify(decision.schema)}.`;
+        send({ type: "conversation.item.create", item: {
+          type: "message", role: "user", content: [{
+            type: "input_text",
+            text: `[SYSTEM DOG DECISION] ${decision.dog} needs a ${decision.kind} decision. ${decision.message} ${detail} Ask the User briefly, then use the matching decision tool with decision_id ${decision.decision_id}.`,
+          }],
+        }});
+        send({ type: "response.create" });
+      }
+      pullMonitor().catch(error => log("monitor_poll_error", { error: String(error) }));
+    }
+
+    function handleEvent(event) {
+      if (event.type === "conversation.item.input_audio_transcription.completed") {
+        display(`user: ${event.transcript}`);
+        log("transcript", { speaker: "user", source: "microphone", text: event.transcript });
+      }
+      if (event.type === "response.output_audio_transcript.done") {
+        display(`walker: ${event.transcript}`);
+        log("transcript", { speaker: "walker", source: "realtime", text: event.transcript });
+      }
+      if (event.type === "input_audio_buffer.speech_started") {
+        display("speech started");
+        log("speech_started", { audio_start_ms: event.audio_start_ms });
+      }
+      if (event.type === "input_audio_buffer.speech_stopped") {
+        log("speech_stopped", { audio_end_ms: event.audio_end_ms });
+      }
+      if (event.type === "response.done") {
+        const response = event.response;
+        log("response_done", { response_id: response.id, status: response.status, status_details: response.status_details, usage: response.usage });
+        for (const output of response.output || []) {
+          if (output.type === "function_call") executeTool(output).catch(error => log("tool_error", { error: String(error) }));
+        }
+      }
+      if (event.type === "error") {
+        display(`API error: ${event.error?.message || "unknown"}`);
+        log("api_error", { error: event.error });
+      }
+    }
+
+    async function start() {
+      startButton.disabled = true;
+      state.textContent = "requesting microphone";
+      earconContext = new AudioContext();
+      await earconContext.resume();
+      microphone = await navigator.mediaDevices.getUserMedia({ audio: {
+        echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+      }});
+      const track = microphone.getAudioTracks()[0];
+      log("microphone_settings", { settings: track.getSettings(), constraints: track.getConstraints() });
+      display(`mic: echoCancellation=${track.getSettings().echoCancellation}, noiseSuppression=${track.getSettings().noiseSuppression}`);
+
+      peerConnection = new RTCPeerConnection();
+      peerConnection.ontrack = event => {
+        audio.srcObject = event.streams[0];
+        audio.play().catch(error => log("audio_playback_error", { error: String(error) }));
+      };
+      peerConnection.onconnectionstatechange = () => {
+        state.textContent = peerConnection.connectionState;
+        log("connection_state", { state: peerConnection.connectionState });
+      };
+      peerConnection.addTrack(track, microphone);
+      dataChannel = peerConnection.createDataChannel("oai-events");
+      dataChannel.onopen = () => {
+        state.textContent = "listening";
+        muteButton.disabled = false;
+        stopButton.disabled = false;
+        duePoll = window.setInterval(() => pullDueTimers().catch(error => log("timer_poll_error", { error: String(error) })), 1000);
+        dogPoll = window.setInterval(() => pullDogEvents().catch(error => log("dog_event_poll_error", { error: String(error) })), 1000);
+        decisionPoll = window.setInterval(() => pullDecisions().catch(error => log("decision_poll_error", { error: String(error) })), 1000);
+        monitorPoll = window.setInterval(() => pullMonitor().catch(error => log("monitor_poll_error", { error: String(error) })), 1000);
+        pullMonitor().catch(error => log("monitor_poll_error", { error: String(error) }));
+        log("data_channel_open");
+        playEarcon("call_started");
+        send({ type: "response.create", response: {
+          instructions: "The session has just opened. Say: 'I'll be your dog walker for today.' Then briefly invite the User to say what is on their mind. Do not ask whether they can hear you.",
+        }});
+      };
+      dataChannel.onmessage = message => handleEvent(JSON.parse(message.data));
+      dataChannel.onclose = () => log("data_channel_closed");
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      const response = await fetch("/session", { method: "POST", headers: { "Content-Type": "application/sdp" }, body: offer.sdp });
+      if (!response.ok) throw new Error(`Session creation failed: ${await response.text()}`);
+      await peerConnection.setRemoteDescription({ type: "answer", sdp: await response.text() });
+      display("connected: speak naturally");
+    }
+
+    function stop() {
+      window.clearInterval(duePoll);
+      window.clearInterval(dogPoll);
+      window.clearInterval(decisionPoll);
+      window.clearInterval(monitorPoll);
+      dataChannel?.close();
+      peerConnection?.getSenders().forEach(sender => sender.track?.stop());
+      peerConnection?.close();
+      microphone?.getTracks().forEach(track => track.stop());
+      earconContext?.close();
+      earconContext = undefined;
+      audio.srcObject = null;
+      state.textContent = "stopped";
+      startButton.disabled = false;
+      muteButton.disabled = true;
+      stopButton.disabled = true;
+      microphoneMuted = false;
+      muteButton.textContent = "Mute microphone";
+      log("browser_session_stopped");
+    }
+
+    startButton.addEventListener("click", () => start().catch(error => {
+      state.textContent = "failed";
+      display(String(error));
+      log("browser_error", { error: String(error) });
+      startButton.disabled = false;
+    }));
+    muteButton.addEventListener("click", () => setMicrophoneMuted(!microphoneMuted));
+    stopButton.addEventListener("click", stop);
+    window.addEventListener("beforeunload", stop);
+  </script>
+</body>
+</html>
