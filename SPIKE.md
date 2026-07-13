@@ -1,36 +1,26 @@
-# Walker Realtime spike
+# Dogwalk WebRTC spike
 
-This spike tests the risky seam before adding Daytona or a real ACP client:
+This spike exercises the browser voice, Realtime, and ACP integration seam:
 
 ```text
-microphone -> PCM16 -> Realtime WebSocket -> gpt-realtime-2.1
-speaker   <- PCM16 <- Realtime WebSocket <- spoken response
-                                      |
-                                      +-> ACP-shaped stub tools
+browser microphone -> WebRTC -> gpt-realtime-2.1
+browser speaker    <- WebRTC <- spoken response
+                              |
+                              +-> sideband tools -> ACP sessions
 ```
 
 ## Run it
 
 The script reads `OPENAI_API_KEY` from the environment or the local `.env`.
-On macOS, grant Terminal microphone access when prompted.
+Grant the browser microphone access when prompted.
 
 ```bash
-./walker_spike.py
+uv run --script webrtc_spike.py
 ```
 
-Speak naturally. Server-side semantic VAD finds turn boundaries and supports
-barge-in. `sounddevice` runs microphone capture and speaker playback at the
-same time, while asyncio independently sends and receives WebSocket events.
-Use headphones to prevent acoustic echo.
-
-Typed mode is useful for inspecting function calls without audio:
-
-```bash
-./walker_spike.py --text
-```
-
-Try: "Send a Dog to inspect this project without changing anything, then check
-what it found." Type `/quit` to stop.
+Open <http://127.0.0.1:8765/webrtc_spike.html> and start an audio session.
+Use `uv run --script text_spike.py test collaboration` for agentic testing
+without Realtime, WebRTC, a browser, microphone, or speaker.
 
 ## Logs
 
@@ -47,27 +37,15 @@ Raw audio and base64 audio deltas are intentionally not logged. The JSONL is
 small enough for a later coding agent to analyze turn-taking, misunderstood
 requests, latency, tool selection, and prompt failures.
 
-## Raw WebSocket Spike
-
-`walker_spike.py` remains an audio and function-call control experiment.
-`StubPack.dispatch()` implements `sic_dog`, `check_dog`, `relay_to_dog`, and
-`call_off_dog` with deterministic in-memory results. No subprocess starts and
-no project files change.
-
-The WebRTC spike supersedes this seam with a real official ACP Python SDK
-adapter. The raw spike is retained as a compact no-browser, no-Dog control.
-
 ## Production direction
 
-The Python WebSocket audio path is appropriate for this local spike and for
-server-side media such as telephony. It should not be forwarded byte-by-byte
-from a phone browser. The phone version should use WebRTC for device audio and
-keep API keys plus ACP tools in a Python sideband server.
+The phone version uses WebRTC for device audio and keeps API keys plus ACP tools
+in a Python sideband server.
 
 ## WebRTC audio spike
 
-`webrtc_spike.py` and `webrtc_spike.html` replace the raw PortAudio path with
-browser-managed WebRTC. This is the path to use for a phone or browser client:
+`webrtc_spike.py` and `webrtc_spike.html` use browser-managed WebRTC. This is the
+path to use for a phone or browser client:
 the browser captures and plays audio directly, while Python holds the API key,
 creates the Realtime session, runs tools, and records logs.
 
@@ -75,7 +53,7 @@ The spike uses OpenAI's `cedar` voice. A Realtime voice cannot change after a
 session has emitted audio, so start a fresh browser session after changing it.
 
 ```bash
-./webrtc_spike.py
+uv run --script webrtc_spike.py
 ```
 
 Open <http://127.0.0.1:8765/webrtc_spike.html>, click **Start audio session**,
@@ -88,8 +66,8 @@ The browser connects to the local server only for three control requests:
 
 - `/session`: local Python sends the browser SDP plus session configuration to
   OpenAI's `/v1/realtime/calls` endpoint with the private API key.
-- `/tool`: the browser relays function calls to Python; Python returns the stub
-  result, and this will become the ACP adapter boundary.
+- `/tool`: the browser relays function calls to Python, which dispatches them
+  through the session manager and ACP adapter.
 - `/event`: the browser records transcript, VAD, connection, tool, and actual
   negotiated microphone settings to JSONL.
 
@@ -122,8 +100,7 @@ not an interactive ACP elicitation.
 
 ### Hands-free control
 
-The WebRTC spike also gives Walker two sideband controls that are unavailable
-in the raw-audio spike:
+The WebRTC spike gives Walker two sideband controls:
 
 - `end_call`: after speaking a brief farewell, Walker can close the browser's
   peer connection and microphone. The browser waits two seconds after the tool

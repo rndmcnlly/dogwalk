@@ -8,7 +8,7 @@ A Managed Session wraps one retained ACP session. A Dog is Walker's voice-facing
 
 ## Domain Language
 
-`DOMAIN.md` is the canonical Ubiquitous Language and is normative for new design and refactoring. Read it before changing session lifecycle, Agent integration, Walker tools, state names, or domain terminology. It takes precedence over historical language in `PITCH.md`, spike notes, and accidental structure in the current implementation.
+`DOMAIN.md` is the canonical Ubiquitous Language and is normative for new design and refactoring. Read it before changing session lifecycle, Agent integration, Walker tools, state names, or domain terminology. It takes precedence over historical language in spike notes and accidental structure in the current implementation.
 
 Core distinctions:
 

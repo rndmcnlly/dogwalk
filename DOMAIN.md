@@ -9,8 +9,7 @@ The project uses this order of authority:
 1. `AGENTS.md` supplies the operating contract and irreducible domain guardrails to every development session.
 2. `DOMAIN.md` defines canonical terms, boundaries, relationships, and lifecycle distinctions.
 3. Tests and scenarios specify behavior executably.
-4. `PITCH.md` preserves product vision and design fiction but is not normative.
-5. Spike notes describe experiments and may retain historical terminology.
+4. Spike notes describe experiments and may retain historical terminology.
 
 Update this document in the same change that introduces or changes a domain concept. Put unresolved modeling choices under Open Questions rather than allowing code to choose a meaning implicitly.
 
