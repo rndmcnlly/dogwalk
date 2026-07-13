@@ -30,6 +30,9 @@ assert:
   - file_exists: poem.es.txt
   - same: [Poet.session.id, $bard_session]
   - different: [Poet.session.id, Lingo.session.id]
+  - same: [Poet.session_state, ready]
+  - same: [Poet.turn_state, stopped]
+  - same: [Poet.stop_reason, end_turn]
   - turns:
       Poet: 2
       Lingo: 1

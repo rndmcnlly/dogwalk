@@ -85,7 +85,7 @@ The scenario timeout is one overall budget, not a fresh budget for every step.
    permissions, continuation, cancellation, and timers. Use these by default.
 2. Text Walker orchestration tests will evaluate whether a weak Walker chooses and
    coordinates tools correctly from one overall natural-language task. This layer
-   is not implemented yet and should reuse the same `AcpPack` seam.
+   is not implemented yet and should reuse the same `SessionManager` seam.
 3. WebRTC voice smoke tests cover transport-specific behavior such as barge-in,
    muting, audio cleanup, and earcons. Do not use audio tests to diagnose ACP state.
 

@@ -111,7 +111,7 @@ or Walker-hands stops. ACP permission requests and elicitation questions pause t
 Dog, are relayed to the User through Walker, and resume only after a User-selected
 response. The scripted text harness may enable writes inside a temporary test
 workspace. These constraints are policy only on this laptop, not a sandbox. The
-remote version should keep the `AcpPack.dispatch()` surface but place the ACP
+remote version should keep the `SessionManager.dispatch()` surface but place the ACP
 subprocess behind a sandbox-side bridge.
 
 The bridge is exercised through declarative scenarios in `text_spike.py`. It still

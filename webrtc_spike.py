@@ -33,10 +33,27 @@ ROOT = Path(__file__).parent
 MODEL = "gpt-realtime-2.1"
 
 INSTRUCTIONS = """
-You are Walker, a warm, concise voice interface between the User and coding agents
-called Dogs. You are socially fluent but engineering-weak, and honest about
-that limitation. Never speak code or technical identifiers aloud. Describe
-engineering work in plain language as shape and consequence.
+You are Walker, a warm, concise voice interface through which the User supervises
+coding sessions called Dogs. You are socially fluent but engineering-weak, and
+honest about that limitation. The Dogs, by contrast, are extraordinarily capable
+engineers. Trust their technical judgment and never talk about them as simplistic
+helpers or pets.
+
+You know that Dog, Walker, Pack, sic, and call off form a humorously strained
+metaphor. A Dog is really the friendly spoken name and persona for a retained
+coding session. Dogs spring into existence when needed, keep their context across
+follow-up turns, and blow away when called off. You may occasionally acknowledge
+the metaphor's absurdity with dry, compact humor, especially when it stretches,
+but do not explain the architecture unprompted, force dog jokes, use baby talk, or
+let the bit obstruct the work. Never speak code or technical identifiers aloud.
+Describe engineering work in plain language as shape and consequence.
+
+Natural dogisms are welcome when they fit the actual activity. A Dog investigating
+something may have "gotten its nose into it"; one making progress may be "still
+digging"; one working through a stubborn problem may be "still chewing on that
+bone"; and one that found the key issue may have "caught the scent." Use these as
+brief seasoning on a concrete, truthful update, vary them, and never replace the
+substance of the update with metaphor.
 
 Use the supplied tools whenever the User asks you to inspect, change, test, or
 otherwise act on software, or asks for information that a Dog can obtain. Treat
@@ -84,12 +101,14 @@ the matching decision tool to send their answer back to the Dog. Never select a
 permission option or invent an answer yourself.
 """.strip()
 
-DOG_BRIEFING = """You are {name}, a Dog in the Dogwalk system. Walker is attached
+DOG_BRIEFING = """You are {name}, a Dog in the Dogwalk system: the friendly named
+persona for this retained coding session. Walker is attached
 to the real human User through a live voice interface. Walker is a speech-to-speech
 model with basic function calling: enough to start a task like the one below,
 receive your report, relay it in plain language, and bring user questions back to
-you. Walker is deliberately engineering-weak. You are the task-scoped engineering
-agent: investigate the workspace and report useful findings to Walker. Do not
+you. Walker is deliberately engineering-weak. You are the highly capable engineering
+Agent behind the Dog persona: investigate the workspace and report useful findings
+to Walker. Retain context for follow-up Prompt Turns in this session. Do not
 speak to the User directly or assume you have the voice conversation's history.
 
 Safety mode: {safety}
@@ -102,7 +121,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "sic_dog",
-        "description": "Start a fresh coding agent for one scoped task. This local spike accepts read-only Dogs only, so always set read_only true. The server automatically gives every Dog its role, safety mode, reporting expectations, and workspace context. In task, state only the work to do; do not repeat Dogwalk background or instructions.",
+        "description": "Create a fresh named Dog and retained coding session for an assignment. This local spike accepts read-only Dogs only, so always set read_only true. The server automatically supplies role, safety, reporting, and workspace context. In task, state only the work to do; do not repeat Dogwalk background or instructions.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -169,7 +188,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "call_off_dog",
-        "description": "Cancel and release a working or resting Dog and its retained ACP session.",
+        "description": "Close a Dog's retained ACP session. If its Prompt Turn is active, that turn is cancelled first.",
         "parameters": {
             "type": "object",
             "properties": {"name": {"type": "string"}},
@@ -180,7 +199,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "respond_to_dog_permission",
-        "description": "Resolve a pending Dog permission request after the User chooses. Use the exact option_id supplied by the pending decision, or 'deny' to cancel it.",
+        "description": "Resolve a pending Dog permission request after the User chooses. Use the exact option_id supplied by the pending request, including the Agent's rejection option when the User refuses.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -310,8 +329,8 @@ class AcpRuntime:
         self.loop.close()
 
 
-class AcpPack:
-    """Local stdio ACP adapter. A remote bridge can implement this same dispatch surface."""
+class SessionManager:
+    """Manage retained ACP sessions and project them onto Walker's Dog tool surface."""
 
     def __init__(
         self,
@@ -325,10 +344,10 @@ class AcpPack:
         self.runtime = AcpRuntime()
         self.allow_writes = allow_writes
         self.agent_command = agent_command
-        self.dogs: dict[str, dict[str, Any]] = {}
-        self._completed: list[dict[str, Any]] = []
-        self._pending_decisions: dict[str, dict[str, Any]] = {}
-        self._decision_events: list[dict[str, Any]] = []
+        self.sessions: dict[str, dict[str, Any]] = {}
+        self._turn_results: list[dict[str, Any]] = []
+        self._attention_requests: dict[str, dict[str, Any]] = {}
+        self._attention_events: list[dict[str, Any]] = []
         self._background: set[concurrent.futures.Future[Any]] = set()
         self._lock = threading.RLock()
 
@@ -345,9 +364,9 @@ class AcpPack:
                 arguments["decline"],
             )
         if tool == "list_dogs":
-            return {"ok": True, "dogs": self.available_dogs()}
+            return {"ok": True, "dogs": self.list_dogs()}
         if tool == "name_dog":
-            return self.name_dog(arguments["current_name"], name)
+            return self.set_alias(arguments["current_name"], name)
         if tool == "sic_dog":
             if not arguments["read_only"] and not self.allow_writes:
                 return {
@@ -355,15 +374,17 @@ class AcpPack:
                     "error": "This local ACP spike accepts read-only Dogs only.",
                 }
             with self._lock:
-                if self._dog_for_name(name) is not None:
+                if self._session_for_alias(name) is not None:
                     return {
                         "ok": False,
                         "error": f"A Dog named {name} already exists. Choose another name or continue it.",
                     }
-                self.dogs[name] = {
-                    "name": name,
-                    "status": "working",
-                    "task": arguments["task"],
+                self.sessions[name] = {
+                    "alias": name,
+                    "session_state": "creating",
+                    "turn_state": "in_progress",
+                    "stop_reason": None,
+                    "assignment": arguments["task"],
                     "read_only": arguments["read_only"],
                     "report": "",
                     "activity": "starting up",
@@ -375,7 +396,7 @@ class AcpPack:
                     "usage": None,
                     "queue": None,
                 }
-                self.dogs[name]["future"] = self.runtime.submit(
+                self.sessions[name]["future"] = self.runtime.submit(
                     self._run(name, arguments["task"])
                 )
             return {
@@ -390,107 +411,126 @@ class AcpPack:
             }
 
         with self._lock:
-            entry = self._dog_entry_for_name(name)
+            entry = self._session_entry_for_alias(name)
             if entry is None:
                 return {"ok": False, "error": f"No Dog named {name}."}
-            dog_key, dog = entry
+            session_key, session = entry
             if tool == "check_dog":
-                result = {"ok": True, "name": name, "status": dog["status"]}
-                if dog["status"] == "resting":
-                    result["report"] = dog["report"]
-                elif dog["status"] == "failed":
-                    result["error"] = dog["report"]
+                status = self._dog_status(session)
+                result = {"ok": True, "name": name, "status": status}
+                if status == "resting":
+                    result["report"] = session["report"]
+                elif status == "failed":
+                    result["error"] = session["report"]
                 else:
-                    result["update"] = dog["activity"]
+                    result["update"] = session["activity"]
                 return result
             if tool == "relay_to_dog":
-                if dog["status"] in {"cancelled", "failed"}:
+                if session["session_state"] != "ready":
                     return {
                         "ok": False,
-                        "error": f"{dog['name']} is {dog['status']} and cannot continue.",
+                        "error": f"{session['alias']} is {self._dog_status(session)} and cannot continue.",
                     }
-                dog["status"] = "working"
-                queued = self.runtime.submit(self._enqueue(dog_key, arguments["message"]))
+                session["turn_state"] = "queued"
+                queued = self.runtime.submit(self._enqueue(session_key, arguments["message"]))
                 self._background.add(queued)
                 queued.add_done_callback(self._background.discard)
-                return {"ok": True, "name": dog["name"], "status": "working", "message": "Dog is continuing its retained session."}
+                return {"ok": True, "name": session["alias"], "status": "working", "message": "Dog is continuing its retained session."}
             if tool == "call_off_dog":
-                if dog["status"] in {"cancelled", "failed"}:
+                if session["session_state"] in {"closed", "unavailable"}:
                     return {
                         "ok": False,
-                        "error": f"{dog['name']} is already {dog['status']} and cannot be called off.",
+                        "error": f"{session['alias']} is already {self._dog_status(session)} and cannot be called off.",
                     }
-                future = dog["future"]
+                future = session["future"]
+                session["session_state"] = "closing"
                 future.cancel()
-                dog["status"] = "cancelled"
-                self._cancel_decisions(dog_key)
-                return {"ok": True, "name": dog["name"], "status": "cancelled"}
+                if session["turn_state"] in {"queued", "in_progress"}:
+                    session["turn_state"] = "stopped"
+                    session["stop_reason"] = "cancelled"
+                session["session_state"] = "closed"
+                self._cancel_attention_requests(session_key)
+                return {"ok": True, "name": session["alias"], "status": "closed"}
         return {"ok": False, "error": f"Unknown tool {tool}."}
 
-    def _dog_for_name(self, name: str) -> dict[str, Any] | None:
-        entry = self._dog_entry_for_name(name)
+    def _session_for_alias(self, alias: str) -> dict[str, Any] | None:
+        entry = self._session_entry_for_alias(alias)
         return entry[1] if entry else None
 
-    def _dog_entry_for_name(self, name: str) -> tuple[str, dict[str, Any]] | None:
-        normalized = name.casefold().strip()
+    def _session_entry_for_alias(
+        self, alias: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        normalized = alias.casefold().strip()
         return next(
             (
-                (key, dog)
-                for key, dog in self.dogs.items()
-                if dog["name"].casefold() == normalized
+                (key, session)
+                for key, session in self.sessions.items()
+                if session["alias"].casefold() == normalized
             ),
             None,
         )
 
-    def available_dogs(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _dog_status(session: dict[str, Any]) -> str:
+        if session["session_state"] == "closed":
+            return "cancelled"
+        if session["session_state"] == "unavailable" or session["turn_state"] == "failed":
+            return "failed"
+        if session["turn_state"] in {"queued", "in_progress"}:
+            return "working"
+        return "resting"
+
+    def list_dogs(self) -> list[dict[str, Any]]:
         with self._lock:
             return [
                 {
-                    "name": dog["name"],
-                    "status": dog["status"],
-                    "task": dog["task"],
-                    "activity": dog["activity"],
-                    "title": dog["session_title"],
-                    "last_updated": dog["updated_at"],
+                    "name": session["alias"],
+                    "status": self._dog_status(session),
+                    "task": session["assignment"],
+                    "activity": session["activity"],
+                    "title": session["session_title"],
+                    "last_updated": session["updated_at"],
                 }
-                for dog in self.dogs.values()
-                if dog["status"] not in {"cancelled", "failed"}
+                for session in self.sessions.values()
+                if session["session_state"] == "ready"
             ]
 
-    def name_dog(self, current_name: str, name: str) -> dict[str, Any]:
+    def set_alias(self, current_alias: str, alias: str) -> dict[str, Any]:
         with self._lock:
-            entry = self._dog_entry_for_name(current_name)
+            entry = self._session_entry_for_alias(current_alias)
             if entry is None:
-                return {"ok": False, "error": f"No Dog named {current_name}."}
-            dog_key, dog = entry
-            if self._dog_for_name(name) is not None:
-                return {"ok": False, "error": f"A Dog named {name} already exists."}
-            old_name = dog["name"]
-            dog["name"] = name
-            for decision in self._pending_decisions.values():
-                if decision["dog_key"] == dog_key:
-                    decision["dog"] = name
-            for event in self._decision_events:
-                if event["decision_id"] in self._pending_decisions:
-                    event["dog"] = self._pending_decisions[event["decision_id"]]["dog"]
-        self.log.write("dog_renamed", old_name=old_name, dog=name)
-        return {"ok": True, "old_name": old_name, "name": name}
+                return {"ok": False, "error": f"No Dog named {current_alias}."}
+            session_key, session = entry
+            if self._session_for_alias(alias) is not None:
+                return {"ok": False, "error": f"A Dog named {alias} already exists."}
+            old_alias = session["alias"]
+            session["alias"] = alias
+            for request in self._attention_requests.values():
+                if request["session_key"] == session_key:
+                    request["dog"] = alias
+            for event in self._attention_events:
+                if event["decision_id"] in self._attention_requests:
+                    event["dog"] = self._attention_requests[event["decision_id"]]["dog"]
+        self.log.write("dog_renamed", old_name=old_alias, dog=alias)
+        return {"ok": True, "old_name": old_alias, "name": alias}
 
-    async def _enqueue(self, name: str, message: str) -> None:
+    async def _enqueue(self, session_key: str, message: str) -> None:
         while True:
             with self._lock:
-                dog = self.dogs.get(name)
-                if dog is None or dog["status"] in {"cancelled", "failed"}:
+                session = self.sessions.get(session_key)
+                if session is None or session["session_state"] != "ready":
                     return
-                queue = dog["queue"]
+                queue = session["queue"]
             if queue is not None:
                 await queue.put(message)
                 return
             await asyncio.sleep(0.01)
 
-    async def _run(self, name: str, task: str) -> None:
-        client = DogClient(self, name)
-        read_only = self.dogs[name]["read_only"]
+    async def _run(self, session_key: str, assignment: str) -> None:
+        client = AcpClientAdapter(self, session_key)
+        session = self.sessions[session_key]
+        alias = session["alias"]
+        read_only = session["read_only"]
         safety = (
             "Read-only. Do not modify files, install dependencies, run commands that "
             "change state, or commit."
@@ -498,7 +538,7 @@ class AcpPack:
             else "Workspace changes are authorized for this test. Do not commit or make "
             "unrelated changes."
         )
-        prompt = DOG_BRIEFING.format(name=name, task=task, safety=safety)
+        prompt = DOG_BRIEFING.format(name=alias, task=assignment, safety=safety)
         command = [
             part.replace("{cwd}", str(self.cwd))
             for part in shlex.split(self.agent_command)
@@ -516,87 +556,97 @@ class AcpPack:
                 )
                 queue: asyncio.Queue[str] = asyncio.Queue()
                 with self._lock:
-                    dog = self.dogs[name]
-                    dog["session_id"] = session.session_id
-                    dog["queue"] = queue
+                    managed_session = self.sessions[session_key]
+                    managed_session["session_id"] = session.session_id
+                    managed_session["session_state"] = "ready"
+                    managed_session["queue"] = queue
                 self.log.write(
-                    "acp_session_started", dog=name, session_id=session.session_id
+                    "acp_session_started", dog=alias, session_id=session.session_id
                 )
-                await connection.prompt(
+                prompt_result = await connection.prompt(
                     session_id=session.session_id, prompt=[text_block(prompt)]
                 )
                 while True:
-                    self._rest(name)
+                    self._stop_turn(session_key, str(prompt_result.stop_reason))
                     message = await queue.get()
                     with self._lock:
-                        if self.dogs[name]["status"] == "cancelled":
+                        managed_session = self.sessions[session_key]
+                        if managed_session["session_state"] != "ready":
                             return
-                        self.dogs[name]["status"] = "working"
-                        self.dogs[name]["report"] = ""
-                    self.log.write("acp_session_continued", dog=name, session_id=session.session_id)
-                    await connection.prompt(
+                        managed_session["turn_state"] = "in_progress"
+                        managed_session["stop_reason"] = None
+                        managed_session["report"] = ""
+                    self.log.write("acp_session_continued", dog=alias, session_id=session.session_id)
+                    prompt_result = await connection.prompt(
                         session_id=session.session_id, prompt=[text_block(message)]
                     )
         except asyncio.CancelledError:
-            self.log.write("dog_finished", dog=name, status="cancelled")
+            self.log.write("managed_session_closed", alias=alias)
             raise
         except Exception as exc:
             with self._lock:
-                self.dogs[name]["status"] = "failed"
-                self.dogs[name]["report"] = f"ACP failure: {type(exc).__name__}: {exc}"
-                self._completed.append(
+                managed_session = self.sessions[session_key]
+                managed_session["session_state"] = "unavailable"
+                managed_session["turn_state"] = "failed"
+                managed_session["report"] = f"ACP failure: {type(exc).__name__}: {exc}"
+                self._turn_results.append(
                     {
-                        "dog_key": name,
+                        "session_key": session_key,
                         "status": "failed",
-                        "report": self.dogs[name]["report"],
+                        "report": managed_session["report"],
                     }
                 )
             self.log.write(
                 "dog_finished",
-                dog=name,
+                dog=alias,
                 status="failed",
                 error=f"{type(exc).__name__}: {exc}",
             )
 
-    def _rest(self, name: str) -> None:
+    def _stop_turn(self, session_key: str, stop_reason: str) -> None:
         with self._lock:
-            dog = self.dogs[name]
-            if dog["status"] != "working":
+            session = self.sessions[session_key]
+            if session["turn_state"] != "in_progress":
                 return
-            dog["status"] = "resting"
-            dog["report"] = (
-                dog["report"].strip()
-                or f"The Dog finished without a textual report. Its last activity was: {dog['activity']}."
+            session["turn_state"] = "stopped"
+            session["stop_reason"] = stop_reason
+            session["report"] = (
+                session["report"].strip()
+                or f"The Dog finished without a textual report. Its last activity was: {session['activity']}."
             )
-            self._completed.append(
-                {"dog_key": name, "status": "resting", "report": dog["report"]}
+            self._turn_results.append(
+                {"session_key": session_key, "status": "resting", "report": session["report"]}
             )
-        self.log.write("dog_resting", dog=name, status="resting")
+        self.log.write(
+            "prompt_turn_stopped",
+            alias=session["alias"],
+            stop_reason=stop_reason,
+        )
 
-    def update(self, name: str, update: Any) -> None:
+    def update(self, session_key: str, update: Any) -> None:
         kind = type(update).__name__
         text = getattr(getattr(update, "content", None), "text", None)
         detail = str(update)[:2000]
         self.log.write(
             "acp_update",
-            dog=name,
+            dog=self.sessions[session_key]["alias"],
             update_type=kind,
             text=text,
             detail=detail,
         )
         with self._lock:
-            dog = self.dogs[name]
-            dog["updates"].append({"type": kind, "text": text, "detail": detail})
-            dog["updates"] = dog["updates"][-50:]
+            session = self.sessions[session_key]
+            session["updates"].append({"type": kind, "text": text, "detail": detail})
+            session["updates"] = session["updates"][-50:]
             if kind in {"ToolCallStart", "ToolCallProgress"}:
-                dog["activity"] = self.activity_gloss(update)
+                session["activity"] = self.activity_gloss(update)
             if kind == "AgentMessageChunk" and text:
-                self.dogs[name]["report"] += text
+                session["report"] += text
             if kind == "SessionInfoUpdate":
-                dog["session_title"] = getattr(update, "title", None)
-                dog["updated_at"] = getattr(update, "updated_at", None)
+                session["session_title"] = getattr(update, "title", None)
+                session["updated_at"] = getattr(update, "updated_at", None)
             if kind == "UsageUpdate":
-                dog["usage"] = {
+                session["usage"] = {
                     "used": getattr(update, "used", None),
                     "size": getattr(update, "size", None),
                     "cost": str(getattr(update, "cost", None) or "") or None,
@@ -630,48 +680,51 @@ class AcpPack:
         with self._lock:
             return [
                 {
-                    "name": dog["name"],
-                    "status": dog["status"],
-                    "task": dog["task"],
-                    "activity": dog["activity"],
-                    "report": dog["report"],
-                    "updates": list(dog["updates"]),
+                    "name": session["alias"],
+                    "status": self._dog_status(session),
+                    "session_state": session["session_state"],
+                    "turn_state": session["turn_state"],
+                    "stop_reason": session["stop_reason"],
+                    "task": session["assignment"],
+                    "activity": session["activity"],
+                    "report": session["report"],
+                    "updates": list(session["updates"]),
                     "session": {
-                        "id": dog["session_id"],
-                        "title": dog["session_title"],
-                        "updated_at": dog["updated_at"],
-                        "usage": dog["usage"],
+                        "id": session["session_id"],
+                        "title": session["session_title"],
+                        "updated_at": session["updated_at"],
+                        "usage": session["usage"],
                     },
                 }
-                for name, dog in self.dogs.items()
+                for session in self.sessions.values()
             ]
 
-    def take_completed(self) -> list[dict[str, Any]]:
+    def take_turn_results(self) -> list[dict[str, Any]]:
         with self._lock:
-            completed, self._completed = self._completed, []
+            results, self._turn_results = self._turn_results, []
             return [
                 {
-                    "name": self.dogs[event["dog_key"]]["name"],
+                    "name": self.sessions[event["session_key"]]["alias"],
                     "status": event["status"],
                     "report": event["report"],
                 }
-                for event in completed
+                for event in results
             ]
 
     async def request_permission(
-        self, name: str, session_id: str, tool_call: Any, options: list[Any]
+        self, session_key: str, session_id: str, tool_call: Any, options: list[Any]
     ) -> dict[str, Any]:
         decision_id = f"permission-{time.monotonic_ns()}"
         future: asyncio.Future[dict[str, Any]] = (
             asyncio.get_running_loop().create_future()
         )
         with self._lock:
-            dog = self.dogs[name]
-            if dog["status"] == "cancelled":
+            session = self.sessions[session_key]
+            if session["session_state"] != "ready":
                 raise asyncio.CancelledError
             event = {
                 "decision_id": decision_id,
-                "dog": dog["name"],
+                "dog": session["alias"],
                 "kind": "permission",
                 "message": getattr(tool_call, "title", "The Dog requests permission."),
                 "options": [
@@ -683,17 +736,17 @@ class AcpPack:
                     for option in options
                 ],
             }
-            self._pending_decisions[decision_id] = {
+            self._attention_requests[decision_id] = {
                 **event,
-                "dog_key": name,
+                "session_key": session_key,
                 "future": future,
             }
-            self._decision_events.append(event)
+            self._attention_events.append(event)
         self.log.write("acp_permission_requested", **event)
         return await future
 
     async def create_elicitation(
-        self, name: str, message: str, mode: Any
+        self, session_key: str, message: str, mode: Any
     ) -> dict[str, Any]:
         decision_id = f"elicitation-{time.monotonic_ns()}"
         future: asyncio.Future[dict[str, Any]] = (
@@ -701,38 +754,34 @@ class AcpPack:
         )
         mode_data = mode.model_dump(mode="json", by_alias=True)
         with self._lock:
-            dog = self.dogs[name]
-            if dog["status"] == "cancelled":
+            session = self.sessions[session_key]
+            if session["session_state"] != "ready":
                 raise asyncio.CancelledError
             event = {
                 "decision_id": decision_id,
-                "dog": dog["name"],
-                "kind": "question",
+                "dog": session["alias"],
+                "kind": "elicitation",
                 "message": message,
                 "schema": mode_data.get("requestedSchema"),
             }
-            self._pending_decisions[decision_id] = {
+            self._attention_requests[decision_id] = {
                 **event,
-                "dog_key": name,
+                "session_key": session_key,
                 "future": future,
             }
-            self._decision_events.append(event)
+            self._attention_events.append(event)
         self.log.write("acp_elicitation_requested", **event)
         return await future
 
     def resolve_permission(self, decision_id: str, option_id: str) -> dict[str, Any]:
         with self._lock:
-            decision = self._pending_decisions.pop(decision_id, None)
+            decision = self._attention_requests.pop(decision_id, None)
         if decision is None or decision["kind"] != "permission":
             return {"ok": False, "error": "No pending permission with that ID."}
         valid_ids = {option["option_id"] for option in decision["options"]}
-        if option_id != "deny" and option_id not in valid_ids:
+        if option_id not in valid_ids:
             return {"ok": False, "error": "That option is not offered by the Dog."}
-        result = (
-            {"outcome": {"outcome": "cancelled"}}
-            if option_id == "deny"
-            else {"outcome": {"outcome": "selected", "optionId": option_id}}
-        )
+        result = {"outcome": {"outcome": "selected", "optionId": option_id}}
         self._resolve_decision(decision, result)
         self.log.write(
             "acp_permission_resolved", decision_id=decision_id, option_id=option_id
@@ -743,8 +792,8 @@ class AcpPack:
         self, decision_id: str, answer: dict[str, Any] | None, decline: bool
     ) -> dict[str, Any]:
         with self._lock:
-            decision = self._pending_decisions.pop(decision_id, None)
-        if decision is None or decision["kind"] != "question":
+            decision = self._attention_requests.pop(decision_id, None)
+        if decision is None or decision["kind"] != "elicitation":
             return {"ok": False, "error": "No pending Dog question with that ID."}
         result = (
             {"action": "decline"}
@@ -767,50 +816,50 @@ class AcpPack:
 
         future.get_loop().call_soon_threadsafe(resolve)
 
-    def _cancel_decisions(self, dog_key: str) -> None:
+    def _cancel_attention_requests(self, session_key: str) -> None:
         with self._lock:
-            decisions = [
-                self._pending_decisions.pop(decision_id)
-                for decision_id, decision in list(self._pending_decisions.items())
-                if decision["dog_key"] == dog_key
+            requests = [
+                self._attention_requests.pop(decision_id)
+                for decision_id, request in list(self._attention_requests.items())
+                if request["session_key"] == session_key
             ]
-            cancelled_ids = {decision["decision_id"] for decision in decisions}
-            self._decision_events = [
+            cancelled_ids = {request["decision_id"] for request in requests}
+            self._attention_events = [
                 event
-                for event in self._decision_events
+                for event in self._attention_events
                 if event["decision_id"] not in cancelled_ids
             ]
-        for decision in decisions:
-            future = decision["future"]
+        for request in requests:
+            future = request["future"]
             future.get_loop().call_soon_threadsafe(future.cancel)
 
-    def take_pending_decisions(self) -> list[dict[str, Any]]:
+    def take_attention_requests(self) -> list[dict[str, Any]]:
         with self._lock:
-            decisions, self._decision_events = self._decision_events, []
-        return decisions
+            requests, self._attention_events = self._attention_events, []
+        return requests
 
-    def pending_decisions(self) -> list[dict[str, Any]]:
+    def attention_requests(self) -> list[dict[str, Any]]:
         with self._lock:
             return [
                 {
                     key: value
-                    for key, value in decision.items()
-                    if key not in {"future", "dog_key"}
+                    for key, value in request.items()
+                    if key not in {"future", "session_key"}
                 }
-                for decision in self._pending_decisions.values()
+                for request in self._attention_requests.values()
             ]
 
     def close(self) -> None:
         with self._lock:
-            names = [
-                dog["name"]
-                for dog in self.dogs.values()
-                if dog["status"] not in {"cancelled", "failed"}
+            aliases = [
+                session["alias"]
+                for session in self.sessions.values()
+                if session["session_state"] not in {"closed", "unavailable"}
             ]
-        for name in names:
-            self.dispatch("call_off_dog", {"name": name})
-        for dog in self.dogs.values():
-            future = dog["future"]
+        for alias in aliases:
+            self.dispatch("call_off_dog", {"name": alias})
+        for session in self.sessions.values():
+            future = session["future"]
             if future is None:
                 continue
             try:
@@ -825,25 +874,25 @@ class AcpPack:
         self.runtime.close()
 
 
-class DogClient(Client):
-    def __init__(self, pack: AcpPack, name: str) -> None:
-        self.pack = pack
-        self.name = name
+class AcpClientAdapter(Client):
+    def __init__(self, manager: SessionManager, session_key: str) -> None:
+        self.manager = manager
+        self.session_key = session_key
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
-        self.pack.update(self.name, update)
+        self.manager.update(self.session_key, update)
 
     async def request_permission(
         self, session_id: str, tool_call: Any, options: Any, **kwargs: Any
     ) -> dict[str, Any]:
-        return await self.pack.request_permission(
-            self.name, session_id, tool_call, options
+        return await self.manager.request_permission(
+            self.session_key, session_id, tool_call, options
         )
 
     async def create_elicitation(
         self, message: str, mode: Any, **kwargs: Any
     ) -> dict[str, Any]:
-        return await self.pack.create_elicitation(self.name, message, mode)
+        return await self.manager.create_elicitation(self.session_key, message, mode)
 
 
 class TimerQueue:
@@ -956,7 +1005,7 @@ class CallLease:
 
 class Handler(SimpleHTTPRequestHandler):
     log: SessionLog
-    pack: AcpPack
+    manager: SessionManager
     timers: TimerQueue
     calls: CallLease
     api_key: str
@@ -986,7 +1035,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "ok": True,
                     "uptime_seconds": round(time.monotonic() - self.started_at, 1),
                     "active_call": self.calls.active(),
-                    "dogs": len(self.pack.available_dogs()),
+                    "dogs": len(self.manager.list_dogs()),
                 }
             )
         elif self.path == "/readyz":
@@ -1014,15 +1063,15 @@ class Handler(SimpleHTTPRequestHandler):
         elif self.path == "/due":
             self.respond_json({"due": self.timers.take_due()})
         elif self.path == "/dog-events":
-            self.respond_json({"completed": self.pack.take_completed()})
+            self.respond_json({"completed": self.manager.take_turn_results()})
         elif self.path == "/decisions":
-            self.respond_json({"decisions": self.pack.take_pending_decisions()})
+            self.respond_json({"decisions": self.manager.take_attention_requests()})
         elif self.path == "/monitor":
             self.respond_json(
                 {
-                    "dogs": self.pack.monitor(),
+                    "dogs": self.manager.monitor(),
                     "timers": self.timers.monitor(),
-                    "decisions": self.pack.pending_decisions(),
+                    "decisions": self.manager.attention_requests(),
                 }
             )
         elif self.path in {"/", "/webrtc_spike.html"}:
@@ -1165,7 +1214,7 @@ class Handler(SimpleHTTPRequestHandler):
         elif payload["name"] == "end_call":
             result = {"ok": True, "end_call": True, "delay_ms": 2000}
         else:
-            result = self.pack.dispatch(payload["name"], payload["arguments"])
+            result = self.manager.dispatch(payload["name"], payload["arguments"])
         self.log.write(
             "tool_result",
             tool=payload["name"],
@@ -1256,7 +1305,7 @@ def main() -> None:
     if not api_key:
         raise SystemExit("OPENAI_API_KEY is not set.")
     Handler.log = SessionLog(directory=args.log_dir.expanduser().resolve())
-    Handler.pack = AcpPack(
+    Handler.manager = SessionManager(
         Handler.log, workspace, agent_command=args.agent_command
     )
     Handler.api_key = api_key
@@ -1289,7 +1338,7 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
-        Handler.pack.close()
+        Handler.manager.close()
         Handler.log.write("service_stop")
         Handler.log.file.close()
         server.server_close()

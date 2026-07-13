@@ -24,7 +24,7 @@ from typing import Any
 
 import yaml
 
-from webrtc_spike import AcpPack, SessionLog, TimerQueue
+from webrtc_spike import SessionLog, SessionManager, TimerQueue
 
 
 ROOT = Path(__file__).parent
@@ -39,7 +39,7 @@ class TextDriver:
         self, cwd: Path, allow_writes: bool, verbose: bool, deadline: float
     ) -> None:
         self.log = SessionLog("text-test")
-        self.pack = AcpPack(self.log, cwd, allow_writes=allow_writes)
+        self.manager = SessionManager(self.log, cwd, allow_writes=allow_writes)
         self.timers = TimerQueue(self.log)
         self.cwd = cwd
         self.verbose = verbose
@@ -53,7 +53,7 @@ class TextDriver:
             print(json.dumps({"event": event, **data}, ensure_ascii=True), flush=True)
 
     def tool(self, tool_name: str, **arguments: Any) -> dict[str, Any]:
-        result = self.pack.dispatch(tool_name, arguments)
+        result = self.manager.dispatch(tool_name, arguments)
         self.event("tool_result", tool=tool_name, arguments=arguments, result=result)
         if not result.get("ok"):
             raise TestFailure(f"{tool_name} failed: {result.get('error', result)}")
@@ -62,7 +62,7 @@ class TextDriver:
     def wait_for_dog(self, name: str) -> dict[str, Any]:
         while time.monotonic() < self.deadline:
             self.resolve_test_permissions()
-            result = self.pack.dispatch("check_dog", {"name": name})
+            result = self.manager.dispatch("check_dog", {"name": name})
             if result.get("status") in {"resting", "failed", "cancelled"}:
                 self.event("dog_settled", result=result)
                 if result["status"] != "resting":
@@ -72,7 +72,7 @@ class TextDriver:
         raise TestFailure(f"Overall scenario timeout expired while waiting for {name}")
 
     def resolve_test_permissions(self) -> None:
-        for decision in self.pack.pending_decisions():
+        for decision in self.manager.attention_requests():
             if decision["kind"] != "permission":
                 raise TestFailure(f"Unhandled Dog question: {decision['message']}")
             option = next(
@@ -93,7 +93,7 @@ class TextDriver:
 
     def dog(self, name: str) -> dict[str, Any]:
         dog = next(
-            (item for item in self.pack.monitor() if item["name"].casefold() == name.casefold()),
+            (item for item in self.manager.monitor() if item["name"].casefold() == name.casefold()),
             None,
         )
         if dog is None:
@@ -126,7 +126,7 @@ class TextDriver:
         return value
 
     def close(self) -> None:
-        self.pack.close()
+        self.manager.close()
         self.log.file.close()
 
 
@@ -315,7 +315,7 @@ def run_test(args: argparse.Namespace) -> int:
     finally:
         driver.close()
     elapsed = time.monotonic() - started
-    sessions = len(driver.pack.monitor())
+    sessions = len(driver.manager.monitor())
     turns = sum(driver.turns.values())
     files = sum(1 for path in workspace.iterdir() if path.is_file())
     print(f"PASS {scenario['name']} ({elapsed:.1f}s): {sessions} sessions, {turns} turns, {files} files")

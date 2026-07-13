@@ -384,7 +384,7 @@ The following language appears in current spikes or design fiction and should be
 - **Working/resting Dog:** Useful spoken projections of turn activity and session readiness, not ACP lifecycle states.
 - **Dog completed:** Means the current Prompt Turn stopped. The Dog's Managed Session may remain ready for another turn.
 - **Call off as cancellation:** Voice intent must distinguish stopping an active Prompt Turn from closing the Managed Session.
-- **`AcpPack`:** Current spike name for an object with several responsibilities. Pack remains voice vocabulary, not the canonical name for core plumbing.
+- **Dog status as lifecycle:** Early spikes stored `working`, `resting`, and `cancelled` as one status. These are now voice projections over separate Managed Session and Prompt Turn state.
 
 ## Open Questions
 
