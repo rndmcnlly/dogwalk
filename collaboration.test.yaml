@@ -1,5 +1,4 @@
 name: collaboration
-writes: true
 timeout: 120
 
 steps:
@@ -38,4 +37,4 @@ assert:
       Lingo: 1
   - contains:
       value: Poet.start_message
-      text: write-enabled
+      text: configured workspace

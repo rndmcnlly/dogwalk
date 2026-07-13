@@ -1,12 +1,10 @@
 name: revival
-writes: true
 timeout: 120
 
 steps:
   - start:
       dog: Scribe
       task: Remember the phrase "copper moon" for later. Do not write anything.
-      read_only: true
   - wait: Scribe
   - remember:
       old_session: Scribe.session.id
@@ -15,7 +13,6 @@ steps:
   - revive:
       dog: Echo
       session: $old_session
-      read_only: false
   - wait: Echo
   - continue:
       dog: Echo

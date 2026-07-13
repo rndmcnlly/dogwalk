@@ -105,14 +105,14 @@ once; ACP tool updates, streamed output, and the final report are recorded in
 the same JSONL file. `check_dog` reads that owned Dog state and never triggers
 another agent turn.
 
-The voice adapter remains **read-only by default**. Dogs retain their ACP sessions
-after a turn and can receive queued follow-up prompts until explicitly called off
-or Walker-hands stops. ACP permission requests and elicitation questions pause the
+Dogs operate in their configured workspace and retain their ACP sessions after a
+turn, receiving queued follow-up prompts until explicitly called off or
+Walker-hands stops. ACP permission requests and elicitation questions pause the
 Dog, are relayed to the User through Walker, and resume only after a User-selected
-response. The scripted text harness may enable writes inside a temporary test
-workspace. These constraints are policy only on this laptop, not a sandbox. The
-remote version should keep the `SessionManager.dispatch()` surface but place the ACP
-subprocess behind a sandbox-side bridge.
+response. The scripted text harness uses a temporary workspace by default. This
+local spike is not a sandbox; the remote version should keep the
+`SessionManager.dispatch()` surface but place the ACP subprocess behind a
+sandbox-side bridge.
 
 The bridge is exercised through declarative scenarios in `text_spike.py`. It still
 needs a harness integration test that causes OpenCode itself to issue

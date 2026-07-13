@@ -256,6 +256,10 @@ An Agent request for the User to authorize or reject an operation, usually a too
 
 Rejecting an offered operation is not the same as cancelling the Prompt Turn. ACP's cancelled permission outcome is reserved for cancellation of the containing turn.
 
+Dogwalk does not define a read-only ACP Session mode. Workspace isolation and
+write capability belong to Agent Hosting or Sandbox policy; Permission Requests
+remain operation-specific ACP authorization rather than a session-wide mode.
+
 ### Elicitation
 
 **Context:** ACP Integration

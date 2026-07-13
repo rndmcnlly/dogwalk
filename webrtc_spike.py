@@ -71,10 +71,6 @@ the task's scope is materially unclear or a consequential safety choice needs
 their decision. Tool results are authoritative, but they are deliberately stubbed
 in this prototype. Keep spoken replies short enough for a hands-free conversation.
 
-A read-only Dog may still inspect, run non-mutating commands, and ask the User for
-an ACP permission decision. Do not describe an ordinary read-only task as
-impossible merely because it involves generating text.
-
 Open every new session with this brief, warm welcome: "I'll be your dog walker
 for today." Then invite the User to say what is on their mind. Do not ask
 whether they can hear you. Never poll a Dog. Check a Dog only when the User
@@ -104,18 +100,6 @@ permission option or invent an answer yourself.
 """.strip()
 
 
-def walker_instructions(allow_writes: bool) -> str:
-    policy = (
-        "This service allows write-enabled Dogs. Set read_only to false when the "
-        "User asks to create, edit, delete, install, or otherwise change workspace "
-        "state. Set it to true for inspection and research. The User's request to "
-        "change the workspace is authorization for those scoped changes; still ask "
-        "before consequential ambiguity or work outside that scope."
-        if allow_writes
-        else "This service permits read-only Dogs only. Always set read_only to true."
-    )
-    return f"{INSTRUCTIONS}\n\n{policy}"
-
 DOG_BRIEFING = """You are {name}, a Dog in the Dogwalk system: the friendly named
 persona for this retained coding session. Walker is attached
 to the real human User through a live voice interface. Walker is a speech-to-speech
@@ -126,7 +110,6 @@ Agent behind the Dog persona: investigate the workspace and report useful findin
 to Walker. Retain context for follow-up Prompt Turns in this session. Do not
 speak to the User directly or assume you have the voice conversation's history.
 
-Safety mode: {safety}
 End with a concise plain-language report for Walker to relay.
 
 Task from Walker:
@@ -136,7 +119,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "sic_dog",
-        "description": "Create a fresh named Dog and retained coding session for an assignment. Choose read_only according to the service policy in your instructions. The server automatically supplies role, safety, reporting, and workspace context. In task, state only the work to do; do not repeat Dogwalk background or instructions.",
+        "description": "Create a fresh named Dog and retained coding session for an assignment. The server automatically supplies role, reporting, and workspace context. In task, state only the work to do; do not repeat Dogwalk background or instructions.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -145,12 +128,8 @@ TOOLS = [
                     "description": "Short pronounceable Dog name.",
                 },
                 "task": {"type": "string", "description": "Engineering task to relay."},
-                "read_only": {
-                    "type": "boolean",
-                    "description": "Whether the Dog must avoid changes.",
-                },
             },
-            "required": ["name", "task", "read_only"],
+            "required": ["name", "task"],
             "additionalProperties": False,
         },
     },
@@ -200,12 +179,8 @@ TOOLS = [
                     "type": "string",
                     "description": "Fresh short pronounceable Dog name.",
                 },
-                "read_only": {
-                    "type": "boolean",
-                    "description": "Whether the revived Dog must avoid changes.",
-                },
             },
-            "required": ["session_id", "name", "read_only"],
+            "required": ["session_id", "name"],
             "additionalProperties": False,
         },
     },
@@ -385,13 +360,11 @@ class SessionManager:
         self,
         log: SessionLog,
         cwd: Path,
-        allow_writes: bool = False,
         agent_command: str = "opencode acp --pure --cwd {cwd}",
     ) -> None:
         self.log = log
         self.cwd = cwd
         self.runtime = AcpRuntime()
-        self.allow_writes = allow_writes
         self.agent_command = agent_command
         self.sessions: dict[str, dict[str, Any]] = {}
         self._turn_results: list[dict[str, Any]] = []
@@ -418,17 +391,10 @@ class SessionManager:
         if tool == "recall_previous_dogs":
             return self.discover_persisted_sessions()
         if tool == "revive_dog":
-            return self.revive_session(
-                arguments["session_id"], name, arguments["read_only"]
-            )
+            return self.revive_session(arguments["session_id"], name)
         if tool == "name_dog":
             return self.set_alias(arguments["current_name"], name)
         if tool == "sic_dog":
-            if not arguments["read_only"] and not self.allow_writes:
-                return {
-                    "ok": False,
-                    "error": "This local ACP spike accepts read-only Dogs only.",
-                }
             with self._lock:
                 if self._session_for_alias(name) is not None:
                     return {
@@ -442,7 +408,6 @@ class SessionManager:
                     "turn_state": "in_progress",
                     "stop_reason": None,
                     "assignment": arguments["task"],
-                    "read_only": arguments["read_only"],
                     "report": "",
                     "activity": "starting up",
                     "updates": [],
@@ -460,11 +425,7 @@ class SessionManager:
                 "ok": True,
                 "name": name,
                 "status": "working",
-                "message": (
-                    "The read-only Dog is scouting the local workspace."
-                    if arguments["read_only"]
-                    else "The write-enabled Dog is working in the isolated test workspace."
-                ),
+                "message": "The Dog is working in the configured workspace.",
             }
 
         with self._lock:
@@ -565,14 +526,7 @@ class SessionManager:
                     break
         return sessions
 
-    def revive_session(
-        self, session_id: str, alias: str, read_only: bool
-    ) -> dict[str, Any]:
-        if not read_only and not self.allow_writes:
-            return {
-                "ok": False,
-                "error": "This local ACP spike accepts read-only Dogs only.",
-            }
+    def revive_session(self, session_id: str, alias: str) -> dict[str, Any]:
         with self._lock:
             discovered = self._discovered_sessions.get(session_id)
             if discovered is None:
@@ -595,7 +549,6 @@ class SessionManager:
                 "turn_state": None,
                 "stop_reason": None,
                 "assignment": discovered.get("title") or "Revived previous session",
-                "read_only": read_only,
                 "report": "",
                 "activity": "remembering its old tricks",
                 "updates": [],
@@ -700,25 +653,14 @@ class SessionManager:
         client = AcpClientAdapter(self, session_key)
         session = self.sessions[session_key]
         alias = session["alias"]
-        read_only = session["read_only"]
-        safety = (
-            "Read-only. Do not modify files, install dependencies, run commands that "
-            "change state, or commit."
-            if read_only
-            else "Workspace changes are authorized for this test. Do not commit or make "
-            "unrelated changes."
-        )
         prompt = (
-            DOG_BRIEFING.format(name=alias, task=assignment, safety=safety)
+            DOG_BRIEFING.format(name=alias, task=assignment)
             if assignment is not None
             else None
         )
-        revived_safety = (
-            "Dogwalk has revived this persisted session under a new attachment. "
-            f"The current safety mode is: {safety} This supersedes the safety mode "
-            "from any earlier Dogwalk briefing.\n\n"
-            if persisted_session_id is not None
-            else ""
+        revived_context = (
+            "Dogwalk has revived this persisted session under a new attachment.\n\n"
+            if persisted_session_id is not None else ""
         )
         command = [
             part.replace("{cwd}", str(self.cwd))
@@ -780,9 +722,9 @@ class SessionManager:
                     self.log.write("acp_session_continued", dog=alias, session_id=session_id)
                     prompt_result = await connection.prompt(
                         session_id=session_id,
-                        prompt=[text_block(f"{revived_safety}{message}")],
+                        prompt=[text_block(f"{revived_context}{message}")],
                     )
-                    revived_safety = ""
+                    revived_context = ""
                     self._stop_turn(session_key, str(prompt_result.stop_reason))
         except asyncio.CancelledError:
             self.log.write("managed_session_closed", alias=alias)
@@ -1224,7 +1166,6 @@ class Handler(SimpleHTTPRequestHandler):
     workspace: Path
     agent_command: str
     instructions: str
-    allow_writes: bool
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -1261,7 +1202,6 @@ class Handler(SimpleHTTPRequestHandler):
                     "ok": ready,
                     "workspace": str(self.workspace),
                     "agent_executable": executable,
-                    "allow_writes": self.allow_writes,
                 },
                 status=HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
             )
@@ -1509,13 +1449,6 @@ def main() -> None:
         type=float,
         default=float(os.environ.get("DOGWALK_CALL_LEASE_SECONDS", "15")),
     )
-    parser.add_argument(
-        "--allow-writes",
-        action="store_true",
-        default=os.environ.get("DOGWALK_ALLOW_WRITES", "").lower()
-        in {"1", "true", "yes"},
-        help="Allow Dogs to modify the configured workspace.",
-    )
     args = parser.parse_args()
     workspace = args.workspace.expanduser().resolve()
     if not workspace.is_dir():
@@ -1529,7 +1462,6 @@ def main() -> None:
     Handler.manager = SessionManager(
         Handler.log,
         workspace,
-        allow_writes=args.allow_writes,
         agent_command=args.agent_command,
     )
     Handler.api_key = api_key
@@ -1538,8 +1470,7 @@ def main() -> None:
     Handler.started_at = time.monotonic()
     Handler.workspace = workspace
     Handler.agent_command = args.agent_command
-    Handler.allow_writes = args.allow_writes
-    Handler.instructions = walker_instructions(args.allow_writes)
+    Handler.instructions = INSTRUCTIONS
     Handler.log.write(
         "service_start",
         mode="webrtc",
@@ -1548,7 +1479,6 @@ def main() -> None:
         port=args.port,
         workspace=str(workspace),
         agent_command=args.agent_command,
-        allow_writes=args.allow_writes,
     )
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True

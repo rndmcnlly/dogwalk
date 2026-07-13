@@ -65,7 +65,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "sic_dog",
-        "description": "Create a fresh named Dog and coding session for an assignment. The Dog receives its role and safety briefing automatically, so task only needs to describe the work.",
+        "description": "Create a fresh named Dog and coding session for an assignment. The Dog receives its role briefing automatically, so task only needs to describe the work.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -77,12 +77,8 @@ TOOLS = [
                     "type": "string",
                     "description": "The engineering task to relay.",
                 },
-                "read_only": {
-                    "type": "boolean",
-                    "description": "Whether the Dog must avoid changes.",
-                },
             },
-            "required": ["name", "task", "read_only"],
+            "required": ["name", "task"],
             "additionalProperties": False,
         },
     },
@@ -159,7 +155,6 @@ class SessionLog:
 @dataclass
 class StubDog:
     task: str
-    read_only: bool
     checks: int = 0
     messages: list[str] = field(default_factory=list)
 
@@ -180,7 +175,7 @@ class StubPack:
                     "ok": False,
                     "error": f"A Dog named {dog_name} is already working.",
                 }
-            self.dogs[dog_name] = StubDog(arguments["task"], arguments["read_only"])
+            self.dogs[dog_name] = StubDog(arguments["task"])
             return {
                 "ok": True,
                 "name": dog_name,

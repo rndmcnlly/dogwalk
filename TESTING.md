@@ -40,11 +40,11 @@ uv run --script text_spike.py test collaboration \
 - A Dog can be renamed and addressed through its new vocal alias.
 - Two Dogs can hand work through shared files.
 - Turn counts and expected files are structurally asserted.
-- Write-enabled test Dogs are reported accurately.
+- Dog startup results identify the configured workspace accurately.
 - A sideband timer fires without a voice call.
 
-The scenario runs write-capable Dogs only in its isolated test workspace. ACP
-permission requests are accepted only when an explicit allow-once option exists.
+The scenario runs Dogs in an isolated temporary workspace. ACP permission requests
+are accepted only when an explicit allow-once option exists.
 Questions and unfamiliar permission shapes fail the test rather than guessing.
 
 ## Scenario Format
@@ -79,8 +79,7 @@ Always `wait` before observing a new Dog's session metadata. Preflight validatio
 rejects the common race of remembering `session.id` immediately after `start`.
 The scenario timeout is one overall budget, not a fresh budget for every step.
 Use `restart`, `recall`, and `revive` to simulate a later voice call attaching an
-Agent-held session under a fresh Dog alias. A `start` or `revive` step may set
-`read_only` explicitly to test safety-mode changes across attachments.
+Agent-held session under a fresh Dog alias.
 
 ## Test Layers
 

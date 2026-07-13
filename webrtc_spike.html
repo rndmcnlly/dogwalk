@@ -3,54 +3,161 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Dogwalk WebRTC Spike</title>
+  <title>Dogwalk Mission Control</title>
   <style>
-    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    body { background: #101719; color: #e7eee9; margin: 0; min-height: 100vh; display: grid; place-items: center; }
-    main { width: min(42rem, calc(100% - 2rem)); }
-    h1 { font-size: 1.6rem; letter-spacing: .08em; margin: 0; }
-    p { color: #adc0b4; line-height: 1.55; }
-    .panel { border: 1px solid #527563; background: #17221d; padding: 1.2rem; margin-top: 1rem; }
-    button { background: #b7e26c; border: 0; color: #132017; cursor: pointer; font: inherit; font-weight: 700; padding: .8rem 1rem; }
-    button[disabled] { background: #4a5a50; color: #bcc7bf; cursor: not-allowed; }
-    #state { color: #b7e26c; font-weight: 700; }
-    #events { background: #0d1310; color: #c3d1c8; font-size: .8rem; height: 16rem; overflow-y: auto; padding: .8rem; white-space: pre-wrap; }
-    .note { font-size: .8rem; }
-    .monitor-grid { display: grid; gap: .7rem; }
-    .monitor-card { border-left: 3px solid #b7e26c; background: #0d1310; padding: .7rem; }
-    .monitor-card[data-status="failed"], .monitor-card[data-status="cancelled"] { border-color: #dc8a78; }
-    .monitor-card p { font-size: .8rem; margin: .35rem 0; }
-    .monitor-card pre { max-height: 12rem; overflow: auto; white-space: pre-wrap; }
-    progress { accent-color: #b7e26c; width: 100%; }
+    :root {
+      color-scheme: dark;
+      --void: #07100f; --deck: #0c1816; --panel: #101f1c; --panel-2: #132622;
+      --line: #29413b; --line-hot: #4f6c63; --text: #e1ebe6; --muted: #779188;
+      --green: #b8ef62; --cyan: #58c5c8; --amber: #efa84f; --red: #e06d58; --blue: #7fa8dc;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --sans: Inter, "Helvetica Neue", Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--void); }
+    body { min-width: 20rem; min-height: 100vh; margin: 0; color: var(--text); background: radial-gradient(circle at 65% 0%, rgba(41,89,76,.17), transparent 38rem), linear-gradient(rgba(88,197,200,.018) 1px, transparent 1px), linear-gradient(90deg, rgba(88,197,200,.015) 1px, transparent 1px), var(--void); background-size: auto, 24px 24px, 24px 24px, auto; font: 13px var(--mono); }
+    button, summary { font: inherit; }
+    button { cursor: pointer; }
+    button[disabled] { cursor: not-allowed; opacity: .45; }
+    .topbar { position: sticky; top: 0; z-index: 20; display: grid; grid-template-columns: 15rem minmax(20rem,1fr) auto; min-height: 4.4rem; border-bottom: 1px solid var(--green); background: rgba(7,16,15,.96); backdrop-filter: blur(14px); }
+    .wordmark, .system-strip, .call-controls { display: flex; align-items: center; }
+    .wordmark { gap: .7rem; padding: 0 1.4rem; border-right: 1px solid var(--line); }
+    .wordmark b { color: var(--green); font: 700 1.15rem var(--sans); letter-spacing: .1em; }
+    .wordmark span, .kicker, .label, .column-label, .metric span, .section-title, .event-time, .event-kind, .badge, .system-item span, .call-state { color: var(--muted); font-size: .65rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+    .system-strip { gap: clamp(1rem,3vw,3rem); padding: 0 1.4rem; overflow: hidden; }
+    .system-item { min-width: 0; white-space: nowrap; }
+    .system-item strong { display: block; max-width: 20rem; margin-top: .28rem; overflow: hidden; color: #c3d3cc; font-size: .72rem; font-weight: 500; text-overflow: ellipsis; }
+    .ok::before { content: ""; display: inline-block; width: .45rem; height: .45rem; margin-right: .45rem; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .call-controls { border-left: 1px solid var(--line); }
+    .call-status { min-width: 10.5rem; padding: .75rem 1.2rem; }
+    .call-state.live { color: var(--green); }
+    .call-state.live::before { content: ""; display: inline-block; width: .45rem; height: .45rem; margin-right: .45rem; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+    .call-status small { display: block; margin-top: .35rem; color: var(--muted); }
+    .call-controls button { align-self: stretch; min-width: 6.5rem; border: 0; border-left: 1px solid var(--line); padding: 0 .8rem; color: var(--muted); background: transparent; font-size: .66rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .call-controls .end { color: #ffd6cc; background: #632d25; }
+    main { width: min(100% - 2rem,112rem); margin: 0 auto; padding: 1.2rem 0 4rem; }
+    .metrics { display: grid; grid-template-columns: repeat(6,1fr); margin-bottom: 1rem; border: 1px solid var(--line); background: rgba(12,24,22,.88); }
+    .metric { min-width: 0; border-right: 1px solid var(--line); padding: .75rem .9rem; }
+    .metric:last-child { border-right: 0; }
+    .metric strong { display: block; margin-top: .32rem; font: 500 1.35rem var(--sans); }
+    .metric strong.green { color: var(--green); } .metric strong.amber { color: var(--amber); }
+    .metric small { display: block; margin-top: .18rem; overflow: hidden; color: var(--muted); font-size: .64rem; text-overflow: ellipsis; white-space: nowrap; }
+    .command-grid { display: grid; grid-template-columns: minmax(0,1fr) 19rem; gap: 1rem; }
+    .command-grid > *, .side-stack > * { min-width: 0; }
+    .panel { border: 1px solid var(--line); background: rgba(12,24,22,.9); }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; min-height: 2.5rem; border-bottom: 1px solid var(--line); padding: .55rem .8rem; background: #0a1513; }
+    .section-title { color: #a9beb5; }
+    .fresh { color: var(--green); font-size: .66rem; }
+    .fresh::before { content: ""; display: inline-block; width: .42rem; height: .42rem; margin-right: .4rem; border-radius: 50%; background: currentColor; }
+    .session-columns, .session-row { display: grid; grid-template-columns: 9rem minmax(12rem,1.2fr) minmax(14rem,1.3fr) 8rem 7rem 6rem; align-items: stretch; }
+    .session-columns { border-bottom: 1px solid var(--line-hot); background: #0a1513; }
+    .column-label { padding: .55rem .7rem; border-right: 1px solid var(--line); }
+    .session-row { position: relative; width: 100%; min-height: 5rem; border: 0; border-bottom: 1px solid var(--line); padding: 0; color: inherit; text-align: left; background: transparent; }
+    .session-row:last-child { border-bottom: 0; }
+    .session-row:hover { background: rgba(88,197,200,.04); }
+    .session-row.selected { background: linear-gradient(90deg,rgba(184,239,98,.12),rgba(184,239,98,.025)); box-shadow: inset 3px 0 0 var(--green); }
+    .session-row.attention { box-shadow: inset 3px 0 0 var(--red); }
+    .session-row > div { min-width: 0; padding: .8rem .7rem; border-right: 1px solid var(--line); }
+    .session-row > div:last-child { border-right: 0; }
+    .dog-id strong { display: block; color: #fff; font: 600 1.1rem var(--sans); letter-spacing: .02em; }
+    .dog-id small, .readout small { display: block; margin-top: .35rem; color: var(--muted); font-size: .61rem; }
+    .state-pill { display: inline-flex; align-items: center; gap: .35rem; margin-top: .35rem; color: var(--green); font-size: .59rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .state-pill::before { content: ""; width: .4rem; height: .4rem; border-radius: 50%; background: currentColor; }
+    .state-pill.resting { color: var(--cyan); } .state-pill.attention, .state-pill.failed { color: var(--red); }
+    .session-row p { margin: .2rem 0 0; overflow: hidden; color: var(--muted); font: .73rem/1.35 var(--sans); text-overflow: ellipsis; white-space: nowrap; }
+    .session-row b { display: block; overflow: hidden; color: #d8e4de; font: 600 .77rem/1.3 var(--sans); text-overflow: ellipsis; white-space: nowrap; }
+    .readout { color: #c8d7d0; font-size: .72rem; }
+    .bar { height: 3px; margin-top: .6rem; background: #20332f; } .bar i { display: block; height: 100%; background: var(--cyan); }
+    .empty { padding: 2rem 1rem; color: var(--muted); text-align: center; }
+    .side-stack { display: grid; align-content: start; gap: 1rem; }
+    .attention-card, .timer-card { border-bottom: 1px solid var(--line); padding: .85rem; }
+    .attention-card:last-child, .timer-card:last-child { border-bottom: 0; }
+    .attention-card { border-left: 3px solid var(--red); }
+    .badge { display: inline-block; border: 1px solid var(--red); padding: .18rem .35rem; color: var(--red); }
+    .attention-card h3 { margin: .7rem 0 .25rem; font: 600 .9rem var(--sans); }
+    .attention-card p, .timer-card p { margin: .3rem 0 0; color: #a9bbb3; font: .73rem/1.45 var(--sans); }
+    .telemetry-list { margin: 0; padding: 0; list-style: none; }
+    .telemetry-list li { display: grid; grid-template-columns: 1fr auto; gap: .7rem; border-bottom: 1px solid var(--line); padding: .66rem .8rem; color: #a9bbb3; font-size: .68rem; }
+    .telemetry-list li:last-child { border-bottom: 0; } .telemetry-list b { color: #dbe7e1; font-weight: 500; } .telemetry-list b.good { color: var(--green); } .telemetry-list b.warn { color: var(--amber); }
+    progress { width: 100%; margin-top: .55rem; accent-color: var(--cyan); }
+    .focus { margin-top: 1rem; }
+    .focus[hidden] { display: none; }
+    .focus-layout { display: grid; grid-template-columns: minmax(0,1fr) 18rem; min-height: 23rem; }
+    .stream { min-width: 0; border-right: 1px solid var(--line-hot); }
+    .stream-head { display: flex; justify-content: space-between; gap: 1rem; border-bottom: 1px solid var(--line); padding: .8rem 1rem; }
+    .stream-head h2 { margin: .3rem 0 0; font: 600 1rem var(--sans); }
+    .running { align-self: center; color: var(--green); font-size: .64rem; text-transform: uppercase; }
+    .stream-events { padding: 0 1rem; }
+    .event { display: grid; grid-template-columns: 5.2rem 7rem minmax(0,1fr); gap: .7rem; border-bottom: 1px solid var(--line); padding: .78rem 0; }
+    .event-kind.tool { color: var(--cyan); } .event-kind.message { color: var(--blue); } .event-kind.activity { color: var(--amber); }
+    .event-content { min-width: 0; } .event-content strong { display: block; color: #dce7e2; font: 600 .75rem var(--sans); }
+    .event-content p { margin: .25rem 0 0; overflow-wrap: anywhere; color: var(--muted); font: .69rem/1.4 var(--sans); }
+    .inspector { min-width: 0; background: #0a1513; }
+    .inspect-group { border-bottom: 1px solid var(--line); padding: .8rem; }
+    .inspect-group h3 { margin: 0 0 .7rem; color: var(--muted); font-size: .62rem; letter-spacing: .1em; text-transform: uppercase; }
+    .inspect-row { display: flex; justify-content: space-between; gap: .7rem; margin-top: .5rem; font-size: .65rem; }
+    .inspect-row span { color: var(--muted); } .inspect-row b { min-width: 0; color: #c7d7d0; font-weight: 500; text-align: right; overflow-wrap: anywhere; }
+    .activity-gloss { border-left: 2px solid var(--amber); padding-left: .65rem; color: #d4dfda; font: .73rem/1.45 var(--sans); }
+    details.raw summary { cursor: pointer; color: var(--muted); font-size: .61rem; letter-spacing: .07em; text-transform: uppercase; }
+    details.raw pre { max-height: 14rem; margin: .7rem 0 0; overflow: auto; color: #9fc5b5; font-size: .57rem; line-height: 1.5; white-space: pre-wrap; }
+    .event-log { margin-top: 1rem; } #events { max-height: 12rem; margin: 0; overflow-y: auto; padding: .8rem; color: #9fc5b5; font-size: .65rem; white-space: pre-wrap; }
+    .footline { display: flex; justify-content: space-between; gap: 1rem; margin-top: .75rem; color: #536c63; font-size: .59rem; text-transform: uppercase; }
+    @media (max-width: 1100px) { .system-strip .system-item:nth-child(n+4) { display:none; } .command-grid { grid-template-columns:1fr; } .side-stack { grid-template-columns:1fr 1fr; } }
+    @media (max-width: 800px) { .topbar { position:static; grid-template-columns:1fr auto; } .system-strip { display:none; } .metrics { grid-template-columns:repeat(3,1fr); } .metric:nth-child(3) { border-right:0; } .metric:nth-child(-n+3) { border-bottom:1px solid var(--line); } .session-table { overflow-x:auto; } .session-columns,.session-row { min-width:48rem; grid-template-columns:8rem minmax(11rem,1fr) minmax(13rem,1fr) 7rem 7rem 5rem; } .focus-layout { display:block; } .stream { border-right:0; } .inspector { display:grid; grid-template-columns:repeat(3,1fr); border-top:1px solid var(--line); } .inspect-group { border-right:1px solid var(--line); } }
+    @media (max-width: 560px) { .topbar { grid-template-columns:1fr; } .wordmark { min-height:3.4rem; border-right:0; border-bottom:1px solid var(--line); } .call-controls { display:grid; grid-template-columns:minmax(0,1fr) repeat(3,4rem); border-left:0; } .call-status { min-width:0; } .call-controls button { min-width:0; padding:0 .25rem; } main { width:min(100% - 1rem,112rem); } .metrics { grid-template-columns:1fr 1fr; } .metric:nth-child(2n) { border-right:0; } .metric:nth-child(-n+4) { border-bottom:1px solid var(--line); } .side-stack { grid-template-columns:1fr; } .event { grid-template-columns:4.5rem minmax(0,1fr); } .event-kind { display:none; } .inspector { display:block; } .inspect-group { border-right:0; } .footline { display:block; line-height:1.6; } }
   </style>
 </head>
 <body>
+  <header class="topbar">
+    <div class="wordmark"><b>DOGWALK</b><span>Mission control / live</span></div>
+    <div class="system-strip">
+      <div class="system-item"><span>Service</span><strong id="service-health">Checking</strong></div>
+      <div class="system-item"><span>Workspace</span><strong id="workspace">Checking</strong></div>
+      <div class="system-item"><span>ACP host</span><strong id="agent-host">Checking</strong></div>
+      <div class="system-item"><span>Snapshot</span><strong id="snapshot">Awaiting call</strong></div>
+    </div>
+    <div class="call-controls">
+      <div class="call-status"><div id="state" class="call-state">Call idle</div><small id="call-meta">Microphone offline</small></div>
+      <button id="start">Start call</button><button id="mute" disabled>Mute</button><button id="stop" class="end" disabled>End call</button>
+    </div>
+  </header>
   <main>
-    <h1>DOGWALK / WEBRTC</h1>
-    <p>Browser-managed microphone, playback, and echo cancellation. The Dogwalk service creates voice sessions and manages local ACP agents beside the workspace.</p>
-    <section class="panel">
-      <button id="start">Start audio session</button>
-      <button id="mute" disabled>Mute microphone</button>
-      <button id="stop" disabled>Stop</button>
-      <p id="state">idle</p>
-      <p class="note">Use the laptop speakers for this test. Chrome's WebRTC audio processing should prevent the assistant from being heard as a new user turn. Headphones remain the stronger production baseline.</p>
+    <section class="metrics" aria-label="Environment overview">
+      <div class="metric"><span>Managed sessions</span><strong id="session-count">00</strong><small id="session-summary">none attached</small></div>
+      <div class="metric"><span>Turns active</span><strong class="green" id="active-count">00</strong><small id="active-names">none</small></div>
+      <div class="metric"><span>Queued turns</span><strong id="queued-count">00</strong><small>projected by service</small></div>
+      <div class="metric"><span>Attention</span><strong class="amber" id="attention-count">00</strong><small id="attention-names">none pending</small></div>
+      <div class="metric"><span>Peak context</span><strong id="context-count">--</strong><small id="context-name">no usage update</small></div>
+      <div class="metric"><span>Observed cost</span><strong id="cost-count">--</strong><small>known session usage</small></div>
     </section>
-    <section class="panel">
-      <div id="events" aria-live="polite">Events will appear here. The complete structured log is written by the local server.</div>
+    <div class="command-grid">
+      <section class="panel" aria-labelledby="sessions-title">
+        <header class="panel-head"><span class="section-title" id="sessions-title">Session operations matrix</span><span class="fresh">Live projection</span></header>
+        <div class="session-table">
+          <div class="session-columns" aria-hidden="true"><div class="column-label">Dog / state</div><div class="column-label">Assignment</div><div class="column-label">Current activity</div><div class="column-label">Turn</div><div class="column-label">Context</div><div class="column-label">Updates</div></div>
+          <div id="dogs"><div class="empty">Start a call to observe Managed Sessions.</div></div>
+        </div>
+      </section>
+      <aside class="side-stack" aria-label="Environment alerts and telemetry">
+        <section class="panel"><header class="panel-head"><span class="section-title">Attention queue · <b id="attention-heading">00</b></span></header><div id="decisions"><div class="empty">No pending requests.</div></div></section>
+        <section class="panel"><header class="panel-head"><span class="section-title">System telemetry</span></header><ul class="telemetry-list"><li><span>Walker lease</span><b id="lease-state">RELEASED</b></li><li><span>Realtime channel</span><b id="channel-state">CLOSED</b></li><li><span>Audio inbound</span><b id="audio-state">OFFLINE</b></li><li><span>ACP sessions</span><b id="acp-count">0</b></li></ul></section>
+        <section class="panel"><header class="panel-head"><span class="section-title">Timers</span></header><div id="timers"><div class="empty">No timers.</div></div></section>
+      </aside>
+    </div>
+    <section class="panel focus" id="focus" hidden aria-labelledby="focus-title">
+      <header class="panel-head"><span class="section-title" id="focus-title">Focused session</span><span class="fresh" id="focus-state">Projected updates</span></header>
+      <div class="focus-layout">
+        <section class="stream" aria-label="ACP update stream"><header class="stream-head"><div><span class="kicker" id="focus-turn">Prompt Turn</span><h2 id="focus-task"></h2></div><span class="running" id="focus-live"></span></header><div class="stream-events" id="stream-events"></div></section>
+        <aside class="inspector" aria-label="Selected session inspector">
+          <section class="inspect-group"><h3>Current activity</h3><div class="activity-gloss" id="focus-activity"></div></section>
+          <section class="inspect-group"><h3>Session facts</h3><div id="session-facts"></div></section>
+          <section class="inspect-group"><h3>Usage</h3><div id="usage-facts"></div></section>
+          <section class="inspect-group"><details class="raw"><summary>Raw ACP updates</summary><pre id="raw-updates"></pre></details></section>
+        </aside>
+      </div>
     </section>
-    <section class="panel">
-      <h2>Dog Monitor</h2>
-      <p class="note">Development telemetry. Walker receives only each Dog's concise activity gloss; these panels retain the verbose ACP event stream.</p>
-      <div id="dogs" class="monitor-grid">No Dogs yet.</div>
-    </section>
-    <section class="panel">
-      <h2>Timers</h2>
-      <div id="timers" class="monitor-grid">No timers yet.</div>
-    </section>
-    <section class="panel">
-      <h2>Pending Dog Decisions</h2>
-      <div id="decisions" class="monitor-grid">No pending decisions.</div>
-    </section>
+    <details class="panel event-log"><summary class="panel-head"><span class="section-title">Walker / browser event log</span></summary><pre id="events" aria-live="polite">Events will appear here. The complete structured log is written by the local server.</pre></details>
+    <div class="footline"><span>Observer surface · selecting a session does not alter it</span><span>Call controls are the only environment mutations</span></div>
   </main>
   <audio id="walker" autoplay></audio>
   <script>
@@ -63,6 +170,7 @@
     const timersPanel = document.querySelector("#timers");
     const decisionsPanel = document.querySelector("#decisions");
     const audio = document.querySelector("#walker");
+    const focusPanel = document.querySelector("#focus");
     let peerConnection;
     let dataChannel;
     let microphone;
@@ -74,6 +182,10 @@
     let earconContext;
     let callToken;
     let heartbeatAbort;
+    let selectedDogName;
+    let latestMonitor;
+    let callStartedAt;
+    let callClock;
 
     function display(message) {
       events.textContent += `\n${new Date().toLocaleTimeString()}  ${message}`;
@@ -114,8 +226,9 @@
     function setMicrophoneMuted(muted) {
       microphoneMuted = muted;
       microphone?.getAudioTracks().forEach(track => { track.enabled = !muted; });
-      muteButton.textContent = muted ? "Unmute microphone" : "Mute microphone";
-      state.textContent = muted ? "listening (microphone muted)" : "listening";
+      muteButton.textContent = muted ? "Unmute" : "Mute";
+      state.textContent = muted ? "Call muted" : "Call active";
+      renderCallChrome();
       log("microphone_muted", { muted });
       display(muted ? "microphone muted" : "microphone unmuted");
       playEarcon(muted ? "microphone_muted" : "microphone_unmuted");
@@ -131,70 +244,178 @@
       else send({ type: "response.create" });
     }
 
-    function monitorCard(title, status) {
-      const card = document.createElement("article");
-      card.className = "monitor-card";
-      card.dataset.status = status;
-      const heading = document.createElement("strong");
-      heading.textContent = `${title} / ${status}`;
-      card.append(heading);
-      return card;
+    function node(tag, className, text) {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined) element.textContent = text;
+      return element;
     }
 
-    function monitorLine(card, label, value) {
-      const line = document.createElement("p");
-      const labelNode = document.createElement("b");
-      labelNode.textContent = `${label}: `;
-      line.append(labelNode, value);
-      card.append(line);
+    function fact(label, value) {
+      const row = node("div", "inspect-row");
+      row.append(node("span", "", label), node("b", "", value ?? "--"));
+      return row;
     }
 
-    function renderMonitor({ dogs, timers, decisions }) {
+    function usageFor(dog) {
+      const usage = dog.session?.usage;
+      const used = Number(usage?.used);
+      const size = Number(usage?.size);
+      return { usage, used, size, percent: used && size ? Math.round(used / size * 100) : null };
+    }
+
+    function projectedState(dog, decisions) {
+      if (decisions.some(decision => decision.dog === dog.name)) return "attention";
+      if (dog.status === "failed" || dog.status === "cancelled") return dog.status;
+      return dog.turn_state === "in_progress" || dog.turn_state === "queued" ? "working" : "resting";
+    }
+
+    function renderFocus(dog) {
+      if (!dog) {
+        focusPanel.hidden = true;
+        return;
+      }
+      focusPanel.hidden = false;
+      const stateName = projectedState(dog, latestMonitor.decisions);
+      const turnState = dog.turn_state?.replaceAll("_", " ") || "not started";
+      document.querySelector("#focus-title").textContent = `Focused session · ${dog.name}`;
+      document.querySelector("#focus-state").textContent = `${turnState} · ${dog.updates.length} updates`;
+      document.querySelector("#focus-turn").textContent = `Prompt Turn · ${turnState}`;
+      document.querySelector("#focus-task").textContent = dog.task;
+      document.querySelector("#focus-live").textContent = stateName === "working" ? "● receiving updates" : stateName;
+      document.querySelector("#focus-activity").textContent = dog.activity;
+
+      const facts = document.querySelector("#session-facts");
+      facts.replaceChildren(
+        fact("Managed Session", dog.session_state),
+        fact("Prompt Turn", dog.turn_state),
+        fact("Stop reason", dog.stop_reason),
+        fact("ACP ID", dog.session?.id),
+        fact("Session title", dog.session?.title),
+      );
+      const { usage, used, size, percent } = usageFor(dog);
+      document.querySelector("#usage-facts").replaceChildren(
+        fact("Context", percent === null ? "--" : `${used.toLocaleString()} / ${size.toLocaleString()} (${percent}%)`),
+        fact("Observed cost", usage?.cost ? `$${usage.cost}` : "--"),
+        fact("Updates retained", dog.updates.length),
+      );
+
+      const stream = document.querySelector("#stream-events");
+      stream.replaceChildren();
+      if (!dog.updates.length) stream.append(node("div", "empty", "No ACP updates received yet."));
+      dog.updates.forEach((update, index) => {
+        const kind = update.type.includes("Tool") ? "tool" : update.type.includes("Message") ? "message" : "activity";
+        const event = node("article", "event");
+        event.append(node("span", "event-time", String(index + 1).padStart(2, "0")), node("span", `event-kind ${kind}`, update.type));
+        const content = node("div", "event-content");
+        content.append(node("strong", "", update.text || update.type));
+        if (update.detail && update.detail !== update.text) content.append(node("p", "", update.detail));
+        event.append(content);
+        stream.append(event);
+      });
+      document.querySelector("#raw-updates").textContent = dog.updates.map(update =>
+        `${update.type}${update.text ? `: ${update.text}` : ""}\n${update.detail}`
+      ).join("\n\n");
+    }
+
+    function renderMonitor(monitor) {
+      latestMonitor = monitor;
+      const { dogs, timers, decisions } = monitor;
+      if (!selectedDogName || !dogs.some(dog => dog.name === selectedDogName)) selectedDogName = dogs[0]?.name;
+      const active = dogs.filter(dog => dog.turn_state === "in_progress");
+      const queued = dogs.filter(dog => dog.turn_state === "queued");
+      const usages = dogs.map(dog => ({ dog, ...usageFor(dog) })).filter(item => item.percent !== null);
+      const peak = usages.sort((a, b) => b.percent - a.percent)[0];
+      const totalCost = dogs.reduce((sum, dog) => sum + (Number(dog.session?.usage?.cost) || 0), 0);
+      document.querySelector("#session-count").textContent = String(dogs.length).padStart(2, "0");
+      document.querySelector("#session-summary").textContent = dogs.length ? "known to this service" : "none attached";
+      document.querySelector("#active-count").textContent = String(active.length).padStart(2, "0");
+      document.querySelector("#active-names").textContent = active.map(dog => dog.name).join(" · ") || "none";
+      document.querySelector("#queued-count").textContent = String(queued.length).padStart(2, "0");
+      document.querySelector("#attention-count").textContent = String(decisions.length).padStart(2, "0");
+      document.querySelector("#attention-heading").textContent = String(decisions.length).padStart(2, "0");
+      document.querySelector("#attention-names").textContent = [...new Set(decisions.map(decision => decision.dog))].join(" · ") || "none pending";
+      document.querySelector("#context-count").textContent = peak ? `${peak.percent}%` : "--";
+      document.querySelector("#context-name").textContent = peak ? `peak session: ${peak.dog.name}` : "no usage update";
+      document.querySelector("#cost-count").textContent = totalCost ? `$${totalCost.toFixed(2)}` : "--";
+      document.querySelector("#acp-count").textContent = String(dogs.length);
+      document.querySelector("#snapshot").textContent = new Date().toLocaleTimeString();
+      document.querySelector("#snapshot").classList.add("ok");
+
       dogsPanel.replaceChildren();
-      if (!dogs.length) dogsPanel.textContent = "No Dogs yet.";
+      if (!dogs.length) dogsPanel.append(node("div", "empty", "No Managed Sessions yet."));
       for (const dog of dogs) {
-        const card = monitorCard(dog.name, dog.status);
-        monitorLine(card, "Task", dog.task);
-        monitorLine(card, "Activity", dog.activity);
-        if (dog.report) monitorLine(card, "Report", dog.report);
-        const details = document.createElement("details");
-        const summary = document.createElement("summary");
-        summary.textContent = `ACP updates (${dog.updates.length})`;
-        const raw = document.createElement("pre");
-        raw.textContent = dog.updates.map(update =>
-          `${update.type}${update.text ? `: ${update.text}` : ""}\n${update.detail}`
-        ).join("\n\n");
-        details.append(summary, raw);
-        card.append(details);
-        dogsPanel.append(card);
+        const displayState = projectedState(dog, decisions);
+        const { used, size, percent } = usageFor(dog);
+        const row = node("button", `session-row${dog.name === selectedDogName ? " selected" : ""}${displayState === "attention" ? " attention" : ""}`);
+        row.type = "button";
+        const identity = node("div", "dog-id");
+        identity.append(node("strong", "", dog.name.toUpperCase()), node("span", `state-pill ${displayState}`, displayState), node("small", "", `session ${dog.session_state}`));
+        const assignment = node("div"); assignment.append(node("b", "", dog.task), node("p", "", dog.session?.title || "No Agent-supplied title"));
+        const activity = node("div"); activity.append(node("b", "", dog.activity), node("p", "", dog.report || "Awaiting report"));
+        const turn = node("div", "readout", dog.turn_state?.replaceAll("_", " ") || "not started"); turn.append(node("small", "", dog.stop_reason || "current"));
+        const context = node("div", "readout", percent === null ? "--" : `${percent}%`); context.append(node("small", "", percent === null ? "no usage" : `${used}/${size}`));
+        const bar = node("div", "bar"); const fill = node("i"); fill.style.width = `${percent || 0}%`; bar.append(fill); context.append(bar);
+        const updates = node("div", "readout", String(dog.updates.length)); updates.append(node("small", "", "retained"));
+        row.append(identity, assignment, activity, turn, context, updates);
+        row.addEventListener("click", () => { selectedDogName = dog.name; renderMonitor(latestMonitor); });
+        dogsPanel.append(row);
       }
 
       timersPanel.replaceChildren();
-      if (!timers.length) timersPanel.textContent = "No timers yet.";
+      if (!timers.length) timersPanel.append(node("div", "empty", "No timers."));
       for (const timer of timers) {
-        const card = monitorCard(timer.purpose, timer.status);
+        const card = node("article", "timer-card");
+        card.append(node("span", "badge", timer.status), node("p", "", timer.purpose), node("p", "", `${timer.remaining_seconds}s remaining of ${timer.seconds}s`));
         const progress = document.createElement("progress");
         progress.max = 1;
         progress.value = timer.progress;
-        monitorLine(card, "Time remaining", `${timer.remaining_seconds}s of ${timer.seconds}s`);
         card.append(progress);
         timersPanel.append(card);
       }
 
       decisionsPanel.replaceChildren();
-      if (!decisions.length) decisionsPanel.textContent = "No pending decisions.";
+      if (!decisions.length) decisionsPanel.append(node("div", "empty", "No pending requests."));
       for (const decision of decisions) {
-        const card = monitorCard(`${decision.dog} / ${decision.kind}`, "pending");
-        monitorLine(card, "Question", decision.message);
-        if (decision.options) monitorLine(card, "Options", decision.options.map(option => option.name).join(" | "));
-        if (decision.schema) monitorLine(card, "Requested schema", JSON.stringify(decision.schema));
+        const card = node("article", "attention-card");
+        card.append(node("span", "badge", decision.kind), node("h3", "", decision.dog), node("p", "", decision.message));
+        if (decision.options) card.append(node("p", "", decision.options.map(option => option.name).join(" | ")));
+        if (decision.schema) card.append(node("p", "", JSON.stringify(decision.schema)));
         decisionsPanel.append(card);
       }
+      renderFocus(dogs.find(dog => dog.name === selectedDogName));
     }
 
     async function pullMonitor() {
       const response = await sideband("/monitor");
       if (response.ok) renderMonitor(await response.json());
+    }
+
+    async function pullSystem() {
+      const [healthResponse, readyResponse] = await Promise.all([fetch("/healthz"), fetch("/readyz")]);
+      const health = await healthResponse.json();
+      const ready = await readyResponse.json();
+      const healthNode = document.querySelector("#service-health");
+      healthNode.textContent = health.ok ? `Healthy · ${Math.floor(health.uptime_seconds / 60)}m uptime` : "Unavailable";
+      healthNode.classList.toggle("ok", health.ok);
+      document.querySelector("#workspace").textContent = ready.workspace;
+      const agent = document.querySelector("#agent-host");
+      agent.textContent = ready.agent_executable || "Agent unavailable";
+      agent.classList.toggle("ok", ready.ok);
+    }
+
+    function renderCallChrome() {
+      const active = Boolean(callToken);
+      state.classList.toggle("live", active);
+      document.querySelector("#lease-state").textContent = active ? "HELD" : "RELEASED";
+      document.querySelector("#lease-state").className = active ? "good" : "";
+      document.querySelector("#channel-state").textContent = dataChannel?.readyState?.toUpperCase() || "CLOSED";
+      document.querySelector("#channel-state").className = dataChannel?.readyState === "open" ? "good" : "";
+      document.querySelector("#audio-state").textContent = microphoneMuted ? "MUTED" : microphone ? "LIVE" : "OFFLINE";
+      document.querySelector("#audio-state").className = microphone && !microphoneMuted ? "good" : microphoneMuted ? "warn" : "";
+      document.querySelector("#call-meta").textContent = callStartedAt
+        ? `${Math.floor((Date.now() - callStartedAt) / 60000)}:${String(Math.floor((Date.now() - callStartedAt) / 1000) % 60).padStart(2, "0")} elapsed`
+        : "Microphone offline";
     }
 
     function playEarcon(name) {
@@ -343,18 +564,21 @@
 
     async function start() {
       startButton.disabled = true;
-      state.textContent = "claiming Walker call";
+      state.textContent = "Claiming call";
       const callResponse = await fetch("/call", { method: "POST" });
       const call = await callResponse.json();
       if (!callResponse.ok) throw new Error(call.error || "Could not start Walker call");
       callToken = call.call_token;
+      callStartedAt = Date.now();
+      callClock = window.setInterval(renderCallChrome, 1000);
+      renderCallChrome();
       holdCallLease().catch(error => {
         if (error.name !== "AbortError" && callToken) {
           display(String(error));
           stop();
         }
       });
-      state.textContent = "requesting microphone";
+      state.textContent = "Requesting microphone";
       earconContext = new AudioContext();
       await earconContext.resume();
       microphone = await navigator.mediaDevices.getUserMedia({ audio: {
@@ -370,15 +594,17 @@
         audio.play().catch(error => log("audio_playback_error", { error: String(error) }));
       };
       peerConnection.onconnectionstatechange = () => {
-        state.textContent = peerConnection.connectionState;
+        state.textContent = peerConnection.connectionState === "connected" ? "Call active" : peerConnection.connectionState;
+        renderCallChrome();
         log("connection_state", { state: peerConnection.connectionState });
       };
       peerConnection.addTrack(track, microphone);
       dataChannel = peerConnection.createDataChannel("oai-events");
       dataChannel.onopen = () => {
-        state.textContent = "listening";
+        state.textContent = "Call active";
         muteButton.disabled = false;
         stopButton.disabled = false;
+        renderCallChrome();
         duePoll = window.setInterval(() => pullDueTimers().catch(error => log("timer_poll_error", { error: String(error) })), 1000);
         dogPoll = window.setInterval(() => pullDogEvents().catch(error => log("dog_event_poll_error", { error: String(error) })), 1000);
         decisionPoll = window.setInterval(() => pullDecisions().catch(error => log("decision_poll_error", { error: String(error) })), 1000);
@@ -406,6 +632,7 @@
       window.clearInterval(dogPoll);
       window.clearInterval(decisionPoll);
       window.clearInterval(monitorPoll);
+      window.clearInterval(callClock);
       dataChannel?.close();
       peerConnection?.getSenders().forEach(sender => sender.track?.stop());
       peerConnection?.close();
@@ -413,20 +640,22 @@
       earconContext?.close();
       earconContext = undefined;
       audio.srcObject = null;
-      state.textContent = "stopped";
+      state.textContent = "Call idle";
       startButton.disabled = false;
       muteButton.disabled = true;
       stopButton.disabled = true;
       microphoneMuted = false;
-      muteButton.textContent = "Mute microphone";
+      muteButton.textContent = "Mute";
       log("browser_session_stopped");
       heartbeatAbort?.abort();
       heartbeatAbort = undefined;
       callToken = undefined;
+      callStartedAt = undefined;
+      renderCallChrome();
     }
 
     startButton.addEventListener("click", () => start().catch(error => {
-      state.textContent = "failed";
+      state.textContent = "Call failed";
       display(String(error));
       log("browser_error", { error: String(error) });
       if (callToken) stop();
@@ -435,6 +664,9 @@
     muteButton.addEventListener("click", () => setMicrophoneMuted(!microphoneMuted));
     stopButton.addEventListener("click", stop);
     window.addEventListener("beforeunload", stop);
+    pullSystem().catch(error => display(`system check failed: ${error}`));
+    window.setInterval(() => pullSystem().catch(error => display(`system check failed: ${error}`)), 5000);
+    renderCallChrome();
   </script>
 </body>
 </html>

@@ -36,11 +36,10 @@ class TestFailure(RuntimeError):
 
 class TextDriver:
     def __init__(
-        self, cwd: Path, allow_writes: bool, verbose: bool, deadline: float
+        self, cwd: Path, verbose: bool, deadline: float
     ) -> None:
         self.log = SessionLog("text-test")
-        self.allow_writes = allow_writes
-        self.manager = SessionManager(self.log, cwd, allow_writes=allow_writes)
+        self.manager = SessionManager(self.log, cwd)
         self.timers = TimerQueue(self.log)
         self.cwd = cwd
         self.verbose = verbose
@@ -132,9 +131,7 @@ class TextDriver:
 
     def restart_manager(self) -> None:
         self.manager.close()
-        self.manager = SessionManager(
-            self.log, self.cwd, allow_writes=self.allow_writes
-        )
+        self.manager = SessionManager(self.log, self.cwd)
 
 
 def load_scenario(name_or_path: str) -> tuple[Path, dict[str, Any]]:
@@ -150,7 +147,7 @@ def load_scenario(name_or_path: str) -> tuple[Path, dict[str, Any]]:
 def validate_scenario(data: Any) -> None:
     if not isinstance(data, dict):
         raise TestFailure("Scenario must be a YAML mapping")
-    allowed = {"name", "writes", "timeout", "steps", "assert"}
+    allowed = {"name", "timeout", "steps", "assert"}
     unknown = set(data) - allowed
     if unknown:
         raise TestFailure(f"Unknown scenario keys: {', '.join(sorted(unknown))}")
@@ -243,7 +240,6 @@ def run_steps(driver: TextDriver, scenario: dict[str, Any]) -> None:
                 "sic_dog",
                 name=name,
                 task=value["task"],
-                read_only=value.get("read_only", not scenario.get("writes", False)),
             )
             driver.starts[name] = result
             driver.turns[name] = 1
@@ -286,7 +282,6 @@ def run_steps(driver: TextDriver, scenario: dict[str, Any]) -> None:
                 "revive_dog",
                 name=name,
                 session_id=driver.resolve(value["session"]),
-                read_only=value.get("read_only", not scenario.get("writes", False)),
             )
             driver.turns[name] = 0
 
@@ -339,7 +334,6 @@ def run_test(args: argparse.Namespace) -> int:
     workspace.mkdir(parents=True, exist_ok=True)
     driver = TextDriver(
         workspace.resolve(),
-        scenario.get("writes", False),
         args.verbose,
         deadline=started + float(scenario.get("timeout", 180)),
     )
@@ -383,7 +377,6 @@ def run_service_test() -> int:
         str(log_dir),
         "--call-lease-seconds",
         "2",
-        "--allow-writes",
     ]
     env = {**os.environ, "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", "test-only")}
     process = subprocess.Popen(
@@ -434,8 +427,6 @@ def run_service_test() -> int:
         readiness = json.loads(body)
         if status != HTTPStatus.OK or not readiness["ok"]:
             raise TestFailure(f"Service was not ready: {body.decode()}")
-        if not readiness["allow_writes"]:
-            raise TestFailure("Service did not report configured write access")
         status, body = request("/call", "POST")
         if status != HTTPStatus.OK:
             raise TestFailure(f"Could not acquire call: {body.decode()}")
