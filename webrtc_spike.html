@@ -27,7 +27,7 @@
 <body>
   <main>
     <h1>DOGWALK / WEBRTC</h1>
-    <p>Browser-managed microphone, playback, and echo cancellation. The local Python server only creates the session, runs tools, and keeps the log.</p>
+    <p>Browser-managed microphone, playback, and echo cancellation. The Dogwalk service creates voice sessions and manages local ACP agents beside the workspace.</p>
     <section class="panel">
       <button id="start">Start audio session</button>
       <button id="mute" disabled>Mute microphone</button>
@@ -72,6 +72,8 @@
     let decisionPoll;
     let monitorPoll;
     let earconContext;
+    let callToken;
+    let heartbeatAbort;
 
     function display(message) {
       events.textContent += `\n${new Date().toLocaleTimeString()}  ${message}`;
@@ -84,12 +86,29 @@
       }
     }
 
+    function sideband(path, options = {}) {
+      const headers = new Headers(options.headers || {});
+      if (callToken) headers.set("X-Dogwalk-Call", callToken);
+      return fetch(path, { ...options, headers });
+    }
+
     function log(kind, data = {}) {
-      fetch("/event", {
+      return sideband("/event", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ kind, ...data }),
       }).catch(() => {});
+    }
+
+    async function holdCallLease() {
+      heartbeatAbort = new AbortController();
+      const response = await sideband("/call-heartbeat", { signal: heartbeatAbort.signal });
+      if (!response.ok) throw new Error("Walker call lease was lost");
+      const reader = response.body.getReader();
+      while (true) {
+        const { done } = await reader.read();
+        if (done) throw new Error("Walker call heartbeat ended");
+      }
     }
 
     function setMicrophoneMuted(muted) {
@@ -174,7 +193,7 @@
     }
 
     async function pullMonitor() {
-      const response = await fetch("/monitor");
+      const response = await sideband("/monitor");
       if (response.ok) renderMonitor(await response.json());
     }
 
@@ -215,7 +234,7 @@
       display(`tool: ${call.name}`);
       if (call.name === "sic_dog") playEarcon("dog_sent");
       if (call.name === "check_dog") playEarcon("dog_check");
-      const response = await fetch("/tool", {
+      const response = await sideband("/tool", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: call.name, call_id: call.call_id, arguments: arguments_ }),
@@ -237,7 +256,7 @@
 
     async function pullDueTimers() {
       if (dataChannel?.readyState !== "open") return;
-      const response = await fetch("/due");
+      const response = await sideband("/due");
       const { due } = await response.json();
       for (const timer of due) {
         display(`timer due: ${timer.purpose}`);
@@ -255,7 +274,7 @@
 
     async function pullDogEvents() {
       if (microphoneMuted || dataChannel?.readyState !== "open") return;
-      const response = await fetch("/dog-events");
+      const response = await sideband("/dog-events");
       const { completed } = await response.json();
       for (const dog of completed) {
         display(`dog completed: ${dog.name} / ${dog.status}`);
@@ -273,7 +292,7 @@
 
     async function pullDecisions() {
       if (microphoneMuted || dataChannel?.readyState !== "open") return;
-      const response = await fetch("/decisions");
+      const response = await sideband("/decisions");
       const { decisions } = await response.json();
       for (const decision of decisions) {
         display(`dog decision: ${decision.dog} / ${decision.kind}`);
@@ -324,6 +343,17 @@
 
     async function start() {
       startButton.disabled = true;
+      state.textContent = "claiming Walker call";
+      const callResponse = await fetch("/call", { method: "POST" });
+      const call = await callResponse.json();
+      if (!callResponse.ok) throw new Error(call.error || "Could not start Walker call");
+      callToken = call.call_token;
+      holdCallLease().catch(error => {
+        if (error.name !== "AbortError" && callToken) {
+          display(String(error));
+          stop();
+        }
+      });
       state.textContent = "requesting microphone";
       earconContext = new AudioContext();
       await earconContext.resume();
@@ -365,7 +395,7 @@
 
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
-      const response = await fetch("/session", { method: "POST", headers: { "Content-Type": "application/sdp" }, body: offer.sdp });
+      const response = await sideband("/session", { method: "POST", headers: { "Content-Type": "application/sdp" }, body: offer.sdp });
       if (!response.ok) throw new Error(`Session creation failed: ${await response.text()}`);
       await peerConnection.setRemoteDescription({ type: "answer", sdp: await response.text() });
       display("connected: speak naturally");
@@ -390,12 +420,16 @@
       microphoneMuted = false;
       muteButton.textContent = "Mute microphone";
       log("browser_session_stopped");
+      heartbeatAbort?.abort();
+      heartbeatAbort = undefined;
+      callToken = undefined;
     }
 
     startButton.addEventListener("click", () => start().catch(error => {
       state.textContent = "failed";
       display(String(error));
       log("browser_error", { error: String(error) });
+      if (callToken) stop();
       startButton.disabled = false;
     }));
     muteButton.addEventListener("click", () => setMicrophoneMuted(!microphoneMuted));

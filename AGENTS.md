@@ -2,7 +2,7 @@
 
 Dogwalk aims to provide the capability surface of an agentic coding-session manager, including juggling many concurrent sessions, entirely through hands-free voice with zero dependence on visual user interaction. A deliberately engineering-weak voice agent called Walker coordinates stronger coding agents called Dogs; the diagnostic web UI exists only for iterative harness development, telemetry, and debugging, not as a required user interface.
 
-Run the scripted non-audio integration test with `uv run --script text_spike.py test collaboration`; run the diagnostic voice server with `uv run --script webrtc_spike.py`, then open `http://127.0.0.1:8765/webrtc_spike.html`. Prefer isolated YAML scenarios and inspect `logs/` only when a concise test result fails.
+Run the scripted non-audio integration test with `uv run --script text_spike.py test collaboration`, and test the portable HTTP boundary with `uv run --script text_spike.py service`. Run the diagnostic voice service with `uv run --script webrtc_spike.py`, then open `http://127.0.0.1:8765/webrtc_spike.html`. Prefer isolated YAML scenarios and inspect `logs/` only when a concise test result fails.
 
 A Managed Session wraps one retained ACP session. A Dog is Walker's voice-facing persona for that Managed Session; its mutable name is a vocal alias, while the ACP session ID remains an opaque implementation identifier.
 

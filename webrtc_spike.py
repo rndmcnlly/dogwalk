@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["agent-client-protocol==0.11.0"]
 # ///
-"""Local sideband server for the browser-based Walker WebRTC spike."""
+"""Portable Dogwalk service for browser voice calls and local ACP agents."""
 
 from __future__ import annotations
 
@@ -12,6 +12,10 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import secrets
+import shlex
+import shutil
+import signal
 import threading
 import time
 import urllib.error
@@ -241,10 +245,21 @@ def load_dotenv(path: Path) -> None:
             os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
+def agent_executable_available(command: str, workspace: Path) -> tuple[bool, str]:
+    executable = shlex.split(command)[0].replace("{cwd}", str(workspace))
+    candidate = Path(executable).expanduser()
+    if candidate.is_absolute() or "/" in executable:
+        if not candidate.is_absolute():
+            candidate = workspace / candidate
+        return candidate.is_file() and os.access(candidate, os.X_OK), str(candidate)
+    resolved = shutil.which(executable)
+    return resolved is not None, resolved or executable
+
+
 class SessionLog:
-    def __init__(self, mode: str = "webrtc") -> None:
-        directory = ROOT / "logs"
-        directory.mkdir(exist_ok=True)
+    def __init__(self, mode: str = "webrtc", directory: Path | None = None) -> None:
+        directory = directory or ROOT / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.path = directory / f"{stamp}-{mode}.jsonl"
         self.file = self.path.open("a", encoding="utf-8", buffering=1)
@@ -298,11 +313,18 @@ class AcpRuntime:
 class AcpPack:
     """Local stdio ACP adapter. A remote bridge can implement this same dispatch surface."""
 
-    def __init__(self, log: SessionLog, cwd: Path, allow_writes: bool = False) -> None:
+    def __init__(
+        self,
+        log: SessionLog,
+        cwd: Path,
+        allow_writes: bool = False,
+        agent_command: str = "opencode acp --pure --cwd {cwd}",
+    ) -> None:
         self.log = log
         self.cwd = cwd
         self.runtime = AcpRuntime()
         self.allow_writes = allow_writes
+        self.agent_command = agent_command
         self.dogs: dict[str, dict[str, Any]] = {}
         self._completed: list[dict[str, Any]] = []
         self._pending_decisions: dict[str, dict[str, Any]] = {}
@@ -477,14 +499,15 @@ class AcpPack:
             "unrelated changes."
         )
         prompt = DOG_BRIEFING.format(name=name, task=task, safety=safety)
+        command = [
+            part.replace("{cwd}", str(self.cwd))
+            for part in shlex.split(self.agent_command)
+        ]
         try:
             async with spawn_agent_process(
                 client,
-                "opencode",
-                "acp",
-                "--pure",
-                "--cwd",
-                str(self.cwd),
+                command[0],
+                *command[1:],
                 cwd=self.cwd,
             ) as (connection, _process):
                 await connection.initialize(protocol_version=PROTOCOL_VERSION)
@@ -886,14 +909,68 @@ class TimerQueue:
             ]
 
 
+class CallLease:
+    """Keep one Walker attached while letting Dogs outlive individual calls."""
+
+    def __init__(self, timeout_seconds: float) -> None:
+        self.timeout_seconds = timeout_seconds
+        self._token: str | None = None
+        self._last_seen = 0.0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> str | None:
+        now = time.monotonic()
+        with self._lock:
+            if self._token and now - self._last_seen <= self.timeout_seconds:
+                return None
+            self._token = secrets.token_urlsafe(24)
+            self._last_seen = now
+            return self._token
+
+    def touch(self, token: str | None) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            if not self._token or now - self._last_seen > self.timeout_seconds:
+                self._token = None
+                return False
+            if not token or not secrets.compare_digest(token, self._token):
+                return False
+            self._last_seen = now
+            return True
+
+    def release(self, token: str | None) -> bool:
+        with self._lock:
+            if not self._token or not token or not secrets.compare_digest(token, self._token):
+                return False
+            self._token = None
+            return True
+
+    def active(self) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            if self._token and now - self._last_seen <= self.timeout_seconds:
+                return True
+            self._token = None
+            return False
+
+
 class Handler(SimpleHTTPRequestHandler):
     log: SessionLog
     pack: AcpPack
     timers: TimerQueue
+    calls: CallLease
     api_key: str
+    started_at: float
+    workspace: Path
+    agent_command: str
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, directory=str(ROOT), **kwargs)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path == "/session":
+        if self.path == "/call":
+            self.begin_call()
+        elif self.path == "/session":
             self.create_session()
         elif self.path == "/tool":
             self.run_tool()
@@ -903,7 +980,38 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/due":
+        if self.path == "/healthz":
+            self.respond_json(
+                {
+                    "ok": True,
+                    "uptime_seconds": round(time.monotonic() - self.started_at, 1),
+                    "active_call": self.calls.active(),
+                    "dogs": len(self.pack.available_dogs()),
+                }
+            )
+        elif self.path == "/readyz":
+            executable_ready, executable = agent_executable_available(
+                self.agent_command, self.workspace
+            )
+            ready = self.workspace.is_dir() and executable_ready
+            self.respond_json(
+                {
+                    "ok": ready,
+                    "workspace": str(self.workspace),
+                    "agent_executable": executable,
+                },
+                status=HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        elif self.path == "/call-heartbeat":
+            self.stream_call_heartbeat()
+        elif self.path in {
+            "/due",
+            "/dog-events",
+            "/decisions",
+            "/monitor",
+        } and not self.require_call():
+            return
+        elif self.path == "/due":
             self.respond_json({"due": self.timers.take_due()})
         elif self.path == "/dog-events":
             self.respond_json({"completed": self.pack.take_completed()})
@@ -917,13 +1025,65 @@ class Handler(SimpleHTTPRequestHandler):
                     "decisions": self.pack.pending_decisions(),
                 }
             )
+        elif self.path in {"/", "/webrtc_spike.html"}:
+            self.serve_browser_client()
         else:
-            super().do_GET()
+            self.send_error(HTTPStatus.NOT_FOUND)
 
     def body(self) -> bytes:
         return self.rfile.read(int(self.headers.get("Content-Length", "0")))
 
+    def begin_call(self) -> None:
+        call_token = self.calls.acquire()
+        if call_token is None:
+            self.respond_json(
+                {"ok": False, "error": "Another Walker call is active."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        self.log.write("call_started")
+        self.respond_json({"ok": True, "call_token": call_token})
+
+    def stream_call_heartbeat(self) -> None:
+        token = self.headers.get("X-Dogwalk-Call")
+        if not self.calls.touch(token):
+            self.respond_json(
+                {"ok": False, "error": "Walker call lease is not active."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        interval = min(5.0, max(0.25, self.calls.timeout_seconds / 3))
+        try:
+            while self.calls.touch(token):
+                self.wfile.write(b'{"ok":true}\n')
+                self.wfile.flush()
+                time.sleep(interval)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            self.calls.release(token)
+
+    def serve_browser_client(self) -> None:
+        body = (ROOT / "webrtc_spike.html").read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def create_session(self) -> None:
+        call_token = self.headers.get("X-Dogwalk-Call")
+        if not self.calls.touch(call_token):
+            self.respond_json(
+                {"ok": False, "error": "Walker call lease is not active."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
         offer = self.body()
         session = json.dumps(
             {
@@ -971,18 +1131,28 @@ class Handler(SimpleHTTPRequestHandler):
             with urllib.request.urlopen(request, timeout=30) as response:
                 answer = response.read()
         except urllib.error.HTTPError as exc:
+            self.calls.release(call_token)
             detail = exc.read().decode(errors="replace")
             self.log.write("session_error", status=exc.code, detail=detail)
             self.send_error(exc.code, detail)
             return
+        except urllib.error.URLError as exc:
+            self.calls.release(call_token)
+            detail = str(exc.reason)
+            self.log.write("session_error", status=502, detail=detail)
+            self.send_error(HTTPStatus.BAD_GATEWAY, detail)
+            return
         self.log.write("session_created", transport="webrtc")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/sdp")
+        self.send_header("X-Dogwalk-Call", call_token)
         self.send_header("Content-Length", str(len(answer)))
         self.end_headers()
         self.wfile.write(answer)
 
     def run_tool(self) -> None:
+        if not self.require_call():
+            return
         payload = json.loads(self.body())
         self.log.write(
             "tool_call",
@@ -1006,12 +1176,39 @@ class Handler(SimpleHTTPRequestHandler):
 
     def record_event(self) -> None:
         payload = json.loads(self.body())
-        self.log.write(payload.pop("kind", "browser_event"), **payload)
+        kind = payload.pop("kind", "browser_event")
+        token = self.headers.get("X-Dogwalk-Call")
+        if token and not self.calls.touch(token):
+            self.respond_json(
+                {"ok": False, "error": "Walker call lease is not active."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        if not token and self.calls.active():
+            self.respond_json(
+                {"ok": False, "error": "Walker call token is required."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        self.log.write(kind, **payload)
+        if kind == "browser_session_stopped":
+            self.calls.release(token)
         self.respond_json({"ok": True})
 
-    def respond_json(self, payload: dict[str, Any]) -> None:
+    def require_call(self) -> bool:
+        if self.calls.touch(self.headers.get("X-Dogwalk-Call")):
+            return True
+        self.respond_json(
+            {"ok": False, "error": "Walker call lease is not active."},
+            status=HTTPStatus.CONFLICT,
+        )
+        return False
+
+    def respond_json(
+        self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK
+    ) -> None:
         body = json.dumps(payload).encode()
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -1022,28 +1219,78 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=8765)
-    args = parser.parse_args()
     load_dotenv(ROOT / ".env")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default=os.environ.get("DOGWALK_HOST", "127.0.0.1"))
+    parser.add_argument(
+        "--port", type=int, default=int(os.environ.get("DOGWALK_PORT", "8765"))
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=Path(os.environ.get("DOGWALK_WORKSPACE", ROOT)),
+    )
+    parser.add_argument(
+        "--agent-command",
+        default=os.environ.get(
+            "DOGWALK_AGENT_COMMAND", "opencode acp --pure --cwd {cwd}"
+        ),
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=Path,
+        default=Path(os.environ.get("DOGWALK_LOG_DIR", ROOT / "logs")),
+    )
+    parser.add_argument(
+        "--call-lease-seconds",
+        type=float,
+        default=float(os.environ.get("DOGWALK_CALL_LEASE_SECONDS", "15")),
+    )
+    args = parser.parse_args()
+    workspace = args.workspace.expanduser().resolve()
+    if not workspace.is_dir():
+        raise SystemExit(f"Workspace is not a directory: {workspace}")
+    if not shlex.split(args.agent_command):
+        raise SystemExit("DOGWALK_AGENT_COMMAND is empty.")
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise SystemExit("OPENAI_API_KEY is not set.")
-    Handler.log = SessionLog()
-    Handler.pack = AcpPack(Handler.log, ROOT)
+    Handler.log = SessionLog(directory=args.log_dir.expanduser().resolve())
+    Handler.pack = AcpPack(
+        Handler.log, workspace, agent_command=args.agent_command
+    )
     Handler.api_key = api_key
     Handler.timers = TimerQueue(Handler.log)
-    Handler.log.write("session_start", mode="webrtc", model=MODEL)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"WebRTC Walker: http://127.0.0.1:{args.port}/webrtc_spike.html")
+    Handler.calls = CallLease(args.call_lease_seconds)
+    Handler.started_at = time.monotonic()
+    Handler.workspace = workspace
+    Handler.agent_command = args.agent_command
+    Handler.log.write(
+        "service_start",
+        mode="webrtc",
+        model=MODEL,
+        host=args.host,
+        port=args.port,
+        workspace=str(workspace),
+        agent_command=args.agent_command,
+    )
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    server.daemon_threads = True
+
+    def stop_server(signum: int, frame: Any) -> None:
+        Handler.log.write("service_signal", signal=signum)
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, stop_server)
+    signal.signal(signal.SIGINT, stop_server)
+    print(f"Dogwalk: http://{args.host}:{args.port}/webrtc_spike.html")
+    print(f"Workspace: {workspace}")
     print(f"Log: {Handler.log.path}")
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
-        pass
     finally:
         Handler.pack.close()
-        Handler.log.write("session_end")
+        Handler.log.write("service_stop")
         Handler.log.file.close()
         server.server_close()
 

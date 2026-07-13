@@ -92,3 +92,17 @@ The scenario timeout is one overall budget, not a fresh budget for every step.
 For a subagent, the preferred instruction is: run the relevant one-line scenario
 command, inspect the reported artifacts only if it fails, make the smallest fix,
 and rerun until the concise result passes.
+
+## Service Boundary
+
+Test the deployable HTTP service independently of OpenAI Realtime and audio:
+
+```bash
+uv run --script text_spike.py service
+```
+
+This launches Dogwalk from a temporary directory and verifies static asset
+serving, health and readiness probes, exclusive Walker call leases, protected
+sideband endpoints, denial of private source/state paths, lease release,
+reacquisition, and graceful `SIGTERM`
+shutdown. It does not create an OpenAI session or start a Dog.

@@ -11,8 +11,14 @@ import argparse
 import json
 import os
 import shutil
+import socket
+import subprocess
+import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
@@ -318,6 +324,123 @@ def run_test(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_service_test() -> int:
+    workspace = Path(tempfile.mkdtemp(prefix="dogwalk-service-", dir=os.environ.get("TMPDIR")))
+    log_dir = workspace / "logs"
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    command = [
+        sys.executable,
+        str(ROOT / "webrtc_spike.py"),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--workspace",
+        str(workspace),
+        "--log-dir",
+        str(log_dir),
+        "--call-lease-seconds",
+        "2",
+    ]
+    env = {**os.environ, "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", "test-only")}
+    process = subprocess.Popen(
+        command,
+        cwd=workspace,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    base = f"http://127.0.0.1:{port}"
+
+    def request(
+        path: str,
+        method: str = "GET",
+        token: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> tuple[int, bytes]:
+        headers = {"X-Dogwalk-Call": token} if token else {}
+        body = json.dumps(data).encode() if data is not None else None
+        if body:
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(
+            base + path, body, headers=headers, method=method
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=2) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read()
+
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                if request("/healthz")[0] == HTTPStatus.OK:
+                    break
+            except urllib.error.URLError:
+                time.sleep(0.05)
+        else:
+            raise TestFailure("Service did not become healthy within 10 seconds")
+        if request("/webrtc_spike.html")[0] != HTTPStatus.OK:
+            raise TestFailure("Static browser client was not served")
+        for private_path in ("/.env", "/.git/config", "/logs/"):
+            if request(private_path)[0] != HTTPStatus.NOT_FOUND:
+                raise TestFailure(f"Private path was exposed: {private_path}")
+        status, body = request("/readyz")
+        if status != HTTPStatus.OK or not json.loads(body)["ok"]:
+            raise TestFailure(f"Service was not ready: {body.decode()}")
+        status, body = request("/call", "POST")
+        if status != HTTPStatus.OK:
+            raise TestFailure(f"Could not acquire call: {body.decode()}")
+        token = json.loads(body)["call_token"]
+        heartbeat_request = urllib.request.Request(
+            base + "/call-heartbeat", headers={"X-Dogwalk-Call": token}
+        )
+        heartbeat = urllib.request.urlopen(heartbeat_request, timeout=3)
+        heartbeat.readline()
+        time.sleep(2.2)
+        if request("/call", "POST")[0] != HTTPStatus.CONFLICT:
+            raise TestFailure("A second Walker call was not rejected")
+        if request("/monitor")[0] != HTTPStatus.CONFLICT:
+            raise TestFailure("Monitor accepted a request without the call token")
+        if request("/monitor", token=token)[0] != HTTPStatus.OK:
+            raise TestFailure("Monitor rejected the active call token")
+        status, _ = request(
+            "/event", "POST", token, {"kind": "browser_session_stopped"}
+        )
+        heartbeat.close()
+        if status != HTTPStatus.OK or request("/call", "POST")[0] != HTTPStatus.OK:
+            raise TestFailure("Released call lease could not be reacquired")
+    except Exception as exc:
+        print(f"FAIL service: {exc}")
+        return_code = 1
+    else:
+        print(
+            "PASS service: private static root, health, readiness, "
+            "streaming exclusive call lease, release"
+        )
+        return_code = 0
+    finally:
+        process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            return_code = 1
+        if process.returncode != 0:
+            print(f"Service exited {process.returncode}: {stderr or stdout}")
+            return_code = 1
+        if return_code == 0:
+            shutil.rmtree(workspace)
+        else:
+            print(f"Workspace preserved: {workspace}")
+    return return_code
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -326,8 +449,9 @@ def main() -> None:
     test.add_argument("--verbose", action="store_true", help="Print structured step events")
     test.add_argument("--workspace", type=Path, help="Use an existing workspace")
     test.add_argument("--allow-project-workspace", action="store_true")
+    subparsers.add_parser("service", help="Test the portable HTTP service boundary")
     args = parser.parse_args()
-    raise SystemExit(run_test(args))
+    raise SystemExit(run_test(args) if args.command == "test" else run_service_test())
 
 
 if __name__ == "__main__":
