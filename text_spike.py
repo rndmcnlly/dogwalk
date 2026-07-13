@@ -1,0 +1,334 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["agent-client-protocol==0.11.0", "pyyaml>=6,<7"]
+# ///
+"""Run scripted Dogwalk tests without Realtime, WebRTC, or audio."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from webrtc_spike import AcpPack, SessionLog, TimerQueue
+
+
+ROOT = Path(__file__).parent
+
+
+class TestFailure(RuntimeError):
+    pass
+
+
+class TextDriver:
+    def __init__(
+        self, cwd: Path, allow_writes: bool, verbose: bool, deadline: float
+    ) -> None:
+        self.log = SessionLog("text-test")
+        self.pack = AcpPack(self.log, cwd, allow_writes=allow_writes)
+        self.timers = TimerQueue(self.log)
+        self.cwd = cwd
+        self.verbose = verbose
+        self.deadline = deadline
+        self.values: dict[str, Any] = {}
+        self.starts: dict[str, dict[str, Any]] = {}
+        self.turns: dict[str, int] = {}
+
+    def event(self, event: str, **data: Any) -> None:
+        if self.verbose:
+            print(json.dumps({"event": event, **data}, ensure_ascii=True), flush=True)
+
+    def tool(self, tool_name: str, **arguments: Any) -> dict[str, Any]:
+        result = self.pack.dispatch(tool_name, arguments)
+        self.event("tool_result", tool=tool_name, arguments=arguments, result=result)
+        if not result.get("ok"):
+            raise TestFailure(f"{tool_name} failed: {result.get('error', result)}")
+        return result
+
+    def wait_for_dog(self, name: str) -> dict[str, Any]:
+        while time.monotonic() < self.deadline:
+            self.resolve_test_permissions()
+            result = self.pack.dispatch("check_dog", {"name": name})
+            if result.get("status") in {"resting", "failed", "cancelled"}:
+                self.event("dog_settled", result=result)
+                if result["status"] != "resting":
+                    raise TestFailure(f"{name} settled as {result['status']}: {result}")
+                return result
+            time.sleep(0.1)
+        raise TestFailure(f"Overall scenario timeout expired while waiting for {name}")
+
+    def resolve_test_permissions(self) -> None:
+        for decision in self.pack.pending_decisions():
+            if decision["kind"] != "permission":
+                raise TestFailure(f"Unhandled Dog question: {decision['message']}")
+            option = next(
+                (
+                    item
+                    for item in decision["options"]
+                    if "once" in item["name"].casefold()
+                ),
+                None,
+            )
+            if option is None:
+                raise TestFailure("Test permission request offered no allow-once option")
+            self.tool(
+                "respond_to_dog_permission",
+                decision_id=decision["decision_id"],
+                option_id=option["option_id"],
+            )
+
+    def dog(self, name: str) -> dict[str, Any]:
+        dog = next(
+            (item for item in self.pack.monitor() if item["name"].casefold() == name.casefold()),
+            None,
+        )
+        if dog is None:
+            raise TestFailure(f"No Dog named {name}")
+        return dog
+
+    def resolve(self, expression: Any) -> Any:
+        if not isinstance(expression, str):
+            return expression
+        if expression.startswith("$"):
+            key = expression[1:]
+            if key not in self.values:
+                raise TestFailure(f"Unknown remembered value {expression}")
+            return self.values[key]
+        if "." not in expression:
+            return expression
+        name, field = expression.split(".", 1)
+        if field == "turns":
+            return self.turns.get(name, 0)
+        if field == "start_message":
+            try:
+                return self.starts[name]["message"]
+            except KeyError as exc:
+                raise TestFailure(f"No start result for {name}") from exc
+        value: Any = self.dog(name)
+        for part in field.split("."):
+            if part not in value:
+                raise TestFailure(f"{expression} has no field {part}")
+            value = value[part]
+        return value
+
+    def close(self) -> None:
+        self.pack.close()
+        self.log.file.close()
+
+
+def load_scenario(name_or_path: str) -> tuple[Path, dict[str, Any]]:
+    candidate = Path(name_or_path)
+    path = candidate if candidate.suffix else ROOT / f"{name_or_path}.test.yaml"
+    if not path.exists():
+        raise TestFailure(f"Scenario not found: {path}")
+    data = yaml.safe_load(path.read_text())
+    validate_scenario(data)
+    return path, data
+
+
+def validate_scenario(data: Any) -> None:
+    if not isinstance(data, dict):
+        raise TestFailure("Scenario must be a YAML mapping")
+    allowed = {"name", "writes", "timeout", "steps", "assert"}
+    unknown = set(data) - allowed
+    if unknown:
+        raise TestFailure(f"Unknown scenario keys: {', '.join(sorted(unknown))}")
+    if not isinstance(data.get("name"), str) or not data["name"]:
+        raise TestFailure("Scenario requires a non-empty name")
+    if not isinstance(data.get("steps"), list) or not data["steps"]:
+        raise TestFailure("Scenario requires at least one step")
+    operations = {"start", "wait", "remember", "continue", "rename", "timer"}
+    started: set[str] = set()
+    settled: set[str] = set()
+    for index, step in enumerate(data["steps"], 1):
+        if not isinstance(step, dict) or len(step) != 1:
+            raise TestFailure(f"Step {index} must contain exactly one operation")
+        operation = next(iter(step))
+        if operation not in operations:
+            raise TestFailure(f"Unknown operation at step {index}: {operation}")
+        value = step[operation]
+        if operation != "wait" and not isinstance(value, dict):
+            raise TestFailure(f"Step {index} operation {operation} requires a mapping")
+        if operation == "wait" and not isinstance(value, (str, dict)):
+            raise TestFailure(f"Step {index} operation wait requires a Dog name")
+        if operation == "start":
+            name = value.get("dog") if isinstance(value, dict) else None
+            if not name or name in started:
+                raise TestFailure(f"Step {index} must start a new, named Dog")
+            started.add(name)
+        elif operation == "wait":
+            name = value if isinstance(value, str) else value.get("dog")
+            if name not in started:
+                raise TestFailure(f"Step {index} waits for unknown Dog {name}")
+            settled.add(name)
+        elif operation == "remember":
+            for expression in value.values():
+                if isinstance(expression, str) and expression.endswith(".session.id"):
+                    name = expression.split(".", 1)[0]
+                    if name not in settled:
+                        raise TestFailure(
+                            f"Step {index} observes {expression} before waiting for {name}"
+                        )
+        elif operation == "continue":
+            if value.get("dog") not in settled:
+                raise TestFailure(f"Step {index} continues a Dog that is not resting")
+            settled.discard(value["dog"])
+        elif operation == "rename":
+            old_name, new_name = value.get("dog"), value.get("to")
+            if old_name not in started or not new_name:
+                raise TestFailure(f"Step {index} renames an unknown Dog")
+            started.remove(old_name)
+            started.add(new_name)
+            if old_name in settled:
+                settled.remove(old_name)
+                settled.add(new_name)
+    if not isinstance(data.get("assert", []), list):
+        raise TestFailure("assert must be a list")
+    assertion_types = {"file_exists", "same", "different", "turns", "contains"}
+    for index, assertion in enumerate(data.get("assert", []), 1):
+        if not isinstance(assertion, dict) or len(assertion) != 1:
+            raise TestFailure(f"Assertion {index} must contain exactly one type")
+        kind = next(iter(assertion))
+        if kind not in assertion_types:
+            raise TestFailure(f"Unknown assertion {index}: {kind}")
+
+
+def run_steps(driver: TextDriver, scenario: dict[str, Any]) -> None:
+    for step in scenario["steps"]:
+        if time.monotonic() >= driver.deadline:
+            raise TestFailure("Overall scenario timeout expired")
+        operation, value = next(iter(step.items()))
+        if operation == "start":
+            name = value["dog"]
+            result = driver.tool(
+                "sic_dog",
+                name=name,
+                task=value["task"],
+                read_only=not scenario.get("writes", False),
+            )
+            driver.starts[name] = result
+            driver.turns[name] = 1
+        elif operation == "wait":
+            name = value if isinstance(value, str) else value["dog"]
+            driver.wait_for_dog(name)
+        elif operation == "remember":
+            for key, expression in value.items():
+                driver.values[key] = driver.resolve(expression)
+        elif operation == "continue":
+            name = value["dog"]
+            driver.tool("relay_to_dog", name=name, message=value["message"])
+            driver.turns[name] = driver.turns.get(name, 0) + 1
+        elif operation == "rename":
+            old_name, new_name = value["dog"], value["to"]
+            driver.tool("name_dog", current_name=old_name, name=new_name)
+            if old_name in driver.starts:
+                driver.starts[new_name] = driver.starts.pop(old_name)
+            driver.turns[new_name] = driver.turns.pop(old_name, 0)
+        elif operation == "timer":
+            timer = driver.timers.set(value["seconds"], value["purpose"])
+            deadline = min(driver.deadline, time.monotonic() + value["seconds"] + 2)
+            while time.monotonic() < deadline:
+                due = driver.timers.take_due()
+                if due:
+                    driver.values[value.get("remember_as", "timer")] = due[0]
+                    break
+                time.sleep(0.05)
+            else:
+                raise TestFailure(f"Timer {timer['timer_id']} did not fire")
+
+
+def run_assertions(driver: TextDriver, assertions: list[dict[str, Any]]) -> None:
+    for assertion in assertions:
+        if not isinstance(assertion, dict) or len(assertion) != 1:
+            raise TestFailure("Each assertion must contain exactly one assertion type")
+        kind, value = next(iter(assertion.items()))
+        if kind == "file_exists":
+            if not (driver.cwd / value).is_file():
+                raise TestFailure(f"Expected file does not exist: {value}")
+        elif kind in {"same", "different"}:
+            left, right = map(driver.resolve, value)
+            passed = left == right if kind == "same" else left != right
+            if not passed:
+                raise TestFailure(
+                    f"Expected {value[0]} and {value[1]} to be {kind}; "
+                    f"observed {left!r} and {right!r}"
+                )
+        elif kind == "turns":
+            for name, expected in value.items():
+                actual = driver.resolve(f"{name}.turns")
+                if actual != expected:
+                    raise TestFailure(f"Expected {name} to have {expected} turns, got {actual}")
+        elif kind == "contains":
+            actual = str(driver.resolve(value["value"]))
+            if value["text"] not in actual:
+                raise TestFailure(
+                    f"Expected {value['value']} to contain {value['text']!r}, got {actual!r}"
+                )
+        else:
+            raise TestFailure(f"Unknown assertion: {kind}")
+
+
+def run_test(args: argparse.Namespace) -> int:
+    started = time.monotonic()
+    try:
+        _, scenario = load_scenario(args.scenario)
+    except TestFailure as exc:
+        print(f"FAIL {args.scenario}: {exc}")
+        return 1
+    if args.workspace and not args.allow_project_workspace:
+        print("FAIL: --workspace requires --allow-project-workspace")
+        return 1
+    temporary = args.workspace is None
+    workspace = args.workspace or Path(
+        tempfile.mkdtemp(prefix="dogwalk-test-", dir=os.environ.get("TMPDIR"))
+    )
+    workspace.mkdir(parents=True, exist_ok=True)
+    driver = TextDriver(
+        workspace.resolve(),
+        scenario.get("writes", False),
+        args.verbose,
+        deadline=started + float(scenario.get("timeout", 180)),
+    )
+    try:
+        run_steps(driver, scenario)
+        run_assertions(driver, scenario.get("assert", []))
+    except Exception as exc:
+        elapsed = time.monotonic() - started
+        print(f"FAIL {scenario['name']} ({elapsed:.1f}s): {exc}")
+        print(f"Details: {driver.log.path}")
+        print(f"Workspace preserved: {workspace}")
+        return 1
+    finally:
+        driver.close()
+    elapsed = time.monotonic() - started
+    sessions = len(driver.pack.monitor())
+    turns = sum(driver.turns.values())
+    files = sum(1 for path in workspace.iterdir() if path.is_file())
+    print(f"PASS {scenario['name']} ({elapsed:.1f}s): {sessions} sessions, {turns} turns, {files} files")
+    if temporary:
+        shutil.rmtree(workspace)
+    return 0
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    test = subparsers.add_parser("test", help="Run a declarative ACP scenario")
+    test.add_argument("scenario", help="Scenario name or YAML path")
+    test.add_argument("--verbose", action="store_true", help="Print structured step events")
+    test.add_argument("--workspace", type=Path, help="Use an existing workspace")
+    test.add_argument("--allow-project-workspace", action="store_true")
+    args = parser.parse_args()
+    raise SystemExit(run_test(args))
+
+
+if __name__ == "__main__":
+    main()

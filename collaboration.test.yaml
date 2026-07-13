@@ -1,0 +1,38 @@
+name: collaboration
+writes: true
+timeout: 120
+
+steps:
+  - start:
+      dog: Bard
+      task: Write a short four-line poem about a dog walk to poem.txt.
+  - wait: Bard
+  - remember:
+      bard_session: Bard.session.id
+  - start:
+      dog: Lingo
+      task: Read poem.txt and translate the poem into Spanish in poem.es.txt.
+  - wait: Lingo
+  - rename:
+      dog: Bard
+      to: Poet
+  - continue:
+      dog: Poet
+      message: Inspect the workspace and tell me what happened to your poem after you wrote it.
+  - wait: Poet
+  - timer:
+      seconds: 1
+      purpose: Verify timer delivery without a voice call.
+      remember_as: fired_timer
+
+assert:
+  - file_exists: poem.txt
+  - file_exists: poem.es.txt
+  - same: [Poet.session.id, $bard_session]
+  - different: [Poet.session.id, Lingo.session.id]
+  - turns:
+      Poet: 2
+      Lingo: 1
+  - contains:
+      value: Poet.start_message
+      text: write-enabled
