@@ -62,16 +62,18 @@ dispatch it rather than saying you cannot do it because you lack access or
 engineering ability. A Dog keeps its context until called off or Walker-hands
 stops. Give each new Dog a short pronounceable name inspired by its task. Before
 starting related work, list the existing Dogs and continue a suitable resting
-one when possible. The User may give an existing Dog a new spoken name. Ask the
+one when possible. If the User asks about work from a previous call, recall the
+persisted sessions, identify candidates by title and recency without speaking
+their opaque identifiers, and revive the chosen session as a Dog with a fresh
+pronounceable name. The User may give an existing Dog a new spoken name. Ask the
 User a question only when
 the task's scope is materially unclear or a consequential safety choice needs
 their decision. Tool results are authoritative, but they are deliberately stubbed
 in this prototype. Keep spoken replies short enough for a hands-free conversation.
 
-This local spike accepts read-only Dogs only: always set read_only to true when
-you sic a Dog. A read-only Dog may still inspect, run non-mutating commands, and
-ask the User for an ACP permission decision. Do not describe an ordinary
-read-only task as impossible merely because it involves generating text.
+A read-only Dog may still inspect, run non-mutating commands, and ask the User for
+an ACP permission decision. Do not describe an ordinary read-only task as
+impossible merely because it involves generating text.
 
 Open every new session with this brief, warm welcome: "I'll be your dog walker
 for today." Then invite the User to say what is on their mind. Do not ask
@@ -101,6 +103,19 @@ the matching decision tool to send their answer back to the Dog. Never select a
 permission option or invent an answer yourself.
 """.strip()
 
+
+def walker_instructions(allow_writes: bool) -> str:
+    policy = (
+        "This service allows write-enabled Dogs. Set read_only to false when the "
+        "User asks to create, edit, delete, install, or otherwise change workspace "
+        "state. Set it to true for inspection and research. The User's request to "
+        "change the workspace is authorization for those scoped changes; still ask "
+        "before consequential ambiguity or work outside that scope."
+        if allow_writes
+        else "This service permits read-only Dogs only. Always set read_only to true."
+    )
+    return f"{INSTRUCTIONS}\n\n{policy}"
+
 DOG_BRIEFING = """You are {name}, a Dog in the Dogwalk system: the friendly named
 persona for this retained coding session. Walker is attached
 to the real human User through a live voice interface. Walker is a speech-to-speech
@@ -121,7 +136,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "sic_dog",
-        "description": "Create a fresh named Dog and retained coding session for an assignment. This local spike accepts read-only Dogs only, so always set read_only true. The server automatically supplies role, safety, reporting, and workspace context. In task, state only the work to do; do not repeat Dogwalk background or instructions.",
+        "description": "Create a fresh named Dog and retained coding session for an assignment. Choose read_only according to the service policy in your instructions. The server automatically supplies role, safety, reporting, and workspace context. In task, state only the work to do; do not repeat Dogwalk background or instructions.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -157,6 +172,40 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "recall_previous_dogs",
+        "description": "Discover coding sessions persisted by the Agent from previous calls in this workspace. Describe candidates by title and recency; never speak their opaque session_id values.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "revive_dog",
+        "description": "Load one session returned by recall_previous_dogs and attach it as a Dog under a fresh spoken name. This restores context but does not begin a new Prompt Turn.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Opaque value copied exactly from recall_previous_dogs. Never speak it.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Fresh short pronounceable Dog name.",
+                },
+                "read_only": {
+                    "type": "boolean",
+                    "description": "Whether the revived Dog must avoid changes.",
+                },
+            },
+            "required": ["session_id", "name", "read_only"],
             "additionalProperties": False,
         },
     },
@@ -348,6 +397,7 @@ class SessionManager:
         self._turn_results: list[dict[str, Any]] = []
         self._attention_requests: dict[str, dict[str, Any]] = {}
         self._attention_events: list[dict[str, Any]] = []
+        self._discovered_sessions: dict[str, dict[str, Any]] = {}
         self._background: set[concurrent.futures.Future[Any]] = set()
         self._lock = threading.RLock()
 
@@ -365,6 +415,12 @@ class SessionManager:
             )
         if tool == "list_dogs":
             return {"ok": True, "dogs": self.list_dogs()}
+        if tool == "recall_previous_dogs":
+            return self.discover_persisted_sessions()
+        if tool == "revive_dog":
+            return self.revive_session(
+                arguments["session_id"], name, arguments["read_only"]
+            )
         if tool == "name_dog":
             return self.set_alias(arguments["current_name"], name)
         if tool == "sic_dog":
@@ -379,7 +435,8 @@ class SessionManager:
                         "ok": False,
                         "error": f"A Dog named {name} already exists. Choose another name or continue it.",
                     }
-                self.sessions[name] = {
+                session_key = f"managed-{time.monotonic_ns()}"
+                self.sessions[session_key] = {
                     "alias": name,
                     "session_state": "creating",
                     "turn_state": "in_progress",
@@ -396,8 +453,8 @@ class SessionManager:
                     "usage": None,
                     "queue": None,
                 }
-                self.sessions[name]["future"] = self.runtime.submit(
-                    self._run(name, arguments["task"])
+                self.sessions[session_key]["future"] = self.runtime.submit(
+                    self._run(session_key, arguments["task"])
                 )
             return {
                 "ok": True,
@@ -453,6 +510,112 @@ class SessionManager:
                 return {"ok": True, "name": session["alias"], "status": "closed"}
         return {"ok": False, "error": f"Unknown tool {tool}."}
 
+    def discover_persisted_sessions(self) -> dict[str, Any]:
+        try:
+            sessions = self.runtime.submit(self._discover_persisted_sessions()).result(
+                timeout=20
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"Could not recall previous sessions: {type(exc).__name__}: {exc}",
+            }
+        with self._lock:
+            attached_ids = {
+                session["session_id"]
+                for session in self.sessions.values()
+                if session["session_state"] != "closed"
+            }
+            self._discovered_sessions = {
+                session["session_id"]: session for session in sessions
+            }
+            recalled = [
+                {**session, "attached": session["session_id"] in attached_ids}
+                for session in sessions
+            ]
+        return {"ok": True, "sessions": recalled}
+
+    async def _discover_persisted_sessions(self) -> list[dict[str, Any]]:
+        command = [
+            part.replace("{cwd}", str(self.cwd))
+            for part in shlex.split(self.agent_command)
+        ]
+        sessions: list[dict[str, Any]] = []
+        async with spawn_agent_process(
+            SessionDiscoveryClient(), command[0], *command[1:], cwd=self.cwd
+        ) as (connection, _process):
+            initialized = await connection.initialize(protocol_version=PROTOCOL_VERSION)
+            capabilities = initialized.agent_capabilities
+            session_capabilities = capabilities.session_capabilities if capabilities else None
+            if session_capabilities is None or session_capabilities.list is None:
+                raise RuntimeError("The configured ACP Agent does not support session listing")
+            cursor = None
+            while True:
+                page = await connection.list_sessions(cwd=str(self.cwd), cursor=cursor)
+                sessions.extend(
+                    {
+                        "session_id": item.session_id,
+                        "title": item.title,
+                        "updated_at": item.updated_at,
+                    }
+                    for item in page.sessions
+                )
+                cursor = page.next_cursor
+                if cursor is None:
+                    break
+        return sessions
+
+    def revive_session(
+        self, session_id: str, alias: str, read_only: bool
+    ) -> dict[str, Any]:
+        if not read_only and not self.allow_writes:
+            return {
+                "ok": False,
+                "error": "This local ACP spike accepts read-only Dogs only.",
+            }
+        with self._lock:
+            discovered = self._discovered_sessions.get(session_id)
+            if discovered is None:
+                return {
+                    "ok": False,
+                    "error": "Recall previous Dogs first, then use a returned session_id.",
+                }
+            if self._session_for_alias(alias) is not None:
+                return {"ok": False, "error": f"A Dog named {alias} already exists."}
+            if any(
+                session["session_id"] == session_id
+                and session["session_state"] != "closed"
+                for session in self.sessions.values()
+            ):
+                return {"ok": False, "error": "That session is already attached as a Dog."}
+            session_key = f"managed-{time.monotonic_ns()}"
+            self.sessions[session_key] = {
+                "alias": alias,
+                "session_state": "creating",
+                "turn_state": None,
+                "stop_reason": None,
+                "assignment": discovered.get("title") or "Revived previous session",
+                "read_only": read_only,
+                "report": "",
+                "activity": "remembering its old tricks",
+                "updates": [],
+                "future": None,
+                "session_id": session_id,
+                "session_title": discovered.get("title"),
+                "updated_at": discovered.get("updated_at"),
+                "usage": None,
+                "queue": None,
+            }
+            self.sessions[session_key]["future"] = self.runtime.submit(
+                self._run(session_key, persisted_session_id=session_id)
+            )
+        return {
+            "ok": True,
+            "name": alias,
+            "status": "working",
+            "message": "The Dog is remembering its previous session.",
+        }
+
     def _session_for_alias(self, alias: str) -> dict[str, Any] | None:
         entry = self._session_entry_for_alias(alias)
         return entry[1] if entry else None
@@ -476,6 +639,8 @@ class SessionManager:
             return "cancelled"
         if session["session_state"] == "unavailable" or session["turn_state"] == "failed":
             return "failed"
+        if session["session_state"] == "creating":
+            return "working"
         if session["turn_state"] in {"queued", "in_progress"}:
             return "working"
         return "resting"
@@ -526,7 +691,12 @@ class SessionManager:
                 return
             await asyncio.sleep(0.01)
 
-    async def _run(self, session_key: str, assignment: str) -> None:
+    async def _run(
+        self,
+        session_key: str,
+        assignment: str | None = None,
+        persisted_session_id: str | None = None,
+    ) -> None:
         client = AcpClientAdapter(self, session_key)
         session = self.sessions[session_key]
         alias = session["alias"]
@@ -538,7 +708,18 @@ class SessionManager:
             else "Workspace changes are authorized for this test. Do not commit or make "
             "unrelated changes."
         )
-        prompt = DOG_BRIEFING.format(name=alias, task=assignment, safety=safety)
+        prompt = (
+            DOG_BRIEFING.format(name=alias, task=assignment, safety=safety)
+            if assignment is not None
+            else None
+        )
+        revived_safety = (
+            "Dogwalk has revived this persisted session under a new attachment. "
+            f"The current safety mode is: {safety} This supersedes the safety mode "
+            "from any earlier Dogwalk briefing.\n\n"
+            if persisted_session_id is not None
+            else ""
+        )
         command = [
             part.replace("{cwd}", str(self.cwd))
             for part in shlex.split(self.agent_command)
@@ -550,24 +731,44 @@ class SessionManager:
                 *command[1:],
                 cwd=self.cwd,
             ) as (connection, _process):
-                await connection.initialize(protocol_version=PROTOCOL_VERSION)
-                session = await connection.new_session(
-                    cwd=str(self.cwd), mcp_servers=[]
-                )
+                initialized = await connection.initialize(protocol_version=PROTOCOL_VERSION)
+                if persisted_session_id is None:
+                    session_id = (
+                        await connection.new_session(cwd=str(self.cwd), mcp_servers=[])
+                    ).session_id
+                else:
+                    capabilities = initialized.agent_capabilities
+                    if capabilities is None or not capabilities.load_session:
+                        raise RuntimeError(
+                            "The configured ACP Agent does not support loading sessions"
+                        )
+                    await connection.load_session(
+                        cwd=str(self.cwd),
+                        session_id=persisted_session_id,
+                        mcp_servers=[],
+                    )
+                    session_id = persisted_session_id
                 queue: asyncio.Queue[str] = asyncio.Queue()
                 with self._lock:
                     managed_session = self.sessions[session_key]
-                    managed_session["session_id"] = session.session_id
+                    managed_session["session_id"] = session_id
                     managed_session["session_state"] = "ready"
                     managed_session["queue"] = queue
+                    if persisted_session_id is not None:
+                        managed_session["report"] = ""
                 self.log.write(
-                    "acp_session_started", dog=alias, session_id=session.session_id
+                    "acp_session_loaded"
+                    if persisted_session_id is not None
+                    else "acp_session_started",
+                    dog=alias,
+                    session_id=session_id,
                 )
-                prompt_result = await connection.prompt(
-                    session_id=session.session_id, prompt=[text_block(prompt)]
-                )
-                while True:
+                if prompt is not None:
+                    prompt_result = await connection.prompt(
+                        session_id=session_id, prompt=[text_block(prompt)]
+                    )
                     self._stop_turn(session_key, str(prompt_result.stop_reason))
+                while True:
                     message = await queue.get()
                     with self._lock:
                         managed_session = self.sessions[session_key]
@@ -576,10 +777,13 @@ class SessionManager:
                         managed_session["turn_state"] = "in_progress"
                         managed_session["stop_reason"] = None
                         managed_session["report"] = ""
-                    self.log.write("acp_session_continued", dog=alias, session_id=session.session_id)
+                    self.log.write("acp_session_continued", dog=alias, session_id=session_id)
                     prompt_result = await connection.prompt(
-                        session_id=session.session_id, prompt=[text_block(message)]
+                        session_id=session_id,
+                        prompt=[text_block(f"{revived_safety}{message}")],
                     )
+                    revived_safety = ""
+                    self._stop_turn(session_key, str(prompt_result.stop_reason))
         except asyncio.CancelledError:
             self.log.write("managed_session_closed", alias=alias)
             raise
@@ -874,6 +1078,13 @@ class SessionManager:
         self.runtime.close()
 
 
+class SessionDiscoveryClient(Client):
+    async def session_update(
+        self, session_id: str, update: Any, **kwargs: Any
+    ) -> None:
+        return
+
+
 class AcpClientAdapter(Client):
     def __init__(self, manager: SessionManager, session_key: str) -> None:
         self.manager = manager
@@ -1012,6 +1223,8 @@ class Handler(SimpleHTTPRequestHandler):
     started_at: float
     workspace: Path
     agent_command: str
+    instructions: str
+    allow_writes: bool
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -1048,6 +1261,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "ok": ready,
                     "workspace": str(self.workspace),
                     "agent_executable": executable,
+                    "allow_writes": self.allow_writes,
                 },
                 status=HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
             )
@@ -1139,7 +1353,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "type": "realtime",
                 "model": MODEL,
                 "output_modalities": ["audio"],
-                "instructions": INSTRUCTIONS,
+                "instructions": self.instructions,
                 "tools": TOOLS,
                 "tool_choice": "auto",
                 "audio": {
@@ -1295,6 +1509,13 @@ def main() -> None:
         type=float,
         default=float(os.environ.get("DOGWALK_CALL_LEASE_SECONDS", "15")),
     )
+    parser.add_argument(
+        "--allow-writes",
+        action="store_true",
+        default=os.environ.get("DOGWALK_ALLOW_WRITES", "").lower()
+        in {"1", "true", "yes"},
+        help="Allow Dogs to modify the configured workspace.",
+    )
     args = parser.parse_args()
     workspace = args.workspace.expanduser().resolve()
     if not workspace.is_dir():
@@ -1306,7 +1527,10 @@ def main() -> None:
         raise SystemExit("OPENAI_API_KEY is not set.")
     Handler.log = SessionLog(directory=args.log_dir.expanduser().resolve())
     Handler.manager = SessionManager(
-        Handler.log, workspace, agent_command=args.agent_command
+        Handler.log,
+        workspace,
+        allow_writes=args.allow_writes,
+        agent_command=args.agent_command,
     )
     Handler.api_key = api_key
     Handler.timers = TimerQueue(Handler.log)
@@ -1314,6 +1538,8 @@ def main() -> None:
     Handler.started_at = time.monotonic()
     Handler.workspace = workspace
     Handler.agent_command = args.agent_command
+    Handler.allow_writes = args.allow_writes
+    Handler.instructions = walker_instructions(args.allow_writes)
     Handler.log.write(
         "service_start",
         mode="webrtc",
@@ -1322,6 +1548,7 @@ def main() -> None:
         port=args.port,
         workspace=str(workspace),
         agent_command=args.agent_command,
+        allow_writes=args.allow_writes,
     )
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True

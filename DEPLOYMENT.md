@@ -58,7 +58,9 @@ release it after the heartbeat timeout.
 
 Dogs are not tied to that lease. They retain their local ACP processes and
 sessions across browser calls until called off or the Dogwalk process stops.
-Process or sandbox restart persistence is not yet promised.
+After a Dogwalk process restart, Agent-held sessions can be discovered and loaded
+under fresh Dog aliases when the configured Agent supports `session/list` and
+`session/load`. Dogwalk does not yet persist aliases or other local projections.
 
 ## Daytona
 

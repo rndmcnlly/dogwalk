@@ -78,11 +78,14 @@ assert:
 Always `wait` before observing a new Dog's session metadata. Preflight validation
 rejects the common race of remembering `session.id` immediately after `start`.
 The scenario timeout is one overall budget, not a fresh budget for every step.
+Use `restart`, `recall`, and `revive` to simulate a later voice call attaching an
+Agent-held session under a fresh Dog alias. A `start` or `revive` step may set
+`read_only` explicitly to test safety-mode changes across attachments.
 
 ## Test Layers
 
-1. Scripted ACP scenarios test Dog lifecycle, concurrency, aliases, files,
-   permissions, continuation, cancellation, and timers. Use these by default.
+1. Scripted ACP scenarios test Dog lifecycle, persistence, revival, aliases,
+   files, permissions, continuation, cancellation, and timers. Use these by default.
 2. Text Walker orchestration tests will evaluate whether a weak Walker chooses and
    coordinates tools correctly from one overall natural-language task. This layer
    is not implemented yet and should reuse the same `SessionManager` seam.

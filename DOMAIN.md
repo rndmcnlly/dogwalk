@@ -171,6 +171,11 @@ A mutable, pronounceable, locally assigned handle by which Walker and the User r
 
 An Alias is distinct from both the opaque ACP Session ID and an Agent-supplied Session Title.
 
+Aliases remain attached to live Managed Sessions across voice calls while the
+Session Manager remains active. An Agent-discovered persisted ACP Session has no
+Dog or Alias until Dogwalk loads it into a new Managed Session; revival assigns a
+fresh Alias rather than treating its Session Title as a spoken identity.
+
 ### Session Title
 
 **Context:** ACP Integration and Session Management
@@ -322,6 +327,8 @@ An Attention Request is received from the Agent, queued for the appropriate inte
 | Begin Prompt Turn | Send prompt content to a Managed Session | Give a Dog an Assignment; relay a follow-up |
 | Inspect Managed Session | Read projected state without starting another turn | Check a Dog |
 | List Managed Sessions | Discover sessions currently known to Dogwalk | List the Pack |
+| Discover Persisted Sessions | List Agent-held session history without attaching it | Recall Dogs from previous calls |
+| Load Persisted Session | Attach an Agent-held ACP Session as a new Managed Session with a fresh Alias | Revive an old Dog under a new name |
 | Set Alias | Change the local pronounceable handle | Name or rename a Dog |
 | Cancel Prompt Turn | Stop current Agent work while retaining the session | Stop what the Dog is doing |
 | Close Managed Session | Release the active ACP Session and detach its Dog | Call off the Dog |
@@ -371,6 +378,7 @@ Adapter-specific limitations should be represented as negotiated capabilities, a
 - Managed Session state and Prompt Turn state are represented separately.
 - Permission Requests and Elicitations may share an Attention queue but retain distinct types and response rules.
 - Dogwalk stores Alias separately from ACP Session ID and Agent-supplied Session Title.
+- Agent-discovered sessions remain unattached history until explicitly loaded; loading creates a Managed Session and assigns a fresh Alias.
 - Speech-safe Activity and Reports are projections of richer protocol state, not replacements for it.
 
 These consequences constrain responsibilities and naming. They do not prescribe a module tree, class hierarchy, persistence technology, or number of source files.
@@ -388,8 +396,6 @@ The following language appears in current spikes or design fiction and should be
 
 ## Open Questions
 
-- Should a Dog Alias persist across voice calls, or does each call create a fresh voice presentation over durable Managed Sessions?
-- When an Agent supports `session/list`, how should Dogwalk reconcile Agent-discovered sessions with locally known Managed Sessions and Aliases?
 - Should queued follow-up prompts be first-class Prompt Turns immediately, or become Prompt Turns only when sent to the Agent?
 - Which Agent plan and tool-call changes deserve proactive speech, an earcon, or silent state projection?
 - How should Walker resolve ambiguous spoken "stop" among stopping speech, cancelling one Prompt Turn, closing one Managed Session, stopping all Agent work, and ending the voice call?

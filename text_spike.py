@@ -39,6 +39,7 @@ class TextDriver:
         self, cwd: Path, allow_writes: bool, verbose: bool, deadline: float
     ) -> None:
         self.log = SessionLog("text-test")
+        self.allow_writes = allow_writes
         self.manager = SessionManager(self.log, cwd, allow_writes=allow_writes)
         self.timers = TimerQueue(self.log)
         self.cwd = cwd
@@ -129,6 +130,12 @@ class TextDriver:
         self.manager.close()
         self.log.file.close()
 
+    def restart_manager(self) -> None:
+        self.manager.close()
+        self.manager = SessionManager(
+            self.log, self.cwd, allow_writes=self.allow_writes
+        )
+
 
 def load_scenario(name_or_path: str) -> tuple[Path, dict[str, Any]]:
     candidate = Path(name_or_path)
@@ -151,7 +158,17 @@ def validate_scenario(data: Any) -> None:
         raise TestFailure("Scenario requires a non-empty name")
     if not isinstance(data.get("steps"), list) or not data["steps"]:
         raise TestFailure("Scenario requires at least one step")
-    operations = {"start", "wait", "remember", "continue", "rename", "timer"}
+    operations = {
+        "start",
+        "wait",
+        "remember",
+        "continue",
+        "rename",
+        "timer",
+        "restart",
+        "recall",
+        "revive",
+    }
     started: set[str] = set()
     settled: set[str] = set()
     for index, step in enumerate(data["steps"], 1):
@@ -187,6 +204,14 @@ def validate_scenario(data: Any) -> None:
             if value.get("dog") not in settled:
                 raise TestFailure(f"Step {index} continues a Dog that is not resting")
             settled.discard(value["dog"])
+        elif operation == "restart":
+            started.clear()
+            settled.clear()
+        elif operation == "revive":
+            name = value.get("dog")
+            if not name or name in started:
+                raise TestFailure(f"Step {index} must revive a newly named Dog")
+            started.add(name)
         elif operation == "rename":
             old_name, new_name = value.get("dog"), value.get("to")
             if old_name not in started or not new_name:
@@ -218,7 +243,7 @@ def run_steps(driver: TextDriver, scenario: dict[str, Any]) -> None:
                 "sic_dog",
                 name=name,
                 task=value["task"],
-                read_only=not scenario.get("writes", False),
+                read_only=value.get("read_only", not scenario.get("writes", False)),
             )
             driver.starts[name] = result
             driver.turns[name] = 1
@@ -249,6 +274,21 @@ def run_steps(driver: TextDriver, scenario: dict[str, Any]) -> None:
                 time.sleep(0.05)
             else:
                 raise TestFailure(f"Timer {timer['timer_id']} did not fire")
+        elif operation == "restart":
+            driver.restart_manager()
+        elif operation == "recall":
+            result = driver.tool("recall_previous_dogs")
+            if remember_as := value.get("remember_as"):
+                driver.values[remember_as] = result["sessions"]
+        elif operation == "revive":
+            name = value["dog"]
+            driver.tool(
+                "revive_dog",
+                name=name,
+                session_id=driver.resolve(value["session"]),
+                read_only=value.get("read_only", not scenario.get("writes", False)),
+            )
+            driver.turns[name] = 0
 
 
 def run_assertions(driver: TextDriver, assertions: list[dict[str, Any]]) -> None:
@@ -343,6 +383,7 @@ def run_service_test() -> int:
         str(log_dir),
         "--call-lease-seconds",
         "2",
+        "--allow-writes",
     ]
     env = {**os.environ, "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", "test-only")}
     process = subprocess.Popen(
@@ -390,8 +431,11 @@ def run_service_test() -> int:
             if request(private_path)[0] != HTTPStatus.NOT_FOUND:
                 raise TestFailure(f"Private path was exposed: {private_path}")
         status, body = request("/readyz")
-        if status != HTTPStatus.OK or not json.loads(body)["ok"]:
+        readiness = json.loads(body)
+        if status != HTTPStatus.OK or not readiness["ok"]:
             raise TestFailure(f"Service was not ready: {body.decode()}")
+        if not readiness["allow_writes"]:
+            raise TestFailure("Service did not report configured write access")
         status, body = request("/call", "POST")
         if status != HTTPStatus.OK:
             raise TestFailure(f"Could not acquire call: {body.decode()}")
