@@ -844,23 +844,19 @@ class SessionManager:
             self._turn_results.append(
                 {"session_key": session_key, "status": "resting", "report": session["report"]}
             )
+            alias = session["alias"]
+            report = session["report"]
         self.log.write(
             "prompt_turn_stopped",
-            alias=session["alias"],
+            alias=alias,
             stop_reason=stop_reason,
+            report=report,
         )
 
     def update(self, session_key: str, update: Any) -> None:
         kind = type(update).__name__
         text = getattr(getattr(update, "content", None), "text", None)
         detail = str(update)[:2000]
-        self.log.write(
-            "acp_update",
-            dog=self.sessions[session_key]["alias"],
-            update_type=kind,
-            text=text,
-            detail=detail,
-        )
         with self._lock:
             session = self.sessions[session_key]
             updates = session["updates"]

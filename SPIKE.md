@@ -30,12 +30,14 @@ and a `kind`. Logs include:
 - User and Walker transcripts
 - speech start and stop boundaries
 - complete tool arguments and results
+- completed Dog reports and ACP stop reasons
 - response status, token usage, and API errors
 - session start, configuration, and end markers
 
-Raw audio and base64 audio deltas are intentionally not logged. The JSONL is
-small enough for a later coding agent to analyze turn-taking, misunderstood
-requests, latency, tool selection, and prompt failures.
+Raw audio, base64 audio deltas, and incremental ACP update chunks are
+intentionally not logged. The JSONL is small enough for a later coding agent to
+analyze turn-taking, misunderstood requests, latency, tool selection, and
+prompt failures.
 
 ## Production direction
 
