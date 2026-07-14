@@ -47,6 +47,7 @@ class TextDriver:
         self.values: dict[str, Any] = {}
         self.starts: dict[str, dict[str, Any]] = {}
         self.turns: dict[str, int] = {}
+        self.permissions = 0
 
     def event(self, event: str, **data: Any) -> None:
         if self.verbose:
@@ -90,6 +91,7 @@ class TextDriver:
                 decision_id=decision["decision_id"],
                 option_id=option["option_id"],
             )
+            self.permissions += 1
 
     def dog(self, name: str) -> dict[str, Any]:
         dog = next(
@@ -233,7 +235,14 @@ def validate_scenario(data: Any) -> None:
                 settled.add(new_name)
     if not isinstance(data.get("assert", []), list):
         raise TestFailure("assert must be a list")
-    assertion_types = {"file_exists", "same", "different", "turns", "contains"}
+    assertion_types = {
+        "file_exists",
+        "same",
+        "different",
+        "turns",
+        "contains",
+        "permissions_at_least",
+    }
     for index, assertion in enumerate(data.get("assert", []), 1):
         if not isinstance(assertion, dict) or len(assertion) != 1:
             raise TestFailure(f"Assertion {index} must contain exactly one type")
@@ -349,6 +358,11 @@ def run_assertions(driver: TextDriver, assertions: list[dict[str, Any]]) -> None
             if value["text"] not in actual:
                 raise TestFailure(
                     f"Expected {value['value']} to contain {value['text']!r}, got {actual!r}"
+                )
+        elif kind == "permissions_at_least":
+            if driver.permissions < value:
+                raise TestFailure(
+                    f"Expected at least {value} permission requests, got {driver.permissions}"
                 )
         else:
             raise TestFailure(f"Unknown assertion: {kind}")

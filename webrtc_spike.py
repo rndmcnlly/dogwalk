@@ -27,6 +27,13 @@ from pathlib import Path
 from typing import Any
 
 from acp import PROTOCOL_VERSION, Client, spawn_agent_process, text_block
+from acp.connection import StreamEvent
+from acp.schema import (
+    AcceptElicitationResponse,
+    CreateElicitationResponse,
+    DeclineElicitationResponse,
+    RequestPermissionResponse,
+)
 
 
 ROOT = Path(__file__).parent
@@ -728,6 +735,7 @@ class SessionManager:
                 command[0],
                 *command[1:],
                 cwd=self.cwd,
+                observers=[self._observe_acp],
             ) as (connection, _process):
                 initialized = await connection.initialize(protocol_version=PROTOCOL_VERSION)
                 if persisted_session_id is None:
@@ -812,6 +820,14 @@ class SessionManager:
                 dog=alias,
                 status="failed",
                 error=f"{type(exc).__name__}: {exc}",
+            )
+
+    def _observe_acp(self, event: StreamEvent) -> None:
+        if error := event.message.get("error"):
+            self.log.write(
+                "acp_protocol_error",
+                direction=str(event.direction),
+                error=error,
             )
 
     def _stop_turn(self, session_key: str, stop_reason: str) -> None:
@@ -970,9 +986,9 @@ class SessionManager:
 
     async def request_permission(
         self, session_key: str, session_id: str, tool_call: Any, options: list[Any]
-    ) -> dict[str, Any]:
+    ) -> RequestPermissionResponse:
         decision_id = f"permission-{time.monotonic_ns()}"
-        future: asyncio.Future[dict[str, Any]] = (
+        future: asyncio.Future[RequestPermissionResponse] = (
             asyncio.get_running_loop().create_future()
         )
         with self._lock:
@@ -999,14 +1015,17 @@ class SessionManager:
                 "future": future,
             }
             self._attention_events.append(event)
-        self.log.write("acp_permission_requested", **event)
+        self.log.write(
+            "acp_permission_requested",
+            **{key: value for key, value in event.items() if key != "kind"},
+        )
         return await future
 
     async def create_elicitation(
         self, session_key: str, message: str, mode: Any
-    ) -> dict[str, Any]:
+    ) -> CreateElicitationResponse:
         decision_id = f"elicitation-{time.monotonic_ns()}"
-        future: asyncio.Future[dict[str, Any]] = (
+        future: asyncio.Future[CreateElicitationResponse] = (
             asyncio.get_running_loop().create_future()
         )
         mode_data = mode.model_dump(mode="json", by_alias=True)
@@ -1027,18 +1046,24 @@ class SessionManager:
                 "future": future,
             }
             self._attention_events.append(event)
-        self.log.write("acp_elicitation_requested", **event)
+        self.log.write(
+            "acp_elicitation_requested",
+            **{key: value for key, value in event.items() if key != "kind"},
+        )
         return await future
 
     def resolve_permission(self, decision_id: str, option_id: str) -> dict[str, Any]:
         with self._lock:
-            decision = self._attention_requests.pop(decision_id, None)
-        if decision is None or decision["kind"] != "permission":
-            return {"ok": False, "error": "No pending permission with that ID."}
-        valid_ids = {option["option_id"] for option in decision["options"]}
-        if option_id not in valid_ids:
-            return {"ok": False, "error": "That option is not offered by the Dog."}
-        result = {"outcome": {"outcome": "selected", "optionId": option_id}}
+            decision = self._attention_requests.get(decision_id)
+            if decision is None or decision["kind"] != "permission":
+                return {"ok": False, "error": "No pending permission with that ID."}
+            valid_ids = {option["option_id"] for option in decision["options"]}
+            if option_id not in valid_ids:
+                return {"ok": False, "error": "That option is not offered by the Dog."}
+            self._consume_attention_request(decision_id)
+        result = RequestPermissionResponse(
+            outcome={"outcome": "selected", "optionId": option_id}
+        )
         self._resolve_decision(decision, result)
         self.log.write(
             "acp_permission_resolved", decision_id=decision_id, option_id=option_id
@@ -1049,13 +1074,14 @@ class SessionManager:
         self, decision_id: str, answer: dict[str, Any] | None, decline: bool
     ) -> dict[str, Any]:
         with self._lock:
-            decision = self._attention_requests.pop(decision_id, None)
-        if decision is None or decision["kind"] != "elicitation":
-            return {"ok": False, "error": "No pending Dog question with that ID."}
+            decision = self._attention_requests.get(decision_id)
+            if decision is None or decision["kind"] != "elicitation":
+                return {"ok": False, "error": "No pending Dog question with that ID."}
+            self._consume_attention_request(decision_id)
         result = (
-            {"action": "decline"}
+            DeclineElicitationResponse(action="decline")
             if decline
-            else {"action": "accept", "content": answer or {}}
+            else AcceptElicitationResponse(action="accept", content=answer or {})
         )
         self._resolve_decision(decision, result)
         self.log.write(
@@ -1063,8 +1089,16 @@ class SessionManager:
         )
         return {"ok": True, "decision_id": decision_id, "declined": decline}
 
+    def _consume_attention_request(self, decision_id: str) -> None:
+        self._attention_requests.pop(decision_id)
+        self._attention_events = [
+            event
+            for event in self._attention_events
+            if event["decision_id"] != decision_id
+        ]
+
     @staticmethod
-    def _resolve_decision(decision: dict[str, Any], result: dict[str, Any]) -> None:
+    def _resolve_decision(decision: dict[str, Any], result: Any) -> None:
         future = decision["future"]
 
         def resolve() -> None:
@@ -1148,14 +1182,14 @@ class AcpClientAdapter(Client):
 
     async def request_permission(
         self, session_id: str, tool_call: Any, options: Any, **kwargs: Any
-    ) -> dict[str, Any]:
+    ) -> RequestPermissionResponse:
         return await self.manager.request_permission(
             self.session_key, session_id, tool_call, options
         )
 
     async def create_elicitation(
         self, message: str, mode: Any, **kwargs: Any
-    ) -> dict[str, Any]:
+    ) -> CreateElicitationResponse:
         return await self.manager.create_elicitation(self.session_key, message, mode)
 
 

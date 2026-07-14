@@ -47,6 +47,10 @@ The scenario runs Dogs in an isolated temporary workspace. ACP permission reques
 are accepted only when an explicit allow-once option exists.
 Questions and unfamiliar permission shapes fail the test rather than guessing.
 
+Run `uv run --script text_spike.py test permission` to verify that an
+out-of-workspace operation pauses for permission and that the same Prompt Turn
+continues after Dogwalk returns the selected ACP option.
+
 ## Scenario Format
 
 Scenarios are YAML files named `<name>.test.yaml` in the project root. The runner
