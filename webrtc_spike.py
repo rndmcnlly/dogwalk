@@ -1618,7 +1618,8 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    runtime_root = Path.cwd()
+    load_dotenv(runtime_root / ".env")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default=os.environ.get("DOGWALK_HOST", "127.0.0.1"))
     parser.add_argument(
@@ -1627,7 +1628,7 @@ def main() -> None:
     parser.add_argument(
         "--workspace",
         type=Path,
-        default=Path(os.environ.get("DOGWALK_WORKSPACE", ROOT)),
+        default=Path(os.environ.get("DOGWALK_WORKSPACE", runtime_root)),
     )
     parser.add_argument(
         "--agent-command",
@@ -1638,7 +1639,7 @@ def main() -> None:
     parser.add_argument(
         "--log-dir",
         type=Path,
-        default=Path(os.environ.get("DOGWALK_LOG_DIR", ROOT / "logs")),
+        default=Path(os.environ.get("DOGWALK_LOG_DIR", runtime_root / "logs")),
     )
     parser.add_argument(
         "--call-lease-seconds",

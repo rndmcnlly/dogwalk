@@ -116,3 +116,9 @@ serving, health and readiness probes, read-only observer capabilities, exclusive
 Walker call leases, protected mutating and consumptive sideband endpoints, denial
 of private source/state paths, lease release, reacquisition, and graceful
 `SIGTERM` shutdown. It does not create an OpenAI session or start a Dog.
+
+Verify the package build and installed `dogwalk` entry point before deployment:
+
+```bash
+uvx --refresh --from . dogwalk --help
+```

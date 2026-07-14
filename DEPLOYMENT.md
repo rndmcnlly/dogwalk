@@ -20,6 +20,17 @@ Run locally:
 uv run --script webrtc_spike.py
 ```
 
+Run the latest revision directly from GitHub without cloning or publishing to
+PyPI:
+
+```bash
+uvx --from git+https://github.com/rndmcnlly/dogwalk.git dogwalk
+```
+
+Append `@<tag-or-commit>` to the Git URL for a reproducible deployment. Dogwalk
+uses the command's current directory as its default workspace and reads `.env`
+and writes `logs/` there.
+
 Run inside a sandbox or container:
 
 ```bash
@@ -39,9 +50,9 @@ are available.
 |---|---|---|
 | `DOGWALK_HOST` | `127.0.0.1` | HTTP bind address |
 | `DOGWALK_PORT` | `8765` | HTTP port |
-| `DOGWALK_WORKSPACE` | Dogwalk source directory | Workspace given to Dogs |
+| `DOGWALK_WORKSPACE` | Current directory | Workspace given to Dogs |
 | `DOGWALK_AGENT_COMMAND` | `opencode acp --pure --cwd {cwd}` | Local ACP command; `{cwd}` expands to the workspace |
-| `DOGWALK_LOG_DIR` | `logs/` beside Dogwalk | Structured service and ACP logs |
+| `DOGWALK_LOG_DIR` | `logs/` in current directory | Structured service and ACP logs |
 | `DOGWALK_CALL_LEASE_SECONDS` | `15` | Time before a disconnected Walker lease expires |
 | `OPENAI_API_KEY` | none | Realtime API credential |
 
