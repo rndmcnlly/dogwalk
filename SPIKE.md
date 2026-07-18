@@ -41,8 +41,22 @@ prompt failures.
 
 ## Production direction
 
-The phone version uses WebRTC for device audio and keeps API keys plus ACP tools
-in a Python sideband server.
+There are two voice transports, each with a distinct role:
+
+- **Browser WebRTC** (`webrtc_spike.py`): diagnostic harness for iterative
+  development, telemetry, and debugging. The browser holds a direct WebRTC
+  peer connection to OpenAI, so device audio and echo cancellation stay in
+  the browser's media subsystem while Python holds the API key, runs tools,
+  and writes JSONL logs.
+- **Phone PSTN** (`voice_bridge.py serve`): the hands-free user-facing
+  transport. Twilio's native 8kHz mulaw audio passes through to OpenAI's
+  `g711_ulaw` format with no resampling; the bridge relays tool calls and
+  async SSE notifications to a backend (`voice_acp_backend.py` for real ACP,
+  or `voice_bridge.py mock-backend` for a dogwalk-themed stub).
+
+The manifest-driven backend protocol (`/manifest`, `/tool/:name`, `/events`
+SSE) is the seam between transport and logic: either transport can drive any
+backend that speaks it. ✨
 
 ## WebRTC audio spike
 

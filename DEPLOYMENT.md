@@ -44,6 +44,46 @@ Open `/webrtc_spike.html` on the resulting origin. `/healthz` reports process
 health, and `/readyz` verifies that the workspace and configured agent executable
 are available.
 
+## PSTN (phone) deployment
+
+The diagnostic `webrtc_spike.py` service is for harness development, not the
+hands-free user. The user-facing transport is a Twilio PSTN bridge split into
+two processes that talk over the manifest-driven backend protocol:
+
+1. **ACP backend** (`voice_acp_backend.py`): owns the workspace, spawns
+   `opencode acp` subprocesses, and exposes `/manifest`, `/tool/:name`, and
+   `/events` SSE. This is where Dogs live.
+2. **Voice bridge** (`voice_bridge.py serve`): holds the OpenAI Realtime key
+   and Twilio credentials, terminates the phone call, and relays tool calls
+   plus async notifications to the backend.
+
+```bash
+# Terminal 1: ACP backend (defaults to port 8799)
+uv run --script voice_acp_backend.py --workspace /workspace/project
+
+# Terminal 2: Twilio bridge, exposed publicly so Twilio can reach /voice
+uv run --script voice_bridge.py serve \
+  --backend http://127.0.0.1:8799 \
+  --public-url https://<public-host>
+```
+
+Expose the bridge port publicly (for example with `tailscale funnel`) and
+point a Twilio number's voice webhook at `https://<public-host>/voice`.
+Twilio's native 8kHz mulaw audio passes through to OpenAI's `g711_ulaw`
+format with no resampling.
+
+For text-only iteration against any backend without a phone call:
+
+```bash
+uv run --script voice_bridge.py simulate --backend http://127.0.0.1:8799
+```
+
+For a dogwalk-themed stub backend (no real ACP):
+
+```bash
+uv run --script voice_bridge.py mock-backend --port 8799
+```
+
 ## Configuration
 
 | Environment variable | Default | Meaning |
@@ -55,9 +95,15 @@ are available.
 | `DOGWALK_LOG_DIR` | `logs/` in current directory | Structured service and ACP logs |
 | `DOGWALK_CALL_LEASE_SECONDS` | `15` | Time before a disconnected Walker lease expires |
 | `OPENAI_API_KEY` | none | Realtime API credential |
+| `TWILIO_ACCOUNT_SID` | none | Twilio account SID (enables outbound `/call`) |
+| `TWILIO_AUTH_TOKEN` | none | Twilio auth token (also used for webhook signature validation) |
+| `TWILIO_PHONE_NUMBER` | none | Twilio caller number |
+| `TWILIO_CLIENT_SECRET` | none | Alternate secret for webhook signature validation |
+| `PUBLIC_URL` | none | Public HTTPS URL for the `serve` bridge; Twilio webhook target |
 
-Equivalent command-line flags are available through `webrtc_spike.py --help`.
-The agent command is parsed as arguments without invoking a shell.
+Equivalent command-line flags are available through `webrtc_spike.py --help`
+and `voice_bridge.py serve --help`. The agent command is parsed as arguments
+without invoking a shell.
 
 ## Lifecycle
 

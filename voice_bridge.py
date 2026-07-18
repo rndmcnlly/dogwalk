@@ -3,27 +3,34 @@
 # requires-python = ">=3.11"
 # dependencies = ["aiohttp"]
 # ///
-"""Voice bridge spike: manifest-driven Realtime agent with async SSE notifications.
+"""Voice bridge: manifest-driven Realtime agent with async SSE notifications.
 
 Three subcommands:
   mock-backend  : serves a dogwalk-themed manifest + tools + SSE events
   simulate     : text-in, audio-out bridge that talks to any backend
-  serve        : full Twilio bridge (future, currently a stub)
+  serve        : full Twilio PSTN bridge (mulaw <-> g711_ulaw pass-through)
 
-Protocol (see voice-bridge-protocol.md):
+Protocol (manifest + tools + SSE; see voice_acp_backend.py for the real ACP
+backend that replaces mock-backend):
   GET  /manifest           -> {instructions, tools[], voice, greeting}
   POST /tool/:name         -> {call_id, args} -> {result} or {error}
   GET  /events?call_id=... -> SSE stream of {type, message, speak}
 
 Quick start:
-  # Terminal 1: start the mock backend
-  uv run --script voice_bridge.py mock-backend --port 8799
+  # Terminal 1: start the real ACP backend
+  uv run --script voice_acp_backend.py --workspace ~/someproject
 
   # Terminal 2: run the bridge in text simulate mode
   uv run --script voice_bridge.py simulate --backend http://127.0.0.1:8799
 
   # Type a message, press enter. Try: "sic Rex on fixing the tests"
   # Then wait ~5 seconds for the async completion notification.
+
+PSTN mode (real phone call):
+  # Expose the port publicly (e.g. tailscale funnel) and point a Twilio number's
+  # voice webhook at https://<public>/voice, then:
+  uv run --script voice_bridge.py serve --backend http://127.0.0.1:8799 \
+    --public-url https://<public>
 """
 
 from __future__ import annotations

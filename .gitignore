@@ -4,4 +4,3 @@ logs/
 __pycache__/
 .ruff_cache/
 dist/
-voice_acp_backend.py
