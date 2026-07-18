@@ -381,6 +381,16 @@ async def run_simulate(args: argparse.Namespace) -> None:
 
         print("voice_bridge simulate: type messages and press enter (Ctrl+C to quit)")
 
+        end_requested = False
+
+        async def end_session_after_delay(delay: float) -> None:
+            nonlocal end_requested
+            end_requested = True
+            await asyncio.sleep(delay)
+            log("session_ended")
+            if not openai_ws.closed:
+                await openai_ws.close()
+
         async def handle_response_done(event: dict[str, Any]) -> None:
             nonlocal response_in_flight
             response = event.get("response", {})
@@ -408,6 +418,16 @@ async def run_simulate(args: argparse.Namespace) -> None:
                         "output": json.dumps(result),
                     },
                 })
+
+                result_data = result.get("result", result) if isinstance(result, dict) else {}
+                if isinstance(result_data, dict) and result_data.get("end_call"):
+                    delay_ms = result_data.get("delay_ms", 2000)
+                    log("end_call_scheduled", delay_ms=delay_ms)
+                    await openai_ws.send_json({"type": "response.create"})
+                    response_in_flight = True
+                    asyncio.create_task(end_session_after_delay(delay_ms / 1000))
+                    return
+
                 has_tool_output = True
 
             if has_tool_output:
@@ -713,6 +733,17 @@ async def handle_twilio_stream(request: web.Request) -> web.WebSocketResponse:
 
     async def from_openai() -> None:
         nonlocal bridge, session_ready
+
+        async def end_call_after_delay(delay: float) -> None:
+            await asyncio.sleep(delay)
+            log("call_ended")
+            if bridge:
+                bridge.close()
+            if not twilio_ws.closed:
+                await twilio_ws.close()
+            if not openai_ws.closed:
+                await openai_ws.close()
+
         async for msg in openai_ws:
             if msg.type != WSMsgType.TEXT:
                 if msg.type == WSMsgType.ERROR:
@@ -781,6 +812,15 @@ async def handle_twilio_stream(request: web.Request) -> web.WebSocketResponse:
                             "output": json.dumps(result),
                         },
                     })
+
+                    result_data = result.get("result", result) if isinstance(result, dict) else {}
+                    if isinstance(result_data, dict) and result_data.get("end_call"):
+                        delay_ms = result_data.get("delay_ms", 2000)
+                        log("end_call_scheduled", delay_ms=delay_ms)
+                        await openai_ws.send_json({"type": "response.create"})
+                        asyncio.create_task(end_call_after_delay(delay_ms / 1000))
+                        return
+
                     has_tool_output = True
 
                 if has_tool_output:
