@@ -2,14 +2,14 @@
 
 ## Status and Authority
 
-This document is Dogwalk's canonical Ubiquitous Language. It is normative for new design and refactoring, although the current spikes may not yet conform to it. A mismatch in spike code is implementation debt, not an alternate domain definition.
+This document is Dogwalk's canonical Ubiquitous Language. It is normative for new design and refactoring. A mismatch in implementation code is debt, not an alternate domain definition.
 
 The project uses this order of authority:
 
 1. `AGENTS.md` supplies the operating contract and irreducible domain guardrails to every development session.
 2. `DOMAIN.md` defines canonical terms, boundaries, relationships, and lifecycle distinctions.
 3. Tests and scenarios specify behavior executably.
-4. Spike notes describe experiments and may retain historical terminology.
+4. Git history preserves experiments and superseded terminology.
 
 Update this document in the same change that introduces or changes a domain concept. Put unresolved modeling choices under Open Questions rather than allowing code to choose a meaning implicitly.
 
@@ -17,23 +17,24 @@ Update this document in the same change that introduces or changes a domain conc
 
 Dogwalk is an eyes-free ACP Client and multi-session coding manager. It gives a User the capability surface of a visual multi-session coding client through hands-free voice, without requiring access to a screen, mouse, or keyboard.
 
-Walker is the realtime voice agent through which the User supervises coding work. Walker presents managed coding sessions as named Dogs and translates between conversational intent and precise session-manager operations. Coding work is performed by ACP Agents such as OpenCode, not by Walker.
+The Voice Agent is the realtime conversational interface through which the User supervises coding work. It translates conversational intent into precise, neutrally named session-manager operations. Coding work is performed by ACP Agents such as OpenCode, not by the Voice Agent.
 
 ## Modeling Principles
 
 - ACP terminology governs protocol integration and anchors the session-management model.
-- Canine terminology belongs to Walker's voice interaction layer and may be expressive there.
+- Dogwalk is a product codename, not the source of its domain vocabulary.
+- Canine language is optional presentation flavor in UI copy and Voice Agent narration. It must not appear in tool names, operation names, protocol payloads, persisted schemas, or prompts sent to ACP Agents.
 - The core model must not depend on OpenCode, a particular model provider, a particular voice transport, or Daytona.
 - A protocol entity, an application projection, and its spoken presentation are different things even when they currently have a one-to-one relationship.
 - Derived state must not be presented as ACP-defined state. Dogwalk may infer that a session is ready or that a turn needs attention, but those are Client projections.
-- Opaque protocol identifiers stay out of speech. Walker refers to work by purpose, recency, and pronounceable alias.
+- Opaque protocol identifiers stay out of speech. The Voice Agent refers to work by purpose, recency, and pronounceable Alias.
 - The current process topology is an implementation choice. ACP permits one Agent connection to support multiple concurrent sessions.
 
 ## Bounded Contexts
 
 ### Voice Interaction
 
-Owns the live conversation, Walker's personality, spoken reference resolution, Dog aliases, Pack presentation, earcons, interruption, muting, and speech-safe summaries. This is the only context in which canine terminology is canonical.
+Owns the live conversation, Voice Agent personality, spoken reference resolution, optional narration flavor, earcons, interruption, muting, and speech-safe summaries. Canine language may appear here as an acknowledged metaphor, but is never canonical domain language.
 
 ### Session Management
 
@@ -49,7 +50,7 @@ Owns how an ACP Agent is located, launched, connected, authenticated, isolated, 
 
 ### Voice Transport
 
-Owns realtime audio transport, speech turn detection, browser or telephone media, and provider-specific function calling. OpenAI Realtime is the current adapter, not the definition of Walker.
+Owns realtime audio transport, speech turn detection, browser or telephone media, and provider-specific function calling. OpenAI Realtime is the current adapter, not the definition of the Voice Agent.
 
 ### Access Control
 
@@ -64,8 +65,8 @@ are adapters, not identity authorities.
 User speech
     |
     v
-Walker / Voice Interaction
-    |  translates Dog language into neutral commands and events
+Voice Agent / Voice Interaction
+    |  translates conversational intent into neutral commands and events
     v
 Session Management
     |  translates managed lifecycle into ACP operations
@@ -87,11 +88,11 @@ Voice Transport carries the conversation used by Voice Interaction.
 
 The human principal whose intent, authorization, and attention govern the work. The User may speak imprecisely and should not need to pronounce technical identifiers.
 
-### Walker
+### Voice Agent
 
 **Context:** Voice Interaction
 
-The socially fluent, deliberately engineering-weak voice agent that maintains the conversation, resolves references, invokes session-manager operations, and presents results in plain language. Walker does not replace the ACP Client as a whole: Walker is one interaction component within Dogwalk.
+The socially fluent, deliberately engineering-weak conversational agent that maintains the voice interaction, resolves references, invokes neutrally named session-manager operations, and presents results in plain language. It may use Dogwalk's canine metaphor sparingly in narration while speaking about ACP and session concepts authoritatively.
 
 **Not:** An ACP Agent, coding harness, Agent host, or engineering authority.
 
@@ -101,7 +102,7 @@ The socially fluent, deliberately engineering-weak voice agent that maintains th
 
 The protocol role that initializes connections, creates or resumes sessions, sends prompts, receives updates, presents permission choices, and controls access to Client capabilities.
 
-Dogwalk is the ACP Client. Walker may initiate Client operations through Dogwalk's tool surface, but Walker itself is not the complete protocol implementation.
+Dogwalk is the ACP Client. The Voice Agent may initiate Client operations through Dogwalk's neutral tool surface, but the Voice Agent itself is not the complete protocol implementation.
 
 ### ACP Agent
 
@@ -111,7 +112,7 @@ An ACP-compatible coding harness that owns conversation context, processes promp
 
 OpenCode is the current Agent implementation. Other ACP-compatible implementations must be substitutable in principle.
 
-**Not:** A Dog, model, subprocess, session, Prompt Turn, or task.
+**Not:** A model, subprocess, session, Prompt Turn, or task.
 
 ## Core Concepts
 
@@ -179,42 +180,20 @@ Dogwalk's application record for one ACP Session. It projects protocol updates i
 
 **Maps to:** Exactly one ACP Session while attached.
 
-**Not:** A Dog, Agent process, Prompt Turn, or long-running task.
-
-### Dog
-
-**Context:** Voice Interaction
-
-Walker's named voice persona for one Managed Session. The Dog makes a session easy to refer to aloud and gives Walker's presentation its characteristic flavor.
-
-**Identity:** A Dog is addressed through a mutable, pronounceable Alias. The Alias is not persistence identity and is not the ACP Session ID.
-
-**Maps to:** Exactly one Managed Session while attached.
-
-**Not:** An ACP Agent, Agent process, model, Prompt Turn, or task.
-
-**Implementation rule:** Core ACP and Session Management types should not use `Dog` in their names. Walker prompts, Walker tools, speech projections, and voice-specific tests may use Dog terminology freely.
-
-### Pack
-
-**Context:** Voice Interaction
-
-Walker's spoken presentation of the set of Dogs currently known to the conversation. It may include Dogs whose sessions are active, ready for another turn, or in need of User attention.
-
-**Not:** An ACP connection pool, process supervisor, or canonical name for the Session Manager.
+**Not:** An Agent process, Prompt Turn, or long-running task.
 
 ### Alias
 
 **Context:** Session Management and Voice Interaction
 
-A mutable, pronounceable, locally assigned handle by which Walker and the User refer to a Managed Session as a Dog.
+A mutable, pronounceable, locally assigned handle by which the Voice Agent and User refer to a Managed Session.
 
 An Alias is distinct from both the opaque ACP Session ID and an Agent-supplied Session Title.
 
 Aliases remain attached to live Managed Sessions across voice calls while the
 Session Manager remains active. An Agent-discovered persisted ACP Session has no
-Dog or Alias until Dogwalk loads it into a new Managed Session; revival assigns a
-fresh Alias rather than treating its Session Title as a spoken identity.
+Alias until Dogwalk loads it into a new Managed Session; loading assigns a fresh
+Alias rather than treating its Session Title as a spoken identity.
 
 ### Session Title
 
@@ -248,6 +227,49 @@ Registration: registering a phone does not create or identify a Sandbox. Agent
 Hosting may derive a non-reversible provider label from the phone identity, but
 must not expose the phone number to the provider as a sandbox name or label.
 
+The provider ID is a cached reference, not durable identity. If the provider
+reports that a Sandbox was deleted, Dogwalk invalidates the reference and may
+create a replacement Sandbox for the same User. Registration survives; files,
+Agent-held session history, and other state in the deleted Sandbox do not.
+Replacement is exceptional reconciliation after explicit provider-side deletion,
+not normal lifecycle. Stopped and archived Sandboxes retain identity and durable
+filesystem state and are resumed in place, potentially across months.
+
+### Review Bundle
+
+**Context:** Session Management
+
+A small, Agent-published bundle of files intended for later visual review by the
+User. A Review Bundle is associated with its originating Managed Session but is
+not ACP Session history, a repository, or a live service. Its public URL is an
+unguessable, expiring bearer capability. The ACP Agent may publish a Review
+Bundle through a scoped Client-provided tool; the Voice Agent may list, text, or
+delete trusted bundle records but cannot create their contents.
+
+The Sandbox capability authenticates the ACP Agent's hosting boundary, not the
+custom tool implementation against that Agent. The custom tool is the intended,
+permission-gated affordance; an Agent with shell access can inspect and reproduce
+its HTTP request by design.
+
+Presentation flavor may call a Review Bundle a "dropping." That metaphor belongs
+only to a Voice Agent flavor pack and never appears in tools, schemas, storage,
+URLs, ACP prompts, or sandbox configuration.
+
+### Ephemeral Service
+
+**Context:** Agent Hosting
+
+A speech-safe registration of an HTTP service currently listening on a Sandbox
+port. Registration records a name, port, originating ACP Session, and Sandbox
+incarnation; it does not contain a public URL or provider preview credential.
+The ACP Agent registers a service through a scoped Client-provided tool. On User
+request, the Voice Agent may ask Agent Hosting to mint a short-lived signed link
+and text it to the registered phone number. The link is never verbalized or
+inserted into Agent or Voice Agent context.
+
+An Ephemeral Service is not durable merely because its registration persists.
+It is available only while its process and Sandbox remain available.
+
 ### Prompt Turn
 
 **Context:** ACP Integration and Session Management
@@ -256,13 +278,13 @@ One complete interaction cycle beginning with `session/prompt` and ending when t
 
 A completed or cancelled Prompt Turn does not imply that its ACP Session has closed. Another Prompt Turn may continue the same session context.
 
-**Not:** An ACP Session, Dog, Agent, or necessarily the whole engineering task.
+**Not:** An ACP Session, Agent, or necessarily the whole engineering task.
 
 ### Assignment
 
 **Context:** Voice Interaction
 
-Walker's plain-language presentation of what the User wants a Dog to do. An Assignment commonly produces one Prompt Turn but may require follow-up turns.
+The Voice Agent's plain-language presentation of what the User wants an ACP Agent to do in a Managed Session. An Assignment commonly produces one Prompt Turn but may require follow-up turns.
 
 Assignment is interaction language, not a protocol lifecycle entity.
 
@@ -270,7 +292,7 @@ Assignment is interaction language, not a protocol lifecycle entity.
 
 **Context:** Session Management
 
-The first prompt content Dogwalk constructs from the User's Assignment plus role, safety, workspace, and reporting context. Subsequent prompts continue the same Managed Session without recreating the brief unless required by an Agent adapter.
+The first prompt content Dogwalk constructs from the User's Assignment plus role, safety, workspace, and reporting context. It uses neutral ACP and session vocabulary and does not brief the ACP Agent into Dogwalk's optional canine narration. Subsequent prompts continue the same Managed Session without recreating the brief unless required by an Agent adapter.
 
 ### Activity
 
@@ -282,7 +304,7 @@ A concise, User-safe projection of current Agent updates, usually plans and tool
 
 **Context:** Session Management and Voice Interaction
 
-A concise result projected from Agent messages and the Prompt Turn outcome for Walker to relay. A Report may state that a turn stopped without establishing success. It must not erase the stop reason or failure state from the underlying Turn Result.
+A concise result projected from Agent messages and the Prompt Turn outcome for the Voice Agent to relay. A Report may state that a turn stopped without establishing success. It must not erase the stop reason or failure state from the underlying Turn Result.
 
 ### Turn Result
 
@@ -330,7 +352,7 @@ Agent-advertised, persistent session configuration such as model, mode, reasonin
 
 **Context:** ACP Integration and Session Management
 
-An Agent-reported execution strategy whose entries and status can change during a Prompt Turn. Plans are useful input for spoken progress summaries but are not commands issued by Walker.
+An Agent-reported execution strategy whose entries and status can change during a Prompt Turn. Plans are useful input for spoken progress summaries but are not commands issued by the Voice Agent.
 
 ## Lifecycles
 
@@ -367,35 +389,34 @@ queued -> in_progress -> stopped
 
 A Permission Request or Elicitation can make an in-progress turn need User attention. That attention condition does not create a new Prompt Turn.
 
-Walker may call a ready Dog "resting" and an in-progress Dog "working." Those are voice projections, not core lifecycle values.
+The Voice Agent may describe a ready session as "resting" or an in-progress session as "working." Those are conversational projections, not core lifecycle values.
 
 ### Attention Lifecycle
 
 An Attention Request is received from the Agent, queued for the appropriate interaction surface, presented to the User, resolved with subtype-correct semantics, and returned to the Agent. Cancelling a Prompt Turn also resolves or cancels its pending protocol requests as ACP requires.
 
-## Operations and Voice Translation
+## Operations
 
-| Neutral operation | Meaning | Walker language |
-|---|---|---|
-| Create Managed Session | Establish a new ACP Session and local projection | Sic a new Dog |
-| Begin Prompt Turn | Send prompt content to a Managed Session | Give a Dog an Assignment; relay a follow-up |
-| Inspect Managed Session | Read projected state without starting another turn | Check a Dog |
-| List Managed Sessions | Discover sessions currently known to Dogwalk | List the Pack |
-| Discover Persisted Sessions | List Agent-held session history without attaching it | Recall Dogs from previous calls |
-| Load Persisted Session | Attach an Agent-held ACP Session as a new Managed Session with a fresh Alias | Revive an old Dog under a new name |
-| Set Alias | Change the local pronounceable handle | Name or rename a Dog |
-| Cancel Prompt Turn | Stop current Agent work while retaining the session | Stop what the Dog is doing |
-| Close Managed Session | Release the active ACP Session and detach its Dog | Call off the Dog |
-| Delete Persisted Session | Remove Agent-held session history when supported | Forget the session, with explicit confirmation |
-| Resolve Permission | Select one Agent-supplied permission option | Give or refuse permission |
-| Resolve Elicitation | Accept, decline, or cancel requested input | Answer or decline the Dog's question |
-| Set Session Config Option | Change an Agent-advertised session setting | Change how this Dog works |
+| Neutral operation | Meaning |
+|---|---|
+| Create Managed Session | Establish a new ACP Session and local projection |
+| Begin Prompt Turn | Send prompt content to a Managed Session |
+| Inspect Managed Session | Read projected state without starting another turn |
+| List Managed Sessions | Discover sessions currently known to Dogwalk |
+| Discover Persisted Sessions | List Agent-held session history without attaching it |
+| Load Persisted Session | Attach an Agent-held ACP Session as a new Managed Session with a fresh Alias |
+| Set Alias | Change the local pronounceable handle |
+| Cancel Prompt Turn | Stop current Agent work while retaining the session |
+| Close Managed Session | Release the active ACP Session |
+| Delete Persisted Session | Remove Agent-held session history when supported |
+| Resolve Permission | Select one Agent-supplied permission option |
+| Resolve Elicitation | Accept, decline, or cancel requested input |
+| Set Session Config Option | Change an Agent-advertised session setting |
 
-Voice phrases are not method names for the core. The Voice Interaction adapter translates them into neutral operations with precise lifecycle effects.
+These canonical terms name Voice Agent tools as well as core methods. Narration may add metaphor after a tool result, but tool names and arguments remain neutral.
 
 ## Explicit Non-Synonyms
 
-- An ACP Agent is not a Dog.
 - An Agent Implementation is not necessarily one Agent process.
 - An Agent Connection is not an ACP Session.
 - An ACP Session is not a Prompt Turn.
@@ -409,7 +430,6 @@ Voice phrases are not method names for the core. The Voice Interaction adapter t
 - An Elicitation is not a Session Config Option.
 - An Alias is not a Session Title or Session ID.
 - A Workspace is not a Sandbox.
-- A Pack is not an ACP connection pool.
 - A voice call is not an Agent Connection.
 
 ## Adapter Vocabulary
@@ -418,7 +438,7 @@ The following names may appear in adapter configuration and deployment documenta
 
 - **OpenCode:** Current ACP Agent Implementation.
 - **OpenAI Realtime:** Current Voice Transport and realtime model provider.
-- **Daytona:** Candidate remote Sandbox provider.
+- **Daytona:** Current remote Sandbox provider.
 - **stdio, WebSocket, HTTP:** Transport mechanisms.
 - **ACP Python SDK:** Current protocol library.
 
@@ -426,7 +446,7 @@ Adapter-specific limitations should be represented as negotiated capabilities, a
 
 ## Architectural Consequences
 
-- Walker tools translate Dog terminology into neutral Session Management operations.
+- Voice Agent tools expose neutral Session Management operations directly.
 - ACP SDK and wire-version types stop at the ACP Integration boundary.
 - Agent launch commands and process topology belong to Agent Hosting adapters.
 - Managed Session state and Prompt Turn state are represented separately.
@@ -439,20 +459,19 @@ These consequences constrain responsibilities and naming. They do not prescribe 
 
 ## Historical Language
 
-The following language appears in current spikes or design fiction and should be interpreted carefully:
+The following language appears in Git history and is not canonical for production interfaces:
 
-- **Dog as subprocess:** The current spike starts one OpenCode process and Agent Connection per Dog. This is hosting policy, not Dog identity.
-- **Dog as task:** Early design fiction described Dogs as ephemeral per task. The established model retains a Managed Session across multiple Prompt Turns.
-- **Working/resting Dog:** Useful spoken projections of turn activity and session readiness, not ACP lifecycle states.
-- **Dog completed:** Means the current Prompt Turn stopped. The Dog's Managed Session may remain ready for another turn.
-- **Call off as cancellation:** Voice intent must distinguish stopping an active Prompt Turn from closing the Managed Session.
-- **Dog status as lifecycle:** Early spikes stored `working`, `resting`, and `cancelled` as one status. These are now voice projections over separate Managed Session and Prompt Turn state.
+- **Walker:** An early proper name for the Voice Agent. Production code uses Voice Agent; "dog walker" may survive as opening copy or a joke.
+- **Dog:** An early persona for a Managed Session, ACP Agent process, or task. Production code uses the precise concept instead.
+- **Pack:** An early spoken label for a set of sessions. Production tools list Managed Sessions.
+- **Sic, relay, revive, and call off:** Early Voice Agent tool verbs. Production tools use create, prompt, load, cancel, and close.
+- **Working/resting Dog:** Optional narration over Prompt Turn activity and session readiness, not lifecycle state.
 
 ## Open Questions
 
 - Should queued follow-up prompts be first-class Prompt Turns immediately, or become Prompt Turns only when sent to the Agent?
 - Which Agent plan and tool-call changes deserve proactive speech, an earcon, or silent state projection?
-- How should Walker resolve ambiguous spoken "stop" among stopping speech, cancelling one Prompt Turn, closing one Managed Session, stopping all Agent work, and ending the voice call?
+- How should the Voice Agent resolve ambiguous spoken "stop" among stopping speech, cancelling one Prompt Turn, closing one Managed Session, stopping all Agent work, and ending the voice call?
 - Which parts of Assignment history belong to Dogwalk versus the ACP Agent's retained session context?
 
 ## ACP References

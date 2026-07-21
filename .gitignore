@@ -5,6 +5,7 @@
 *.pem
 logs/
 .perk/
+.venv/
 __pycache__/
 .ruff_cache/
 dist/

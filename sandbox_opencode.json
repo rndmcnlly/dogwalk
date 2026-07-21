@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/deepseek-v4-flash-free",
+  "small_model": "opencode/deepseek-v4-flash-free",
+  "share": "disabled",
+  "permission": {
+    "publish_review_bundle": "ask",
+    "register_ephemeral_service": "ask"
+  }
+}

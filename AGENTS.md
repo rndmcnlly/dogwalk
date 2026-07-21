@@ -1,23 +1,26 @@
 # Dogwalk
 
-Dogwalk aims to provide the capability surface of an agentic coding-session manager, including juggling many concurrent sessions, entirely through hands-free voice with zero dependence on visual user interaction. A deliberately engineering-weak voice agent called Walker coordinates stronger coding agents called Dogs; the diagnostic web UI exists only for iterative harness development, telemetry, and debugging, not as a required user interface.
+Dogwalk aims to provide the capability surface of an agentic coding-session manager, including juggling many concurrent sessions, entirely through hands-free voice with zero dependence on visual user interaction. A deliberately engineering-weak Voice Agent coordinates stronger ACP Agents running in isolated sandboxes; the diagnostic web UI exists only for iterative harness development, telemetry, and debugging, not as a required user interface.
 
-Run the scripted non-audio integration test with `uv run --script text_spike.py test collaboration`, and test the portable HTTP boundary with `uv run --script text_spike.py service`. Run the diagnostic browser voice service with `uv run --script webrtc_spike.py`, then open `http://127.0.0.1:8765/webrtc_spike.html`. For the PSTN/phone transport, run the real ACP backend with `uv run --script voice_acp_backend.py --workspace <dir>` and the Twilio bridge with `uv run --script voice_bridge.py serve --backend http://127.0.0.1:8799 --public-url <url>`; for text-only iteration against any backend, `uv run --script voice_bridge.py simulate --backend http://127.0.0.1:8799`. Prefer isolated YAML scenarios and inspect `logs/` only when a concise test result fails.
+The production path is Twilio PSTN -> Cloudflare Worker and sandbox-keyed Durable Object -> OpenAI Realtime plus ACP-over-WebSocket -> the Daytona-hosted ACP Gateway and OpenCode. Run `uv run --script cf_worker/smoke_test.py`, `uv run --script cf_worker/voice_session_test.py`, and `uv run --script sandbox_acp_gateway.py test`; run `npm run typecheck` from `cf_worker/`. `cf_worker/README.md` is the operational runbook and `PSTN_CLOUDFLARE.md` records the deployed architecture.
 
-A Managed Session wraps one retained ACP session. A Dog is Walker's voice-facing persona for that Managed Session; its mutable name is a vocal alias, while the ACP session ID remains an opaque implementation identifier.
+This is a public repository for one operator-managed deployment. It is acceptable to document public hostnames, provider resource IDs, local Keychain service names, and commands that retrieve secrets on Adam's laptop. Never commit secret values, local `.env` or `.dev.vars` files, private keys, capability tokens, signed preview URLs, or production request payloads containing them.
+
+A Managed Session wraps one retained ACP Session. Its mutable Alias is pronounceable, while the ACP Session ID remains an opaque implementation identifier.
 
 ## Domain Language
 
-`DOMAIN.md` is the canonical Ubiquitous Language and is normative for new design and refactoring. Read it before changing session lifecycle, Agent integration, Walker tools, state names, or domain terminology. It takes precedence over historical language in spike notes and accidental structure in the current implementation.
+`DOMAIN.md` is the canonical Ubiquitous Language and is normative for new design and refactoring. Read it before changing session lifecycle, Agent integration, Voice Agent tools, state names, or domain terminology. It takes precedence over historical language preserved in Git and accidental structure in the current implementation.
 
 Core distinctions:
 
-- Dogwalk is an eyes-free ACP Client. An ACP Agent is a coding harness such as OpenCode; an Agent is not a Dog.
-- A Managed Session wraps one ACP session. A Dog is Walker's voice-facing persona for that Managed Session.
+- Dogwalk is an eyes-free ACP Client. An ACP Agent is a coding harness such as OpenCode, distinct from the Voice Agent.
+- A Managed Session wraps one ACP Session and owns its pronounceable Alias.
 - A Prompt Turn completes or is cancelled; its Managed Session can remain available for later turns.
 - Cancelling a Prompt Turn, closing an active session, and deleting persisted session history are distinct operations.
 - Permission Requests authorize actions. Elicitations ask for information. Do not collapse them into one protocol response type.
 - OpenCode, OpenAI Realtime, and Daytona are adapters or deployment choices, not domain concepts.
-- Canine terms such as Dog, Pack, sic, relay, and call off belong to Walker's voice UX. Use neutral ACP and session-management terms in core plumbing.
+- Dogwalk is a product codename. Canine language may flavor UI copy, an opening line, or occasional Voice Agent narration, but it is not domain vocabulary.
+- Voice Agent tool names, payloads, logs, schemas, tests, ACP prompts, and sandbox internals use neutral ACP and session-management terms.
 
 When introducing or changing a domain concept, use the canonical term from `DOMAIN.md` in core code and tests, update `DOMAIN.md` in the same change, and record unresolved ambiguity under Open Questions rather than silently choosing a new meaning.

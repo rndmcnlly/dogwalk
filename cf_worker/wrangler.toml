@@ -1,12 +1,20 @@
 name = "dogwalk"
 main = "src/index.ts"
-compatibility_date = "2025-10-01"
+compatibility_date = "2026-07-20"
 workers_dev = true
+routes = [
+  { pattern = "dogwalk.tools", custom_domain = true }
+]
 
 [vars]
 # Set after creating the path-scoped Cloudflare Access application.
 ACCESS_TEAM_DOMAIN = ""
 ACCESS_AUD = ""
+OPENAI_REALTIME_MODEL = "gpt-realtime-2.1"
+PUBLIC_ORIGIN = "https://dogwalk.tools"
+TWILIO_FROM_NUMBER = "+18317775707"
+# Name of a pre-built Daytona snapshot containing OpenCode and the ACP Gateway.
+DAYTONA_SNAPSHOT = "dogwalk-acp-20260721-v3"
 
 # Bound in Spike 1. DB id is filled in after `wrangler d1 create dogwalk`
 # is run on the adam@adamsmith.as account.
@@ -15,10 +23,18 @@ binding = "DB"
 database_name = "dogwalk"
 database_id = "f04230d7-172f-4a89-9556-2d3d62e8bf1a"
 
+[[durable_objects.bindings]]
+name = "VOICE_SESSIONS"
+class_name = "VoiceSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["VoiceSession"]
+
 # TWILIO_AUTH_TOKEN is a Worker secret, set via:
 #   wrangler secret put TWILIO_AUTH_TOKEN
 # For local `wrangler dev`, put it in .dev.vars (gitignored).
-# DAYTONA_API_KEY and DOGWALK_IDENTITY_SECRET are also Worker secrets.
+# DAYTONA_API_KEY, DOGWALK_IDENTITY_SECRET, and OPENAI_API_KEY are also Worker secrets.
 
 # Observability: enable logs in the Cloudflare dashboard / wrangler tail.
 [observability]

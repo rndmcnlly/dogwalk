@@ -1,27 +1,18 @@
 /**
  * Dogwalk Cloudflare Worker
  *
- * TwiML registration, Daytona sandbox lifecycle, warm-call status menu, and
- * Access-protected Mission Control. No OpenAI or OpenCode yet.
- *
- * See TWILIO_CF_DAYTONA.md for the design-fiction transcript this implements.
+ * TwiML registration, Daytona sandbox lifecycle, Durable Object voice/ACP
+ * coordination, and Access-protected Mission Control.
+ * See PSTN_CLOUDFLARE.md for the deployed architecture.
  */
 
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { ADMIN_HTML } from "./admin";
+import type { Env } from "./types";
+import { handleSandboxApi, provisionSandboxCapability } from "./sandbox_api";
+export { VoiceSession } from "./voice_session";
 
 // --- env ----------------------------------------------------------------
-
-export interface Env {
-  DB: D1Database;
-  TWILIO_AUTH_TOKEN: string;
-  DAYTONA_API_KEY: string;
-  DOGWALK_IDENTITY_SECRET: string;
-  DAYTONA_API_BASE?: string;
-  ACCESS_TEAM_DOMAIN: string;
-  ACCESS_AUD: string;
-  ADMIN_PASSWORD?: string;
-}
 
 // --- Twilio signature validation ----------------------------------------
 
@@ -46,16 +37,19 @@ async function twilioSignatureValid(
   // x-forwarded-proto and x-forwarded-host. In local dev, neither header is
   // set, so fall back to the request's own protocol and host.
   const url = new URL(req.url);
-  const xfProto = req.headers.get("x-forwarded-proto") ?? url.protocol.replace(":", "");
-  const xfHost = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
-  const signedUrl = `${xfProto}://${xfHost}${url.pathname}${url.search}`;
+  const requestProtocol = url.protocol.replace(":", "");
+  const requestHost = url.host;
+  const signedProtocol = req.headers.get("upgrade")?.toLowerCase() === "websocket" ? "wss" : requestProtocol;
+  const signedUrl = `${signedProtocol}://${requestHost}${url.pathname}${url.search}`;
 
   // Twilio sends POST as application/x-www-form-urlencoded for /voice.
   // Clone before formData() consumes the body.
-  const form = await req.clone().formData();
   const params: [string, string][] = [];
-  for (const [k, v] of form.entries()) {
-    if (typeof v === "string") params.push([k, v]);
+  if (req.method === "POST" && req.headers.get("content-type")?.includes("application/x-www-form-urlencoded")) {
+    const form = await req.clone().formData();
+    for (const [k, v] of form.entries()) {
+      if (typeof v === "string") params.push([k, v]);
+    }
   }
   params.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   let s = signedUrl;
@@ -97,6 +91,9 @@ const Say = (text: string, opts: { voice?: string } = {}) =>
 const Pause = (seconds: number) => `<Pause length="${seconds}"/>`;
 const Redirect = (path: string) => `<Redirect method="POST">${escapeXml(path)}</Redirect>`;
 const Hangup = () => `<Hangup/>`;
+const ConnectStream = (url: string, parameters: Record<string, string>) =>
+  `<Connect><Stream url="${escapeXml(url)}">${Object.entries(parameters).map(([name, value]) =>
+    `<Parameter name="${escapeXml(name)}" value="${escapeXml(value)}"/>`).join("")}</Stream></Connect>`;
 
 const GatherSpeech = (
   promptText: string,
@@ -109,6 +106,9 @@ const GatherSpeech = (
     : "";
   return `<Gather input="speech" speechTimeout="auto" actionOnEmptyResult="true" action="${actionPath}?attempts=${attempts}" method="POST"${hintAttribute} language="en-US">${Say(promptText)}</Gather>`;
 };
+
+const GatherDtmf = (promptText: string, actionPath: string) =>
+  `<Gather input="dtmf" numDigits="1" timeout="8" action="${escapeXml(actionPath)}" method="POST">${Say(promptText)}</Gather>`;
 
 const escapeXml = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -194,6 +194,12 @@ interface SandboxAssignment {
 
 const daytonaBase = (env: Env) => (env.DAYTONA_API_BASE ?? "https://app.daytona.io/api").replace(/\/$/, "");
 
+class DaytonaApiError extends Error {
+  constructor(readonly status: number, detail: string) {
+    super(`Daytona ${status}: ${detail}`);
+  }
+}
+
 async function daytonaFetch<T>(env: Env, path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${daytonaBase(env)}${path}`, {
     ...init,
@@ -204,7 +210,7 @@ async function daytonaFetch<T>(env: Env, path: string, init: RequestInit = {}): 
     },
     signal: AbortSignal.timeout(10_000),
   });
-  if (!response.ok) throw new Error(`Daytona ${response.status}: ${(await response.text()).slice(0, 300)}`);
+  if (!response.ok) throw new DaytonaApiError(response.status, (await response.text()).slice(0, 300));
   return response.json<T>();
 }
 
@@ -286,10 +292,13 @@ async function ensureSandboxAssignment(env: Env, phone: string): Promise<Sandbox
   }
   if (!ownsProvisioning) return assignment;
 
+  if (!env.DAYTONA_SNAPSHOT) throw new Error("Daytona snapshot is not configured");
+
   const sandbox = await daytonaFetch<DaytonaSandbox>(env, "/sandbox", {
     method: "POST",
     body: JSON.stringify({
-      name: `dogwalk-${hash.slice(0, 16)}`,
+      name: `dogwalk-${hash.slice(0, 12)}-${crypto.randomUUID().slice(0, 8)}`,
+      snapshot: env.DAYTONA_SNAPSHOT,
       labels: {
         [DAYTONA_LABEL_MANAGED]: "dogwalk",
         [DAYTONA_LABEL_IDENTITY]: `phone-hmac-v1:${hash}`,
@@ -335,7 +344,11 @@ async function sandboxReady(env: Env, sandbox: DaytonaSandbox): Promise<boolean>
   }
 }
 
-async function resolveSandbox(env: Env, phone: string): Promise<{ assignment: SandboxAssignment; sandbox?: DaytonaSandbox }> {
+async function resolveSandbox(
+  env: Env,
+  phone: string,
+  replaceMissing = true,
+): Promise<{ assignment: SandboxAssignment; sandbox?: DaytonaSandbox }> {
   const assignment = await ensureSandboxAssignment(env, phone);
   if (!assignment.provider_id) return { assignment };
   const now = Math.floor(Date.now() / 1000);
@@ -346,7 +359,22 @@ async function resolveSandbox(env: Env, phone: string): Promise<{ assignment: Sa
   ) {
     return { assignment };
   }
-  const sandbox = await getDaytonaSandbox(env, assignment.provider_id);
+  let sandbox: DaytonaSandbox;
+  try {
+    sandbox = await getDaytonaSandbox(env, assignment.provider_id);
+  } catch (error) {
+    if (!(error instanceof DaytonaApiError) || error.status !== 404 || !replaceMissing) throw error;
+    const cleared = await env.DB.prepare(
+      `UPDATE sandbox_assignments
+          SET provider_id = NULL, state = 'missing', error = NULL,
+              provisioning_started_at = 0, last_checked_at = ?
+        WHERE phone_number = ? AND provider_id = ?`,
+    ).bind(now, phone, assignment.provider_id).run();
+    if (cleared.meta.changes === 1) {
+      await audit(env, "sandbox.missing", phone, null, { provider_id: assignment.provider_id });
+    }
+    return resolveSandbox(env, phone, false);
+  }
   await updateAssignment(env, phone, sandbox);
   return { assignment: (await getAssignment(env, phone))!, sandbox };
 }
@@ -556,12 +584,27 @@ export default {
       return new Response("ok\n", { headers: { "content-type": "text/plain" } });
     }
 
+    const sandboxApi = await handleSandboxApi(req, env);
+    if (sandboxApi) return sandboxApi;
+
     if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
       return handleAdmin(req, env, url.pathname);
     }
 
     if (url.pathname === "/voice" && req.method === "POST") {
       return handleVoice(req, env);
+    }
+    if (url.pathname.startsWith("/voice/stream/") && req.method === "GET") {
+      return handleVoiceStream(req, env);
+    }
+    if (url.pathname === "/voice/after-stream" && req.method === "POST") {
+      return handleAfterStream(req, env);
+    }
+    if (url.pathname === "/voice/recovery" && req.method === "POST") {
+      return handleRecovery(req, env);
+    }
+    if (url.pathname === "/voice/recovery/confirm" && req.method === "POST") {
+      return handleRecoveryConfirm(req, env);
     }
     if (url.pathname === "/voice/claim" && req.method === "POST") {
       return handleClaim(req, env);
@@ -575,9 +618,26 @@ export default {
     if (url.pathname === "/voice/status" && req.method === "POST") {
       return handleCallStatus(req, env);
     }
+    if (url.pathname === "/sms/status" && req.method === "POST") {
+      return handleSmsStatus(req, env);
+    }
     return new Response("not found", { status: 404 });
   },
 };
+
+async function handleSmsStatus(req: Request, env: Env): Promise<Response> {
+  const signature = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  if (!signature.valid) return new Response("forbidden", { status: 403 });
+  const form = await req.clone().formData();
+  const messageSid = String(form.get("MessageSid") ?? "");
+  const status = String(form.get("MessageStatus") ?? "");
+  const errorCode = String(form.get("ErrorCode") ?? "") || null;
+  if (!messageSid || !status) return new Response("bad request", { status: 400 });
+  await env.DB.prepare(
+    "UPDATE sms_log SET status = ?, error_code = ?, updated_at = unixepoch() WHERE provider_id = ?",
+  ).bind(status, errorCode, messageSid).run();
+  return new Response(null, { status: 204 });
+}
 
 // --- main /voice entrypoint --------------------------------------------
 
@@ -606,8 +666,13 @@ async function handleVoice(req: Request, env: Env): Promise<Response> {
     try {
       const { assignment, sandbox } = await resolveSandbox(env, from);
       if (sandbox && await sandboxReady(env, sandbox)) {
+        await provisionSandboxCapability(env, sandbox, from);
         await audit(env, "sandbox.ready", from, callSid, { state: sandbox.state });
-        return twiml(GatherSpeech("Workspace awake. Say status or hang up.", "/voice/menu", 1, MENU_HINTS));
+        const streamUrl = new URL(req.url);
+        streamUrl.protocol = "wss:";
+        streamUrl.pathname = `/voice/stream/${assignment.identity_hash}/`;
+        streamUrl.search = "";
+        return twiml(ConnectStream(streamUrl.toString(), { from, callSid }) + Redirect("/voice/after-stream"));
       }
 
       if (sandbox && ["stopped", "archived", "paused"].includes(sandbox.state)) {
@@ -618,7 +683,7 @@ async function handleVoice(req: Request, env: Env): Promise<Response> {
 
       if (sandbox && ["error", "build_failed", "destroyed"].includes(sandbox.state)) {
         await audit(env, "sandbox.unavailable", from, callSid, { state: sandbox.state });
-        return twiml(Say("Your workspace needs operator attention. Goodbye.") + Hangup());
+        return recoveryMenu("Workspace unavailable. ");
       }
 
       if (wakePoll >= MAX_WAKE_POLLS) {
@@ -641,6 +706,107 @@ async function handleVoice(req: Request, env: Env): Promise<Response> {
   await audit(env, "claim.ritual.start", from, callSid, {});
   const invites = await usableInviteCodes(env);
   return twiml(GatherSpeech("Dogwalk. Say your invite words.", "/voice/claim", 1, invites.map((i) => i.code_words)));
+}
+
+async function handleAfterStream(req: Request, env: Env): Promise<Response> {
+  const signature = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  if (!signature.valid) return new Response("forbidden", { status: 403 });
+  const form = await req.clone().formData();
+  const from = normalizePhone(form.get("From"));
+  const callSid = String(form.get("CallSid") ?? "");
+  if (!from || !callSid) return twiml(Hangup());
+  const handoff = await env.DB.prepare(
+    "SELECT action FROM call_handoffs WHERE call_sid = ? AND phone_number = ?",
+  ).bind(callSid, from).first<{ action: string }>();
+  await env.DB.prepare("DELETE FROM call_handoffs WHERE call_sid = ?").bind(callSid).run();
+  return handoff?.action === "hangup" ? twiml(Hangup()) : recoveryMenu("Voice unavailable. ");
+}
+
+function recoveryMenu(prefix = ""): Response {
+  return twiml(
+    GatherDtmf(`${prefix}Recovery. Press 1 to restart. 2 to replace. 0 for voice. 9 to hang up.`, "/voice/recovery") +
+    Hangup(),
+  );
+}
+
+async function handleRecovery(req: Request, env: Env): Promise<Response> {
+  const signature = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  if (!signature.valid) return new Response("forbidden", { status: 403 });
+  const form = await req.clone().formData();
+  const from = normalizePhone(form.get("From"));
+  const callSid = String(form.get("CallSid") ?? "");
+  const digit = String(form.get("Digits") ?? "");
+  if (!from || !(await isRegistered(env, from))) return twiml(Hangup());
+  if (digit === "9") return twiml(Hangup());
+  if (digit === "0") return twiml(Redirect("/voice"));
+  if (digit === "2") {
+    return twiml(
+      GatherDtmf(
+        "Replacement destroys all workspace files and session history. Press 2 again to confirm.",
+        "/voice/recovery/confirm",
+      ) + Hangup(),
+    );
+  }
+  if (digit === "1") {
+    const assignment = await getAssignment(env, from);
+    if (!assignment?.provider_id) return twiml(Redirect("/voice"));
+    try {
+      await daytonaFetch(env, `/sandbox/${encodeURIComponent(assignment.provider_id)}/stop`, { method: "POST" });
+      await audit(env, "sandbox.restart.requested", from, callSid, {});
+      return twiml(Say("Restarting.") + Pause(5) + Redirect("/voice"));
+    } catch {
+      return recoveryMenu("Restart failed. ");
+    }
+  }
+  return recoveryMenu();
+}
+
+async function handleRecoveryConfirm(req: Request, env: Env): Promise<Response> {
+  const signature = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  if (!signature.valid) return new Response("forbidden", { status: 403 });
+  const form = await req.clone().formData();
+  const from = normalizePhone(form.get("From"));
+  const callSid = String(form.get("CallSid") ?? "");
+  if (!from || String(form.get("Digits") ?? "") !== "2" || !(await isRegistered(env, from))) {
+    return recoveryMenu("Cancelled. ");
+  }
+  const assignment = await getAssignment(env, from);
+  if (assignment?.provider_id) {
+    try {
+      await daytonaFetch(env, `/sandbox/${encodeURIComponent(assignment.provider_id)}`, { method: "DELETE" });
+    } catch (error) {
+      if (!(error instanceof DaytonaApiError) || error.status !== 404) return recoveryMenu("Replacement failed. ");
+    }
+    await env.DB.prepare(
+      `UPDATE sandbox_assignments SET provider_id = NULL, state = 'missing', error = NULL,
+         provisioning_started_at = 0, last_checked_at = unixepoch() WHERE phone_number = ?`,
+    ).bind(from).run();
+    await audit(env, "sandbox.replacement.confirmed", from, callSid, {});
+  }
+  return twiml(Say("Replacing.") + Pause(5) + Redirect("/voice"));
+}
+
+async function handleVoiceStream(req: Request, env: Env): Promise<Response> {
+  if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    return new Response("websocket required", { status: 426 });
+  }
+  const signature = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  if (!signature.valid) return new Response("forbidden", { status: 403 });
+  const identity = new URL(req.url).pathname.split("/").filter(Boolean).at(-1) ?? "";
+  if (!/^[a-f0-9]{64}$/.test(identity)) return new Response("invalid identity", { status: 400 });
+  const assignment = await env.DB.prepare(
+    `SELECT s.phone_number, s.provider_id
+       FROM sandbox_assignments s
+       JOIN registrations r ON r.phone_number = s.phone_number
+      WHERE s.identity_hash = ?`,
+  ).bind(identity).first<{ phone_number: string; provider_id: string | null }>();
+  if (!assignment?.provider_id) return new Response("sandbox assignment unavailable", { status: 404 });
+
+  const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(identity));
+  const headers = new Headers(req.headers);
+  headers.set("x-dogwalk-phone", assignment.phone_number);
+  headers.set("x-dogwalk-sandbox-id", assignment.provider_id);
+  return object.fetch(new Request(req, { headers }));
 }
 
 async function recordCallStarted(env: Env, phone: string, callSid: string): Promise<void> {
