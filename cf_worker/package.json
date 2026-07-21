@@ -1,0 +1,21 @@
+{
+  "name": "dogwalk-worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "db:init": "wrangler d1 execute dogwalk --file=schema.sql",
+    "db:init:remote": "wrangler d1 execute dogwalk --remote --file=schema.sql"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260718.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.112.0"
+  },
+  "dependencies": {
+    "jose": "^6.2.3"
+  }
+}

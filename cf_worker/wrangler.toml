@@ -1,0 +1,25 @@
+name = "dogwalk"
+main = "src/index.ts"
+compatibility_date = "2025-10-01"
+workers_dev = true
+
+[vars]
+# Set after creating the path-scoped Cloudflare Access application.
+ACCESS_TEAM_DOMAIN = ""
+ACCESS_AUD = ""
+
+# Bound in Spike 1. DB id is filled in after `wrangler d1 create dogwalk`
+# is run on the adam@adamsmith.as account.
+[[d1_databases]]
+binding = "DB"
+database_name = "dogwalk"
+database_id = "f04230d7-172f-4a89-9556-2d3d62e8bf1a"
+
+# TWILIO_AUTH_TOKEN is a Worker secret, set via:
+#   wrangler secret put TWILIO_AUTH_TOKEN
+# For local `wrangler dev`, put it in .dev.vars (gitignored).
+# DAYTONA_API_KEY and DOGWALK_IDENTITY_SECRET are also Worker secrets.
+
+# Observability: enable logs in the Cloudflare dashboard / wrangler tail.
+[observability]
+enabled = true

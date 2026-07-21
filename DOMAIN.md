@@ -51,6 +51,13 @@ Owns how an ACP Agent is located, launched, connected, authenticated, isolated, 
 
 Owns realtime audio transport, speech turn detection, browser or telephone media, and provider-specific function calling. OpenAI Realtime is the current adapter, not the definition of Walker.
 
+### Access Control
+
+Owns phone Registration and Invite Codes at the PSTN boundary. A registered
+phone number identifies a User for access purposes; Dogwalk does not maintain a
+separate personal name in this context. Telephony providers and sandbox hosts
+are adapters, not identity authorities.
+
 ## Context Map
 
 ```text
@@ -107,6 +114,40 @@ OpenCode is the current Agent implementation. Other ACP-compatible implementatio
 **Not:** A Dog, model, subprocess, session, Prompt Turn, or task.
 
 ## Core Concepts
+
+### Registration
+
+**Context:** Access Control
+
+Authorization for one phone number to use Dogwalk. The normalized phone number
+is the Registration's identity and is unique. Registration records which Invite
+Code authorized it and when it occurred, but does not contain a personal name,
+sandbox identity, or hosting policy.
+
+### Invite Code
+
+**Context:** Access Control
+
+A speakable capability that authorizes Registration. An Invite Code may have an
+expiration time and a maximum number of uses. No expiration means it remains
+valid indefinitely; no maximum means unlimited registrations. A code is usable
+only while unexpired and below its maximum, and each phone number may register
+only once regardless of how many codes it knows.
+
+### Voice Call
+
+**Context:** Voice Transport
+
+One provider-mediated live audio connection between a User and Dogwalk. A Voice
+Call has transport identity and lifecycle independent of Agent Connections,
+Managed Sessions, and Prompt Turns. Diagnostic Call Activity records the
+ordered registration, hosting, and menu events observed during that call; it is
+an operational projection, not conversation history. ACP Integration may later
+project concise protocol envelopes into the same timeline when they are
+correlated with a Voice Call. Full prompts, model output, and tool payloads do
+not belong inline in Call Activity when they are large; store bounded diagnostic
+details or references. Mission Control presents a redacted projection by
+default and requires an explicit, session-only opt-in to reveal verbose details.
 
 ### Agent Implementation
 
@@ -196,6 +237,16 @@ The filesystem scope made available to an ACP Session. It consists of the primar
 An optional execution and security boundary around Agents, processes, files, network access, and credentials. Daytona is one possible sandbox provider.
 
 **Not:** An ACP concept or synonym for Workspace.
+
+### Sandbox Assignment
+
+**Context:** Agent Hosting
+
+Dogwalk's association between an authorized User identity and one provider-hosted
+Sandbox. It records provider identity and lifecycle projection separately from
+Registration: registering a phone does not create or identify a Sandbox. Agent
+Hosting may derive a non-reversible provider label from the phone identity, but
+must not expose the phone number to the provider as a sandbox name or label.
 
 ### Prompt Turn
 

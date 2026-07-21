@@ -27,7 +27,7 @@ cannot host that. Daytona already hosts it well. Therefore:
 > door, the phonebook, and the switchboard, not the kennel.**
 
 This lines up with `DOMAIN.md`'s bounded contexts exactly. Cloudflare owns Voice
-Transport, the allowlist, and Voice Interaction routing. Daytona owns Agent
+Transport, phone registration, and Voice Interaction routing. Daytona owns Agent
 Hosting, ACP Integration, and Session Management.
 
 ## Resolved design questions
@@ -96,7 +96,7 @@ outbound WebSocket up to the DO instead; documented, not built.
 ## Architecture
 
 ```text
-Phone -> Twilio -> CF Worker /voice  (allowlist lookup in D1)
+Phone -> Twilio -> CF Worker /voice  (registration lookup in D1)
                       |
                       +- unknown number -> TwiML reject / request-access ritual
                       +- known, cold     -> TwiML "waking your workspace" + hold,
@@ -143,12 +143,10 @@ Stay Cloudflare-native. Convex was considered and rejected: it would be a second
 control plane outside Cloudflare duplicating what DOs + D1 already provide, at
 friends-and-family scale not worth the extra vendor.
 
-- **D1** (SQLite): the "little database." Allowlist and audit log. A row is
-  roughly `phone_number -> daytona_label` plus policy (ephemeral | persistent,
-  permission autonomy level, display name, created_at, last_seen). Daytona
-  labels are the join key; the Worker never hardcodes sandbox IDs. Sandbox
-  lookup is "list sandboxes filtered by label," matching the stated core goal:
-  "per-user Daytona sandboxes looked up by label."
+- **D1** (SQLite): the "little database." Phone registrations, capability-style
+  invite codes, and an audit log. The phone number is the PSTN identity; access
+  control stores no personal name or hosting policy. Sandbox association belongs
+  to Agent Hosting and may be keyed from the registered phone number.
 - **Durable Objects**: per-call / per-sandbox live coordination. Holds the three
   WebSockets, the `CallLease`, and the Managed Session projection. This is the
   single biggest architectural win: the threading + asyncio hybrid that is the
@@ -160,7 +158,7 @@ friends-and-family scale not worth the extra vendor.
 
 ## Onboarding and the cold-sandbox TwiML loop
 
-The interesting sequencing problem: an allowlisted-but-unprovisioned friend calls
+The interesting sequencing problem: a registered-but-unprovisioned caller calls
 before their sandbox is warm. Daytona cold-start plus `opencode acp` init takes
 seconds. Plain TwiML covers it:
 
@@ -205,7 +203,7 @@ Keep (runs in the sandbox, stays Python, proven core):
 Port (to JS/TS on Cloudflare):
 - `voice_bridge.py serve` role -> Worker + Durable Object: Twilio webhook,
   signature validation, Media Stream WS <-> OpenAI Realtime WS, plus the new
-  allowlist / onboarding / label-resolution logic.
+  registration / onboarding / hosting-resolution logic.
 - The Walker persona: `INSTRUCTIONS`, `DOG_BRIEFING`, `TOOLS`. Single-source
   these; today the "a Dog completed" notification wording is duplicated across
   the HTML, the pump, and `INSTRUCTIONS` (shotgun-surgery hazard). One home.
@@ -249,7 +247,7 @@ Decide whether the alias->sessionId binding is DO-durable or re-derived via
    DO) open the ACP WebSocket via the standard preview URL + token, complete an
    `initialize` handshake and one `session/new` + `session/prompt`. Proves the
    whole control plane end to end with zero audio.
-2. **Worker `/voice` + D1 allowlist + TwiML onboarding loop**: no audio yet.
+2. **Worker `/voice` + D1 registrations + TwiML onboarding loop**: no audio yet.
    Prove unknown/warm/cold routing and the cold-start redirect.
 3. **DO audio bridge**: Twilio Media Stream <-> DO <-> OpenAI Realtime, Walker
    persona, tool calls relayed to spike-1's ACP WebSocket.
