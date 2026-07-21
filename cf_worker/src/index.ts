@@ -8,6 +8,7 @@
 
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { ADMIN_HTML } from "./admin";
+import { LANDING_HTML } from "./landing";
 import type { Env } from "./types";
 import { handleSandboxApi, provisionSandboxCapability } from "./sandbox_api";
 export { VoiceSession } from "./voice_session";
@@ -578,6 +579,12 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
+
+    if (url.pathname === "/" && req.method === "GET") {
+      return new Response(LANDING_HTML, {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=300" },
+      });
+    }
 
     // GET /healthz: does not require Twilio validation.
     if (url.pathname === "/healthz") {

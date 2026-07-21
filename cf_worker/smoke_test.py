@@ -284,6 +284,14 @@ def run_tests(
     status, body = get(base_url, "/healthz")
     require((status, body) == (200, "ok\n"), f"healthz: {status} {body!r}")
 
+    status, body = get(base_url, "/")
+    require(
+        status == 200
+        and "Take your coding agents" in body
+        and "github.com/rndmcnlly/dogwalk" in body,
+        f"landing page: {status} {body[:100]!r}",
+    )
+
     status, _ = post(
         base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_BOGUS"}, "bogus"
     )
@@ -621,7 +629,7 @@ def run_tests(
         f"completed calls remain live: {closed_state.get('live_calls')}",
     )
 
-    print("27 checks passed" if mock_daytona else "19 checks passed")
+    print("28 checks passed" if mock_daytona else "20 checks passed")
     return 0
 
 
