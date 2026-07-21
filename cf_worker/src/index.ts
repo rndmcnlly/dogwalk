@@ -2,7 +2,7 @@
  * Dogwalk Cloudflare Worker
  *
  * TwiML registration, Daytona sandbox lifecycle, Durable Object voice/ACP
- * coordination, and Access-protected Mission Control.
+ * coordination, and the Access-protected read-only Diagnostics surface.
  * See PSTN_CLOUDFLARE.md for the deployed architecture.
  */
 
@@ -380,7 +380,7 @@ async function resolveSandbox(
   return { assignment: (await getAssignment(env, phone))!, sandbox };
 }
 
-// --- Mission Control ----------------------------------------------------
+// --- Diagnostics --------------------------------------------------------
 
 const accessKeySets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
@@ -429,7 +429,7 @@ const jsonResponse = (value: unknown, status = 200) => new Response(JSON.stringi
   headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
 });
 
-async function missionControlSnapshot(env: Env, verbose: boolean): Promise<Record<string, unknown>> {
+async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<string, unknown>> {
   const registrationResult = await env.DB.prepare(
     `SELECT r.phone_number, r.registered_at, r.last_seen_at,
             s.provider_id, s.identity_hash, s.state, s.error,
@@ -516,11 +516,11 @@ async function missionControlSnapshot(env: Env, verbose: boolean): Promise<Recor
 
 const maskPhone = (phone: string): string => phone.replace(/\d(?=\d{4})/g, "*");
 
-async function missionControlState(env: Env, verbose: boolean): Promise<Response> {
-  return jsonResponse(await missionControlSnapshot(env, verbose));
+async function diagnosticsState(env: Env, verbose: boolean): Promise<Response> {
+  return jsonResponse(await diagnosticsSnapshot(env, verbose));
 }
 
-function missionControlEvents(env: Env, verbose: boolean): Response {
+function diagnosticsEvents(env: Env, verbose: boolean): Response {
   const encoder = new TextEncoder();
   let active = true;
   const stream = new ReadableStream<Uint8Array>({
@@ -529,7 +529,7 @@ function missionControlEvents(env: Env, verbose: boolean): Response {
         const deadline = Date.now() + 5 * 60 * 1000;
         try {
           while (active && Date.now() < deadline) {
-            const snapshot = await missionControlSnapshot(env, verbose);
+            const snapshot = await diagnosticsSnapshot(env, verbose);
             controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(snapshot)}\n\n`));
             await new Promise((resolve) => setTimeout(resolve, 10_000));
           }
@@ -559,7 +559,7 @@ function missionControlEvents(env: Env, verbose: boolean): Response {
 
 async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Response> {
   if (!(await adminAuthorized(req, env))) {
-    const headers = env.ADMIN_PASSWORD ? { "www-authenticate": 'Basic realm="Dogwalk Mission Control"' } : undefined;
+    const headers = env.ADMIN_PASSWORD ? { "www-authenticate": 'Basic realm="Dogwalk Diagnostics"' } : undefined;
     return new Response("unauthorized", { status: env.ADMIN_PASSWORD ? 401 : 403, headers });
   }
   if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
@@ -569,8 +569,8 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
     });
   }
   const verbose = new URL(req.url).searchParams.get("verbose") === "1";
-  if (pathname === "/admin/api/state") return missionControlState(env, verbose);
-  if (pathname === "/admin/api/events") return missionControlEvents(env, verbose);
+  if (pathname === "/admin/api/state") return diagnosticsState(env, verbose);
+  if (pathname === "/admin/api/events") return diagnosticsEvents(env, verbose);
   return new Response("not found", { status: 404 });
 }
 

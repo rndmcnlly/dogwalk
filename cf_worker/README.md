@@ -3,7 +3,7 @@
 This Worker is the production Dogwalk service at `https://dogwalk.tools`. It
 provides Twilio PSTN voice, phone registration, Daytona sandbox lifecycle,
 Managed Session multiplexing, publication links, SMS delivery, recovery, and
-diagnostic Mission Control.
+a read-only Diagnostics surface.
 
 This is a public repository for Adam's operator-managed deployment. Public
 hostnames, provider resource IDs, Keychain service names, and local secret-lookup
@@ -141,22 +141,41 @@ that window, but a completely silent long Prompt Turn could still lose its Agent
 Connection. A sandbox-initiated inbound ACP connection is the hardening path for
 strictly durable unattended turns.
 
-## Mission Control
+## Diagnostics
 
-Mission Control is at `https://dogwalk.tools/admin`. The interim username
-is `adam`; its generated password is stored in macOS Keychain:
+The read-only Diagnostics surface is at `https://dogwalk.tools/admin`. It is a
+passive mirror of runtime state for harness development and debugging, never a
+required user interface and never a control surface: all authorization and
+action happen over voice. The interim username is `adam`; its generated password
+is stored in macOS Keychain:
 
 ```bash
 security find-generic-password -a adam -s dogwalk-admin -w
 ```
 
-The dashboard receives authenticated server-sent events from
-`/admin/api/events` every ten seconds. Streams close after five minutes so the
-browser reconnects and revalidates authentication automatically.
+The page renders one runtime tree whose nesting follows object containment, with
+Voice Calls, Sandbox Assignments, Access Control records, and the audit tail as
+sibling roots. Selecting a node drives the detail pane. It receives authenticated
+server-sent events from `/admin/api/events` every ten seconds. Streams close
+after five minutes so the browser reconnects and revalidates authentication
+automatically.
+
+The Session Management and ACP Integration subtrees (Managed Sessions, Prompt
+Turns, Attention Requests) are marked "not wired" until the backend emits that
+telemetry; the operator lens shows only calls, sandboxes, registrations, and the
+audit log today.
+
+A capability-scoped caller lens (a Scoped Diagnostic View, per `DOMAIN.md`) is
+served read-only at `/v/<token>`. The Voice Agent tool `text_diagnostic_view`
+mints a per-call unguessable link and texts it to the registered caller so they
+can see this call's own activity and share it when reporting a problem. The token
+is an HMAC over the Call SID, so a leaked link exposes only that one call and can
+never reveal another call; it carries no expiry by design. The link is never
+verbalized. Its backing row lives in the `diagnostic_views` table.
 
 Live calls are keyed by Twilio Call SID and display a bounded, source-aware
 activity timeline. The reserved sources are `voice`, `access`, `hosting`,
-`menu`, and `acp`. Mission Control starts in demo-safe mode: phone numbers,
+`menu`, and `acp`. Diagnostics starts in demo-safe mode: phone numbers,
 provider IDs, Call SIDs, identity hashes, and event details are redacted by the
 server. `Reveal verbose telemetry` reconnects with `verbose=1` for the current
 page session only. Large conversation or tool payloads should be stored by

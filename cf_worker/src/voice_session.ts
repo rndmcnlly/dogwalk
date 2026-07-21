@@ -4,6 +4,7 @@ import {
   listEphemeralServices,
   listReviewBundles,
   sendSms,
+  textDiagnosticView,
   textEphemeralService,
   textReviewBundle,
 } from "./sandbox_api";
@@ -163,6 +164,12 @@ const TOOLS = [
       required: ["service_id"],
       additionalProperties: false,
     },
+  },
+  {
+    type: "function",
+    name: "text_diagnostic_view",
+    description: "Queue a private link to a read-only view of this call's own activity for SMS delivery, useful when the caller wants to see what happened or report a problem. The link is scoped to this call only. Never speak or repeat the link.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     type: "function",
@@ -525,6 +532,10 @@ export class VoiceSession {
           await sendSms(this.env, this.requiredPhone(), requiredString(args, "message").slice(0, 320));
           result = { ok: true, status: "queued" };
           break;
+        case "text_diagnostic_view":
+          await textDiagnosticView(this.env, this.requiredPhone(), this.requiredCallSid());
+          result = { ok: true, status: "queued" };
+          break;
         case "open_recovery_menu":
           await this.setCallHandoff("recovery");
           result = { ok: true, status: "opening recovery menu" };
@@ -843,6 +854,11 @@ export class VoiceSession {
   private requiredPhone(): string {
     if (!this.phone) throw new Error("Registered phone is unavailable");
     return this.phone;
+  }
+
+  private requiredCallSid(): string {
+    if (!this.callSid) throw new Error("Voice Call context is unavailable");
+    return this.callSid;
   }
 
   private async setCallHandoff(action: "hangup" | "recovery"): Promise<void> {

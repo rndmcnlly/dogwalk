@@ -138,6 +138,22 @@ CREATE TABLE IF NOT EXISTS call_handoffs (
   created_at INTEGER NOT NULL
 );
 
+-- A Scoped Diagnostic View is a read-only projection of the runtime tree bound
+-- to one Voice Call. The public link is an unguessable bearer capability; only
+-- its hash is retained. The capability is bound to the call_sid, so a leaked
+-- link can never reveal a different (past or future) Voice Call. No expiry: the
+-- per-call HMAC token is unenumerable, so cross-call leakage is the only threat
+-- and binding defeats it.
+CREATE TABLE IF NOT EXISTS diagnostic_views (
+  call_sid TEXT PRIMARY KEY,
+  phone_number TEXT NOT NULL,
+  public_token_hash TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_diagnostic_views_token
+  ON diagnostic_views(public_token_hash);
+
 CREATE TABLE IF NOT EXISTS sms_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   phone_number TEXT NOT NULL,

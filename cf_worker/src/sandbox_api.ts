@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { SCOPED_VIEW_HTML } from "./admin";
 
 const CAPABILITY_PATH = "/home/daytona/.config/dogwalk/sandbox-capability.json";
 const MAX_FILES = 16;
@@ -46,6 +47,9 @@ export async function handleSandboxApi(request: Request, env: Env): Promise<Resp
   }
   if (pathname.startsWith("/b/") && ["GET", "HEAD"].includes(request.method)) {
     return serveReviewBundle(request, env);
+  }
+  if (pathname.startsWith("/v/") && ["GET", "HEAD"].includes(request.method)) {
+    return serveDiagnosticView(request, env);
   }
   return null;
 }
@@ -155,6 +159,74 @@ export async function textEphemeralService(env: Env, phone: string, serviceId: s
     `/sandbox/${encodeURIComponent(service.provider_id)}/ports/${service.port}/signed-preview-url?expiresInSeconds=${SERVICE_LINK_TTL_SECONDS}`,
   );
   await sendSms(env, phone, `${service.name}: ${preview.url}`, "ephemeral_service", service.id);
+}
+
+// --- Scoped Diagnostic View ---------------------------------------------
+
+// Mint a per-call unguessable link and text it to the registered caller. The
+// token is an HMAC over the call_sid, so it is unenumerable: a leaked link
+// exposes only this one Voice Call, never a different past or future call.
+// No expiry, by design (see DOMAIN.md: Scoped Diagnostic View).
+export async function textDiagnosticView(env: Env, phone: string, callSid: string): Promise<void> {
+  if (!callSid) throw new Error("Voice Call context is unavailable");
+  const token = await diagnosticViewToken(env, callSid);
+  const tokenHash = await sha256Hex(token);
+  await env.DB.prepare(
+    `INSERT INTO diagnostic_views (call_sid, phone_number, public_token_hash, created_at)
+     VALUES (?, ?, ?, unixepoch())
+     ON CONFLICT(call_sid) DO UPDATE SET
+       phone_number = excluded.phone_number,
+       public_token_hash = excluded.public_token_hash`,
+  ).bind(callSid, phone, tokenHash).run();
+  const origin = env.PUBLIC_ORIGIN ?? "https://dogwalk.tools";
+  await sendSms(env, phone, `See what your agents did this call: ${origin}/v/${token}`, "diagnostic_view", callSid);
+}
+
+async function serveDiagnosticView(request: Request, env: Env): Promise<Response> {
+  const parts = new URL(request.url).pathname.split("/").filter(Boolean);
+  const token = parts[1] ?? "";
+  const wantsData = parts[2] === "data";
+  if (!/^[a-f0-9]{64}$/.test(token)) return new Response("not found", { status: 404 });
+  const view = await env.DB.prepare(
+    "SELECT call_sid, phone_number FROM diagnostic_views WHERE public_token_hash = ?",
+  ).bind(await sha256Hex(token)).first<{ call_sid: string; phone_number: string }>();
+  if (!view) return new Response("not found", { status: 404 });
+
+  if (!wantsData) {
+    return new Response(SCOPED_VIEW_HTML, {
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-robots-tag": "noindex, nofollow, noarchive",
+        "referrer-policy": "no-referrer",
+      },
+    });
+  }
+  return json(await scopedViewSnapshot(env, view.call_sid, view.phone_number));
+}
+
+// The pruned, read-only projection resolved through one Voice Call. Only what
+// that call touched, plus the caller's own sandbox state. Presentation may use
+// friendly Voice-Interaction language; neutral state stays operator-facing.
+async function scopedViewSnapshot(env: Env, callSid: string, phone: string): Promise<Record<string, unknown>> {
+  const call = await env.DB.prepare(
+    `SELECT call_sid, status, started_at, ended_at FROM voice_calls WHERE call_sid = ?`,
+  ).bind(callSid).first<Record<string, unknown>>();
+  const activity = await env.DB.prepare(
+    `SELECT ts, source, event FROM call_activity WHERE call_sid = ? ORDER BY id ASC LIMIT 200`,
+  ).bind(callSid).all<Record<string, unknown>>();
+  const sandbox = await env.DB.prepare(
+    `SELECT state FROM sandbox_assignments WHERE phone_number = ?`,
+  ).bind(phone).first<{ state: string }>();
+  return {
+    generated_at: Math.floor(Date.now() / 1000),
+    scoped: true,
+    call: call
+      ? { started_at: call.started_at, ended_at: call.ended_at, status: call.status }
+      : null,
+    activity: activity.results ?? [],
+    sandbox_state: sandbox?.state ?? null,
+  };
 }
 
 export async function sendSms(
@@ -327,6 +399,10 @@ async function authenticateSandbox(request: Request, env: Env): Promise<SandboxA
 
 async function reviewToken(env: Env, id: string): Promise<string> {
   return scopedToken(env, `review-bundle-v1:${id}`);
+}
+
+async function diagnosticViewToken(env: Env, callSid: string): Promise<string> {
+  return scopedToken(env, `diagnostic-view-v1:${callSid}`);
 }
 
 async function scopedToken(env: Env, message: string): Promise<string> {

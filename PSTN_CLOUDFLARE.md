@@ -101,10 +101,10 @@ local credentials are documentation, not secrets. Secret values, private keys,
 capability tokens, signed links, and sensitive production payloads never belong
 in Git.
 
-Caller identity is the normalized registered phone number. Mission Control at
-`https://dogwalk.tools/admin` defaults to server-side redaction and currently
-uses interim HTTP Basic authentication. Cloudflare Access JWT support exists but
-is disabled until a path-scoped Access application is configured.
+Caller identity is the normalized registered phone number. The Diagnostics
+surface at `https://dogwalk.tools/admin` defaults to server-side redaction and
+currently uses interim HTTP Basic authentication. Cloudflare Access JWT support
+exists but is disabled until a path-scoped Access application is configured.
 
 ## Known Rough Edges
 
@@ -115,7 +115,7 @@ is disabled until a path-scoped Access application is configured.
 - Review Bundles use bounded D1 blob storage until R2 is enabled.
 - SMS delivery remains unavailable until Twilio approves the A2P Brand,
   Campaign, and sender association.
-- Mission Control is diagnostic infrastructure, not a required user interface.
+- The Diagnostics surface is read-only infrastructure, not a required user interface.
 
 These are bounded gaps in the accepted architecture, not competing product
 directions.

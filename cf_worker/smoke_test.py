@@ -556,6 +556,11 @@ def run_tests(
     status, _ = get(base_url, "/admin")
     require(status == 401, f"admin did not require authentication: {status}")
 
+    # Scoped Diagnostic View: an unminted per-call token must not resolve. The
+    # capability is unenumerable, so a random 64-hex token is a 404.
+    status, _ = get(base_url, "/v/" + ("0" * 64))
+    require(status == 404, f"unknown scoped view token resolved: {status}")
+
     status, event, safe_state = first_sse_event(base_url, "adam", LOCAL_ADMIN_PASSWORD)
     require(
         status == 200 and event == "state", f"SSE did not emit state: {status} {event}"
@@ -629,7 +634,7 @@ def run_tests(
         f"completed calls remain live: {closed_state.get('live_calls')}",
     )
 
-    print("28 checks passed" if mock_daytona else "20 checks passed")
+    print("29 checks passed" if mock_daytona else "21 checks passed")
     return 0
 
 

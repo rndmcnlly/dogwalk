@@ -147,7 +147,7 @@ an operational projection, not conversation history. ACP Integration may later
 project concise protocol envelopes into the same timeline when they are
 correlated with a Voice Call. Full prompts, model output, and tool payloads do
 not belong inline in Call Activity when they are large; store bounded diagnostic
-details or references. Mission Control presents a redacted projection by
+details or references. The Diagnostics Surface presents a redacted projection by
 default and requires an explicit, session-only opt-in to reveal verbose details.
 
 ### Agent Implementation
@@ -269,6 +269,52 @@ inserted into Agent or Voice Agent context.
 
 An Ephemeral Service is not durable merely because its registration persists.
 It is available only while its process and Sandbox remain available.
+
+### Diagnostics Surface
+
+**Context:** Access Control, with projections from every other context
+
+The read-only, passive web projection of Dogwalk's runtime state, used for
+harness development, telemetry, and debugging. It is never a required interaction
+surface and never mutates domain state; all authorization and action happen over
+voice. The Diagnostics Surface renders one runtime tree whose nesting follows
+object containment (Agent Connection, Managed Session by Alias, Prompt Turn,
+Attention Request, Review Bundle), with Voice Calls, Sandbox Assignments, Access
+Control records, and the audit tail as sibling roots. Bounded context is a label
+on each node, not the organizing structure.
+
+The same renderer serves different viewers under different capabilities. The
+operator capability resolves the full tree. A Scoped Diagnostic View resolves
+only a permitted subtree. What each viewer may see is decided by capability, not
+by client-side hiding.
+
+**Not:** A control surface, a required User interface, or the Voice Interaction
+itself. "Mission Control" is superseded historical language for this surface.
+
+### Scoped Diagnostic View
+
+**Context:** Access Control and Voice Interaction
+
+A capability-scoped, read-only projection of the runtime tree bound to one Voice
+Call. It lets a User see what their own Agents did during that call and share the
+link when reporting a problem, an opt-in eyes-full complement to the eyes-free
+norm. Its public URL is an unguessable bearer capability, minted by Agent Hosting
+on User request and texted to the registered phone number; it is never verbalized
+or inserted into Agent or Voice Agent context. It belongs to the same capability
+family as a Review Bundle and an Ephemeral Service link.
+
+The capability is bound to the Call's identity, not to a phone number, Sandbox,
+or Managed Session. Because the token is an unenumerable per-call secret, a
+leaked link cannot reveal any other Voice Call, past or future; cross-call
+leakage is the only relevant threat and binding defeats it, so the capability
+carries no expiry. The view resolves the Managed Sessions that call supervised,
+their Prompt Turns, Attention Requests, and Review Bundles, plus the correlated
+Call Activity, frozen to that call's window. Presentation in this view may use
+Voice Interaction conversational projections such as "working" or "done"; neutral
+lifecycle state and opaque identifiers remain the operator-facing representation.
+
+**Not:** A Managed Session, a durable dashboard, or a capability that follows a
+User across calls.
 
 ### Prompt Turn
 
@@ -466,6 +512,7 @@ The following language appears in Git history and is not canonical for productio
 - **Pack:** An early spoken label for a set of sessions. Production tools list Managed Sessions.
 - **Sic, relay, revive, and call off:** Early Voice Agent tool verbs. Production tools use create, prompt, load, cancel, and close.
 - **Working/resting Dog:** Optional narration over Prompt Turn activity and session readiness, not lifecycle state.
+- **Mission Control:** Superseded name for the Diagnostics Surface. Production code and docs use Diagnostics.
 
 ## Open Questions
 
@@ -473,6 +520,8 @@ The following language appears in Git history and is not canonical for productio
 - Which Agent plan and tool-call changes deserve proactive speech, an earcon, or silent state projection?
 - How should the Voice Agent resolve ambiguous spoken "stop" among stopping speech, cancelling one Prompt Turn, closing one Managed Session, stopping all Agent work, and ending the voice call?
 - Which parts of Assignment history belong to Dogwalk versus the ACP Agent's retained session context?
+- A Managed Session and its Alias can outlive the Voice Call that created it. When a Scoped Diagnostic View is frozen to one call's window, should a session that later continues under a different call remain visible in the original call's view, or should the view show only that session's state as of the original call?
+- Where should durable state whose lifecycle is owned by a Sandbox live? Review Bundles and Ephemeral Services currently persist in D1 keyed by phone number, so they outlive the Sandbox that produced them, which conflicts with the principle that deleting a Sandbox truly destroys its Agent-held state. Moving that state into per-Sandbox Durable Object storage would make deletion complete, but the operator Diagnostics lens is a Worker reading D1 and cannot synchronously read arbitrary DO storage; it would then need RPC fan-out or a DO-pushed projection. The ownership boundary between D1 and Durable Objects, and how the operator lens observes DO-owned state, is unresolved.
 
 ## ACP References
 
