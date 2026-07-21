@@ -20,28 +20,39 @@ export { VoiceSession } from "./voice_session";
 /**
  * Validate the Twilio signature header against the request body and URL.
  * Twilio signs with HMAC-SHA1 of `url + params` (sorted, concatenated) using
- * the auth token. The signature is base64. We reconstruct the URL from the
- * incoming request, preferring the x-forwarded-proto/host that Cloudflare
- * sets in front of workers.dev.
+ * the auth token. The signature is base64.
+ *
+ * Twilio signs the exact public URL you configure on the phone number. To make
+ * validation deterministic and independent of which hostname actually served
+ * the request (the custom domain dogwalk.tools vs the workers.dev hostname),
+ * we reconstruct the signed URL from PUBLIC_ORIGIN + the request path when it
+ * is set. Configure the Twilio webhook to match PUBLIC_ORIGIN exactly:
+ *   Voice: A call comes in     -> POST https://dogwalk.tools/voice
+ *   Voice: Call status changes -> POST https://dogwalk.tools/voice/status
+ * When PUBLIC_ORIGIN is unset (pure local dev) we fall back to the request's
+ * own origin.
  *
  * Reference: https://www.twilio.com/docs/usage/webhooks/webhooks-security
  */
 async function twilioSignatureValid(
   req: Request,
-  authToken: string,
+  env: Env,
 ): Promise<{ valid: boolean; url: string }> {
+  const authToken = env.TWILIO_AUTH_TOKEN;
   const sigHeader = req.headers.get("x-twilio-signature") ?? "";
   if (!sigHeader || !authToken) return { valid: false, url: "" };
 
-  // Reconstruct the URL Twilio signed: the fully-qualified webhook URL it hit.
-  // In production (workers.dev), Twilio calls https://... and Cloudflare sets
-  // x-forwarded-proto and x-forwarded-host. In local dev, neither header is
-  // set, so fall back to the request's own protocol and host.
+  // Prefer the configured public origin's host so the signed URL matches what
+  // Twilio was told to call, regardless of the serving hostname. Fall back to
+  // the request's own host when PUBLIC_ORIGIN is not configured (pure local
+  // dev). The scheme still follows the request: Twilio signs the https webhook
+  // URL for POST callbacks and the wss URL when it opens a Media Stream, so a
+  // WebSocket upgrade is validated against wss://<host>.
   const url = new URL(req.url);
-  const requestProtocol = url.protocol.replace(":", "");
-  const requestHost = url.host;
-  const signedProtocol = req.headers.get("upgrade")?.toLowerCase() === "websocket" ? "wss" : requestProtocol;
-  const signedUrl = `${signedProtocol}://${requestHost}${url.pathname}${url.search}`;
+  const configuredHost = env.PUBLIC_ORIGIN ? new URL(env.PUBLIC_ORIGIN).host : url.host;
+  const isWebSocket = req.headers.get("upgrade")?.toLowerCase() === "websocket";
+  const scheme = isWebSocket ? "wss" : url.protocol.replace(":", "");
+  const signedUrl = `${scheme}://${configuredHost}${url.pathname}${url.search}`;
 
   // Twilio sends POST as application/x-www-form-urlencoded for /voice.
   // Clone before formData() consumes the body.
@@ -633,7 +644,7 @@ export default {
 };
 
 async function handleSmsStatus(req: Request, env: Env): Promise<Response> {
-  const signature = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  const signature = await twilioSignatureValid(req, env);
   if (!signature.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
   const messageSid = String(form.get("MessageSid") ?? "");
@@ -650,7 +661,7 @@ async function handleSmsStatus(req: Request, env: Env): Promise<Response> {
 
 async function handleVoice(req: Request, env: Env): Promise<Response> {
   // Twilio signature check. We clone the body because formData() consumes it.
-  const sig = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  const sig = await twilioSignatureValid(req, env);
   if (!sig.valid) {
     return new Response("forbidden", { status: 403 });
   }
@@ -716,7 +727,7 @@ async function handleVoice(req: Request, env: Env): Promise<Response> {
 }
 
 async function handleAfterStream(req: Request, env: Env): Promise<Response> {
-  const signature = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  const signature = await twilioSignatureValid(req, env);
   if (!signature.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
   const from = normalizePhone(form.get("From"));
@@ -737,7 +748,7 @@ function recoveryMenu(prefix = ""): Response {
 }
 
 async function handleRecovery(req: Request, env: Env): Promise<Response> {
-  const signature = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  const signature = await twilioSignatureValid(req, env);
   if (!signature.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
   const from = normalizePhone(form.get("From"));
@@ -769,7 +780,7 @@ async function handleRecovery(req: Request, env: Env): Promise<Response> {
 }
 
 async function handleRecoveryConfirm(req: Request, env: Env): Promise<Response> {
-  const signature = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  const signature = await twilioSignatureValid(req, env);
   if (!signature.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
   const from = normalizePhone(form.get("From"));
@@ -797,7 +808,7 @@ async function handleVoiceStream(req: Request, env: Env): Promise<Response> {
   if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     return new Response("websocket required", { status: 426 });
   }
-  const signature = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  const signature = await twilioSignatureValid(req, env);
   if (!signature.valid) return new Response("forbidden", { status: 403 });
   const identity = new URL(req.url).pathname.split("/").filter(Boolean).at(-1) ?? "";
   if (!/^[a-f0-9]{64}$/.test(identity)) return new Response("invalid identity", { status: 400 });
@@ -830,7 +841,7 @@ async function recordCallStarted(env: Env, phone: string, callSid: string): Prom
 }
 
 async function handleCallStatus(req: Request, env: Env): Promise<Response> {
-  const sig = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  const sig = await twilioSignatureValid(req, env);
   if (!sig.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
   const from = normalizePhone(form.get("From"));
@@ -857,7 +868,7 @@ async function handleCallStatus(req: Request, env: Env): Promise<Response> {
 // --- /voice/claim: receive spoken words --------------------------------
 
 async function handleClaim(req: Request, env: Env): Promise<Response> {
-  const sig = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  const sig = await twilioSignatureValid(req, env);
   if (!sig.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
   const from = normalizePhone(form.get("From"));
@@ -911,7 +922,7 @@ async function handleClaim(req: Request, env: Env): Promise<Response> {
 // --- /voice/confirm: yes/retry on readback -----------------------------
 
 async function handleConfirm(req: Request, env: Env): Promise<Response> {
-  const sig = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  const sig = await twilioSignatureValid(req, env);
   if (!sig.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
   const from = normalizePhone(form.get("From"));
@@ -1003,7 +1014,7 @@ function statusSummary(output: string): string {
 }
 
 async function handleMenu(req: Request, env: Env): Promise<Response> {
-  const sig = await twilioSignatureValid(req, env.TWILIO_AUTH_TOKEN);
+  const sig = await twilioSignatureValid(req, env);
   if (!sig.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
   const from = normalizePhone(form.get("From"));
