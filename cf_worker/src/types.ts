@@ -10,8 +10,12 @@ export interface Env {
   TWILIO_API_BASE?: string;
   DAYTONA_SNAPSHOT: string;
   DAYTONA_API_BASE?: string;
-  OPENAI_REALTIME_MODEL?: string;
-  OPENAI_REALTIME_URL?: string;
+  OPENAI_PROJECT_ID: string;
+  OPENAI_WEBHOOK_SECRET: string;
+  OPENAI_LIVE_MODEL?: string;
+  OPENAI_DELEGATED_MODEL?: string;
+  OPENAI_LIVE_API_BASE?: string;
+  OPENAI_LIVE_ATTACH_BASE?: string;
   PUBLIC_ORIGIN?: string;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;

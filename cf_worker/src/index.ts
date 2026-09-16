@@ -11,7 +11,8 @@ import { ADMIN_HTML } from "./admin";
 import { LANDING_HTML } from "./landing";
 import type { Env } from "./types";
 import { handleSandboxApi, provisionSandboxCapability } from "./sandbox_api";
-export { VoiceSession } from "./voice_session";
+import { backendInstructions, VOICE_INSTRUCTIONS, VOICE_TOOLS, VoiceSession } from "./voice_session";
+export { VoiceSession };
 
 // --- env ----------------------------------------------------------------
 
@@ -45,13 +46,10 @@ async function twilioSignatureValid(
   // Prefer the configured public origin's host so the signed URL matches what
   // Twilio was told to call, regardless of the serving hostname. Fall back to
   // the request's own host when PUBLIC_ORIGIN is not configured (pure local
-  // dev). The scheme still follows the request: Twilio signs the https webhook
-  // URL for POST callbacks and the wss URL when it opens a Media Stream, so a
-  // WebSocket upgrade is validated against wss://<host>.
+  // dev).
   const url = new URL(req.url);
   const configuredHost = env.PUBLIC_ORIGIN ? new URL(env.PUBLIC_ORIGIN).host : url.host;
-  const isWebSocket = req.headers.get("upgrade")?.toLowerCase() === "websocket";
-  const scheme = isWebSocket ? "wss" : url.protocol.replace(":", "");
+  const scheme = url.protocol.replace(":", "");
   const signedUrl = `${scheme}://${configuredHost}${url.pathname}${url.search}`;
 
   // Twilio sends POST as application/x-www-form-urlencoded for /voice.
@@ -103,9 +101,8 @@ const Say = (text: string, opts: { voice?: string } = {}) =>
 const Pause = (seconds: number) => `<Pause length="${seconds}"/>`;
 const Redirect = (path: string) => `<Redirect method="POST">${escapeXml(path)}</Redirect>`;
 const Hangup = () => `<Hangup/>`;
-const ConnectStream = (url: string, parameters: Record<string, string>) =>
-  `<Connect><Stream url="${escapeXml(url)}">${Object.entries(parameters).map(([name, value]) =>
-    `<Parameter name="${escapeXml(name)}" value="${escapeXml(value)}"/>`).join("")}</Stream></Connect>`;
+const DialSip = (uri: string) =>
+  `<Dial action="/voice/after-live" method="POST"><Sip>${escapeXml(uri)}</Sip></Dial>`;
 
 const GatherSpeech = (
   promptText: string,
@@ -124,6 +121,94 @@ const GatherDtmf = (promptText: string, actionPath: string) =>
 
 const escapeXml = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+const textEncoder = new TextEncoder();
+
+function base64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function decodeBase64(value: string): Uint8Array {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(normalized + "=".repeat((4 - normalized.length % 4) % 4));
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function hmacSha256(secret: Uint8Array | string, content: string): Promise<Uint8Array> {
+  const source = typeof secret === "string" ? textEncoder.encode(secret) : secret;
+  const material = new Uint8Array(source.byteLength);
+  material.set(source);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    material,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  return new Uint8Array(await crypto.subtle.sign("HMAC", key, textEncoder.encode(content)));
+}
+
+function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index++) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+
+async function sipContextCapability(env: Env, callSid: string): Promise<string> {
+  const expiresAt = Math.floor(Date.now() / 1000) + 5 * 60;
+  const content = `${callSid}.${expiresAt}`;
+  return `${content}.${base64Url(await hmacSha256(env.DOGWALK_IDENTITY_SECRET, `sip-context-v1:${content}`))}`;
+}
+
+async function verifySipContext(
+  env: Env,
+  token: string,
+): Promise<{ callSid: string } | null> {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const [callSid, expiresRaw, signature] = parts;
+  const expiresAt = Number(expiresRaw);
+  if (!/^CA[A-Za-z0-9_]{2,64}$/.test(callSid)) return null;
+  if (!Number.isInteger(expiresAt) || expiresAt < Math.floor(Date.now() / 1000)) return null;
+  const content = `${callSid}.${expiresRaw}`;
+  const expected = await hmacSha256(env.DOGWALK_IDENTITY_SECRET, `sip-context-v1:${content}`);
+  let actual: Uint8Array;
+  try {
+    actual = decodeBase64(signature);
+  } catch {
+    return null;
+  }
+  return equalBytes(expected, actual) ? { callSid } : null;
+}
+
+async function openAiWebhookValid(req: Request, env: Env, body: string): Promise<boolean> {
+  if (!env.OPENAI_WEBHOOK_SECRET) return false;
+  const webhookId = req.headers.get("webhook-id") ?? "";
+  const timestampRaw = req.headers.get("webhook-timestamp") ?? "";
+  const timestamp = Number(timestampRaw);
+  if (!webhookId || !Number.isInteger(timestamp) || Math.abs(Date.now() / 1000 - timestamp) > 5 * 60) return false;
+  const encodedSecret = env.OPENAI_WEBHOOK_SECRET.replace(/^whsec_/, "");
+  let secret: Uint8Array;
+  try {
+    secret = decodeBase64(encodedSecret);
+  } catch {
+    return false;
+  }
+  const expected = await hmacSha256(secret, `${webhookId}.${timestampRaw}.${body}`);
+  const signatures = (req.headers.get("webhook-signature") ?? "").split(/\s+/);
+  return signatures.some((candidate) => {
+    const [version, encoded] = candidate.split(",", 2);
+    if (version !== "v1" || !encoded) return false;
+    try {
+      return equalBytes(expected, decodeBase64(encoded));
+    } catch {
+      return false;
+    }
+  });
+}
 
 // --- ritual constants ---------------------------------------------------
 
@@ -612,11 +697,11 @@ export default {
     if (url.pathname === "/voice" && req.method === "POST") {
       return handleVoice(req, env);
     }
-    if (url.pathname.startsWith("/voice/stream/") && req.method === "GET") {
-      return handleVoiceStream(req, env);
+    if (url.pathname === "/openai/live" && req.method === "POST") {
+      return handleOpenAiLiveWebhook(req, env);
     }
-    if (url.pathname === "/voice/after-stream" && req.method === "POST") {
-      return handleAfterStream(req, env);
+    if (url.pathname === "/voice/after-live" && req.method === "POST") {
+      return handleAfterLive(req, env);
     }
     if (url.pathname === "/voice/recovery" && req.method === "POST") {
       return handleRecovery(req, env);
@@ -686,11 +771,10 @@ async function handleVoice(req: Request, env: Env): Promise<Response> {
       if (sandbox && await sandboxReady(env, sandbox)) {
         await provisionSandboxCapability(env, sandbox, from);
         await audit(env, "sandbox.ready", from, callSid, { state: sandbox.state });
-        const streamUrl = new URL(req.url);
-        streamUrl.protocol = "wss:";
-        streamUrl.pathname = `/voice/stream/${assignment.identity_hash}/`;
-        streamUrl.search = "";
-        return twiml(ConnectStream(streamUrl.toString(), { from, callSid }) + Redirect("/voice/after-stream"));
+        if (!env.OPENAI_PROJECT_ID) throw new Error("OPENAI_PROJECT_ID is not configured");
+        const context = await sipContextCapability(env, callSid);
+        const sipUri = `sip:${env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls;secure=true?x-dogwalk-context=${encodeURIComponent(context)}`;
+        return twiml(DialSip(sipUri));
       }
 
       if (sandbox && ["stopped", "archived", "paused"].includes(sandbox.state)) {
@@ -726,7 +810,7 @@ async function handleVoice(req: Request, env: Env): Promise<Response> {
   return twiml(GatherSpeech("Dogwalk. Say your invite words.", "/voice/claim", 1, invites.map((i) => i.code_words)));
 }
 
-async function handleAfterStream(req: Request, env: Env): Promise<Response> {
+async function handleAfterLive(req: Request, env: Env): Promise<Response> {
   const signature = await twilioSignatureValid(req, env);
   if (!signature.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
@@ -804,27 +888,114 @@ async function handleRecoveryConfirm(req: Request, env: Env): Promise<Response> 
   return twiml(Say("Replacing.") + Pause(5) + Redirect("/voice"));
 }
 
-async function handleVoiceStream(req: Request, env: Env): Promise<Response> {
-  if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-    return new Response("websocket required", { status: 426 });
-  }
-  const signature = await twilioSignatureValid(req, env);
-  if (!signature.valid) return new Response("forbidden", { status: 403 });
-  const identity = new URL(req.url).pathname.split("/").filter(Boolean).at(-1) ?? "";
-  if (!/^[a-f0-9]{64}$/.test(identity)) return new Response("invalid identity", { status: 400 });
-  const assignment = await env.DB.prepare(
-    `SELECT s.phone_number, s.provider_id
-       FROM sandbox_assignments s
-       JOIN registrations r ON r.phone_number = s.phone_number
-      WHERE s.identity_hash = ?`,
-  ).bind(identity).first<{ phone_number: string; provider_id: string | null }>();
-  if (!assignment?.provider_id) return new Response("sandbox assignment unavailable", { status: 404 });
+async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response> {
+  const body = await req.text();
+  if (!(await openAiWebhookValid(req, env, body))) return new Response("invalid webhook signature", { status: 400 });
 
-  const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(identity));
-  const headers = new Headers(req.headers);
-  headers.set("x-dogwalk-phone", assignment.phone_number);
-  headers.set("x-dogwalk-sandbox-id", assignment.provider_id);
-  return object.fetch(new Request(req, { headers }));
+  let event: Record<string, any>;
+  try {
+    event = JSON.parse(body);
+  } catch {
+    return new Response("invalid webhook payload", { status: 400 });
+  }
+  if (!["live.transport.incoming", "live.call.incoming"].includes(String(event.type))) {
+    return new Response(null, { status: 204 });
+  }
+  if (event.type === "live.transport.incoming" && event.data?.type !== "sip") {
+    return new Response(null, { status: 204 });
+  }
+
+  const liveSessionId = String(event.data?.session_id ?? "");
+  const sipHeaders = Array.isArray(event.data?.sip_headers) ? event.data.sip_headers : [];
+  const contextHeader = sipHeaders.find((header: any) =>
+    String(header?.name ?? "").toLowerCase() === "x-dogwalk-context"
+  );
+  const context = liveSessionId && contextHeader
+    ? await verifySipContext(env, String(contextHeader.value ?? ""))
+    : null;
+  if (!context) {
+    if (liveSessionId) await decideLiveCall(env, liveSessionId, "reject", { status_code: 403 });
+    return new Response(null, { status: 204 });
+  }
+
+  const assignment = await env.DB.prepare(
+    `SELECT s.phone_number, s.provider_id, s.identity_hash
+       FROM voice_calls c
+       JOIN sandbox_assignments s ON s.phone_number = c.phone_number
+       JOIN registrations r ON r.phone_number = s.phone_number
+      WHERE c.call_sid = ? AND s.state = 'started'`,
+  ).bind(context.callSid).first<{ phone_number: string; provider_id: string | null; identity_hash: string }>();
+  if (!assignment?.provider_id) {
+    await decideLiveCall(env, liveSessionId, "reject", { status_code: 486 });
+    return new Response(null, { status: 204 });
+  }
+
+  const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(assignment.identity_hash));
+  const headers = new Headers({
+    "x-dogwalk-phone": assignment.phone_number,
+    "x-dogwalk-sandbox-id": assignment.provider_id,
+    "x-dogwalk-call-sid": context.callSid,
+    "x-dogwalk-live-session-id": liveSessionId,
+  });
+  const prepare = await object.fetch("https://voice-session/prepare", { method: "POST", headers });
+  if (!prepare.ok) {
+    await decideLiveCall(env, liveSessionId, "reject", { status_code: prepare.status === 409 ? 486 : 500 });
+    return new Response(null, { status: 204 });
+  }
+  const snapshot = await prepare.json<unknown>();
+  const accepted = await decideLiveCall(env, liveSessionId, "accept", {
+    session: {
+      type: "live",
+      model: env.OPENAI_LIVE_MODEL ?? "gpt-live-1",
+      instructions: VOICE_INSTRUCTIONS,
+      audio: { output: { voice: "marin" } },
+      delegation: {
+        type: "responses",
+        responses: {
+          model: env.OPENAI_DELEGATED_MODEL ?? "gpt-5.6-luna",
+          instructions: backendInstructions(snapshot),
+          tools: VOICE_TOOLS,
+          tool_choice: "auto",
+          parallel_tool_calls: false,
+        },
+      },
+    },
+  });
+  if (!accepted) return new Response(null, { status: 204 });
+
+  const attached = await object.fetch("https://voice-session/attach", { method: "POST", headers });
+  if (!attached.ok) {
+    await decideLiveCall(env, liveSessionId, "hangup");
+    await audit(env, "voice.live.attach.failed", assignment.phone_number, context.callSid, {
+      status: attached.status,
+      detail: (await attached.text()).slice(0, 200),
+    });
+    return new Response("sideband attach failed", { status: 500 });
+  }
+  await audit(env, "voice.live.accepted", assignment.phone_number, context.callSid, { live_session_id: liveSessionId });
+  return new Response(null, { status: 204 });
+}
+
+async function decideLiveCall(
+  env: Env,
+  sessionId: string,
+  action: "accept" | "reject" | "hangup",
+  payload?: unknown,
+): Promise<boolean> {
+  const base = (env.OPENAI_LIVE_API_BASE ?? "https://api.openai.com/v1/live").replace(/\/$/, "");
+  const response = await fetch(`${base}/sessions/${encodeURIComponent(sessionId)}/${action}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      ...(payload ? { "content-type": "application/json" } : {}),
+    },
+    body: payload ? JSON.stringify(payload) : undefined,
+  });
+  if (response.ok) return true;
+  const detail = await response.text();
+  if (response.status === 409 && detail.includes("decision_already_made")) return action === "accept";
+  console.error(`GPT-Live ${action} failed`, response.status, detail.slice(0, 300));
+  return false;
 }
 
 async function recordCallStarted(env: Env, phone: string, callSid: string): Promise<void> {

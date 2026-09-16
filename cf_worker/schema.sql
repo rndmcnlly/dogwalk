@@ -130,7 +130,7 @@ CREATE TABLE IF NOT EXISTS ephemeral_services (
 CREATE INDEX IF NOT EXISTS idx_ephemeral_services_phone
   ON ephemeral_services(phone_number, active, updated_at DESC);
 
--- One-shot instruction consumed when Twilio resumes after a Media Stream.
+-- One-shot instruction consumed when Twilio resumes after the GPT-Live SIP leg.
 CREATE TABLE IF NOT EXISTS call_handoffs (
   call_sid TEXT PRIMARY KEY,
   phone_number TEXT NOT NULL,

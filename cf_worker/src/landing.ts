@@ -74,7 +74,7 @@ footer a:hover{border-color:var(--ink)}
   <ul class="pipe">
     <li>
       <div class="stage">You speak<span>Voice Transport</span></div>
-      <div class="what">A phone call reaches <a href="https://www.twilio.com/voice">Twilio</a> and becomes a live conversation through <a href="https://platform.openai.com/docs/guides/realtime">OpenAI Realtime</a>.</div>
+      <div class="what">A phone call reaches <a href="https://www.twilio.com/voice">Twilio</a> and becomes a live conversation through OpenAI GPT-Live.</div>
     </li>
     <li>
       <div class="stage">Voice Agent<span>Voice Interaction</span></div>
@@ -107,7 +107,7 @@ footer a:hover{border-color:var(--ink)}
 
 <footer>
   <span>An open-source proof of concept.<br><span class="status">Rough edges included.</span></span>
-  <span>Twilio &middot; OpenAI Realtime &middot; ACP &middot; OpenCode &middot; Daytona<br><a href="https://github.com/rndmcnlly/dogwalk">Read the source &rarr;</a></span>
+  <span>Twilio &middot; OpenAI GPT-Live &middot; ACP &middot; OpenCode &middot; Daytona<br><a href="https://github.com/rndmcnlly/dogwalk">Read the source &rarr;</a></span>
 </footer>
 
 </div>

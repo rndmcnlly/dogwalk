@@ -3,9 +3,10 @@
 # requires-python = ">=3.11"
 # dependencies = ["websockets==15.0.1"]
 # ///
-"""End-to-end local test of the Durable Object voice and ACP bridge."""
+"""End-to-end local test of GPT-Live sideband and ACP coordination."""
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -14,9 +15,11 @@ import signal
 import subprocess
 import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
-from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 
 from smoke_test import (
@@ -28,23 +31,23 @@ from smoke_test import (
     ThreadingHTTPServer,
     prepare_local_fixture,
     project_wrangler,
-    sign,
     wait_port,
 )
 
 WORKER_DIR = Path(__file__).resolve().parent
 SOCKET_PORT = 8791
 IDENTITY_SECRET = f"local-identity-secret-{secrets.token_hex(8)}"
+OPENAI_WEBHOOK_KEY = secrets.token_bytes(32)
+OPENAI_WEBHOOK_SECRET = "whsec_" + base64.b64encode(OPENAI_WEBHOOK_KEY).decode()
 
 
 class SocketMocks:
     def __init__(self) -> None:
-        self.realtime = None
+        self.live = None
         self.acp_messages: asyncio.Queue[dict] = asyncio.Queue()
-        self.realtime_messages: asyncio.Queue[dict] = asyncio.Queue()
+        self.live_messages: asyncio.Queue[dict] = asyncio.Queue()
         self.acp_connected = asyncio.Event()
-        self.realtime_connected = asyncio.Event()
-        self.response_number = 0
+        self.live_connected = asyncio.Event()
 
     async def handler(self, socket) -> None:
         if socket.request.path == "/acp":
@@ -90,30 +93,19 @@ class SocketMocks:
                 )
             return
 
-        if socket.request.path == "/realtime":
-            self.realtime = socket
-            self.realtime_connected.set()
+        if socket.request.path == "/live/sessions/live-test/attach":
+            self.live = socket
+            self.live_connected.set()
             async for raw in socket:
                 message = json.loads(raw)
-                await self.realtime_messages.put(message)
-                if message.get("type") == "session.update":
-                    await socket.send(json.dumps({"type": "session.updated"}))
-                elif message.get("type") == "response.create":
-                    self.response_number += 1
-                    response = {"id": f"response-{self.response_number}"}
-                    await socket.send(
-                        json.dumps({"type": "response.created", "response": response})
-                    )
-                    await socket.send(
-                        json.dumps({"type": "response.done", "response": response})
-                    )
+                await self.live_messages.put(message)
             return
 
         await socket.close(1008, "unknown mock path")
 
-    async def send_realtime(self, message: dict) -> None:
-        assert self.realtime is not None
-        await self.realtime.send(json.dumps(message))
+    async def send_live(self, message: dict) -> None:
+        assert self.live is not None
+        await self.live.send(json.dumps(message))
 
 
 async def next_matching(
@@ -137,6 +129,8 @@ VALUES ('{TEST_PHONE}', 'ahead almighty apple', unixepoch(), unixepoch());
 INSERT INTO sandbox_assignments
   (phone_number, provider_id, identity_hash, state, provisioning_started_at, last_checked_at)
 VALUES ('{TEST_PHONE}', 'mock-sandbox-1', '{identity}', 'started', unixepoch(), unixepoch());
+INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at)
+VALUES ('CA_VOICE_TEST', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch());
 INSERT INTO ephemeral_services
   (id, phone_number, provider_id, name, port, session_id, created_at, updated_at, active)
 VALUES ('service-test', '{TEST_PHONE}', 'mock-sandbox-1', 'VS Code', 8000,
@@ -153,109 +147,110 @@ VALUES ('service-test', '{TEST_PHONE}', 'mock-sandbox-1', 'VS Code', 8000,
 async def run_protocol(identity: str) -> None:
     mocks = SocketMocks()
     async with serve(mocks.handler, "127.0.0.1", SOCKET_PORT):
-        path = f"/voice/stream/{identity}/"
-        public_url = f"wss://dogwalk.tools{path}"
-        async with connect(
-            f"ws://127.0.0.1:8787{path}",
-            additional_headers={
-                "x-twilio-signature": sign(public_url, {}, LOCAL_TOKEN)
+        call_sid = "CA_VOICE_TEST"
+        expires_at = int(time.time()) + 300
+        content = f"{call_sid}.{expires_at}"
+        signature = base64.urlsafe_b64encode(
+            hmac.new(
+                IDENTITY_SECRET.encode(),
+                f"sip-context-v1:{content}".encode(),
+                hashlib.sha256,
+            ).digest()
+        ).decode().rstrip("=")
+        context = f"{content}.{signature}"
+        event = {
+            "object": "event",
+            "id": "evt_live_test",
+            "type": "live.transport.incoming",
+            "data": {
+                "type": "sip",
+                "session_id": "live-test",
+                "sip_headers": [{"name": "X-Dogwalk-Context", "value": context}],
             },
-        ) as twilio:
-            await twilio.send(
-                json.dumps(
-                    {"event": "connected", "protocol": "Call", "version": "1.0.0"}
-                )
-            )
-            await twilio.send(
-                json.dumps(
-                    {
-                        "event": "start",
-                        "start": {
-                            "streamSid": "MZ_TEST",
-                            "callSid": "CA_VOICE_TEST",
-                            "mediaFormat": {
-                                "encoding": "audio/x-mulaw",
-                                "sampleRate": 8000,
-                                "channels": 1,
-                            },
-                        },
-                    }
-                )
-            )
-            await asyncio.wait_for(mocks.acp_connected.wait(), 8)
-            await asyncio.wait_for(mocks.realtime_connected.wait(), 8)
-            session_update = await next_matching(
-                mocks.realtime_messages,
-                lambda item: item.get("type") == "session.update",
-            )
-            assert (
-                session_update["session"]["audio"]["input"]["format"]["type"]
-                == "audio/pcmu"
-            )
-            assert (
-                "Harness session events are not user speech"
-                in session_update["session"]["instructions"]
-            )
-            assert (
-                "Session inspection and listing are lightweight"
-                in session_update["session"]["instructions"]
-            )
-            assert {tool["name"] for tool in session_update["session"]["tools"]} >= {
-                "create_managed_session",
-                "begin_prompt_turn",
-                "resolve_permission",
-            }
-            await next_matching(
-                mocks.acp_messages, lambda item: item.get("method") == "initialize"
-            )
-            await next_matching(
-                mocks.realtime_messages,
-                lambda item: item.get("type") == "response.create",
-            )
+        }
+        body = json.dumps(event, separators=(",", ":"))
+        webhook_id = "wh_live_test"
+        timestamp = str(int(time.time()))
+        webhook_signature = base64.b64encode(
+            hmac.new(
+                OPENAI_WEBHOOK_KEY,
+                f"{webhook_id}.{timestamp}.{body}".encode(),
+                hashlib.sha256,
+            ).digest()
+        ).decode()
 
-            await mocks.send_realtime(
-                {"type": "response.output_audio.delta", "delta": "dGVzdC1tdWxhdw=="}
+        def post_webhook(signature_header: str) -> int:
+            request = urllib.request.Request(
+                "http://127.0.0.1:8787/openai/live",
+                data=body.encode(),
+                headers={
+                    "content-type": "application/json",
+                    "webhook-id": webhook_id,
+                    "webhook-timestamp": timestamp,
+                    "webhook-signature": signature_header,
+                },
+                method="POST",
             )
-            outbound = json.loads(await asyncio.wait_for(twilio.recv(), 5))
-            assert outbound["event"] == "media"
-            assert outbound["media"]["payload"] == "dGVzdC1tdWxhdw=="
-            await mocks.send_realtime({"type": "input_audio_buffer.speech_started"})
-            cleared = json.loads(await asyncio.wait_for(twilio.recv(), 5))
-            assert cleared == {"event": "clear", "streamSid": "MZ_TEST"}
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return response.status
+            except urllib.error.HTTPError as error:
+                return error.code
 
-            await mocks.send_realtime(
-                {"type": "response.created", "response": {"id": "tool-create"}}
-            )
-            await mocks.send_realtime(
+        assert await asyncio.to_thread(post_webhook, "v1,invalid") == 400
+        assert not DaytonaMock.openai_requests
+        assert await asyncio.to_thread(post_webhook, f"v1,{webhook_signature}") == 204
+        await asyncio.wait_for(mocks.acp_connected.wait(), 8)
+        await asyncio.wait_for(mocks.live_connected.wait(), 8)
+        accept_path, accept_payload = next(
+            item for item in DaytonaMock.openai_requests if item[0].endswith("/accept")
+        )
+        assert accept_path == "/live/sessions/live-test/accept"
+        session = accept_payload["session"]
+        assert session["type"] == "live" and session["model"] == "gpt-live-1"
+        assert "audio" in session and "format" not in session["audio"]
+        assert "Harness session events are not user speech" in session["instructions"]
+        delegated = session["delegation"]["responses"]
+        assert "call-start snapshot is advisory" in delegated["instructions"]
+        assert {tool["name"] for tool in delegated["tools"]} >= {
+            "create_managed_session",
+            "begin_prompt_turn",
+            "resolve_permission",
+        }
+        await next_matching(
+            mocks.acp_messages, lambda item: item.get("method") == "initialize"
+        )
+        greeting = await next_matching(
+            mocks.live_messages,
+            lambda item: item.get("type") == "session.commentary.append",
+        )
+        assert greeting["content"] == "Dogwalk. Where to?"
+
+        await mocks.send_live(
                 {
-                    "type": "response.output_item.done",
-                    "item": {
+                    "type": "response.event",
+                    "event": {"type": "response.output_item.done", "item": {
                         "type": "function_call",
                         "name": "create_managed_session",
                         "call_id": "call-create",
                         "arguments": json.dumps({"alias": "Juniper"}),
-                    },
+                    }},
                 }
             )
-            await mocks.send_realtime(
-                {"type": "response.done", "response": {"id": "tool-create"}}
-            )
-            created = await next_matching(
-                mocks.realtime_messages,
+        created = await next_matching(
+                mocks.live_messages,
                 lambda item: item.get("item", {}).get("call_id") == "call-create",
             )
-            assert json.loads(created["item"]["output"])["ok"] is True
-            await next_matching(
+        assert created["type"] == "response.item.create"
+        assert json.loads(created["item"]["output"])["ok"] is True
+        await next_matching(
                 mocks.acp_messages, lambda item: item.get("method") == "session/new"
             )
 
-            await mocks.send_realtime(
-                {"type": "response.created", "response": {"id": "tool-prompt"}}
-            )
-            await mocks.send_realtime(
+        await mocks.send_live(
                 {
-                    "type": "response.output_item.done",
-                    "item": {
+                    "type": "response.event",
+                    "event": {"type": "response.output_item.done", "item": {
                         "type": "function_call",
                         "name": "begin_prompt_turn",
                         "call_id": "call-prompt",
@@ -265,75 +260,61 @@ async def run_protocol(identity: str) -> None:
                                 "prompt": "Create a tiny verified artifact.",
                             }
                         ),
-                    },
+                    }},
                 }
             )
-            await mocks.send_realtime(
-                {"type": "response.done", "response": {"id": "tool-prompt"}}
-            )
-            prompted = await next_matching(
-                mocks.realtime_messages,
+        prompted = await next_matching(
+                mocks.live_messages,
                 lambda item: item.get("item", {}).get("call_id") == "call-prompt",
             )
-            assert json.loads(prompted["item"]["output"])["turn_state"] == "in_progress"
-            prompt_request = await next_matching(
+        assert json.loads(prompted["item"]["output"])["turn_state"] == "in_progress"
+        prompt_request = await next_matching(
                 mocks.acp_messages, lambda item: item.get("method") == "session/prompt"
             )
-            assert prompt_request["params"]["sessionId"] == "acp-session-test"
-            completion = await next_matching(
-                mocks.realtime_messages,
+        assert prompt_request["params"]["sessionId"] == "acp-session-test"
+        completion = await next_matching(
+                mocks.live_messages,
                 lambda item: "Prompt Turn stopped" in json.dumps(item),
             )
-            assert completion["type"] == "conversation.item.create"
-            assert "not user speech" in completion["item"]["content"][0]["text"]
+        assert completion["type"] == "session.commentary.append"
 
-            await mocks.send_realtime(
-                {"type": "response.created", "response": {"id": "tool-text"}}
-            )
-            await mocks.send_realtime(
+        await mocks.send_live(
                 {
-                    "type": "response.output_item.done",
-                    "item": {
+                    "type": "response.event",
+                    "event": {"type": "response.output_item.done", "item": {
                         "type": "function_call",
                         "name": "text_ephemeral_service",
                         "call_id": "call-text",
                         "arguments": json.dumps({"service_id": "service-test"}),
-                    },
+                    }},
                 }
             )
-            await mocks.send_realtime(
-                {"type": "response.done", "response": {"id": "tool-text"}}
-            )
-            queued = await next_matching(
-                mocks.realtime_messages,
+        queued = await next_matching(
+                mocks.live_messages,
                 lambda item: item.get("item", {}).get("call_id") == "call-text",
             )
-            assert json.loads(queued["item"]["output"])["status"] == "queued"
-            assert DaytonaMock.sms_messages[-1]["To"] == TEST_PHONE
-            assert "signed-service-token" in DaytonaMock.sms_messages[-1]["Body"]
-            assert (
+        assert json.loads(queued["item"]["output"])["status"] == "queued"
+        assert DaytonaMock.sms_messages[-1]["To"] == TEST_PHONE
+        assert "signed-service-token" in DaytonaMock.sms_messages[-1]["Body"]
+        assert (
                 DaytonaMock.sms_messages[-1]["StatusCallback"]
                 == "https://dogwalk.tools/sms/status"
             )
 
-            await mocks.send_realtime(
-                {"type": "response.created", "response": {"id": "tool-end"}}
-            )
-            await mocks.send_realtime(
+        await mocks.send_live(
                 {
-                    "type": "response.output_item.done",
-                    "item": {
+                    "type": "response.event",
+                    "event": {"type": "response.output_item.done", "item": {
                         "type": "function_call",
                         "name": "end_call",
                         "call_id": "call-end",
                         "arguments": "{}",
-                    },
+                    }},
                 }
             )
-            await mocks.send_realtime(
-                {"type": "response.done", "response": {"id": "tool-end"}}
-            )
-            await asyncio.wait_for(twilio.wait_closed(), 5)
+        async with asyncio.timeout(5):
+            while not any(path.endswith("/hangup") for path, _ in DaytonaMock.openai_requests):
+                await asyncio.sleep(0.05)
 
 
 def main() -> int:
@@ -348,6 +329,7 @@ def main() -> int:
     configure_assignment(wrangler, identity)
     DaytonaMock.exists = True
     DaytonaMock.generation = 1
+    DaytonaMock.openai_requests = []
     daytona = ThreadingHTTPServer(("127.0.0.1", DAYTONA_MOCK_PORT), DaytonaMock)
     thread = threading.Thread(target=daytona.serve_forever, daemon=True)
     thread.start()
@@ -370,7 +352,13 @@ def main() -> int:
             "--var",
             "OPENAI_API_KEY:local-openai-token",
             "--var",
-            f"OPENAI_REALTIME_URL:http://127.0.0.1:{SOCKET_PORT}/realtime",
+            "OPENAI_PROJECT_ID:proj_test",
+            "--var",
+            f"OPENAI_WEBHOOK_SECRET:{OPENAI_WEBHOOK_SECRET}",
+            "--var",
+            f"OPENAI_LIVE_API_BASE:http://127.0.0.1:{DAYTONA_MOCK_PORT}/live",
+            "--var",
+            f"OPENAI_LIVE_ATTACH_BASE:http://127.0.0.1:{SOCKET_PORT}/live",
             "--var",
             f"ADMIN_PASSWORD:{LOCAL_ADMIN_PASSWORD}",
             "--var",
@@ -388,7 +376,7 @@ def main() -> int:
         if not wait_port("127.0.0.1", 8787, timeout=20):
             raise RuntimeError("wrangler dev did not start")
         asyncio.run(run_protocol(identity))
-        print("voice session bridge checks passed")
+        print("voice session sideband checks passed")
         return 0
     finally:
         process.send_signal(signal.SIGTERM)

@@ -2,7 +2,7 @@
 
 Dogwalk aims to provide the capability surface of an agentic coding-session manager, including juggling many concurrent sessions, entirely through hands-free voice with zero dependence on visual user interaction. A deliberately engineering-weak Voice Agent coordinates stronger ACP Agents running in isolated sandboxes; the diagnostic web UI exists only for iterative harness development, telemetry, and debugging, not as a required user interface.
 
-The production path is Twilio PSTN -> Cloudflare Worker and sandbox-keyed Durable Object -> OpenAI Realtime plus ACP-over-WebSocket -> the Daytona-hosted ACP Gateway and OpenCode. Run `uv run --script cf_worker/smoke_test.py`, `uv run --script cf_worker/voice_session_test.py`, and `uv run --script sandbox_acp_gateway.py test`; run `npm run typecheck` from `cf_worker/`. `cf_worker/README.md` is the operational runbook and `PSTN_CLOUDFLARE.md` records the deployed architecture.
+The production path is Twilio PSTN -> Cloudflare Worker access and Sandbox wake-up -> OpenAI GPT-Live over secure SIP, with a control sideband to the sandbox-keyed Durable Object -> ACP-over-WebSocket -> the Daytona-hosted ACP Gateway and OpenCode. Run `uv run --script cf_worker/smoke_test.py`, `uv run --script cf_worker/voice_session_test.py`, and `uv run --script sandbox_acp_gateway.py test`; run `npm run typecheck` from `cf_worker/`. `cf_worker/README.md` is the operational runbook and `PSTN_CLOUDFLARE.md` records the deployed architecture.
 
 This is a public repository for one operator-managed deployment. It is acceptable to document public hostnames, provider resource IDs, local Keychain service names, and commands that retrieve secrets on Adam's laptop. Never commit secret values, local `.env` or `.dev.vars` files, private keys, capability tokens, signed preview URLs, or production request payloads containing them.
 
@@ -19,7 +19,7 @@ Core distinctions:
 - A Prompt Turn completes or is cancelled; its Managed Session can remain available for later turns.
 - Cancelling a Prompt Turn, closing an active session, and deleting persisted session history are distinct operations.
 - Permission Requests authorize actions. Elicitations ask for information. Do not collapse them into one protocol response type.
-- OpenCode, OpenAI Realtime, and Daytona are adapters or deployment choices, not domain concepts.
+- OpenCode, OpenAI GPT-Live, and Daytona are adapters or deployment choices, not domain concepts.
 - Dogwalk is a product codename. Canine language may flavor UI copy, an opening line, or occasional Voice Agent narration, but it is not domain vocabulary.
 - Voice Agent tool names, payloads, logs, schemas, tests, ACP prompts, and sandbox internals use neutral ACP and session-management terms.
 

@@ -25,6 +25,7 @@ npx wrangler secret put TWILIO_AUTH_TOKEN
 npx wrangler secret put DAYTONA_API_KEY
 npx wrangler secret put DOGWALK_IDENTITY_SECRET
 npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put OPENAI_WEBHOOK_SECRET
 npx wrangler secret put TWILIO_ACCOUNT_SID
 npx wrangler secret put ADMIN_PASSWORD
 npm run deploy
@@ -33,6 +34,10 @@ npm run deploy
 `DOGWALK_IDENTITY_SECRET` should be a stable random value. Changing it prevents
 recovery by provider label for assignments that have not yet stored a Daytona
 ID.
+
+Set `OPENAI_PROJECT_ID` in `wrangler.toml`. In the matching OpenAI project,
+subscribe `https://dogwalk.tools/openai/live` to `live.transport.incoming` and
+store its `whsec_...` signing secret as `OPENAI_WEBHOOK_SECRET`.
 
 `DAYTONA_SNAPSHOT` is currently `dogwalk-acp-20260721-v3`. It contains the ACP
 Gateway, OpenCode `1.18.4`, passwordless sandbox-local `sudo`, network diagnostic
@@ -99,25 +104,36 @@ It checks registration, retry limits, snapshot and credential-free configuration
 sandbox creation, deletion recovery, readiness, status execution, identity
 isolation, webhook signatures, and fail-closed admin access.
 
-`voice_session_test.py` runs mock Twilio, OpenAI Realtime, Daytona preview, and
-ACP WebSockets around a local Worker. It checks μ-law passthrough, barge-in
-clearing, ACP initialization, Managed Session creation, asynchronous Prompt
-Turns, signed-preview SMS, and call termination without consuming provider
-traffic.
+`voice_session_test.py` runs mock OpenAI GPT-Live control, Daytona preview, and
+ACP endpoints around a local Worker. It checks signed incoming-call correlation,
+the call-start state preamble, Responses delegation, ACP initialization, Managed
+Session creation, asynchronous Prompt Turns, signed-preview SMS, and call
+termination without consuming provider traffic.
 
 ## Voice Sessions
 
-Warm calls use Twilio bidirectional Media Streams. A sandbox-keyed SQLite Durable
-Object owns the live Agent Connection and persisted Managed Session projection;
-the Voice Call temporarily attaches Twilio and OpenAI Realtime sockets to it.
-Ending the call closes the audio sockets but does not cancel active Prompt Turns
-or close ACP Sessions.
+Warm calls retain Twilio's deterministic registration and Sandbox wake-up front
+door, then use secure SIP (`TLS` signaling and `SRTP` media) to hand the active
+audio leg directly to OpenAI GPT-Live. A sandbox-keyed SQLite Durable Object owns
+the Agent Connection and persisted Managed Session projection; it attaches one
+GPT-Live sideband WebSocket for context and tool execution. Ending the call
+detaches that sideband but does not cancel active Prompt Turns or close ACP
+Sessions.
 
-The production voice model defaults to `gpt-realtime-2.1`. The bridge forwards
-Twilio and Realtime PCMU payloads without transcoding. Voice Agent tools use the
+The production voice model defaults to `gpt-live-1`, with `gpt-5.6-luna` as its
+Responses-delegation backend. OpenAI owns codec negotiation, playback, and
+full-duplex interruption behavior. Voice Agent tools use the
 neutral operations `create_managed_session`, `begin_prompt_turn`,
 `inspect_managed_session`, `list_managed_sessions`, `cancel_prompt_turn`, and
 `resolve_permission`.
+
+Twilio adds a five-minute HMAC capability containing the existing Call SID to a
+custom SIP header. The signed OpenAI webhook validates it and resolves the User
+and current Sandbox Assignment from D1; SIP caller headers alone never authorize
+a call. Before accepting, the Worker reads a bounded call-start snapshot from
+the Durable Object and places it in the delegated backend instructions. The
+snapshot supplies aliases and recent state for natural reference resolution,
+while tools remain authoritative for current reads and all actions.
 
 The Voice Agent normally speaks one to three words, then listens. Dog-walking
 presentation language is isolated in `src/voice_flavors.ts`; machine-facing

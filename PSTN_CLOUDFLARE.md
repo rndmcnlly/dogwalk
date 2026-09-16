@@ -14,10 +14,9 @@ part of the protocol, tool, storage, or session-management vocabulary.
 
 ```text
 Phone
-  -> Twilio PSTN and bidirectional Media Stream
-  -> Cloudflare Worker at dogwalk.tools
-  -> sandbox-keyed VoiceSession Durable Object
-       -> OpenAI Realtime (Voice Agent and speech)
+  -> Twilio PSTN and deterministic access/wake-up TwiML
+  -> OpenAI GPT-Live over secure SIP (Voice Agent and speech)
+       -> sideband WebSocket to sandbox-keyed VoiceSession Durable Object
        -> ACP over WebSocket through Daytona preview proxy
             -> sandbox_acp_gateway.py
             -> opencode acp over stdio
@@ -25,28 +24,28 @@ Phone
 ```
 
 One Durable Object coordinates one retained Agent Connection and many Managed
-Sessions for a Sandbox. A Voice Call temporarily attaches Twilio and OpenAI
-Realtime sockets to that object. Ending a call does not cancel Prompt Turns or
-close ACP Sessions.
-
-Twilio PCMU audio passes through the Durable Object without transcoding. OpenAI
-Realtime speech-start events clear buffered Twilio output for barge-in.
+Sessions for a Sandbox. A Voice Call temporarily attaches a GPT-Live control
+sideband to that object; Twilio and OpenAI carry the media directly over SIP and
+SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 
 ## Responsibilities
 
 ### Cloudflare Worker
 
 - Validates signed Twilio webhooks.
+- Validates signed OpenAI incoming-session webhooks and short-lived SIP call
+  correlation capabilities.
 - Registers callers through speakable Invite Codes stored in D1.
 - Resolves, creates, starts, and reconciles durable Daytona Sandboxes.
-- Routes each call to the Durable Object keyed by Sandbox assignment.
+- Accepts GPT-Live sessions with a bounded state snapshot and routes their
+  sidebands to the Durable Object keyed by Sandbox assignment.
 - Provides deterministic TwiML recovery when realtime voice is unavailable.
 - Serves Review Bundles, SMS callbacks, sandbox publication APIs, and Mission
   Control.
 
 ### VoiceSession Durable Object
 
-- Owns live Twilio, OpenAI Realtime, and ACP WebSockets.
+- Owns the GPT-Live sideband and ACP WebSockets, but no telephone audio.
 - Exposes neutral Managed Session and Prompt Turn tools to the Voice Agent.
 - Multiplexes multiple ACP Sessions over one Agent Connection.
 - Persists Alias and Managed Session projections across Voice Calls.
@@ -108,6 +107,9 @@ exists but is disabled until a path-scoped Access application is configured.
 
 ## Known Rough Edges
 
+- The GPT-Live direct-SIP migration was deployed on 2026-09-15, but an
+  end-to-end production call is not yet operational. Diagnosis is deferred; the
+  architecture and local control-plane tests are preserved for follow-up.
 - A completely silent Prompt Turn can outlive Cloudflare's outbound WebSocket
   retention guarantee. A sandbox-initiated connection is the hardening path.
 - Session discovery/load, explicit close/delete/config operations, and ACP

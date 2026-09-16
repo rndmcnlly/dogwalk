@@ -43,6 +43,7 @@ class DaytonaMock(BaseHTTPRequestHandler):
     last_create_payload: dict = {}
     capability_uploads = 0
     sms_messages: list[dict[str, str]] = []
+    openai_requests: list[tuple[str, dict]] = []
 
     def sandbox(self, state: str = "started") -> dict:
         return {
@@ -111,6 +112,10 @@ class DaytonaMock(BaseHTTPRequestHandler):
             if "application/json" in self.headers.get("content-type", "")
             else {}
         )
+        if self.path.startswith("/live/sessions/"):
+            DaytonaMock.openai_requests.append((self.path, payload))
+            self.reply({})
+            return
         if self.path == "/api/sandbox":
             DaytonaMock.exists = True
             DaytonaMock.detail_reads = 0
@@ -405,20 +410,19 @@ def run_tests(
             {"From": TEST_PHONE, "CallSid": "CA_TEST2"},
             token,
         )
-        if "<Connect><Stream" in body:
+        if "<Dial" in body:
             break
     require(
         status == 200
-        and "<Connect><Stream" in body
-        and "wss://dogwalk.tools/voice/stream/" in body
-        and '<Parameter name="from"' in body
-        and '<Redirect method="POST">/voice/after-stream</Redirect>' in body,
+        and '<Dial action="/voice/after-live"' in body
+        and "sip:proj_test@sip.api.openai.com;transport=tls;secure=true" in body
+        and "x-dogwalk-context=" in body,
         f"sandbox ready: {status} {body}",
     )
 
     status, body = post(
         base_url,
-        "/voice/after-stream",
+        "/voice/after-live",
         {"From": TEST_PHONE, "CallSid": "CA_TEST2"},
         token,
     )
@@ -546,10 +550,10 @@ def run_tests(
                 {"From": TEST_PHONE, "CallSid": replacement_call},
                 token,
             )
-            if "<Connect><Stream" in body:
+            if "<Dial" in body:
                 break
         require(
-            status == 200 and "<Connect><Stream" in body,
+            status == 200 and "<Dial" in body and "sip:proj_test@sip.api.openai.com" in body,
             f"replacement sandbox not ready: {status} {body}",
         )
 
@@ -724,6 +728,8 @@ def main() -> int:
             "DAYTONA_API_KEY:local-daytona-token",
             "--var",
             "DOGWALK_IDENTITY_SECRET:local-identity-secret",
+            "--var",
+            "OPENAI_PROJECT_ID:proj_test",
             "--var",
             f"DAYTONA_API_BASE:http://127.0.0.1:{DAYTONA_MOCK_PORT}/api",
             "--var",

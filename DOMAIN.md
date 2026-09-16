@@ -50,7 +50,7 @@ Owns how an ACP Agent is located, launched, connected, authenticated, isolated, 
 
 ### Voice Transport
 
-Owns realtime audio transport, speech turn detection, browser or telephone media, and provider-specific function calling. OpenAI Realtime is the current adapter, not the definition of the Voice Agent.
+Owns realtime audio transport, speech turn detection, browser or telephone media, and provider-specific function calling. OpenAI GPT-Live over SIP is the current adapter, not the definition of the Voice Agent.
 
 ### Access Control
 
@@ -77,7 +77,9 @@ ACP Integration
 ACP Agent
 
 Agent Hosting supplies connections and isolation to ACP Integration.
-Voice Transport carries the conversation used by Voice Interaction.
+Voice Transport carries the conversation used by Voice Interaction. A direct
+provider-to-model media path may be controlled through a separate application
+sideband; the media path and control path remain parts of one Voice Call.
 ```
 
 ## Roles
@@ -483,7 +485,9 @@ These canonical terms name Voice Agent tools as well as core methods. Narration 
 The following names may appear in adapter configuration and deployment documentation but must not define core domain types:
 
 - **OpenCode:** Current ACP Agent Implementation.
-- **OpenAI Realtime:** Current Voice Transport and realtime model provider.
+- **OpenAI GPT-Live:** Current Voice Transport model provider. Twilio hands the
+  active media leg to it over SIP; Dogwalk attaches a sideband for application
+  context and tool execution.
 - **Daytona:** Current remote Sandbox provider.
 - **stdio, WebSocket, HTTP:** Transport mechanisms.
 - **ACP Python SDK:** Current protocol library.
