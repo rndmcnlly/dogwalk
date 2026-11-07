@@ -364,13 +364,13 @@ def run_tests(
         token,
     )
     require(
-        status == 200 and "Voice unavailable" in body and "/voice/recovery" in body,
+        status == 200 and "Voice dropped" in body and "Press 1 to reconnect" in body and "/voice/recovery" in body,
         f"default stream handoff: {status} {body}",
     )
     status, body = post(
         base_url,
         "/voice/recovery",
-        {"From": TEST_PHONE, "CallSid": "CA_TEST2", "Digits": "2"},
+        {"From": TEST_PHONE, "CallSid": "CA_TEST2", "Digits": "3"},
         token,
     )
     require(

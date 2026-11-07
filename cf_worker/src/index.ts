@@ -826,12 +826,13 @@ async function handleAfterLive(req: Request, env: Env): Promise<Response> {
     "SELECT action FROM call_handoffs WHERE call_sid = ? AND phone_number = ?",
   ).bind(callSid, from).first<{ action: string }>();
   await env.DB.prepare("DELETE FROM call_handoffs WHERE call_sid = ?").bind(callSid).run();
-  return handoff?.action === "hangup" ? twiml(Hangup()) : recoveryMenu("Voice unavailable. ");
+  return handoff?.action === "hangup" ? twiml(Hangup()) : recoveryMenu("Voice dropped. ");
 }
 
 function recoveryMenu(prefix = ""): Response {
   return twiml(
-    GatherDtmf(`${prefix}Recovery. Press 1 to restart. 2 to replace. 0 for voice. 9 to hang up.`, "/voice/recovery") +
+    // Ordered by consequence: the first option is the harmless one.
+    GatherDtmf(`${prefix}Press 1 to reconnect. 2 to restart the sandbox, which stops running work. 3 to replace it. 9 to hang up.`, "/voice/recovery") +
     Hangup(),
   );
 }
@@ -845,16 +846,16 @@ async function handleRecovery(req: Request, env: Env): Promise<Response> {
   const digit = String(form.get("Digits") ?? "");
   if (!from || !(await isRegistered(env, from))) return twiml(Hangup());
   if (digit === "9") return twiml(Hangup());
-  if (digit === "0") return twiml(Redirect("/voice"));
-  if (digit === "2") {
+  if (digit === "1" || digit === "0") return twiml(Redirect("/voice"));
+  if (digit === "3") {
     return twiml(
       GatherDtmf(
-        "Replacement destroys all workspace files and session history. Press 2 again to confirm.",
+        "Replacement destroys all workspace files and session history. Press 3 again to confirm.",
         "/voice/recovery/confirm",
       ) + Hangup(),
     );
   }
-  if (digit === "1") {
+  if (digit === "2") {
     const assignment = await getAssignment(env, from);
     if (!assignment?.provider_id) return twiml(Redirect("/voice"));
     try {
@@ -874,7 +875,7 @@ async function handleRecoveryConfirm(req: Request, env: Env): Promise<Response> 
   const form = await req.clone().formData();
   const from = normalizePhone(form.get("From"));
   const callSid = String(form.get("CallSid") ?? "");
-  if (!from || String(form.get("Digits") ?? "") !== "2" || !(await isRegistered(env, from))) {
+  if (!from || String(form.get("Digits") ?? "") !== "3" || !(await isRegistered(env, from))) {
     return recoveryMenu("Cancelled. ");
   }
   const assignment = await getAssignment(env, from);

@@ -195,6 +195,8 @@ not belong inline in Call Activity when they are large; store bounded diagnostic
 details or references. The Diagnostics Surface presents a redacted projection by
 default and requires an explicit, session-only opt-in to reveal verbose details.
 
+The Session Orchestrator may read the current User's recent Call Activity to explain interruptions, and each call begins with a since-last-call summary (how the previous call ended, including provider errors such as moderation, recovery actions, failed Prompt Turns, and its last words) so the Voice Agent can reorient the User after a drop. A provider ending the voice connection is not a User hanging up, and neither cancels Prompt Turns; only a Sandbox restart or replacement interrupts Agent work.
+
 ### Agent Implementation
 
 **Context:** Agent Hosting
@@ -539,6 +541,8 @@ The following language appears in Git history and is not canonical for productio
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Could Access Control identify a User by something spoken, such as a passphrase in the style of Invite Codes, so a call from any telephone, even a payphone, works without caller ID?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
+
+- Should the Voice Frontend also receive recent conversation directly (as provider session history at call start), rather than only through the Session Orchestrator's reorienting speech?
 
 ## ACP References
 
