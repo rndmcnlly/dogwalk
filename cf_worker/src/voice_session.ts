@@ -488,11 +488,7 @@ export class VoiceSession {
   private async maybeGreet(): Promise<void> {
     if (this.greeted || !this.liveAttached || !this.acpReady) return;
     this.greeted = true;
-    this.sendLive({
-      type: "session.instructions.append",
-      delegation_id: null,
-      content: 'Your first spoken line on this call is exactly: "Dogwalk. Where to?"',
-    });
+    // Commentary alone: pairing it with an instructions.append made the greeting play twice.
     this.sendLive({ type: "session.commentary.append", delegation_id: null, content: "Dogwalk. Where to?" });
   }
 
