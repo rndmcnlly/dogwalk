@@ -670,6 +670,20 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
   const verbose = new URL(req.url).searchParams.get("verbose") === "1";
   if (pathname === "/admin/api/state") return diagnosticsState(env, verbose);
   if (pathname === "/admin/api/events") return diagnosticsEvents(env, verbose);
+  if (pathname === "/admin/api/calls") {
+    if (!verbose) return new Response("calls require verbose=1", { status: 400 });
+    const limit = Math.min(20, Math.max(1, Number(new URL(req.url).searchParams.get("limit") ?? "5") || 5));
+    const calls = await env.DB.prepare(
+      `SELECT call_sid, status, started_at, ended_at, duration_seconds FROM voice_calls ORDER BY started_at DESC LIMIT ?`,
+    ).bind(limit).all<Record<string, unknown>>();
+    const withActivity = await Promise.all(calls.results.map(async (call) => ({
+      ...call,
+      activity: (await env.DB.prepare(
+        "SELECT ts, source, event, detail FROM call_activity WHERE call_sid = ? ORDER BY id",
+      ).bind(call.call_sid).all()).results,
+    })));
+    return jsonResponse(withActivity);
+  }
   if (pathname === "/admin/api/conversations") {
     // Conversation content is never part of the redacted default lens.
     if (!verbose) return new Response("conversations require verbose=1", { status: 400 });

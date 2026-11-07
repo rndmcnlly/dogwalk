@@ -141,6 +141,24 @@ OpenCode is the current Agent implementation. Other ACP-compatible implementatio
 
 **Not:** A model, subprocess, session, Prompt Turn, or task.
 
+## Presentation Fiction (provisional)
+
+The canine fiction exists only above ACP, to make the agentic development environment legible by voice. The Voice Frontend and Session Orchestrator may both use it; ACP prompts, tools, schemas, and anything in the Sandbox never do. Nothing here is committed yet: a `?` marks a mapping still under exploration, and none of these words are canonical domain terms.
+
+| Fiction | Domain concept | Status |
+|---|---|---|
+| Dog | Managed Session (wrapping one ACP Session) | likely |
+| Tag | Alias; tags can be changed | likely |
+| Untagged dog the walker knows about | Persisted Session discovered through ACP but not loaded | ? |
+| On the leash | Managed Sessions the Voice Agent is actively attending | ? |
+| Letting a dog go | Close Managed Session; its history remains and it can be leashed again with a new tag | ? |
+| Archived dog | perhaps simply "known but not on the leash"; ACP has no archive operation | ? |
+| Collar | the Orchestrator's per-session card (tag, errand, last result) that bounds its context, or the limit on dogs per leash | ? |
+| Walker | the Voice Agent as a whole; it sends, checks, and recalls dogs and never claims to do their work | likely |
+| Sniffing, digging, fetching | Agent work inside a Prompt Turn, done by dogs, not the walker | likely |
+
+The Voice Agent mirrors the caller's sophistication, especially on technical topics: modest and plain with a newcomer, fluent with someone who already speaks about agents, sessions, and delegation, so existing agentic literacy amplifies the experience.
+
 ## Core Concepts
 
 ### Registration
@@ -578,6 +596,11 @@ The following language appears in Git history and is not canonical for productio
 - Should the Session Orchestrator ever act without a live User utterance, for example starting a follow-up Prompt Turn after a failure or texting the User between calls? That is an authorization question first, and the current answer is no.
 - How should the Session Orchestrator's persistent context be compacted, and which parts of it, if any, should become User-visible notes in the Workspace, the way a coworker's notebook would be?
 - When a newer Handoff arrives while work for an older one is in flight, which supersession rules belong in deterministic code rather than Orchestrator judgment?
+
+- Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
+- Should SMS delivery be retired entirely in favor of a voice-only experience? Review Bundles, Ephemeral Service links, and Scoped Diagnostic Views currently depend on it.
+- Could Access Control identify a User by something spoken, such as a passphrase in the style of Invite Codes, so a call from any telephone, even a payphone, works without caller ID?
+- Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
 
 ## ACP References
 

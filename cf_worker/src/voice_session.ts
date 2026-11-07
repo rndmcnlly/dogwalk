@@ -55,6 +55,11 @@ interface TranscriptEntry {
   endMs: number;
 }
 
+interface CallMark {
+  call_sid: string;
+  context_index: number;
+}
+
 const UNSPEAKABLE = /https?:\/\/|\bses_[A-Za-z0-9]+|\b[0-9a-f]{12,}\b/;
 
 interface PendingRpc {
@@ -310,6 +315,7 @@ export class VoiceSession {
         orchestrator_context: this.orchestratorContext,
         orchestrator_queue: this.orchestratorQueue,
         call_transcripts: await this.state.storage.get("call_transcripts") ?? [],
+        call_marks: await this.state.storage.get("call_marks") ?? [],
       });
     }
     if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
@@ -341,6 +347,10 @@ export class VoiceSession {
       await Promise.all([this.connectAcp(), this.connectLive(incomingLiveSessionId)]);
       await this.record("voice.live.attached", { live_session_id: incomingLiveSessionId });
       await this.maybeGreet();
+      // Diagnostics: where this call's slice of the cross-call Orchestrator context begins.
+      const marks = await this.state.storage.get<CallMark[]>("call_marks") ?? [];
+      marks.push({ call_sid: this.callSid ?? "", context_index: this.orchestratorContext.length });
+      await this.state.storage.put("call_marks", marks.slice(-20));
       await this.orchestratorEvent(`[harness event] call_started: ${JSON.stringify(this.voiceContextSnapshot())}`);
       return new Response(null, { status: 204 });
     } catch (error) {
@@ -583,7 +593,11 @@ export class VoiceSession {
     const start = this.orchestratorContext.findIndex(
       (item: any, index) => index >= this.orchestratorContext.length - limit && item.role === "user",
     );
-    if (start > 0) this.orchestratorContext = this.orchestratorContext.slice(start);
+    if (start <= 0) return;
+    this.orchestratorContext = this.orchestratorContext.slice(start);
+    void this.state.storage.get<CallMark[]>("call_marks").then((marks) => this.state.storage.put(
+      "call_marks", (marks ?? []).map((mark) => ({ ...mark, context_index: Math.max(0, mark.context_index - start) })),
+    ));
   }
 
   private frontendAppend(lane: "brief" | "say", args: Record<string, unknown>): Record<string, unknown> {
@@ -613,8 +627,12 @@ export class VoiceSession {
     try {
       switch (item.name) {
         case "brief":
-        case "say":
           return this.frontendAppend(item.name, args);
+        case "say": {
+          const spoken = this.frontendAppend(item.name, args);
+          await this.record("orchestrator.say", { delegation_id: args.delegation_id ?? null, ok: spoken.ok !== false });
+          return spoken;
+        }
         case "create_managed_session":
           result = await this.createManagedSession(requiredString(args, "alias"));
           break;
