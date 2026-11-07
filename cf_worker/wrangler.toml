@@ -6,6 +6,12 @@ routes = [
   { pattern = "dogwalk.tools", custom_domain = true }
 ]
 
+# Voice Agent Skills and the docs they embed are bundled as text modules.
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true
+
 [vars]
 # Set after creating the path-scoped Cloudflare Access application.
 ACCESS_TEAM_DOMAIN = ""

@@ -155,6 +155,7 @@ The canine fiction exists only above ACP, to make the agentic development enviro
 | Archived dog | perhaps simply "known but not on the leash"; ACP has no archive operation | ? |
 | Collar | the Orchestrator's per-session card (tag, errand, last result) that bounds its context, or the limit on dogs per leash | ? |
 | Walker | the Voice Agent as a whole; it sends, checks, and recalls dogs and never claims to do their work | likely |
+| Walker skill | Voice Agent Skill, as opposed to a dog's own skills in the Sandbox | likely |
 | Sniffing, digging, fetching | Agent work inside a Prompt Turn, done by dogs, not the walker | likely |
 
 The Voice Agent mirrors the caller's sophistication, especially on technical topics: modest and plain with a newcomer, fluent with someone who already speaks about agents, sessions, and delegation, so existing agentic literacy amplifies the experience.
@@ -314,6 +315,14 @@ The Voice Frontend's request for Session Orchestrator help, carrying the recent 
 **Context:** ACP Integration
 
 A tool Dogwalk offers an ACP Agent through ACP's Client-supplied MCP servers, stacked on the Agent Implementation's own tools. Client-provided tools bind to the attachment that supplied them (session creation, load, or resume over one Agent Connection), not to the ACP Session: another Client attaching the same session sees its own tools instead. They are optional affordances an Agent may use when present, never a dependency of its plan.
+
+### Voice Agent Skill
+
+**Context:** Voice Interaction
+
+Version-controlled guidance the Session Orchestrator loads on demand when a request matches the skill's description (its trigger), such as precise transcription or self-knowledge about Dogwalk. A skill has a body for the Orchestrator and may carry speech guidance applied to the Voice Frontend for the rest of the call. Voice Agent Skills change only through Dogwalk's repository; nothing at runtime writes them. Self-knowledge skills embed the project's own documents rather than paraphrasing them.
+
+**Not:** A skill held by an ACP Agent in the Sandbox, which the Agent may create and maintain itself, or a Client-Provided Tool.
 
 ### Prompt Turn
 

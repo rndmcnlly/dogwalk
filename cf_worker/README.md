@@ -137,6 +137,14 @@ between calls, events accumulate but the model does not run.
 `ORCHESTRATOR_API_BASE` and `ORCHESTRATOR_API_KEY` can point it at any compatible
 endpoint.
 
+Voice Agent Skills live in `voice_agent_skills/*.md`: frontmatter `name` and
+`description` (the trigger), an Orchestrator body, and an optional
+`## Voice Frontend guidance` section pushed through `session.instructions.append`
+when the skill loads. The index is inlined in the Orchestrator prompt; bodies
+load through `load_voice_agent_skill`. Add a skill by writing the file and
+registering it in `src/voice_agent_skills.ts`. `platform-self-knowledge` embeds
+`DOMAIN.md` and `PSTN_CLOUDFLARE.md` at build time.
+
 Twilio adds a five-minute HMAC capability containing the existing Call SID to a
 custom SIP header. The signed OpenAI webhook validates it and resolves the User
 and current Sandbox Assignment from D1; SIP caller headers alone never authorize
