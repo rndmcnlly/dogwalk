@@ -41,8 +41,7 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 - Accepts GPT-Live sessions with a bounded state snapshot and routes their
   sidebands to the Durable Object keyed by Sandbox assignment.
 - Provides deterministic TwiML recovery when realtime voice is unavailable.
-- Serves Review Bundles, SMS callbacks, sandbox publication APIs, and Mission
-  Control.
+- Serves the read-only Diagnostics surface.
 
 ### VoiceSession Durable Object
 
@@ -74,7 +73,7 @@ semantics.
 ## Persistence
 
 D1 stores phone Registration, Invite Codes, Sandbox Assignments, audit and call
-activity, publication metadata, SMS delivery state, and call handoffs. A provider
+activity, and call handoffs. A provider
 ID is a cached hosting reference rather than durable identity. Confirmed provider
 deletion clears the stale assignment and permits replacement while retaining the
 phone Registration.
@@ -82,19 +81,6 @@ phone Registration.
 The Durable Object stores the live session projection. OpenCode retains ACP
 Session history inside the durable Sandbox filesystem. These stores have
 different lifecycles and must not be collapsed into one notion of a session.
-
-## Publication Surfaces
-
-Review Bundles are bounded Agent-published files for later visual inspection.
-Dogwalk currently stores them in D1 behind unguessable expiring bearer URLs.
-
-Ephemeral Services are speech-safe registrations of live sandbox ports. Dogwalk
-mints short-lived Daytona signed preview URLs only when the User requests one.
-Links are sent directly by SMS and never enter Voice Agent or ACP Agent context.
-
-Twilio accepting an outbound message means only `queued`. Signed status callbacks
-update eventual delivery or failure state. US delivery from the current local
-number additionally depends on approved A2P 10DLC registration.
 
 ## Access And Secrets
 
@@ -116,15 +102,10 @@ exists but is disabled until a path-scoped Access application is configured.
   2026-11-07 the voice layer moved to client delegation with a Session
   Orchestrator and the Sandbox to OpenCode 2. A real call has not yet been
   verified on the new design.
-- Review Bundle and Ephemeral Service tools are absent from the OpenCode 2
-  snapshot until they return as Client-provided MCP tools.
 - A completely silent Prompt Turn can outlive Cloudflare's outbound WebSocket
   retention guarantee. A sandbox-initiated connection is the hardening path.
 - Session discovery/load, explicit close/delete/config operations, and ACP
   Elicitation are not yet exposed through the Voice Agent.
-- Review Bundles use bounded D1 blob storage until R2 is enabled.
-- SMS delivery remains unavailable until Twilio approves the A2P Brand,
-  Campaign, and sender association.
 - The Diagnostics surface is read-only infrastructure, not a required user interface.
 
 These are bounded gaps in the accepted architecture, not competing product

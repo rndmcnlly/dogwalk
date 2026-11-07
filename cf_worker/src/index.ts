@@ -10,7 +10,6 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { ADMIN_HTML } from "./admin";
 import { LANDING_HTML } from "./landing";
 import type { Env } from "./types";
-import { handleSandboxApi, provisionSandboxCapability } from "./sandbox_api";
 import { FRONTEND_INSTRUCTIONS, VoiceSession } from "./voice_session";
 export { VoiceSession };
 
@@ -714,9 +713,6 @@ export default {
       return new Response("ok\n", { headers: { "content-type": "text/plain" } });
     }
 
-    const sandboxApi = await handleSandboxApi(req, env);
-    if (sandboxApi) return sandboxApi;
-
     if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
       return handleAdmin(req, env, url.pathname);
     }
@@ -748,26 +744,9 @@ export default {
     if (url.pathname === "/voice/status" && req.method === "POST") {
       return handleCallStatus(req, env);
     }
-    if (url.pathname === "/sms/status" && req.method === "POST") {
-      return handleSmsStatus(req, env);
-    }
     return new Response("not found", { status: 404 });
   },
 };
-
-async function handleSmsStatus(req: Request, env: Env): Promise<Response> {
-  const signature = await twilioSignatureValid(req, env);
-  if (!signature.valid) return new Response("forbidden", { status: 403 });
-  const form = await req.clone().formData();
-  const messageSid = String(form.get("MessageSid") ?? "");
-  const status = String(form.get("MessageStatus") ?? "");
-  const errorCode = String(form.get("ErrorCode") ?? "") || null;
-  if (!messageSid || !status) return new Response("bad request", { status: 400 });
-  await env.DB.prepare(
-    "UPDATE sms_log SET status = ?, error_code = ?, updated_at = unixepoch() WHERE provider_id = ?",
-  ).bind(status, errorCode, messageSid).run();
-  return new Response(null, { status: 204 });
-}
 
 // --- main /voice entrypoint --------------------------------------------
 
@@ -796,7 +775,6 @@ async function handleVoice(req: Request, env: Env): Promise<Response> {
     try {
       const { assignment, sandbox } = await resolveSandbox(env, from);
       if (sandbox && await sandboxReady(env, sandbox)) {
-        await provisionSandboxCapability(env, sandbox, from);
         await audit(env, "sandbox.ready", from, callSid, { state: sandbox.state });
         if (!env.OPENAI_PROJECT_ID) throw new Error("OPENAI_PROJECT_ID is not configured");
         const context = await sipContextCapability(env, callSid);

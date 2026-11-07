@@ -81,86 +81,10 @@ CREATE TABLE IF NOT EXISTS call_activity (
 CREATE INDEX IF NOT EXISTS idx_call_activity_call
   ON call_activity(call_sid, id);
 
--- A provider-neutral, create-only capability delivered to one Sandbox
--- incarnation. Only the token hash is retained by Dogwalk.
-CREATE TABLE IF NOT EXISTS sandbox_capabilities (
-  phone_number TEXT PRIMARY KEY REFERENCES sandbox_assignments(phone_number),
-  provider_id TEXT NOT NULL,
-  token_hash TEXT NOT NULL UNIQUE,
-  issued_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS review_bundles (
-  id TEXT PRIMARY KEY,
-  phone_number TEXT NOT NULL REFERENCES sandbox_assignments(phone_number),
-  public_token_hash TEXT NOT NULL UNIQUE,
-  title TEXT NOT NULL,
-  session_id TEXT NOT NULL,
-  default_path TEXT NOT NULL,
-  file_count INTEGER NOT NULL,
-  byte_count INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_review_bundles_phone
-  ON review_bundles(phone_number, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS review_bundle_files (
-  bundle_id TEXT NOT NULL REFERENCES review_bundles(id) ON DELETE CASCADE,
-  path TEXT NOT NULL,
-  media_type TEXT NOT NULL,
-  byte_count INTEGER NOT NULL,
-  content BLOB NOT NULL,
-  PRIMARY KEY (bundle_id, path)
-);
-
-CREATE TABLE IF NOT EXISTS ephemeral_services (
-  id TEXT PRIMARY KEY,
-  phone_number TEXT NOT NULL REFERENCES sandbox_assignments(phone_number),
-  provider_id TEXT NOT NULL,
-  name TEXT NOT NULL,
-  port INTEGER NOT NULL,
-  session_id TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
-);
-
-CREATE INDEX IF NOT EXISTS idx_ephemeral_services_phone
-  ON ephemeral_services(phone_number, active, updated_at DESC);
-
 -- One-shot instruction consumed when Twilio resumes after the GPT-Live SIP leg.
 CREATE TABLE IF NOT EXISTS call_handoffs (
   call_sid TEXT PRIMARY KEY,
   phone_number TEXT NOT NULL,
   action TEXT NOT NULL CHECK (action IN ('hangup', 'recovery')),
   created_at INTEGER NOT NULL
-);
-
--- A Scoped Diagnostic View is a read-only projection of the runtime tree bound
--- to one Voice Call. The public link is an unguessable bearer capability; only
--- its hash is retained. The capability is bound to the call_sid, so a leaked
--- link can never reveal a different (past or future) Voice Call. No expiry: the
--- per-call HMAC token is unenumerable, so cross-call leakage is the only threat
--- and binding defeats it.
-CREATE TABLE IF NOT EXISTS diagnostic_views (
-  call_sid TEXT PRIMARY KEY,
-  phone_number TEXT NOT NULL,
-  public_token_hash TEXT NOT NULL UNIQUE,
-  created_at INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_diagnostic_views_token
-  ON diagnostic_views(public_token_hash);
-
-CREATE TABLE IF NOT EXISTS sms_log (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  phone_number TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  provider_id TEXT,
-  status TEXT NOT NULL DEFAULT 'queued',
-  error_code TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL DEFAULT 0
 );

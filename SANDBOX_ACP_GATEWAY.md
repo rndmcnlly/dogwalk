@@ -100,10 +100,7 @@ This is an operator-recovery path, not routine lifecycle. User sandboxes normall
 stop and archive in place, retaining their filesystem and identity indefinitely.
 
 The snapshot grants the isolated `daytona` user passwordless `sudo` and includes
-`ping`, DNS, and socket diagnostics. It no longer installs the 1.x OpenCode
-plugin tools for Review Bundles and Ephemeral Services: OpenCode 2 changed its
-plugin API, and those tools are moving to Client-provided MCP tools served by the
-Worker so that any ACP Agent receives them.
+`ping`, DNS, and socket diagnostics.
 
 ## Verification
 

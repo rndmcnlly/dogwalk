@@ -21,7 +21,7 @@ The Voice Agent is the realtime conversational interface through which the User 
 
 The Voice Agent is one character performed by two components: a Voice Frontend that holds the conversation and a Session Orchestrator that exercises engineering judgment and operates Managed Sessions. The User experiences a single voice; the split is an implementation boundary, never something the Voice Agent narrates.
 
-Dogwalk presents as an agentic development environment driven by a coworker. ACP Agents should see ordinary requests from a colleague: they need not know they are supervised by voice, and anything specific to calls, speech, or SMS stays inside Dogwalk.
+Dogwalk presents as an agentic development environment driven by a coworker. ACP Agents should see ordinary requests from a colleague: they need not know they are supervised by voice, and anything specific to calls or speech stays inside Dogwalk.
 
 ## Modeling Principles
 
@@ -280,41 +280,6 @@ Replacement is exceptional reconciliation after explicit provider-side deletion,
 not normal lifecycle. Stopped and archived Sandboxes retain identity and durable
 filesystem state and are resumed in place, potentially across months.
 
-### Review Bundle
-
-**Context:** Session Management
-
-A small, Agent-published bundle of files intended for later visual review by the
-User. A Review Bundle is associated with its originating Managed Session but is
-not ACP Session history, a repository, or a live service. Its public URL is an
-unguessable, expiring bearer capability. The ACP Agent may publish a Review
-Bundle through a scoped Client-provided tool; the Voice Agent may list, text, or
-delete trusted bundle records but cannot create their contents.
-
-The Sandbox capability authenticates the ACP Agent's hosting boundary, not the
-custom tool implementation against that Agent. The custom tool is the intended,
-permission-gated affordance; an Agent with shell access can inspect and reproduce
-its HTTP request by design.
-
-Presentation flavor may call a Review Bundle a "dropping." That metaphor belongs
-only to a Voice Agent flavor pack and never appears in tools, schemas, storage,
-URLs, ACP prompts, or sandbox configuration.
-
-### Ephemeral Service
-
-**Context:** Agent Hosting
-
-A speech-safe registration of an HTTP service currently listening on a Sandbox
-port. Registration records a name, port, originating ACP Session, and Sandbox
-incarnation; it does not contain a public URL or provider preview credential.
-The ACP Agent registers a service through a scoped Client-provided tool. On User
-request, the Voice Agent may ask Agent Hosting to mint a short-lived signed link
-and text it to the registered phone number. The link is never verbalized or
-inserted into Agent or Voice Agent context.
-
-An Ephemeral Service is not durable merely because its registration persists.
-It is available only while its process and Sandbox remain available.
-
 ### Diagnostics Surface
 
 **Context:** Access Control, with projections from every other context
@@ -324,42 +289,15 @@ harness development, telemetry, and debugging. It is never a required interactio
 surface and never mutates domain state; all authorization and action happen over
 voice. The Diagnostics Surface renders one runtime tree whose nesting follows
 object containment (Agent Connection, Managed Session by Alias, Prompt Turn,
-Attention Request, Review Bundle), with Voice Calls, Sandbox Assignments, Access
+Attention Request), with Voice Calls, Sandbox Assignments, Access
 Control records, and the audit tail as sibling roots. Bounded context is a label
 on each node, not the organizing structure.
 
-The same renderer serves different viewers under different capabilities. The
-operator capability resolves the full tree. A Scoped Diagnostic View resolves
-only a permitted subtree. What each viewer may see is decided by capability, not
-by client-side hiding.
+Only the operator capability resolves the tree. What a viewer may see is decided
+by capability, not by client-side hiding.
 
 **Not:** A control surface, a required User interface, or the Voice Interaction
 itself. "Mission Control" is superseded historical language for this surface.
-
-### Scoped Diagnostic View
-
-**Context:** Access Control and Voice Interaction
-
-A capability-scoped, read-only projection of the runtime tree bound to one Voice
-Call. It lets a User see what their own Agents did during that call and share the
-link when reporting a problem, an opt-in eyes-full complement to the eyes-free
-norm. Its public URL is an unguessable bearer capability, minted by Agent Hosting
-on User request and texted to the registered phone number; it is never verbalized
-or inserted into Agent or Voice Agent context. It belongs to the same capability
-family as a Review Bundle and an Ephemeral Service link.
-
-The capability is bound to the Call's identity, not to a phone number, Sandbox,
-or Managed Session. Because the token is an unenumerable per-call secret, a
-leaked link cannot reveal any other Voice Call, past or future; cross-call
-leakage is the only relevant threat and binding defeats it, so the capability
-carries no expiry. The view resolves the Managed Sessions that call supervised,
-their Prompt Turns, Attention Requests, and Review Bundles, plus the correlated
-Call Activity, frozen to that call's window. Presentation in this view may use
-Voice Interaction conversational projections such as "working" or "done"; neutral
-lifecycle state and opaque identifiers remain the operator-facing representation.
-
-**Not:** A Managed Session, a durable dashboard, or a capability that follows a
-User across calls.
 
 ### Handoff
 
@@ -373,7 +311,7 @@ The Voice Frontend's request for Session Orchestrator help, carrying the recent 
 
 **Context:** ACP Integration
 
-A tool Dogwalk offers an ACP Agent through ACP's Client-supplied MCP servers, stacked on the Agent Implementation's own tools. Client-provided tools bind to the attachment that supplied them (session creation, load, or resume over one Agent Connection), not to the ACP Session: another Client attaching the same session sees its own tools instead. They are optional affordances an Agent may use when present, never a dependency of its plan. Tools that publish Review Bundles or register Ephemeral Services belong here, independent of any one Agent Implementation's plugin system.
+A tool Dogwalk offers an ACP Agent through ACP's Client-supplied MCP servers, stacked on the Agent Implementation's own tools. Client-provided tools bind to the attachment that supplied them (session creation, load, or resume over one Agent Connection), not to the ACP Session: another Client attaching the same session sees its own tools instead. They are optional affordances an Agent may use when present, never a dependency of its plan.
 
 ### Prompt Turn
 
@@ -582,6 +520,9 @@ The following language appears in Git history and is not canonical for productio
 - **Sic, relay, revive, and call off:** Early Voice Agent tool verbs. Production tools use create, prompt, load, cancel, and close.
 - **Working/resting Dog:** Optional narration over Prompt Turn activity and session readiness, not lifecycle state.
 - **Mission Control:** Superseded name for the Diagnostics Surface. Production code and docs use Diagnostics.
+- **Review Bundle:** Agent-published files for later visual review, delivered by texted link. Retired 2026-11-07 with SMS for a voice-only focus.
+- **Ephemeral Service:** A registered Sandbox port reachable through a texted signed preview link. Retired 2026-11-07 with SMS for a voice-only focus.
+- **Scoped Diagnostic View:** A texted, per-call read-only caller lens on the Diagnostics Surface. Retired 2026-11-07 with SMS for a voice-only focus.
 - **Delegated backend:** The September 2026 arrangement where GPT-Live's managed Responses delegation ran session tools. Superseded by the Session Orchestrator under client delegation.
 
 ## Open Questions
@@ -590,15 +531,12 @@ The following language appears in Git history and is not canonical for productio
 - Which Agent plan and tool-call changes deserve proactive speech, an earcon, or silent state projection?
 - How should the Voice Agent resolve ambiguous spoken "stop" among stopping speech, cancelling one Prompt Turn, closing one Managed Session, stopping all Agent work, and ending the voice call?
 - Which parts of Assignment history belong to Dogwalk versus the ACP Agent's retained session context?
-- A Managed Session and its Alias can outlive the Voice Call that created it. When a Scoped Diagnostic View is frozen to one call's window, should a session that later continues under a different call remain visible in the original call's view, or should the view show only that session's state as of the original call?
-- Where should durable state whose lifecycle is owned by a Sandbox live? Review Bundles and Ephemeral Services currently persist in D1 keyed by phone number, so they outlive the Sandbox that produced them, which conflicts with the principle that deleting a Sandbox truly destroys its Agent-held state. Moving that state into per-Sandbox Durable Object storage would make deletion complete, but the operator Diagnostics lens is a Worker reading D1 and cannot synchronously read arbitrary DO storage; it would then need RPC fan-out or a DO-pushed projection. The ownership boundary between D1 and Durable Objects, and how the operator lens observes DO-owned state, is unresolved.
 
-- Should the Session Orchestrator ever act without a live User utterance, for example starting a follow-up Prompt Turn after a failure or texting the User between calls? That is an authorization question first, and the current answer is no.
+- Should the Session Orchestrator ever act without a live User utterance, for example starting a follow-up Prompt Turn after a failure? That is an authorization question first, and the current answer is no.
 - How should the Session Orchestrator's persistent context be compacted, and which parts of it, if any, should become User-visible notes in the Workspace, the way a coworker's notebook would be?
 - When a newer Handoff arrives while work for an older one is in flight, which supersession rules belong in deterministic code rather than Orchestrator judgment?
 
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
-- Should SMS delivery be retired entirely in favor of a voice-only experience? Review Bundles, Ephemeral Service links, and Scoped Diagnostic Views currently depend on it.
 - Could Access Control identify a User by something spoken, such as a passphrase in the style of Invite Codes, so a call from any telephone, even a payphone, works without caller ID?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
 

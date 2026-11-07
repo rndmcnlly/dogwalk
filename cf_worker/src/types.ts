@@ -5,9 +5,6 @@ export interface Env {
   DAYTONA_API_KEY: string;
   DOGWALK_IDENTITY_SECRET: string;
   OPENAI_API_KEY: string;
-  TWILIO_ACCOUNT_SID: string;
-  TWILIO_FROM_NUMBER: string;
-  TWILIO_API_BASE?: string;
   DAYTONA_SNAPSHOT: string;
   DAYTONA_AGENT_SECRET?: string;
   DAYTONA_API_BASE?: string;

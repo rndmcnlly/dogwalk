@@ -2,8 +2,7 @@
 
 This Worker is the production Dogwalk service at `https://dogwalk.tools`. It
 provides Twilio PSTN voice, phone registration, Daytona sandbox lifecycle,
-Managed Session multiplexing, publication links, SMS delivery, recovery, and
-a read-only Diagnostics surface.
+Managed Session multiplexing, recovery, and a read-only Diagnostics surface.
 
 This is a public repository for Adam's operator-managed deployment. Public
 hostnames, provider resource IDs, Keychain service names, and local secret-lookup
@@ -26,7 +25,6 @@ npx wrangler secret put DAYTONA_API_KEY
 npx wrangler secret put DOGWALK_IDENTITY_SECRET
 npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put OPENAI_WEBHOOK_SECRET
-npx wrangler secret put TWILIO_ACCOUNT_SID
 npx wrangler secret put ADMIN_PASSWORD
 npm run deploy
 ```
@@ -108,7 +106,7 @@ isolation, webhook signatures, and fail-closed admin access.
 ACP endpoints around a local Worker. It checks signed incoming-call correlation,
 client delegation, the Session Orchestrator loop against a mock Responses
 endpoint, ACP initialization, Managed
-Session creation, asynchronous Prompt Turns, signed-preview SMS, and call
+Session creation, asynchronous Prompt Turns, session inspection, and call
 termination without consuming provider traffic.
 
 ## Voice Sessions
@@ -128,7 +126,10 @@ runs inside the Durable Object as a Responses API tool loop on
 call transcript up to each delegation, operates Managed Sessions through the
 neutral operations (`create_managed_session`, `begin_prompt_turn`,
 `inspect_managed_session`, `list_managed_sessions`, `cancel_prompt_turn`,
-`resolve_permission`, plus SMS and call control), and answers through `brief`
+`resolve_permission`, `discover_persisted_sessions` (ACP `session/list` bounded
+to the Workspace), `load_persisted_session` (`session/resume` with a fresh
+Alias), `set_alias`, `close_managed_session` (`session/close`; history is kept),
+plus call control), and answers through `brief`
 (`session.thinking.append`) and `say` (`session.commentary.append`). Events that
 arrive mid-loop are injected before its next model call, so corrections steer
 work in flight. Its context persists in Durable Object storage across calls;
@@ -148,21 +149,6 @@ presentation language is isolated in `src/voice_flavors.ts`; machine-facing
 contracts remain neutral. `end_call` closes the call, while
 `open_recovery_menu` hands control back to deterministic TwiML for restart or
 confirmed destructive replacement.
-
-The OpenCode 1.x plugin tools `publish_review_bundle` and
-`register_ephemeral_service` are not in the OpenCode 2 snapshot. Until they
-return as Client-provided MCP tools served by this Worker, Agents cannot create
-new Review Bundles or Ephemeral Services; the Worker endpoints below remain.
-
-ACP Agents publish Review Bundles through `publish_review_bundle`. The initial
-bounded implementation stores at most 1 MiB per bundle in D1 for seven days and
-exposes safe unguessable `/b/<token>/<filename>` links. R2 can replace this
-storage adapter after it is enabled on the Cloudflare account.
-
-ACP Agents register listening ports through `register_ephemeral_service`. The
-Voice Agent sees only a speech-safe name and opaque service ID. On request,
-Dogwalk mints a one-hour Daytona signed preview URL and sends it directly by SMS;
-the URL never enters spoken or model context.
 
 Cloudflare currently guarantees an outbound WebSocket prevents Durable Object
 eviction for 15 minutes. Agent updates generally keep active turns alive beyond
@@ -194,14 +180,6 @@ Turns, Attention Requests) are marked "not wired" until the backend emits that
 telemetry; the operator lens shows only calls, sandboxes, registrations, and the
 audit log today.
 
-A capability-scoped caller lens (a Scoped Diagnostic View, per `DOMAIN.md`) is
-served read-only at `/v/<token>`. The Voice Agent tool `text_diagnostic_view`
-mints a per-call unguessable link and texts it to the registered caller so they
-can see this call's own activity and share it when reporting a problem. The token
-is an HMAC over the Call SID, so a leaked link exposes only that one call and can
-never reveal another call; it carries no expiry by design. The link is never
-verbalized. Its backing row lives in the `diagnostic_views` table.
-
 Live calls are keyed by Twilio Call SID and display a bounded, source-aware
 activity timeline. The reserved sources are `voice`, `access`, `hosting`,
 `menu`, and `acp`. Diagnostics starts in demo-safe mode: phone numbers,
@@ -218,11 +196,6 @@ https://dogwalk.tools/voice/status
 
 Use `POST`. Terminal callbacks close live-call cards; a five-minute activity
 window is the fallback for missed callbacks.
-
-Outbound SMS requests include a signed callback to
-`https://dogwalk.tools/sms/status`. Dogwalk records provider acceptance as
-`queued`, then updates delivery status and failure code from that callback. It
-must never claim carrier delivery merely because Twilio accepted the request.
 
 The Worker also supports Cloudflare Access JWT verification through
 `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`. Those variables remain empty until a

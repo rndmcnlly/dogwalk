@@ -41,8 +41,6 @@ class DaytonaMock(BaseHTTPRequestHandler):
     generation = 0
     create_count = 0
     last_create_payload: dict = {}
-    capability_uploads = 0
-    sms_messages: list[dict[str, str]] = []
     openai_requests: list[tuple[str, dict]] = []
 
     def sandbox(self, state: str = "started") -> dict:
@@ -64,19 +62,6 @@ class DaytonaMock(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        if (
-            self.path
-            == f"/api/sandbox/mock-sandbox-{self.generation}/ports/8000/signed-preview-url?expiresInSeconds=3600"
-        ):
-            self.reply(
-                {
-                    "sandboxId": f"mock-sandbox-{self.generation}",
-                    "port": 8000,
-                    "token": "signed-service-token",
-                    "url": "https://8000-signed-service-token.proxy.daytona.test",
-                }
-            )
-            return
         if (
             self.path
             == f"/api/sandbox/mock-sandbox-{self.generation}/ports/8765/preview-url"
@@ -129,34 +114,6 @@ class DaytonaMock(BaseHTTPRequestHandler):
             return
         if self.path == f"/api/sandbox/mock-sandbox-{self.generation}/stop":
             self.reply(self.sandbox("stopping"))
-            return
-        if self.path.startswith(
-            f"/toolbox/mock-sandbox-{self.generation}/files/folder?"
-        ):
-            self.reply({})
-            return
-        if self.path.startswith(
-            f"/toolbox/mock-sandbox-{self.generation}/files/upload?"
-        ):
-            DaytonaMock.capability_uploads += 1
-            self.reply({})
-            return
-        if self.path.startswith(
-            f"/toolbox/mock-sandbox-{self.generation}/files/permissions?"
-        ):
-            self.reply({})
-            return
-        if self.path.startswith("/twilio/Accounts/") and self.path.endswith(
-            "/Messages.json"
-        ):
-            message = dict(urllib.parse.parse_qsl(raw.decode()))
-            DaytonaMock.sms_messages.append(message)
-            self.send_response(201)
-            body = json.dumps({"sid": "SM_TEST", "status": "queued"}).encode()
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
             return
         if self.path == f"/toolbox/mock-sandbox-{self.generation}/process/execute":
             result = (
@@ -225,26 +182,6 @@ def get(base_url: str, path: str) -> tuple[int, str]:
             base_url + path, headers={"user-agent": "twilio-smoke-test/1.0"}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
-            return response.status, response.read().decode()
-    except urllib.error.HTTPError as error:
-        return error.code, error.read().decode()
-
-
-def post_json(
-    base_url: str, path: str, value: dict, authorization: str
-) -> tuple[int, str]:
-    request = urllib.request.Request(
-        base_url + path,
-        data=json.dumps(value).encode(),
-        headers={
-            "authorization": authorization,
-            "content-type": "application/json",
-            "user-agent": "dogwalk-smoke-test/1.0",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, response.read().decode()
     except urllib.error.HTTPError as error:
         return error.code, error.read().decode()
@@ -443,72 +380,6 @@ def run_tests(
         f"recovery replacement warning: {status} {body}",
     )
 
-    if mock_daytona:
-        require(
-            DaytonaMock.capability_uploads == 1,
-            "sandbox capability was not provisioned exactly once",
-        )
-        capability = hmac.new(
-            b"local-identity-secret",
-            f"sandbox-capability-v1:{TEST_PHONE}:mock-sandbox-1".encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        status, published_body = post_json(
-            base_url,
-            "/api/sandbox/review-bundles",
-            {
-                "version": 1,
-                "title": "Smoke report",
-                "context": {
-                    "session_id": "session-smoke",
-                    "message_id": "message-smoke",
-                },
-                "files": [
-                    {
-                        "path": "report.md",
-                        "media_type": "text/markdown; charset=utf-8",
-                        "content_base64": base64.b64encode(
-                            b"# Verified\n\nBundle body.\n"
-                        ).decode(),
-                    }
-                ],
-            },
-            f"Bearer {capability}",
-        )
-        require(
-            status == 201,
-            f"Review Bundle publication failed: {status} {published_body}",
-        )
-        bundle_id = json.loads(published_body)["bundle_id"]
-        public_token = hmac.new(
-            b"local-identity-secret",
-            f"review-bundle-v1:{bundle_id}".encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        status, review_body = get(base_url, f"/b/{public_token}/report.md")
-        require(
-            status == 200 and "Bundle body" in review_body and "<pre>" in review_body,
-            f"Review Bundle read failed: {status} {review_body}",
-        )
-        status, service_body = post_json(
-            base_url,
-            "/api/sandbox/ephemeral-services",
-            {
-                "version": 1,
-                "name": "VS Code",
-                "port": 8000,
-                "context": {
-                    "session_id": "session-smoke",
-                    "message_id": "message-smoke",
-                },
-            },
-            f"Bearer {capability}",
-        )
-        require(
-            status == 201 and json.loads(service_body)["name"] == "VS Code",
-            f"Ephemeral Service registration failed: {status} {service_body}",
-        )
-
     status, body = post(
         base_url,
         "/voice/menu?attempts=1",
@@ -559,11 +430,6 @@ def run_tests(
 
     status, _ = get(base_url, "/admin")
     require(status == 401, f"admin did not require authentication: {status}")
-
-    # Scoped Diagnostic View: an unminted per-call token must not resolve. The
-    # capability is unenumerable, so a random 64-hex token is a 404.
-    status, _ = get(base_url, "/v/" + ("0" * 64))
-    require(status == 404, f"unknown scoped view token resolved: {status}")
 
     status, event, safe_state = first_sse_event(base_url, "adam", LOCAL_ADMIN_PASSWORD)
     require(
@@ -638,7 +504,7 @@ def run_tests(
         f"completed calls remain live: {closed_state.get('live_calls')}",
     )
 
-    print("29 checks passed" if mock_daytona else "21 checks passed")
+    print("24 checks passed" if mock_daytona else "20 checks passed")
     return 0
 
 
@@ -651,12 +517,7 @@ def prepare_local_fixture(wrangler: str) -> None:
     sql = f"""
 DELETE FROM call_activity WHERE call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}'));
 DELETE FROM call_handoffs WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
-DELETE FROM sms_log WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
 DELETE FROM voice_calls WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
-DELETE FROM review_bundle_files WHERE bundle_id IN (SELECT id FROM review_bundles WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}'));
-DELETE FROM review_bundles WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
-DELETE FROM ephemeral_services WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
-DELETE FROM sandbox_capabilities WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
 DELETE FROM sandbox_assignments WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
 DELETE FROM registrations WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
 DELETE FROM claim_attempt WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
@@ -707,8 +568,6 @@ def main() -> int:
     DaytonaMock.generation = 0
     DaytonaMock.create_count = 0
     DaytonaMock.last_create_payload = {}
-    DaytonaMock.capability_uploads = 0
-    DaytonaMock.sms_messages = []
     daytona = ThreadingHTTPServer(("127.0.0.1", DAYTONA_MOCK_PORT), DaytonaMock)
     thread = threading.Thread(target=daytona.serve_forever, daemon=True)
     thread.start()
@@ -738,12 +597,6 @@ def main() -> int:
             "DAYTONA_AGENT_SECRET:dogwalk-test-agent-secret",
             "--var",
             f"ADMIN_PASSWORD:{LOCAL_ADMIN_PASSWORD}",
-            "--var",
-            "TWILIO_ACCOUNT_SID:AC_TEST",
-            "--var",
-            "TWILIO_FROM_NUMBER:+18317775707",
-            "--var",
-            f"TWILIO_API_BASE:http://127.0.0.1:{DAYTONA_MOCK_PORT}/twilio",
         ],
         cwd=WORKER_DIR,
         stdout=subprocess.DEVNULL,

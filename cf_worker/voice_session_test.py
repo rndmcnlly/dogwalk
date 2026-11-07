@@ -52,12 +52,14 @@ class SocketMocks:
         self.acp_connected = asyncio.Event()
         self.live_connected = asyncio.Event()
         self.seen: list[dict] = []
+        self.acp_seen: list[dict] = []
 
     async def handler(self, socket) -> None:
         if socket.request.path == "/acp":
             self.acp_connected.set()
             async for raw in socket:
                 message = json.loads(raw)
+                self.acp_seen.append(message)
                 await self.acp_messages.put(message)
                 request_id = message.get("id")
                 method = message.get("method")
@@ -69,6 +71,23 @@ class SocketMocks:
                     result = {"sessionId": "acp-session-test"}
                 elif method == "session/load":
                     result = {}
+                elif method == "session/list":
+                    result = {
+                        "sessions": [
+                            {
+                                "sessionId": "acp-session-test",
+                                "cwd": "/home/daytona",
+                                "title": "Tiny verified artifact",
+                                "updatedAt": "2026-11-07T10:00:00Z",
+                            },
+                            {
+                                "sessionId": PERSISTED_SESSION_ID,
+                                "cwd": "/home/daytona",
+                                "title": PERSISTED_TITLE,
+                                "updatedAt": "2026-11-06T18:30:00Z",
+                            },
+                        ]
+                    }
                 elif method == "session/prompt":
                     await asyncio.sleep(0.2)
                     await socket.send(
@@ -121,8 +140,11 @@ AGENT_PROMPT = (
 )
 STARTED_SAY = "Juniper is on it."
 FINISHED_SAY = "Juniper finished; it reports the artifact is verified."
-TEXTED_SAY = "I texted you the VS Code link."
+REPORTED_SAY = "Juniper says the artifact is verified."
 FAREWELL_SAY = "Talk soon."
+PERSISTED_SESSION_ID = "ses_earlier0parser"
+PERSISTED_TITLE = "Earlier parser work"
+LEASH_SAY = "Rowan has gone home; Juniper is still with us."
 
 
 def call(call_id: str, name: str, **arguments) -> dict:
@@ -160,17 +182,30 @@ ORCHESTRATOR_SCRIPT = [
     ("[handoff del-1]", lambda ctx: [call("h1-say", "say", text=STARTED_SAY, delegation_id="del-1")]),
     ("turn_stopped", lambda ctx: [call("ts-say", "say", text=FINISHED_SAY, delegation_id=None)]),
     ("[handoff del-2]", lambda ctx: [
-        call("h2-text", "text_ephemeral_service", service_id="service-test"),
+        call("h2-inspect", "inspect_managed_session", alias=created_alias(ctx)),
     ]),
-    ("[handoff del-2]", lambda ctx: [call("h2-say", "say", text=TEXTED_SAY, delegation_id="del-2")]),
+    ("[handoff del-2]", lambda ctx: [call("h2-say", "say", text=REPORTED_SAY, delegation_id="del-2")]),
+    # Handoff 3: persisted-session lifecycle (discover, load, retag, close, list).
+    ("[handoff del-3]", lambda ctx: [call("h3-discover", "discover_persisted_sessions")]),
     ("[handoff del-3]", lambda ctx: [
-        call("h3-say", "say", text=FAREWELL_SAY, delegation_id="del-3"),
-        call("h3-end", "end_call"),
+        call("h3-load", "load_persisted_session", ref="r1", alias="Birch"),
+    ]),
+    ("[handoff del-3]", lambda ctx: [
+        call("h3-retag", "set_alias", alias="Birch", new_alias="Rowan"),
+    ]),
+    ("[handoff del-3]", lambda ctx: [call("h3-close", "close_managed_session", alias="Rowan")]),
+    ("[handoff del-3]", lambda ctx: [call("h3-list", "list_managed_sessions")]),
+    ("[handoff del-3]", lambda ctx: [call("h3-say", "say", text=LEASH_SAY, delegation_id="del-3")]),
+    ("[handoff del-4]", lambda ctx: [
+        call("h4-say", "say", text=FAREWELL_SAY, delegation_id="del-4"),
+        call("h4-end", "end_call"),
     ]),
 ]
 STEP_IDS = [
     "cs-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
-    "ts-say", "h2-text", "h2-say", "h3-say", "h3-end",
+    "ts-say", "h2-inspect", "h2-say",
+    "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list", "h3-say",
+    "h4-say", "h4-end",
 ]
 
 
@@ -272,10 +307,6 @@ INSERT INTO sandbox_assignments
 VALUES ('{TEST_PHONE}', 'mock-sandbox-1', '{identity}', 'started', unixepoch(), unixepoch());
 INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at)
 VALUES ('CA_VOICE_TEST', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch());
-INSERT INTO ephemeral_services
-  (id, phone_number, provider_id, name, port, session_id, created_at, updated_at, active)
-VALUES ('service-test', '{TEST_PHONE}', 'mock-sandbox-1', 'VS Code', 8000,
-        'session-smoke', unixepoch(), unixepoch(), 1);
 """
     subprocess.run(
         [wrangler, "d1", "execute", "dogwalk", "--local", "--command", sql],
@@ -353,6 +384,12 @@ async def run_protocol(identity: str) -> None:
         assert "Generate <|SpawnThinking|> when" in session["instructions"]
         assert session["delegation"] == {"type": "client", "acknowledgement_delay_ms": 400}
         assert "tools" not in session
+        frontend = session["instructions"]
+        assert "Match the caller's sophistication" in frontend
+        assert "never mention a backend" in frontend
+        assert "backend" not in (
+            frontend.replace("Backend tools:", "").replace("never mention a backend", "").lower()
+        )
         await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "initialize"
         )
@@ -393,30 +430,70 @@ async def run_protocol(identity: str) -> None:
         assert OrchestratorMock.tool_output("h1-create")["session"]["alias"] == "Juniper"
         assert OrchestratorMock.tool_output("h1-begin")["turn_state"] == "in_progress"
 
-        # Handoff 2: a link goes out by SMS, never by voice.
-        await mocks.send_live(transcript("input", "Text me the VS Code link.", 5000, 6200))
+        # Handoff 2: a follow-up question answered from session inspection.
+        await mocks.send_live(transcript("input", "What did it report?", 5000, 6200))
         await mocks.send_live(delegation("del-2", 6250))
-        texted = await next_matching(mocks.live_messages, appended("commentary", TEXTED_SAY))
-        assert texted["delegation_id"] == "del-2"
+        reported = await next_matching(mocks.live_messages, appended("commentary", REPORTED_SAY))
+        assert reported["delegation_id"] == "del-2"
         handoff = OrchestratorMock.user_message("[handoff del-2]")
-        assert "Caller: Text me the VS Code link." in handoff and "Juniper" not in handoff
-        assert OrchestratorMock.tool_output("h2-text")["status"] == "queued"
-        assert DaytonaMock.sms_messages[-1]["To"] == TEST_PHONE
-        assert "signed-service-token" in DaytonaMock.sms_messages[-1]["Body"]
-        assert (
-            DaytonaMock.sms_messages[-1]["StatusCallback"]
-            == "https://dogwalk.tools/sms/status"
-        )
+        assert "Caller: What did it report?" in handoff and "Juniper" not in handoff
+        inspected = OrchestratorMock.tool_output("h2-inspect")
+        assert inspected["alias"] == "Juniper" and inspected["stop_reason"] == "end_turn"
 
-        # Handoff 3: farewell and end_call in one response; hangup follows the farewell.
+        # Handoff 3: leash earlier work, retag it, let it go home, and list what remains.
+        await mocks.send_live(transcript("input", "Pick up that parser work from yesterday ", 7000, 8000))
+        await mocks.send_live(transcript("input", "as Birch, call it Rowan, then let it go.", 8000, 8800))
+        await mocks.send_live(delegation("del-3", 8850))
+        listed = await next_matching(
+            mocks.acp_messages, lambda item: item.get("method") == "session/list"
+        )
+        assert listed["params"] == {"cwd": "/home/daytona"}
+        resumed = await next_matching(
+            mocks.acp_messages, lambda item: item.get("method") == "session/resume"
+        )
+        assert resumed["params"] == {
+            "sessionId": PERSISTED_SESSION_ID, "cwd": "/home/daytona", "mcpServers": [],
+        }
+        closed = await next_matching(
+            mocks.acp_messages, lambda item: item.get("method") == "session/close"
+        )
+        assert closed["params"] == {"sessionId": PERSISTED_SESSION_ID}
+        leashed = await next_matching(mocks.live_messages, appended("commentary", LEASH_SAY))
+        assert leashed["delegation_id"] == "del-3"
+        discovered = OrchestratorMock.tool_output("h3-discover")
+        assert discovered["ok"] is True
+        assert discovered["sessions"] == [
+            {"ref": "r1", "title": PERSISTED_TITLE, "updated_at": "2026-11-06T18:30:00Z"}
+        ]
+        discovered_raw = json.dumps(discovered)
+        assert "sessionId" not in discovered_raw and "ses_" not in discovered_raw
+        assert "acp-session-test" not in discovered_raw
+        loaded = OrchestratorMock.tool_output("h3-load")
+        assert loaded["ok"] is True and loaded["session"]["alias"] == "Birch"
+        assert PERSISTED_SESSION_ID not in json.dumps(loaded)
+        retagged = OrchestratorMock.tool_output("h3-retag")
+        assert retagged == {"ok": True, "previous": "Birch", "alias": "Rowan"}
+        assert OrchestratorMock.tool_output("h3-close")["alias"] == "Rowan"
+        remaining = OrchestratorMock.tool_output("h3-list")
+        assert [item["alias"] for item in remaining] == ["Juniper"]
+        assert "Rowan" not in json.dumps(remaining)
+
+        # Handoff 4: farewell and end_call in one response; hangup follows the farewell.
         await mocks.send_live(transcript("input", "Thanks, hang up now.", 9000, 10000))
-        await mocks.send_live(delegation("del-3", 10050))
+        await mocks.send_live(delegation("del-4", 10050))
         farewell = await next_matching(mocks.live_messages, appended("commentary", FAREWELL_SAY))
-        assert farewell["delegation_id"] == "del-3"
+        assert farewell["delegation_id"] == "del-4"
         async with asyncio.timeout(10):
             while not any(path.endswith("/hangup") for path, _ in DaytonaMock.openai_requests):
                 await asyncio.sleep(0.05)
-        assert OrchestratorMock.tool_output("h3-end")["status"] == "ending call"
+        assert OrchestratorMock.tool_output("h4-end")["status"] == "ending call"
+
+        # The canine fiction stays above ACP: no Agent prompt mentions dogs.
+        prompts = [m for m in mocks.acp_seen if m.get("method") == "session/prompt"]
+        assert prompts
+        for message in prompts:
+            for block in message["params"]["prompt"]:
+                assert "dog" not in block.get("text", "").lower()
 
         # Nothing with a URL reached the caller-facing lane.
         spoken = [m for m in mocks.seen if m.get("type") == "session.commentary.append"]
@@ -429,8 +506,11 @@ async def run_protocol(identity: str) -> None:
             assert payload["model"] == "gpt-6.1-sol"
             assert payload["store"] is False and payload["parallel_tool_calls"] is True
             assert "Session Orchestrator" in payload["instructions"]
+            assert "The walk (a working fiction)" in payload["instructions"]
             assert {tool["name"] for tool in payload["tools"]} >= {
                 "brief", "say", "create_managed_session", "begin_prompt_turn", "end_call",
+                "discover_persisted_sessions", "load_persisted_session", "set_alias",
+                "close_managed_session",
             }
         fed_back = {
             item["call_id"]
@@ -489,12 +569,6 @@ def main() -> int:
             f"ORCHESTRATOR_API_BASE:http://127.0.0.1:{ORCHESTRATOR_MOCK_PORT}/v1",
             "--var",
             f"ADMIN_PASSWORD:{LOCAL_ADMIN_PASSWORD}",
-            "--var",
-            "TWILIO_ACCOUNT_SID:AC_TEST",
-            "--var",
-            "TWILIO_FROM_NUMBER:+18317775707",
-            "--var",
-            f"TWILIO_API_BASE:http://127.0.0.1:{DAYTONA_MOCK_PORT}/twilio",
         ],
         cwd=WORKER_DIR,
         stdout=subprocess.DEVNULL,
