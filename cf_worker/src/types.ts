@@ -9,11 +9,15 @@ export interface Env {
   TWILIO_FROM_NUMBER: string;
   TWILIO_API_BASE?: string;
   DAYTONA_SNAPSHOT: string;
+  DAYTONA_AGENT_SECRET?: string;
   DAYTONA_API_BASE?: string;
   OPENAI_PROJECT_ID: string;
   OPENAI_WEBHOOK_SECRET: string;
   OPENAI_LIVE_MODEL?: string;
-  OPENAI_DELEGATED_MODEL?: string;
+  ORCHESTRATOR_MODEL?: string;
+  ORCHESTRATOR_API_BASE?: string;
+  ORCHESTRATOR_API_KEY?: string;
+  ORCHESTRATOR_REASONING_EFFORT?: string;
   OPENAI_LIVE_API_BASE?: string;
   OPENAI_LIVE_ATTACH_BASE?: string;
   PUBLIC_ORIGIN?: string;

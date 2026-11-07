@@ -12,11 +12,14 @@ ACCESS_TEAM_DOMAIN = ""
 ACCESS_AUD = ""
 OPENAI_PROJECT_ID = "proj_jignpSyHyE5k18M1EGYS9Ijx"
 OPENAI_LIVE_MODEL = "gpt-live-1"
-OPENAI_DELEGATED_MODEL = "gpt-5.6-luna"
+ORCHESTRATOR_MODEL = "gpt-6.1-sol"
+ORCHESTRATOR_REASONING_EFFORT = "low"
 PUBLIC_ORIGIN = "https://dogwalk.tools"
 TWILIO_FROM_NUMBER = "+18317775707"
 # Name of a pre-built Daytona snapshot containing OpenCode and the ACP Gateway.
-DAYTONA_SNAPSHOT = "dogwalk-acp-20260721-v3"
+DAYTONA_SNAPSHOT = "dogwalk-acp-20261107-v2"
+# Name of the org Daytona Secret mapped to OPENAI_API_KEY for sandbox Agents.
+DAYTONA_AGENT_SECRET = "dogwalk-openai"
 
 # Bound in Spike 1. DB id is filled in after `wrangler d1 create dogwalk`
 # is run on the adam@adamsmith.as account.

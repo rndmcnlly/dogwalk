@@ -15,8 +15,9 @@ part of the protocol, tool, storage, or session-management vocabulary.
 ```text
 Phone
   -> Twilio PSTN and deterministic access/wake-up TwiML
-  -> OpenAI GPT-Live over secure SIP (Voice Agent and speech)
+  -> OpenAI GPT-Live over secure SIP (Voice Frontend: speech, no tools)
        -> sideband WebSocket to sandbox-keyed VoiceSession Durable Object
+            -> Session Orchestrator (Responses API tool loop, gpt-6.1-sol)
        -> ACP over WebSocket through Daytona preview proxy
             -> sandbox_acp_gateway.py
             -> opencode acp over stdio
@@ -46,7 +47,9 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 ### VoiceSession Durable Object
 
 - Owns the GPT-Live sideband and ACP WebSockets, but no telephone audio.
-- Exposes neutral Managed Session and Prompt Turn tools to the Voice Agent.
+- Runs the Session Orchestrator: answers each GPT-Live client delegation from
+  the call transcript, with neutral Managed Session and Prompt Turn tools, and
+  persists its context across calls.
 - Multiplexes multiple ACP Sessions over one Agent Connection.
 - Persists Alias and Managed Session projections across Voice Calls.
 - Preserves Permission Request choices exactly as supplied by the ACP Agent.
@@ -57,7 +60,8 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 
 - Provides the filesystem, process, network, and credential isolation required
   by coding Agents.
-- Runs the ACP Gateway and OpenCode from an immutable versioned snapshot.
+- Runs the ACP Gateway and OpenCode 2 from an immutable versioned snapshot.
+- Receives Agent inference credentials only as Daytona Secret placeholders.
 - Auto-stops after idle time and auto-archives after extended inactivity, but is
   never automatically deleted.
 - Retains files and Agent-held session history across calls and restarts.
@@ -108,8 +112,12 @@ exists but is disabled until a path-scoped Access application is configured.
 ## Known Rough Edges
 
 - The GPT-Live direct-SIP migration was deployed on 2026-09-15, but an
-  end-to-end production call is not yet operational. Diagnosis is deferred; the
-  architecture and local control-plane tests are preserved for follow-up.
+  end-to-end production call never worked; the cause was not diagnosed. On
+  2026-11-07 the voice layer moved to client delegation with a Session
+  Orchestrator and the Sandbox to OpenCode 2. A real call has not yet been
+  verified on the new design.
+- Review Bundle and Ephemeral Service tools are absent from the OpenCode 2
+  snapshot until they return as Client-provided MCP tools.
 - A completely silent Prompt Turn can outlive Cloudflare's outbound WebSocket
   retention guarantee. A sandbox-initiated connection is the hardening path.
 - Session discovery/load, explicit close/delete/config operations, and ACP

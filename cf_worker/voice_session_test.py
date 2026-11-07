@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["websockets==15.0.1"]
 # ///
-"""End-to-end local test of GPT-Live sideband and ACP coordination."""
+"""End-to-end local test of GPT-Live client delegation, the Session Orchestrator, and ACP."""
 
 import asyncio
 import base64
@@ -22,6 +22,8 @@ from pathlib import Path
 
 from websockets.asyncio.server import serve
 
+from http.server import BaseHTTPRequestHandler
+
 from smoke_test import (
     DAYTONA_MOCK_PORT,
     DaytonaMock,
@@ -36,6 +38,7 @@ from smoke_test import (
 
 WORKER_DIR = Path(__file__).resolve().parent
 SOCKET_PORT = 8791
+ORCHESTRATOR_MOCK_PORT = 8792
 IDENTITY_SECRET = f"local-identity-secret-{secrets.token_hex(8)}"
 OPENAI_WEBHOOK_KEY = secrets.token_bytes(32)
 OPENAI_WEBHOOK_SECRET = "whsec_" + base64.b64encode(OPENAI_WEBHOOK_KEY).decode()
@@ -48,6 +51,7 @@ class SocketMocks:
         self.live_messages: asyncio.Queue[dict] = asyncio.Queue()
         self.acp_connected = asyncio.Event()
         self.live_connected = asyncio.Event()
+        self.seen: list[dict] = []
 
     async def handler(self, socket) -> None:
         if socket.request.path == "/acp":
@@ -98,6 +102,7 @@ class SocketMocks:
             self.live_connected.set()
             async for raw in socket:
                 message = json.loads(raw)
+                self.seen.append(message)
                 await self.live_messages.put(message)
             return
 
@@ -106,6 +111,142 @@ class SocketMocks:
     async def send_live(self, message: dict) -> None:
         assert self.live is not None
         await self.live.send(json.dumps(message))
+
+
+CALL_BRIEF = "Call started with no Managed Sessions."
+WORK_BRIEF = "Starting Juniper on a tiny verified artifact."
+AGENT_PROMPT = (
+    "Goal: create a tiny artifact and verify it. Finish with a short summary "
+    "of what changed and how it was verified."
+)
+STARTED_SAY = "Juniper is on it."
+FINISHED_SAY = "Juniper finished; it reports the artifact is verified."
+TEXTED_SAY = "I texted you the VS Code link."
+FAREWELL_SAY = "Talk soon."
+
+
+def call(call_id: str, name: str, **arguments) -> dict:
+    return {
+        "type": "function_call",
+        "id": f"fc_{call_id}",
+        "call_id": call_id,
+        "name": name,
+        "arguments": json.dumps(arguments),
+    }
+
+
+def created_alias(context: list[dict]) -> str:
+    output = next(
+        item for item in context
+        if item.get("type") == "function_call_output" and item["call_id"] == "h1-create"
+    )
+    return json.loads(output["output"])["session"]["alias"]
+
+
+# Each step fires once its trigger appears in a user message, in order, after the
+# previous step's outputs are back. Steps that answer a handoff use its delegation id.
+ORCHESTRATOR_SCRIPT = [
+    ("call_started", lambda ctx: [call("cs-brief", "brief", text=CALL_BRIEF, delegation_id=None)]),
+    ("[handoff del-1]", lambda ctx: [
+        call("h1-brief", "brief", text=WORK_BRIEF, delegation_id="del-1"),
+        call("h1-create", "create_managed_session", alias="Juniper"),
+    ]),
+    ("[handoff del-1]", lambda ctx: [
+        call("h1-begin", "begin_prompt_turn", alias=created_alias(ctx), prompt=AGENT_PROMPT),
+    ]),
+    ("[handoff del-1]", lambda ctx: [
+        call("h1-say-url", "say", text="Watch it at https://example.com", delegation_id="del-1"),
+    ]),
+    ("[handoff del-1]", lambda ctx: [call("h1-say", "say", text=STARTED_SAY, delegation_id="del-1")]),
+    ("turn_stopped", lambda ctx: [call("ts-say", "say", text=FINISHED_SAY, delegation_id=None)]),
+    ("[handoff del-2]", lambda ctx: [
+        call("h2-text", "text_ephemeral_service", service_id="service-test"),
+    ]),
+    ("[handoff del-2]", lambda ctx: [call("h2-say", "say", text=TEXTED_SAY, delegation_id="del-2")]),
+    ("[handoff del-3]", lambda ctx: [
+        call("h3-say", "say", text=FAREWELL_SAY, delegation_id="del-3"),
+        call("h3-end", "end_call"),
+    ]),
+]
+STEP_IDS = [
+    "cs-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
+    "ts-say", "h2-text", "h2-say", "h3-say", "h3-end",
+]
+
+
+class OrchestratorMock(BaseHTTPRequestHandler):
+    """A scripted /v1/responses endpoint standing in for the Session Orchestrator model."""
+
+    requests: list[tuple[dict[str, str], dict]] = []
+    issued: list[tuple[str, int]] = []
+    lock = threading.Lock()
+
+    def log_message(self, *args) -> None:
+        pass
+
+    def do_POST(self) -> None:
+        raw = self.rfile.read(int(self.headers.get("content-length", "0")))
+        payload = json.loads(raw)
+        headers = {key.lower(): value for key, value in self.headers.items()}
+        if self.path != "/v1/responses":
+            self.send_error(404)
+            return
+        with OrchestratorMock.lock:
+            OrchestratorMock.requests.append((headers, payload))
+            context = payload["input"]
+            user_text = "\n".join(
+                str(item["content"]) for item in context if item.get("role") == "user"
+            )
+            output = []
+            step = len({index for _, index in OrchestratorMock.issued})
+            if step < len(ORCHESTRATOR_SCRIPT) and ORCHESTRATOR_SCRIPT[step][0] in user_text:
+                output = ORCHESTRATOR_SCRIPT[step][1](context)
+                OrchestratorMock.issued.extend((item["call_id"], step) for item in output)
+        body = json.dumps({"output": output, "usage": {"input_tokens": 1, "output_tokens": 1}}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    @classmethod
+    def user_message(cls, marker: str) -> str:
+        for _, payload in cls.requests:
+            for item in payload["input"]:
+                if item.get("role") == "user" and marker in str(item["content"]):
+                    return str(item["content"])
+        raise AssertionError(f"orchestrator never received {marker}")
+
+    @classmethod
+    def tool_output(cls, call_id: str) -> dict:
+        for _, payload in reversed(cls.requests):
+            for item in payload["input"]:
+                if item.get("type") == "function_call_output" and item["call_id"] == call_id:
+                    return json.loads(item["output"])
+        raise AssertionError(f"orchestrator never received output for {call_id}")
+
+
+def transcript(direction: str, delta: str, start_ms: int, end_ms: int) -> dict:
+    return {
+        "type": f"session.{direction}_transcript.delta",
+        "delta": delta,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+    }
+
+
+def delegation(delegation_id: str, offset_ms: int) -> dict:
+    return {
+        "type": "session.delegation.created",
+        "offset_ms": offset_ms,
+        "delegation": {"id": delegation_id, "type": "delegation", "target": "client"},
+    }
+
+
+def appended(lane: str, content: str):
+    return lambda item: (
+        item.get("type") == f"session.{lane}.append" and item.get("content") == content
+    )
 
 
 async def next_matching(
@@ -209,14 +350,9 @@ async def run_protocol(identity: str) -> None:
         session = accept_payload["session"]
         assert session["type"] == "live" and session["model"] == "gpt-live-1"
         assert "audio" in session and "format" not in session["audio"]
-        assert "Harness session events are not user speech" in session["instructions"]
-        delegated = session["delegation"]["responses"]
-        assert "call-start snapshot is advisory" in delegated["instructions"]
-        assert {tool["name"] for tool in delegated["tools"]} >= {
-            "create_managed_session",
-            "begin_prompt_turn",
-            "resolve_permission",
-        }
+        assert "Generate <|SpawnThinking|> when" in session["instructions"]
+        assert session["delegation"] == {"type": "client", "acknowledgement_delay_ms": 400}
+        assert "tools" not in session
         await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "initialize"
         )
@@ -225,96 +361,84 @@ async def run_protocol(identity: str) -> None:
             lambda item: item.get("type") == "session.commentary.append",
         )
         assert greeting["content"] == "Dogwalk. Where to?"
+        call_brief = await next_matching(mocks.live_messages, appended("thinking", CALL_BRIEF))
+        assert call_brief["delegation_id"] is None
 
-        await mocks.send_live(
-                {
-                    "type": "response.event",
-                    "event": {"type": "response.output_item.done", "item": {
-                        "type": "function_call",
-                        "name": "create_managed_session",
-                        "call_id": "call-create",
-                        "arguments": json.dumps({"alias": "Juniper"}),
-                    }},
-                }
-            )
-        created = await next_matching(
-                mocks.live_messages,
-                lambda item: item.get("item", {}).get("call_id") == "call-create",
-            )
-        assert created["type"] == "response.item.create"
-        assert json.loads(created["item"]["output"])["ok"] is True
+        # Handoff 1: the Voice Frontend delegates; the task is the transcript.
+        await mocks.send_live(transcript("input", "Start a session called Juniper ", 0, 900))
+        await mocks.send_live(transcript("input", "to build a tiny verified artifact.", 900, 2100))
+        await mocks.send_live(transcript("output", "On it.", 2200, 2600))
+        await mocks.send_live(delegation("del-1", 2150))
+        work_brief = await next_matching(mocks.live_messages, appended("thinking", WORK_BRIEF))
+        assert work_brief["delegation_id"] == "del-1"
         await next_matching(
-                mocks.acp_messages, lambda item: item.get("method") == "session/new"
-            )
-
-        await mocks.send_live(
-                {
-                    "type": "response.event",
-                    "event": {"type": "response.output_item.done", "item": {
-                        "type": "function_call",
-                        "name": "begin_prompt_turn",
-                        "call_id": "call-prompt",
-                        "arguments": json.dumps(
-                            {
-                                "alias": "Juniper",
-                                "prompt": "Create a tiny verified artifact.",
-                            }
-                        ),
-                    }},
-                }
-            )
-        prompted = await next_matching(
-                mocks.live_messages,
-                lambda item: item.get("item", {}).get("call_id") == "call-prompt",
-            )
-        assert json.loads(prompted["item"]["output"])["turn_state"] == "in_progress"
+            mocks.acp_messages, lambda item: item.get("method") == "session/new"
+        )
         prompt_request = await next_matching(
-                mocks.acp_messages, lambda item: item.get("method") == "session/prompt"
-            )
+            mocks.acp_messages, lambda item: item.get("method") == "session/prompt"
+        )
         assert prompt_request["params"]["sessionId"] == "acp-session-test"
-        completion = await next_matching(
-                mocks.live_messages,
-                lambda item: "Prompt Turn stopped" in json.dumps(item),
-            )
-        assert completion["type"] == "session.commentary.append"
+        assert prompt_request["params"]["prompt"] == [{"type": "text", "text": AGENT_PROMPT}]
+        started = await next_matching(mocks.live_messages, appended("commentary", STARTED_SAY))
+        assert started["delegation_id"] == "del-1"
+        finished = await next_matching(mocks.live_messages, appended("commentary", FINISHED_SAY))
+        assert finished["delegation_id"] is None
+        handoff = OrchestratorMock.user_message("[handoff del-1]")
+        assert "Caller: Start a session called Juniper to build a tiny verified artifact." in handoff
+        assert "Voice: On it." in handoff
+        stopped = OrchestratorMock.user_message("turn_stopped")
+        assert '"stop_reason":"end_turn"' in stopped and "Bridge report complete." in stopped
+        rejected = OrchestratorMock.tool_output("h1-say-url")
+        assert rejected["ok"] is False and "URL" in rejected["error"]
+        assert OrchestratorMock.tool_output("h1-create")["session"]["alias"] == "Juniper"
+        assert OrchestratorMock.tool_output("h1-begin")["turn_state"] == "in_progress"
 
-        await mocks.send_live(
-                {
-                    "type": "response.event",
-                    "event": {"type": "response.output_item.done", "item": {
-                        "type": "function_call",
-                        "name": "text_ephemeral_service",
-                        "call_id": "call-text",
-                        "arguments": json.dumps({"service_id": "service-test"}),
-                    }},
-                }
-            )
-        queued = await next_matching(
-                mocks.live_messages,
-                lambda item: item.get("item", {}).get("call_id") == "call-text",
-            )
-        assert json.loads(queued["item"]["output"])["status"] == "queued"
+        # Handoff 2: a link goes out by SMS, never by voice.
+        await mocks.send_live(transcript("input", "Text me the VS Code link.", 5000, 6200))
+        await mocks.send_live(delegation("del-2", 6250))
+        texted = await next_matching(mocks.live_messages, appended("commentary", TEXTED_SAY))
+        assert texted["delegation_id"] == "del-2"
+        handoff = OrchestratorMock.user_message("[handoff del-2]")
+        assert "Caller: Text me the VS Code link." in handoff and "Juniper" not in handoff
+        assert OrchestratorMock.tool_output("h2-text")["status"] == "queued"
         assert DaytonaMock.sms_messages[-1]["To"] == TEST_PHONE
         assert "signed-service-token" in DaytonaMock.sms_messages[-1]["Body"]
         assert (
-                DaytonaMock.sms_messages[-1]["StatusCallback"]
-                == "https://dogwalk.tools/sms/status"
-            )
+            DaytonaMock.sms_messages[-1]["StatusCallback"]
+            == "https://dogwalk.tools/sms/status"
+        )
 
-        await mocks.send_live(
-                {
-                    "type": "response.event",
-                    "event": {"type": "response.output_item.done", "item": {
-                        "type": "function_call",
-                        "name": "end_call",
-                        "call_id": "call-end",
-                        "arguments": "{}",
-                    }},
-                }
-            )
-        async with asyncio.timeout(5):
+        # Handoff 3: farewell and end_call in one response; hangup follows the farewell.
+        await mocks.send_live(transcript("input", "Thanks, hang up now.", 9000, 10000))
+        await mocks.send_live(delegation("del-3", 10050))
+        farewell = await next_matching(mocks.live_messages, appended("commentary", FAREWELL_SAY))
+        assert farewell["delegation_id"] == "del-3"
+        async with asyncio.timeout(10):
             while not any(path.endswith("/hangup") for path, _ in DaytonaMock.openai_requests):
                 await asyncio.sleep(0.05)
+        assert OrchestratorMock.tool_output("h3-end")["status"] == "ending call"
+
+        # Nothing with a URL reached the caller-facing lane.
+        spoken = [m for m in mocks.seen if m.get("type") == "session.commentary.append"]
+        assert spoken and not any("http" in m["content"] for m in spoken)
+
+        requests = OrchestratorMock.requests
+        assert {step for step, _ in OrchestratorMock.issued} == set(STEP_IDS)
+        for headers, payload in requests:
+            assert headers.get("authorization") == "Bearer local-openai-token"
+            assert payload["model"] == "gpt-6.1-sol"
+            assert payload["store"] is False and payload["parallel_tool_calls"] is True
+            assert "Session Orchestrator" in payload["instructions"]
+            assert {tool["name"] for tool in payload["tools"]} >= {
+                "brief", "say", "create_managed_session", "begin_prompt_turn", "end_call",
+            }
+        fed_back = {
+            item["call_id"]
+            for _, payload in requests
+            for item in payload["input"]
+            if item.get("type") == "function_call_output"
+        }
+        assert fed_back == set(STEP_IDS)
 
 
 def main() -> int:
@@ -333,6 +457,8 @@ def main() -> int:
     daytona = ThreadingHTTPServer(("127.0.0.1", DAYTONA_MOCK_PORT), DaytonaMock)
     thread = threading.Thread(target=daytona.serve_forever, daemon=True)
     thread.start()
+    orchestrator = ThreadingHTTPServer(("127.0.0.1", ORCHESTRATOR_MOCK_PORT), OrchestratorMock)
+    threading.Thread(target=orchestrator.serve_forever, daemon=True).start()
     process = subprocess.Popen(
         [
             wrangler,
@@ -360,6 +486,8 @@ def main() -> int:
             "--var",
             f"OPENAI_LIVE_ATTACH_BASE:http://127.0.0.1:{SOCKET_PORT}/live",
             "--var",
+            f"ORCHESTRATOR_API_BASE:http://127.0.0.1:{ORCHESTRATOR_MOCK_PORT}/v1",
+            "--var",
             f"ADMIN_PASSWORD:{LOCAL_ADMIN_PASSWORD}",
             "--var",
             "TWILIO_ACCOUNT_SID:AC_TEST",
@@ -376,13 +504,15 @@ def main() -> int:
         if not wait_port("127.0.0.1", 8787, timeout=20):
             raise RuntimeError("wrangler dev did not start")
         asyncio.run(run_protocol(identity))
-        print("voice session sideband checks passed")
+        print("voice session delegation checks passed")
         return 0
     finally:
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=10)
         daytona.shutdown()
         daytona.server_close()
+        orchestrator.shutdown()
+        orchestrator.server_close()
 
 
 if __name__ == "__main__":

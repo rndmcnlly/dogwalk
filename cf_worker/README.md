@@ -39,16 +39,15 @@ Set `OPENAI_PROJECT_ID` in `wrangler.toml`. In the matching OpenAI project,
 subscribe `https://dogwalk.tools/openai/live` to `live.transport.incoming` and
 store its `whsec_...` signing secret as `OPENAI_WEBHOOK_SECRET`.
 
-`DAYTONA_SNAPSHOT` is currently `dogwalk-acp-20260721-v3`. It contains the ACP
-Gateway, OpenCode `1.18.4`, passwordless sandbox-local `sudo`, network diagnostic
-utilities, and global OpenCode tools for Review Bundles and Ephemeral Services.
-The OpenCode config selects `opencode/deepseek-v4-flash-free`.
+`DAYTONA_SNAPSHOT` is currently `dogwalk-acp-20261107-v2`. It contains the ACP
+Gateway, OpenCode `2.2.5`, passwordless sandbox-local `sudo`, and network
+diagnostic utilities. The OpenCode config selects `openai/gpt-6.1-sol`.
 
 From the repository root, build a new immutable version rather than replacing
 this snapshot in place:
 
 ```bash
-source ~/.tokens/daytona-api
+set -a; source ~/.tokens/daytona-api; set +a
 uv run --script build_sandbox_snapshot.py --name dogwalk-acp-YYYYMMDD-vN
 ```
 
@@ -58,16 +57,17 @@ The Worker submits this mapping at sandbox creation:
 
 ```json
 {
-  "snapshot": "configured-snapshot-name"
+  "snapshot": "configured-snapshot-name",
+  "secrets": [{ "OPENAI_API_KEY": "dogwalk-openai" }]
 }
 ```
 
-No inference key is injected for the initial free-model deployment. A clean
-Daytona sandbox with OpenCode `1.18.4` and zero stored credentials successfully
-ran this model on 2026-07-20. Free-model availability is temporary, and prompts
-may be used for provider improvement, so this tier must not be presented as
-suitable for confidential code. If a credentialed provider is added later, use
-an allowlisted Daytona Secret rather than a snapshot layer or workspace file.
+`dogwalk-openai` is an org Daytona Secret allowlisted to `api.openai.com`,
+named by `DAYTONA_AGENT_SECRET`. The Worker sends only its name. Daytona's
+egress proxy substitutes the value into HTTPS headers, so the Sandbox holds a
+`dtn_secret_` placeholder; see `../SANDBOX_ACP_GATEWAY.md`. A Sandbox created
+before the secret existed must be replaced (or restarted after
+`update_secrets`) to receive it.
 
 If a sandbox is deleted directly in Daytona, D1 temporarily retains a stale
 provider ID. On the next registered call, a Daytona 404 atomically clears that
@@ -106,7 +106,8 @@ isolation, webhook signatures, and fail-closed admin access.
 
 `voice_session_test.py` runs mock OpenAI GPT-Live control, Daytona preview, and
 ACP endpoints around a local Worker. It checks signed incoming-call correlation,
-the call-start state preamble, Responses delegation, ACP initialization, Managed
+client delegation, the Session Orchestrator loop against a mock Responses
+endpoint, ACP initialization, Managed
 Session creation, asynchronous Prompt Turns, signed-preview SMS, and call
 termination without consuming provider traffic.
 
@@ -116,30 +117,42 @@ Warm calls retain Twilio's deterministic registration and Sandbox wake-up front
 door, then use secure SIP (`TLS` signaling and `SRTP` media) to hand the active
 audio leg directly to OpenAI GPT-Live. A sandbox-keyed SQLite Durable Object owns
 the Agent Connection and persisted Managed Session projection; it attaches one
-GPT-Live sideband WebSocket for context and tool execution. Ending the call
-detaches that sideband but does not cancel active Prompt Turns or close ACP
-Sessions.
+GPT-Live sideband WebSocket. Ending the call detaches that sideband but does not
+cancel active Prompt Turns or close ACP Sessions.
 
-The production voice model defaults to `gpt-live-1`, with `gpt-5.6-luna` as its
-Responses-delegation backend. OpenAI owns codec negotiation, playback, and
-full-duplex interruption behavior. Voice Agent tools use the
-neutral operations `create_managed_session`, `begin_prompt_turn`,
-`inspect_managed_session`, `list_managed_sessions`, `cancel_prompt_turn`, and
-`resolve_permission`.
+The Voice Agent is two components (see `../DOMAIN.md`). The Voice Frontend is
+`gpt-live-1` under client delegation: it converses, has no tools, and raises a
+delegation (a Handoff) when the caller asks about work. The Session Orchestrator
+runs inside the Durable Object as a Responses API tool loop on
+`ORCHESTRATOR_MODEL` (default `gpt-6.1-sol`, `low` reasoning effort). It reads the
+call transcript up to each delegation, operates Managed Sessions through the
+neutral operations (`create_managed_session`, `begin_prompt_turn`,
+`inspect_managed_session`, `list_managed_sessions`, `cancel_prompt_turn`,
+`resolve_permission`, plus SMS and call control), and answers through `brief`
+(`session.thinking.append`) and `say` (`session.commentary.append`). Events that
+arrive mid-loop are injected before its next model call, so corrections steer
+work in flight. Its context persists in Durable Object storage across calls;
+between calls, events accumulate but the model does not run.
+`ORCHESTRATOR_API_BASE` and `ORCHESTRATOR_API_KEY` can point it at any compatible
+endpoint.
 
 Twilio adds a five-minute HMAC capability containing the existing Call SID to a
 custom SIP header. The signed OpenAI webhook validates it and resolves the User
 and current Sandbox Assignment from D1; SIP caller headers alone never authorize
-a call. Before accepting, the Worker reads a bounded call-start snapshot from
-the Durable Object and places it in the delegated backend instructions. The
-snapshot supplies aliases and recent state for natural reference resolution,
-while tools remain authoritative for current reads and all actions.
+a call. On attach, the Durable Object gives the Orchestrator a bounded call-start
+snapshot of aliases and recent state as a harness event; tools remain
+authoritative for current reads and all actions.
 
-The Voice Agent normally speaks one to three words, then listens. Dog-walking
+The Voice Frontend normally speaks one short sentence, then listens. Dog-walking
 presentation language is isolated in `src/voice_flavors.ts`; machine-facing
 contracts remain neutral. `end_call` closes the call, while
 `open_recovery_menu` hands control back to deterministic TwiML for restart or
 confirmed destructive replacement.
+
+The OpenCode 1.x plugin tools `publish_review_bundle` and
+`register_ephemeral_service` are not in the OpenCode 2 snapshot. Until they
+return as Client-provided MCP tools served by this Worker, Agents cannot create
+new Review Bundles or Ephemeral Services; the Worker endpoints below remain.
 
 ACP Agents publish Review Bundles through `publish_review_bundle`. The initial
 bounded implementation stores at most 1 MiB per bundle in D1 for seven days and

@@ -11,7 +11,7 @@ import { ADMIN_HTML } from "./admin";
 import { LANDING_HTML } from "./landing";
 import type { Env } from "./types";
 import { handleSandboxApi, provisionSandboxCapability } from "./sandbox_api";
-import { backendInstructions, VOICE_INSTRUCTIONS, VOICE_TOOLS, VoiceSession } from "./voice_session";
+import { FRONTEND_INSTRUCTIONS, VoiceSession } from "./voice_session";
 export { VoiceSession };
 
 // --- env ----------------------------------------------------------------
@@ -396,6 +396,9 @@ async function ensureSandboxAssignment(env: Env, phone: string): Promise<Sandbox
     body: JSON.stringify({
       name: `dogwalk-${hash.slice(0, 12)}-${crypto.randomUUID().slice(0, 8)}`,
       snapshot: env.DAYTONA_SNAPSHOT,
+      // A Daytona Secret name, not a value: the egress proxy substitutes the key into
+      // HTTPS headers to allowlisted hosts, so the sandbox only ever holds a placeholder.
+      ...(env.DAYTONA_AGENT_SECRET ? { secrets: [{ OPENAI_API_KEY: env.DAYTONA_AGENT_SECRET }] } : {}),
       labels: {
         [DAYTONA_LABEL_MANAGED]: "dogwalk",
         [DAYTONA_LABEL_IDENTITY]: `phone-hmac-v1:${hash}`,
@@ -942,23 +945,15 @@ async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response
     await decideLiveCall(env, liveSessionId, "reject", { status_code: prepare.status === 409 ? 486 : 500 });
     return new Response(null, { status: 204 });
   }
-  const snapshot = await prepare.json<unknown>();
+  // Client delegation: GPT-Live only converses. The VoiceSession Durable Object runs the
+  // Session Orchestrator and answers each delegation through the sideband.
   const accepted = await decideLiveCall(env, liveSessionId, "accept", {
     session: {
       type: "live",
       model: env.OPENAI_LIVE_MODEL ?? "gpt-live-1",
-      instructions: VOICE_INSTRUCTIONS,
+      instructions: FRONTEND_INSTRUCTIONS,
       audio: { output: { voice: "marin" } },
-      delegation: {
-        type: "responses",
-        responses: {
-          model: env.OPENAI_DELEGATED_MODEL ?? "gpt-5.6-luna",
-          instructions: backendInstructions(snapshot),
-          tools: VOICE_TOOLS,
-          tool_choice: "auto",
-          parallel_tool_calls: false,
-        },
-      },
+      delegation: { type: "client", acknowledgement_delay_ms: 400 },
     },
   });
   if (!accepted) return new Response(null, { status: 204 });

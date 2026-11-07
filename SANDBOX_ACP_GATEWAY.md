@@ -2,7 +2,7 @@
 
 Status: first production component.
 
-The active production snapshot is `dogwalk-acp-20260721-v3`, built reproducibly
+The active production snapshot is `dogwalk-acp-20261107-v2`, built reproducibly
 by `build_sandbox_snapshot.py`.
 
 `sandbox_acp_gateway.py` exposes a sandbox-local ACP Agent through the
@@ -41,11 +41,13 @@ Inside a sandbox:
 ```bash
 uv run --script sandbox_acp_gateway.py serve \
   --workspace /home/daytona \
-  --agent-command '/home/daytona/.opencode/bin/opencode acp --pure --cwd {cwd}'
+  --agent-command 'opencode acp'
 ```
 
 Defaults are `0.0.0.0:8765`, the current directory as Workspace, and
-`opencode acp --pure --cwd {cwd}`. The corresponding environment variables are
+`opencode acp`. OpenCode 2 runs a private in-process server per `acp` process,
+takes each session's directory from `cwd` in `session/new`, and rejects the
+1.x `--pure` and `--cwd` flags. The corresponding environment variables are
 `DOGWALK_ACP_GATEWAY_HOST`, `DOGWALK_ACP_GATEWAY_PORT`, `DOGWALK_WORKSPACE`, and
 `DOGWALK_AGENT_COMMAND`. The product codename namespaces configuration; it does
 not change ACP vocabulary.
@@ -69,26 +71,25 @@ control plane sends the fresh `x-daytona-preview-token` returned after each
 sandbox start and `X-Daytona-Skip-Preview-Warning: true`. Do not use a signed
 browser URL for the ACP endpoint.
 
-Provision a tested OpenCode version into a user-writable path and configure its
-absolute path. The Daytona image tested on 2026-07-20 supplied OpenCode `1.1.35`,
-which closed on the current ACP v1 handshake. `opencode upgrade` selected a
-root-owned npm installation, printed a permissions failure, and still exited
-zero. `opencode upgrade -m curl` installed working version `1.18.4` at
-`/home/daytona/.opencode/bin/opencode`.
+The snapshot installs OpenCode `2.2.5` from its GitHub release into
+`/usr/local/bin`. OpenCode 1.x through `1.18.4` served the 2026-07 deployments;
+2.x prints `opencode v2.2.5` for `--version`, which the build check accounts for.
 
-### Initial inference model
+### Inference
 
-The initial snapshot needs no inference credential. Configure OpenCode with a
-currently free Zen model, initially `opencode/deepseek-v4-flash-free`. On
-2026-07-20 a clean Daytona sandbox with OpenCode `1.18.4`, zero entries in
-`auth.json`, and no inference environment variable completed a real prompt with
-that model.
+OpenCode uses `openai/gpt-6.1-sol`, with `openai/gpt-6-luna` as its title model,
+through the built-in OpenAI provider. Sandboxes receive `OPENAI_API_KEY` from the
+org Daytona Secret `dogwalk-openai`, allowlisted to `api.openai.com`. Daytona's
+egress proxy substitutes the real key into HTTPS request headers, so processes in
+the Sandbox, including an Agent with `sudo`, see only a `dtn_secret_` placeholder.
+The Agent can still *use* the key against the allowlisted host; scope it to a
+dedicated OpenAI project with a budget. Daytona already points
+`NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE` at its proxy CA, and OpenCode needed
+no TLS changes. Verified 2026-11-07: a fresh Sandbox from `-v2` completed a real
+ACP Prompt Turn (`end_turn`) through the gateway.
 
-Free availability is temporary and prompts may be used for provider improvement.
-This bootstrap tier is not appropriate for confidential repositories. The
-snapshot's pinned model must be monitored and updated when the free lineup
-changes. If Dogwalk later uses a credentialed provider, mount its key through an
-allowlisted Daytona Secret rather than baking it into the snapshot or workspace.
+The 2026-07 free-model bootstrap (`opencode/deepseek-v4-flash-free`) ended when
+that model left the free lineup.
 
 If a Sandbox is manually deleted, the next call invalidates its stale provider
 ID, searches once more by identity label, and provisions a fresh Sandbox from
@@ -98,11 +99,11 @@ destructive to the old Workspace and Agent-held ACP Session history.
 This is an operator-recovery path, not routine lifecycle. User sandboxes normally
 stop and archive in place, retaining their filesystem and identity indefinitely.
 
-Snapshot v3 grants the isolated `daytona` user passwordless `sudo` and includes
-`ping`, DNS, and socket diagnostics. It also installs the provider-neutral global
-OpenCode tools `publish_review_bundle` and `register_ephemeral_service`. Their
-Sandbox-scoped capability is provisioned after creation and is not present in the
-snapshot.
+The snapshot grants the isolated `daytona` user passwordless `sudo` and includes
+`ping`, DNS, and socket diagnostics. It no longer installs the 1.x OpenCode
+plugin tools for Review Bundles and Ephemeral Services: OpenCode 2 changed its
+plugin API, and those tools are moving to Client-provided MCP tools served by the
+Worker so that any ACP Agent receives them.
 
 ## Verification
 
@@ -116,7 +117,8 @@ It checks health, readiness, the connection ID header, single-connection
 exclusion, bidirectional text forwarding, binary-frame handling, subprocess
 stderr isolation, and connection-slot recovery. The first Daytona deployment
 also passed a real authenticated-preview `initialize` and `session/new` round
-trip against OpenCode `1.18.4`.
+trip against OpenCode `1.18.4`, and snapshot `dogwalk-acp-20261107-v2` passed a
+full in-sandbox Prompt Turn against OpenCode `2.2.5`.
 
 ## Deliberate Limits
 

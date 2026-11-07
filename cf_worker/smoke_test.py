@@ -398,8 +398,8 @@ def run_tests(
             "sandbox snapshot was not configured",
         )
         require(
-            "secrets" not in DaytonaMock.last_create_payload,
-            "credential mapping was added to the free-model sandbox",
+            DaytonaMock.last_create_payload.get("secrets") == [{"OPENAI_API_KEY": "dogwalk-test-agent-secret"}],
+            "Agent inference secret was not mapped by name",
         )
 
     for wake in (1, 2):
@@ -734,6 +734,8 @@ def main() -> int:
             f"DAYTONA_API_BASE:http://127.0.0.1:{DAYTONA_MOCK_PORT}/api",
             "--var",
             "DAYTONA_SNAPSHOT:dogwalk-test-snapshot",
+            "--var",
+            "DAYTONA_AGENT_SECRET:dogwalk-test-agent-secret",
             "--var",
             f"ADMIN_PASSWORD:{LOCAL_ADMIN_PASSWORD}",
             "--var",

@@ -19,6 +19,10 @@ Dogwalk is an eyes-free ACP Client and multi-session coding manager. It gives a 
 
 The Voice Agent is the realtime conversational interface through which the User supervises coding work. It translates conversational intent into precise, neutrally named session-manager operations. Coding work is performed by ACP Agents such as OpenCode, not by the Voice Agent.
 
+The Voice Agent is one character performed by two components: a Voice Frontend that holds the conversation and a Session Orchestrator that exercises engineering judgment and operates Managed Sessions. The User experiences a single voice; the split is an implementation boundary, never something the Voice Agent narrates.
+
+Dogwalk presents as an agentic development environment driven by a coworker. ACP Agents should see ordinary requests from a colleague: they need not know they are supervised by voice, and anything specific to calls, speech, or SMS stays inside Dogwalk.
+
 ## Modeling Principles
 
 - ACP terminology governs protocol integration and anchors the session-management model.
@@ -65,8 +69,11 @@ are adapters, not identity authorities.
 User speech
     |
     v
-Voice Agent / Voice Interaction
-    |  translates conversational intent into neutral commands and events
+Voice Frontend / Voice Interaction
+    |  Handoffs (transcript) up; context and speech requests down
+    v
+Session Orchestrator
+    |  neutral commands; receives harness events
     v
 Session Management
     |  translates managed lifecycle into ACP operations
@@ -94,9 +101,27 @@ The human principal whose intent, authorization, and attention govern the work. 
 
 **Context:** Voice Interaction
 
-The socially fluent, deliberately engineering-weak conversational agent that maintains the voice interaction, resolves references, invokes neutrally named session-manager operations, and presents results in plain language. It may use Dogwalk's canine metaphor sparingly in narration while speaking about ACP and session concepts authoritatively.
+The single character the User talks to: socially fluent, a little modest about engineering detail, and authoritative about session state. It may use Dogwalk's canine metaphor sparingly in narration. It is composed of a Voice Frontend and a Session Orchestrator.
 
-**Not:** An ACP Agent, coding harness, Agent host, or engineering authority.
+**Not:** An ACP Agent, coding harness, Agent host, or a single model.
+
+### Voice Frontend
+
+**Context:** Voice Interaction
+
+The realtime speech component of the Voice Agent. It owns turn-taking, interruption, conversational repair, persona, and spoken phrasing. It has no session tools: when the User asks for or about work, it raises a Handoff and waits for the Session Orchestrator rather than guessing. It treats Orchestrator context as background and Orchestrator speech requests as things to say in its own words.
+
+**Not:** An engineering authority or a source of session state.
+
+### Session Orchestrator
+
+**Context:** Session Management and Voice Interaction
+
+The reasoning component of the Voice Agent. It reads Handoffs and harness events, resolves references, writes engineering briefs for ACP Agents, invokes the neutral operations, and decides what the Voice Frontend should know (unspoken context) or say now (speech requests). Its conversation context persists across Voice Calls; between calls it accumulates events but takes no action.
+
+It is a client of Session Management, never a replacement for it: Managed Session and Prompt Turn projections remain authoritative, and the Orchestrator reports completion only from them.
+
+**Not:** An ACP Agent, the Session Manager, or a store of record.
 
 ### ACP Client
 
@@ -318,6 +343,20 @@ lifecycle state and opaque identifiers remain the operator-facing representation
 **Not:** A Managed Session, a durable dashboard, or a capability that follows a
 User across calls.
 
+### Handoff
+
+**Context:** Voice Interaction
+
+The Voice Frontend's request for Session Orchestrator help, carrying the recent call transcript rather than a structured task. A later Handoff may continue, correct, cancel, or be independent of an earlier one; the Orchestrator decides which, preserving unrelated work. Speech or context sent in answer to a Handoff references it. Handoffs have no completion event: the Orchestrator's final speech request is the answer.
+
+**Not:** A Prompt Turn or an Assignment. One Handoff may start several Prompt Turns or none.
+
+### Client-Provided Tool
+
+**Context:** ACP Integration
+
+A tool Dogwalk offers an ACP Agent through ACP's Client-supplied MCP servers, stacked on the Agent Implementation's own tools. Client-provided tools bind to the attachment that supplied them (session creation, load, or resume over one Agent Connection), not to the ACP Session: another Client attaching the same session sees its own tools instead. They are optional affordances an Agent may use when present, never a dependency of its plan. Tools that publish Review Bundles or register Ephemeral Services belong here, independent of any one Agent Implementation's plugin system.
+
 ### Prompt Turn
 
 **Context:** ACP Integration and Session Management
@@ -479,15 +518,23 @@ These canonical terms name Voice Agent tools as well as core methods. Narration 
 - An Alias is not a Session Title or Session ID.
 - A Workspace is not a Sandbox.
 - A voice call is not an Agent Connection.
+- A Handoff is not a Prompt Turn.
+- The Session Orchestrator is not the Session Manager; its memory is not a store of record.
+- Client-provided tools bind to an attachment, not to an ACP Session.
 
 ## Adapter Vocabulary
 
 The following names may appear in adapter configuration and deployment documentation but must not define core domain types:
 
 - **OpenCode:** Current ACP Agent Implementation.
-- **OpenAI GPT-Live:** Current Voice Transport model provider. Twilio hands the
-  active media leg to it over SIP; Dogwalk attaches a sideband for application
-  context and tool execution.
+- **OpenAI GPT-Live:** Current Voice Frontend model and Voice Transport. Twilio
+  hands the active media leg to it over SIP; Dogwalk attaches a sideband and uses
+  client delegation, so a GPT-Live delegation is the adapter form of a Handoff
+  and its thinking and commentary appends carry Orchestrator context and speech.
+- **Responses API:** Current Session Orchestrator model protocol. Any compatible
+  endpoint, including open-weight servers, may host the Orchestrator model.
+- **Daytona Secret:** Current mechanism for giving sandbox Agents inference
+  credentials through an egress proxy without placing the value in the Sandbox.
 - **Daytona:** Current remote Sandbox provider.
 - **stdio, WebSocket, HTTP:** Transport mechanisms.
 - **ACP Python SDK:** Current protocol library.
@@ -517,6 +564,7 @@ The following language appears in Git history and is not canonical for productio
 - **Sic, relay, revive, and call off:** Early Voice Agent tool verbs. Production tools use create, prompt, load, cancel, and close.
 - **Working/resting Dog:** Optional narration over Prompt Turn activity and session readiness, not lifecycle state.
 - **Mission Control:** Superseded name for the Diagnostics Surface. Production code and docs use Diagnostics.
+- **Delegated backend:** The September 2026 arrangement where GPT-Live's managed Responses delegation ran session tools. Superseded by the Session Orchestrator under client delegation.
 
 ## Open Questions
 
@@ -526,6 +574,10 @@ The following language appears in Git history and is not canonical for productio
 - Which parts of Assignment history belong to Dogwalk versus the ACP Agent's retained session context?
 - A Managed Session and its Alias can outlive the Voice Call that created it. When a Scoped Diagnostic View is frozen to one call's window, should a session that later continues under a different call remain visible in the original call's view, or should the view show only that session's state as of the original call?
 - Where should durable state whose lifecycle is owned by a Sandbox live? Review Bundles and Ephemeral Services currently persist in D1 keyed by phone number, so they outlive the Sandbox that produced them, which conflicts with the principle that deleting a Sandbox truly destroys its Agent-held state. Moving that state into per-Sandbox Durable Object storage would make deletion complete, but the operator Diagnostics lens is a Worker reading D1 and cannot synchronously read arbitrary DO storage; it would then need RPC fan-out or a DO-pushed projection. The ownership boundary between D1 and Durable Objects, and how the operator lens observes DO-owned state, is unresolved.
+
+- Should the Session Orchestrator ever act without a live User utterance, for example starting a follow-up Prompt Turn after a failure or texting the User between calls? That is an authorization question first, and the current answer is no.
+- How should the Session Orchestrator's persistent context be compacted, and which parts of it, if any, should become User-visible notes in the Workspace, the way a coworker's notebook would be?
+- When a newer Handoff arrives while work for an older one is in flight, which supersession rules belong in deterministic code rather than Orchestrator judgment?
 
 ## ACP References
 

@@ -299,7 +299,7 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--agent-command",
         default=os.environ.get(
-            "DOGWALK_AGENT_COMMAND", "opencode acp --pure --cwd {cwd}"
+            "DOGWALK_AGENT_COMMAND", "opencode acp"
         ),
     )
     subcommands.add_parser("test", help="Run the transport integration test")
