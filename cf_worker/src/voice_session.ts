@@ -303,8 +303,16 @@ export class VoiceSession {
   }
 
   async fetch(request: Request): Promise<Response> {
-    if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/conversation") {
+      // Read-only operator diagnostics; the Worker gates this behind admin auth.
+      return Response.json({
+        orchestrator_context: this.orchestratorContext,
+        orchestrator_queue: this.orchestratorQueue,
+        call_transcripts: await this.state.storage.get("call_transcripts") ?? [],
+      });
+    }
+    if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
     this.phone = request.headers.get("x-dogwalk-phone");
     this.callSid = request.headers.get("x-dogwalk-call-sid");
     const incomingSandboxId = request.headers.get("x-dogwalk-sandbox-id");
@@ -994,6 +1002,11 @@ export class VoiceSession {
     this.liveAttached = false;
     this.liveSessionId = null;
     if (live?.readyState === WebSocket.OPEN) live.close(1000, reason);
+    if (this.transcript.length) {
+      const saved = await this.state.storage.get<unknown[]>("call_transcripts") ?? [];
+      saved.push({ call_sid: this.callSid, ended_at: new Date().toISOString(), entries: this.transcript });
+      await this.state.storage.put("call_transcripts", saved.slice(-10));
+    }
     await this.orchestratorEvent(`[harness event] call_ended: ${JSON.stringify({ reason })}`);
     this.cleaningUpVoice = false;
   }

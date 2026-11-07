@@ -670,6 +670,16 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
   const verbose = new URL(req.url).searchParams.get("verbose") === "1";
   if (pathname === "/admin/api/state") return diagnosticsState(env, verbose);
   if (pathname === "/admin/api/events") return diagnosticsEvents(env, verbose);
+  if (pathname === "/admin/api/conversations") {
+    // Conversation content is never part of the redacted default lens.
+    if (!verbose) return new Response("conversations require verbose=1", { status: 400 });
+    const assignments = await env.DB.prepare("SELECT identity_hash FROM sandbox_assignments").all<{ identity_hash: string }>();
+    const conversations = await Promise.all(assignments.results.map(async ({ identity_hash }) => {
+      const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(identity_hash));
+      return (await object.fetch("https://voice-session/conversation")).json();
+    }));
+    return jsonResponse(conversations);
+  }
   return new Response("not found", { status: 404 });
 }
 
