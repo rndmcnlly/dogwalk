@@ -195,7 +195,7 @@ not belong inline in Call Activity when they are large; store bounded diagnostic
 details or references. The Diagnostics Surface presents a redacted projection by
 default and requires an explicit, session-only opt-in to reveal verbose details.
 
-The Session Orchestrator may read the current User's recent Call Activity to explain interruptions, and each call begins with a since-last-call summary (how the previous call ended, including provider errors such as moderation, recovery actions, failed Prompt Turns, and its last words) so the Voice Agent can reorient the User after a drop. A provider ending the voice connection is not a User hanging up, and neither cancels Prompt Turns; only a Sandbox restart or replacement interrupts Agent work.
+The Session Orchestrator may read the current User's recent Call Activity to explain interruptions, and each call begins with a since-last-call summary (how the previous call ended, including provider errors such as moderation, recovery actions, failed Prompt Turns, and its last words) so the Voice Agent can reorient the User after a drop. A provider ending the voice connection is not a User hanging up, and neither cancels Prompt Turns; only a Sandbox restart or replacement interrupts Agent work. A Voice Call may contain several voice sessions (after a drop, the recovery path can start another). A voice session ends at the first of the provider's close event or the loss of the control sideband; the Voice Call ends only when the telephony provider reports it complete, and that report also closes out any voice session whose end was never observed.
 
 ### Agent Implementation
 

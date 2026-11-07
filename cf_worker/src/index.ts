@@ -1031,6 +1031,21 @@ async function handleCallStatus(req: Request, env: Env): Promise<Response> {
        duration_seconds = excluded.duration_seconds`,
   ).bind(callSid, from, status, now, now, terminal ? now : null, duration || null).run();
   await audit(env, `call.${status}`, from, callSid, duration ? { duration } : {});
+  if (terminal) {
+    // The telephone call is over: make sure the VoiceSession has noticed, even if the
+    // GPT-Live sideband ended without telling it.
+    try {
+      const assignment = await getAssignment(env, from);
+      if (assignment?.identity_hash) {
+        const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(assignment.identity_hash));
+        await object.fetch("https://voice-session/telephone-ended", {
+          method: "POST", headers: { "x-dogwalk-call-sid": callSid },
+        });
+      }
+    } catch (error) {
+      console.error("telephone-ended notification failed", error);
+    }
+  }
   return new Response(null, { status: 204 });
 }
 

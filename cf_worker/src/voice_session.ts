@@ -47,6 +47,7 @@ interface TranscriptEntry {
 }
 
 interface LastCall {
+  call_sid: string | null;
   ended_at: number;
   reason: string;
   error: string | null;
@@ -311,6 +312,10 @@ export class VoiceSession {
         call_transcripts: await this.state.storage.get("call_transcripts") ?? [],
         call_marks: await this.state.storage.get("call_marks") ?? [],
       });
+    }
+    if (request.method === "POST" && url.pathname === "/telephone-ended") {
+      await this.telephoneEnded(request.headers.get("x-dogwalk-call-sid") ?? "");
+      return new Response(null, { status: 204 });
     }
     if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
     this.phone = request.headers.get("x-dogwalk-phone");
@@ -1116,6 +1121,28 @@ export class VoiceSession {
     await this.hangupLive();
   }
 
+  // Two questions, two signals. A voice session ends at the first of GPT-Live's
+  // session.closed or the sideband closing (cleanupVoice, idempotent). The telephone call
+  // ends only at Twilio's status callback, which also catches a voice end we never saw.
+  private async telephoneEnded(callSid: string): Promise<void> {
+    if (!callSid) return;
+    if (this.liveAttached && this.callSid === callSid) {
+      await this.cleanupVoice("telephone call completed");
+      return;
+    }
+    const last = await this.state.storage.get<LastCall>("last_call");
+    const marks = await this.state.storage.get<CallMark[]>("call_marks") ?? [];
+    if (last?.call_sid === callSid || !marks.some((mark) => mark.call_sid === callSid)) return;
+    await this.state.storage.put("last_call", {
+      call_sid: callSid,
+      ended_at: Date.now(),
+      reason: "telephone call completed; the voice session's end was not observed",
+      error: null,
+      last_words: [],
+    } satisfies LastCall);
+    await this.orchestratorEvent(`[harness event] call_ended: ${JSON.stringify({ reason: "telephone call completed; voice end not observed" })}`);
+  }
+
   private async cleanupVoice(reason: string): Promise<void> {
     if (this.cleaningUpVoice) return;
     this.cleaningUpVoice = true;
@@ -1131,6 +1158,7 @@ export class VoiceSession {
       await this.state.storage.put("call_transcripts", saved.slice(-10));
     }
     const ending: LastCall = {
+      call_sid: this.callSid,
       ended_at: Date.now(),
       reason: this.liveCloseReason ?? reason,
       error: this.liveError,
