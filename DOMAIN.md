@@ -340,7 +340,7 @@ A Managed Session is rooted in one Workspace directory chosen when it is created
 
 **Context:** Session Management and Voice Interaction
 
-A mutable, pronounceable, locally assigned handle by which the Voice Agent and User refer to a Managed Session.
+A mutable, pronounceable, locally assigned handle by which the Voice Agent and User refer to a Managed Session. The Voice Agent chooses one freely when it creates or loads a session, and changes an existing one only when the User asks or agrees. It names only Aliases that exist: prompt examples use a placeholder, never a plausible name.
 
 An Alias is distinct from both the opaque ACP Session ID and an Agent-supplied Session Title.
 
@@ -526,7 +526,7 @@ Following observes; it never directs the Agent.
 
 **Context:** Voice Interaction
 
-One sentence about a Followed Session's Activity, built deterministically without a model: a change of phase (looking around, changing files, running something), the first change of a turn, a failed step (failures within two seconds of each other, such as parallel tool calls failing together, make one beat carrying the latest streak), a long-running command, a new plan step, an interim remark, or a nearly full context window. Beats reach the Voice Frontend as unspoken context at once, and the latest is spoken in a quiet moment, spaced well apart and dropped when stale. A beat's text is neutral; the Voice Frontend restates it in the Theme's words at the current register, never reciting it or chaining several.
+One sentence about a Followed Session's Activity, built deterministically without a model: a change of phase (looking around, changing files, running something), the first change of a turn, a failed step (failures within two seconds of each other, such as parallel tool calls failing together, make one beat carrying the latest streak), a long-running command, a new plan step, an interim remark, or a nearly full context window. Beats within a second and a half of each other make one beat (the weightiest: a failure or full context window, then the Agent's own words, then a step or first change, then a phase change; else the latest). A tool of no known kind makes no beat, and a tool's own name never appears in one. An interim remark keeps the Agent's words and tense, quoted, so a plan stays a plan. Beats reach the Voice Frontend as unspoken context once a burst settles, and the latest is spoken in a quiet moment, spaced well apart (twenty seconds or more), never twice running without the User speaking or a Prompt Turn starting or ending in between (a failure may break that), and dropped when stale. A beat's text is neutral; the Voice Frontend restates it in the Theme's words at the current register, never reciting it or chaining several.
 
 ### Bid
 

@@ -121,6 +121,9 @@ class SocketMocks:
                 elif method == "session/prompt":
                     await asyncio.sleep(0.2)
                     for update in PROMPT_UPDATES:
+                        if "pause" in update:
+                            await asyncio.sleep(update["pause"])
+                            continue
                         await socket.send(json.dumps({
                             "jsonrpc": "2.0",
                             "method": "session/update",
@@ -163,22 +166,37 @@ def message_chunk(text: str) -> dict:
     return {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}
 
 
+# Beats closer together than BEAT_COALESCE_MS (1.5 s) coalesce; the margin absorbs the
+# Durable Object's own processing time.
+SETTLE = {"pause": 2.2}
+
 # One Prompt Turn's traffic, shaped like OpenCode's: a plan, a read whose locations arrive
-# with in_progress, the Agent narrating between tool calls, then the first edit.
+# with in_progress, the Agent narrating between tool calls, then the first edit, each its own
+# beat. Then a burst: a plan as a remark, a tool of no known kind, and a command at once.
 PROMPT_UPDATES = [
+    SETTLE,
     {"sessionUpdate": "plan", "entries": [
         {"content": "Find the parser", "priority": "high", "status": "in_progress"},
         {"content": "Write the artifact", "priority": "medium", "status": "pending"},
     ]},
+    SETTLE,
     {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "read", "kind": "read", "status": "pending"},
     {"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "in_progress",
      "locations": [{"path": "/home/daytona/src/parser.py"}]},
     {"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"},
+    SETTLE,
     message_chunk("The parser lives in **src**. "),
     {"sessionUpdate": "tool_call", "toolCallId": "t2", "title": "write", "kind": "edit", "status": "pending"},
+    SETTLE,
     {"sessionUpdate": "tool_call_update", "toolCallId": "t2", "status": "in_progress",
      "locations": [{"path": "/home/daytona/artifact.txt"}]},
     {"sessionUpdate": "tool_call_update", "toolCallId": "t2", "status": "completed"},
+    SETTLE,
+    message_chunk("I'll check the tests next, which should take about a minute. "),
+    {"sessionUpdate": "tool_call", "toolCallId": "t3", "title": "websearch", "kind": "other", "status": "in_progress"},
+    {"sessionUpdate": "tool_call_update", "toolCallId": "t3", "status": "completed"},
+    {"sessionUpdate": "tool_call", "toolCallId": "t4", "title": "bash", "kind": "execute", "status": "in_progress"},
+    {"sessionUpdate": "tool_call_update", "toolCallId": "t4", "status": "completed"},
     message_chunk("Bridge report complete."),
 ]
 
@@ -658,6 +676,10 @@ async def run_protocol(identity: str) -> None:
         # label and the one sentence forbidding it.
         assert "The session model:" in frontend and "Whatever the theme and intensity" in frontend
         assert "The walk (Park theme)" in frontend and "your head (your mind)" in frontend
+        # Examples narrate a placeholder, never a plausible alias the voice might repeat.
+        assert "<alias>" in frontend and not any(name in frontend for name in ("Cedar", "Biscuit", "Kappa", "Dozer")), frontend
+        assert "name only aliases the Session Orchestrator" in frontend
+        assert "An intention or estimate is not an action or a limit" in frontend
         assert "Never mention a backend" in frontend
         # Delegated work is never claimed before the Orchestrator says a turn began.
         assert "unless the Session Orchestrator told you a turn began for it" in frontend
@@ -702,7 +724,7 @@ async def run_protocol(identity: str) -> None:
         assert prompt_request["params"]["prompt"] == [{"type": "text", "text": AGENT_PROMPT}]
         started = await next_matching(mocks.live_messages, appended("commentary", STARTED_SAY))
         assert started["delegation_id"] == "del-1"
-        finished = await next_matching(mocks.live_messages, appended("commentary", FINISHED_SAY))
+        finished = await next_matching(mocks.live_messages, appended("commentary", FINISHED_SAY), 20)
         assert finished["delegation_id"] is None
         handoff = OrchestratorMock.user_message("[handoff del-1]")
         assert "Caller: Start a session called Juniper to build a tiny verified artifact." in handoff
@@ -719,7 +741,7 @@ async def run_protocol(identity: str) -> None:
 
         # Sending Juniper off followed it: progress beats reach the Voice Frontend as
         # thinking, built from ACP updates without a model call.
-        # Beats a few seconds apart are coalesced into one append.
+        # Beats a few seconds apart are joined into one append; beats in one burst make one beat.
         def beats() -> str:
             return "\n".join(
                 m["content"] for m in mocks.seen
@@ -728,9 +750,15 @@ async def run_protocol(identity: str) -> None:
 
         expected_beats = [
             "Juniper is working", "step 1 of 2: Find the parser.", "Juniper is reading parser.py.",
-            "Juniper says: The parser lives in src.", "started changing files: editing artifact.txt.",
+            'Juniper says: "The parser lives in src."', "started changing files: editing artifact.txt.",
+            # A remark keeps the Agent's words and tense: a plan and an estimate, not an action.
+            "Juniper says: \"I'll check the tests next, which should take about a minute.\"",
         ]
         await wait_for(lambda: all(fragment in beats() for fragment in expected_beats))
+        # The burst made one beat: the remark outweighed the command started with it, and the
+        # tool of no known kind made none, so its name never reached the Voice Frontend.
+        assert "running a command" not in beats() and "websearch" not in beats(), beats()
+        assert "using" not in beats(), beats()
         # Tool calls failing in a burst (parallel web searches) make one beat with the streak.
         for index in range(3):
             await mocks.acp.send(json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {
@@ -752,7 +780,7 @@ async def run_protocol(identity: str) -> None:
         # The failed searches after the turn made its closing words the latest remark.
         assert inspected["followed"] is True and inspected["remark"] == "Bridge report complete.", inspected
         assert [(c["kind"], c["status"], c["paths"]) for c in inspected["recent_tool_calls"]] == [
-            ("read", "completed", ["src/parser.py"]), ("edit", "completed", ["artifact.txt"]),
+            ("edit", "completed", ["artifact.txt"]), ("other", "completed", []), ("execute", "completed", []),
             ("fetch", "failed", []), ("fetch", "failed", []), ("fetch", "failed", []),
         ], inspected
         assert OrchestratorMock.tool_output("h2-unfollow") == {"ok": True, "stopped_following": "Juniper"}
@@ -1154,6 +1182,9 @@ async def run_protocol(identity: str) -> None:
             }
             assert "Never create a session in home and tell it to work in another directory" in payload["instructions"]
             assert "from what I know, unverified" in payload["instructions"]
+            assert not any(name in payload["instructions"] for name in ("Cedar", "Biscuit", "Kappa", "Dozer"))
+            assert "rename an existing session only when the caller asks" in payload["instructions"]
+            assert "where something is written down, update the Memory" in payload["instructions"]
         # The Orchestrator presents the caller's theme: Park until the switch, Survey after it.
         assert "The walk (Park theme)" in requests[0][1]["instructions"]
         assert "The survey (Survey theme)" in requests[-1][1]["instructions"]
