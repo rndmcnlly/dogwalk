@@ -58,7 +58,7 @@ export function wavToClip(bytes: Uint8Array): Clip & { truncated: boolean; total
       const limit = MAX_FIXTURE_SECONDS * SAMPLE_RATE * 2;
       const clipped = data.subarray(0, Math.min(data.length, limit) & ~1);
       return {
-        base64: toBase64(clipped),
+        base64: toBase64(normalize(clipped)),
         seconds: clipped.length / (SAMPLE_RATE * 2),
         totalSeconds: data.length / (SAMPLE_RATE * 2),
         truncated: data.length > limit,
@@ -67,6 +67,32 @@ export function wavToClip(bytes: Uint8Array): Clip & { truncated: boolean; total
     at += 8 + size + (size % 2);
   }
   throw new Error("WAV has no data chunk");
+}
+
+// Agent-made audio arrives at any loudness; a playtest found a full-scale supersaw jarring
+// next to the voice. Scale to a speech-like level (RMS about -20 dBFS, peaks at most -4 dBFS)
+// and fade the edges so clips never start or stop with a click.
+const TARGET_RMS = 0.1;
+const PEAK_CEILING = 0.63;
+const FADE_SAMPLES = Math.round(0.015 * SAMPLE_RATE);
+
+function normalize(pcm: Uint8Array): Uint8Array {
+  const input = new Int16Array(pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength));
+  let sumSquares = 0;
+  let peak = 0;
+  for (const sample of input) {
+    const value = Math.abs(sample) / 32768;
+    sumSquares += value * value;
+    peak = Math.max(peak, value);
+  }
+  const rms = Math.sqrt(sumSquares / Math.max(1, input.length));
+  const gain = rms > 0 ? Math.min(TARGET_RMS / rms, PEAK_CEILING / peak) : 1;
+  const output = new Int16Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    const fade = Math.min(1, i / FADE_SAMPLES, (input.length - 1 - i) / FADE_SAMPLES);
+    output[i] = Math.max(-32768, Math.min(32767, Math.round(input[i] * gain * fade)));
+  }
+  return new Uint8Array(output.buffer);
 }
 
 function toBase64(bytes: Uint8Array): string {
