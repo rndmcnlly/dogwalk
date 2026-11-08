@@ -77,6 +77,16 @@ auto-archive after 7 days, and never auto-delete. A call starts or restores that
 same Sandbox, preserving its filesystem and Agent-held session history across
 months. Replacement occurs only after explicit provider-side deletion.
 
+## Deploying Changes
+
+From the repository root, `uv run --script deploy.py` deploys with the `cf`
+`personal` profile and then refreshes the VoiceSession Durable Object. A Durable
+Object keeps running its starting code while it holds the outbound ACP
+WebSocket, so a plain `wrangler deploy` leaves calls on the old version. The
+script waits until no call is in progress, then stops the Sandbox so the object
+reloads; stopping it mid-call would hang up the caller. `--no-deploy` performs
+only the refresh.
+
 ## Invite Codes
 
 Invite Codes are maintained directly in D1. Omit `expires_at` for no expiration
