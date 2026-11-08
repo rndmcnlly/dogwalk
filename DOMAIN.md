@@ -345,6 +345,8 @@ A concrete program or service that implements the ACP Agent role, such as OpenCo
 
 An initialized transport channel between Dogwalk and an ACP Agent, with a negotiated protocol version and capabilities. One connection may support multiple concurrent ACP sessions. A host may instead choose one connection per session.
 
+When the Agent process ends, Agent Hosting reports an Agent Termination reason (`out_of_memory`, `killed` by a signal, or `exited` with a status, plus the memory limit when known) to the ACP Client: as JSON-RPC error data on each unanswered request and in the connection's close reason. Session Management carries it into the failed Turn Result (including a turn the Agent failed with a bare error moments before), so the User hears why the work stopped, not only that the connection dropped.
+
 **Not:** A voice call or Managed Session.
 
 ### ACP Session

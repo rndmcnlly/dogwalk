@@ -168,7 +168,14 @@ session count) or `agent_unavailable`. Session tools that need the Agent fail
 fast with "the sandbox is still starting; try again after agent_connected", while
 `list_managed_sessions` and `inspect_managed_session` answer from the persisted
 projection. A dropped Agent Connection mid-call reconnects in the background
-instead of hanging up. On reconnect, Managed Sessions are restored with
+instead of hanging up. When the Agent process dies, the gateway reads cgroup v2
+`memory.events` (its own cgroup and ancestors) to tell an OOM kill from another
+signal or exit, answers unanswered requests with JSON-RPC error data
+`{reason, signal, exit_status, limit_bytes, detail}`, and closes with 1011 and
+the same reason; the Durable Object puts it in `failure`, `turn_failed`, and
+`agent_unavailable` (`agent_termination`, `failed_turns`). The gateway is baked
+into the snapshot at `/opt/dogwalk/sandbox_acp_gateway.py`, so a change reaches
+a Sandbox only through a new snapshot or a back-patch of that file and a restart. On reconnect, Managed Sessions are restored with
 `session/resume` when the Agent advertises `sessionCapabilities.resume` in
 `initialize`, otherwise `session/load`, always from the session's recorded
 directory (OpenCode rejects a reload from any other). A record without a

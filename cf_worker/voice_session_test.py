@@ -130,6 +130,16 @@ class SocketMocks:
                             "params": {"sessionId": "acp-session-test", "update": update},
                         }))
                     error = {"code": -32603, "message": "SseError: the event stream ended"}
+                elif method == "session/prompt" and params["prompt"][0]["text"] == OOM_PROMPT:
+                    # As in a real call: OpenCode's server child is OOM-killed, the turn gets a
+                    # bare error, then the gateway closes with the reason.
+                    await socket.send(json.dumps({
+                        "jsonrpc": "2.0", "id": request_id,
+                        "error": {"code": -32603, "message": "ServerUnavailable"},
+                    }))
+                    await asyncio.sleep(0.25)
+                    await socket.close(1011, json.dumps(OOM_CLOSE, separators=(",", ":")))
+                    return
                 elif method == "session/prompt":
                     await asyncio.sleep(0.2)
                     for update in PROMPT_UPDATES:
@@ -222,6 +232,10 @@ FAIL_UPDATES = [
     *({"sessionUpdate": "tool_call", "toolCallId": f"gf{index}", "title": "websearch", "kind": "fetch", "status": "failed"} for index in range(3)),
     {"pause": 3.0},
 ]
+
+OOM_PROMPT = "Install the dependencies with pnpm."
+OOM_CLOSE = {"reason": "out_of_memory", "signal": "SIGKILL", "exit_status": 1, "limit_bytes": 1073741824}
+OOM_SENTENCE = "The Agent was killed because the sandbox ran out of memory (1 GiB limit)."
 
 CALL_BRIEF = "Call started with no Managed Sessions."
 READY_BRIEF = "The sandbox is ready."
@@ -337,6 +351,9 @@ ORCHESTRATOR_SCRIPT = [
     # Second call: a turn that fails mid-command: its running command ends with it.
     ("[handoff del-f]", lambda ctx: [call("f-begin", "begin_prompt_turn", alias="Juniper", prompt=FAIL_PROMPT)]),
     ("turn_failed", lambda ctx: [call("f-inspect", "inspect_managed_session", alias="Juniper")]),
+    # The Agent is OOM-killed mid-turn: the reason follows the bare error.
+    ("[handoff del-o]", lambda ctx: [call("o-begin", "begin_prompt_turn", alias="Juniper", prompt=OOM_PROMPT)]),
+    ('"agent_termination":"out_of_memory"', lambda ctx: [call("o-inspect", "inspect_managed_session", alias="Juniper")]),
     # Second call: digits without a system meaning still reach the Orchestrator.
     ('"key":"7"', lambda ctx: [call("k7-say", "say", text=KEYPAD_SAY, delegation_id=None)]),
     # Invitations: the caller (invited by SEED_INVITER) invites friends, by voice alone.
@@ -417,7 +434,7 @@ BOARD_PROGRAM = (
 ICON_PROGRAM = 'root = Stack([Image("/home/daytona/chart.png", "", null, "icon"), Text("Next")])'
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
-    "ts-say", "h2-inspect", "h2-unfollow", "h2-say", "f-begin", "f-inspect",
+    "ts-say", "h2-inspect", "h2-unfollow", "h2-say", "f-begin", "f-inspect", "o-begin", "o-inspect",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
     "h4-say", "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
@@ -1067,6 +1084,17 @@ async def run_protocol(identity: str) -> None:
         assert [(c["kind"], c["status"]) for c in failed["recent_tool_calls"]] == [("execute", "failed")] + [("fetch", "failed")] * 3, failed
         await asyncio.sleep(4)
         assert not re.search(r"running|working with|still|failed for", beats()[failed_at:]), beats()[failed_at:]
+
+        # An out-of-memory kill reaches the Orchestrator as a sayable reason, and the
+        # Agent Connection comes back.
+        await mocks.send_live(transcript("input", "Have Juniper install the dependencies.", 23500, 24100))
+        await mocks.send_live(delegation("del-o", 24150))
+        await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "o-inspect" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
+        unavailable = OrchestratorMock.user_message('"agent_termination":"out_of_memory"')
+        assert OOM_SENTENCE in unavailable and '"failed_turns":["Juniper"]' in unavailable, unavailable
+        killed = OrchestratorMock.tool_output("o-inspect")
+        assert "ServerUnavailable" in killed["failure"] and OOM_SENTENCE in killed["failure"], killed
+        await wait_for(lambda: latest_user_text().count("[harness event] agent_connected") >= 3, 15)
 
         # Star opens the System Menu: muted input, a prompt clip, star goes back. Status and
         # sound style are no longer in it.

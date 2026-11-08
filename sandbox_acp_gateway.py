@@ -15,8 +15,10 @@ import logging
 import os
 import shlex
 import shutil
+import signal
 import socket
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 from aiohttp import ClientSession, WSMsgType, WSServerHandshakeError, web
@@ -42,12 +44,88 @@ def executable_available(command: str, workspace: Path) -> bool:
     return shutil.which(arguments[0]) is not None
 
 
+# Why the Agent process ended, read from cgroup v2. The gateway's own cgroup and its
+# ancestors are checked, because the memory limit may sit on a parent (the container).
+def cgroup_dirs(root: Path, proc_cgroup: Path) -> list[Path]:
+    try:
+        relative = next(
+            line[3:] for line in proc_cgroup.read_text().splitlines() if line.startswith("0::")
+        ).strip()
+    except (OSError, StopIteration):
+        relative = "/"
+    current = root / relative.lstrip("/")
+    found = []
+    while True:
+        if (current / "memory.events").is_file():
+            found.append(current)
+        if current == root or root not in current.parents:
+            return found
+        current = current.parent
+
+
+def oom_kills(dirs: list[Path]) -> dict[Path, int]:
+    counts = {}
+    for directory in dirs:
+        with contextlib.suppress(OSError, ValueError):
+            for line in (directory / "memory.events").read_text().splitlines():
+                key, _, value = line.partition(" ")
+                if key == "oom_kill":
+                    counts[directory] = int(value)
+    return counts
+
+
+def memory_limit(dirs: list[Path]) -> int | None:
+    limits = []
+    for directory in dirs:
+        with contextlib.suppress(OSError, ValueError):
+            limits.append(int((directory / "memory.max").read_text().strip()))
+    return min(limits) if limits else None
+
+
+def agent_termination(
+    returncode: int | None, before: dict[Path, int], after: dict[Path, int], limit: int | None
+) -> dict:
+    """A small, neutral account of how the Agent process ended, for the ACP client."""
+    result: dict = {"reason": "exited", "exit_status": returncode}
+    if returncode is not None and returncode < 0:
+        with contextlib.suppress(ValueError):
+            result["signal"] = signal.Signals(-returncode).name
+        result["reason"] = "killed"
+    # A wrapper (opencode acp runs a server child) can exit 1 after its child is OOM-killed,
+    # so the counter decides, not the signal.
+    if any(after.get(directory, 0) > count for directory, count in before.items()):
+        result["reason"] = "out_of_memory"
+    if limit is not None:
+        result["limit_bytes"] = limit
+    if result["reason"] == "out_of_memory":
+        size = f" ({limit / 2**30:.3g} GiB limit)" if limit else ""
+        result["detail"] = f"The ACP Agent was killed because the sandbox ran out of memory{size}."
+    elif result["reason"] == "killed":
+        result["detail"] = f"The ACP Agent was killed by {result.get('signal', 'a signal')}."
+    else:
+        result["detail"] = f"The ACP Agent exited with status {returncode}."
+    return result
+
+
+def request_key(message: object) -> str | None:
+    if isinstance(message, dict) and "id" in message:
+        return json.dumps(message["id"])
+    return None
+
+
 class AcpGateway:
     """Own one WebSocket-to-stdio ACP Agent connection at a time."""
 
-    def __init__(self, workspace: Path, agent_command: str) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        agent_command: str,
+        cgroup_root: Path = Path("/sys/fs/cgroup"),
+        proc_cgroup: Path = Path("/proc/self/cgroup"),
+    ) -> None:
         self.workspace = workspace.resolve()
         self.agent_command = agent_command
+        self.cgroups = cgroup_dirs(cgroup_root, proc_cgroup)
         self._connection_lock = asyncio.Lock()
         self._active = False
         self._process: asyncio.subprocess.Process | None = None
@@ -95,6 +173,7 @@ class AcpGateway:
         try:
             await websocket.prepare(request)
             LOG.info("connection_opened connection_id=%s", connection_id)
+            oom_before = oom_kills(self.cgroups)
             process = await asyncio.create_subprocess_exec(
                 *command_arguments(self.agent_command, self.workspace),
                 cwd=self.workspace,
@@ -104,7 +183,7 @@ class AcpGateway:
                 limit=MAX_MESSAGE_BYTES + 1,
             )
             self._process = process
-            await self._bridge(websocket, process)
+            await self._bridge(websocket, process, oom_before)
         except Exception:
             LOG.exception("connection_failed connection_id=%s", connection_id)
             if not websocket.closed:
@@ -121,11 +200,22 @@ class AcpGateway:
         return websocket
 
     async def _bridge(
-        self, websocket: web.WebSocketResponse, process: asyncio.subprocess.Process
+        self,
+        websocket: web.WebSocketResponse,
+        process: asyncio.subprocess.Process,
+        oom_before: dict[Path, int],
     ) -> None:
         assert process.stdin is not None
         assert process.stdout is not None
         assert process.stderr is not None
+        # Client requests the Agent has not answered, so its end can answer them instead.
+        pending: dict[str, object] = {}
+
+        def parse(text: str) -> object:
+            try:
+                return json.loads(text)
+            except ValueError:
+                return None
 
         async def websocket_to_agent() -> None:
             async for message in websocket:
@@ -134,6 +224,10 @@ class AcpGateway:
                     if len(encoded) > MAX_MESSAGE_BYTES:
                         await websocket.close(code=1009, message=b"Message too large")
                         return
+                    parsed = parse(message.data)
+                    key = request_key(parsed)
+                    if key is not None and "method" in parsed:
+                        pending[key] = parsed["id"]
                     process.stdin.write(encoded + b"\n")
                     await process.stdin.drain()
                 elif message.type == WSMsgType.ERROR:
@@ -145,7 +239,37 @@ class AcpGateway:
                     raise ValueError("ACP Agent message exceeds the size limit")
                 payload = line.rstrip(b"\r\n")
                 if payload:
-                    await websocket.send_str(payload.decode("utf-8"))
+                    text = payload.decode("utf-8")
+                    parsed = parse(text)
+                    key = request_key(parsed)
+                    if key is not None and "method" not in parsed:
+                        pending.pop(key, None)
+                    await websocket.send_str(text)
+
+        async def agent_ended() -> None:
+            # Drain what the Agent wrote before it went, then say why it went: an error for
+            # each unanswered request, and the same reason in the close frame.
+            await asyncio.wait({downstream, exited}, timeout=2)
+            if downstream.done() and not downstream.cancelled() and downstream.exception():
+                raise downstream.exception()
+            termination = agent_termination(
+                process.returncode, oom_before, oom_kills(self.cgroups), memory_limit(self.cgroups)
+            )
+            LOG.warning("agent_terminated %s", json.dumps(termination))
+            if websocket.closed:
+                return
+            for request_id in pending.values():
+                await websocket.send_str(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32603, "message": termination["detail"], "data": termination},
+                }))
+            pending.clear()
+            if termination["reason"] == "exited" and termination["exit_status"] == 0:
+                return
+            # A close reason holds at most 123 bytes: the detail stays in the request errors.
+            brief = {key: termination[key] for key in ("reason", "signal", "exit_status", "limit_bytes") if key in termination}
+            await websocket.close(code=1011, message=json.dumps(brief, separators=(",", ":")).encode())
 
         async def log_agent_stderr() -> None:
             while line := await process.stderr.readline():
@@ -160,12 +284,12 @@ class AcpGateway:
             done, _ = await asyncio.wait(
                 bridge_tasks, return_when=asyncio.FIRST_COMPLETED
             )
-            for task in done:
-                exception = task.exception()
+            if upstream in done:
+                exception = upstream.exception()
                 if exception is not None:
                     raise exception
-            if exited in done and process.returncode:
-                raise RuntimeError(f"ACP Agent exited with status {process.returncode}")
+            else:
+                await agent_ended()
         finally:
             for task in bridge_tasks | {stderr}:
                 if not task.done():
@@ -209,6 +333,11 @@ def create_app(gateway: AcpGateway) -> web.Application:
 async def fake_agent() -> None:
     while line := await asyncio.to_thread(sys.stdin.buffer.readline):
         message = json.loads(line)
+        events = os.environ.get("DOGWALK_TEST_MEMORY_EVENTS")
+        if message.get("method") == "session/prompt" and events:
+            # Stand in for the kernel: count an OOM kill on the cgroup, then SIGKILL.
+            Path(events).write_text("low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\n")
+            os.kill(os.getpid(), signal.SIGKILL)
         print("fake agent diagnostic", file=sys.stderr, flush=True)
         print(json.dumps(message, separators=(",", ":")), flush=True)
 
@@ -216,7 +345,17 @@ async def fake_agent() -> None:
 async def run_test() -> None:
     script = Path(__file__).resolve()
     fake_command = shlex.join([sys.executable, str(script), "fake-agent"])
-    gateway = AcpGateway(Path.cwd(), fake_command)
+    # A cgroup v2 tree whose limit sits on the parent of the gateway's own cgroup.
+    cgroups = Path(tempfile.mkdtemp(prefix="acp-gateway-cgroup-"))
+    (cgroups / "gateway").mkdir()
+    (cgroups / "memory.events").write_text("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n")
+    (cgroups / "memory.max").write_text("1073741824\n")
+    (cgroups / "gateway" / "memory.events").write_text("oom_kill 0\n")
+    (cgroups / "gateway" / "memory.max").write_text("max\n")
+    (cgroups / "proc-cgroup").write_text("0::/gateway\n")
+    os.environ["DOGWALK_TEST_MEMORY_EVENTS"] = str(cgroups / "memory.events")
+    gateway = AcpGateway(Path.cwd(), fake_command, cgroups, cgroups / "proc-cgroup")
+    assert gateway.cgroups == [cgroups / "gateway", cgroups]
     runner = web.AppRunner(create_app(gateway))
     await runner.setup()
     listener = socket.socket()
@@ -274,9 +413,28 @@ async def run_test() -> None:
                     await asyncio.sleep(0.1)
             else:
                 raise AssertionError("ACP connection slot was not released")
+
+            # The Agent is OOM-killed mid-turn: its unanswered request gets a structured
+            # error, and the close frame carries the same reason.
+            for _ in range(30):
+                try:
+                    websocket = await session.ws_connect(f"{base_url}/acp")
+                    break
+                except WSServerHandshakeError:
+                    await asyncio.sleep(0.1)
+            await websocket.send_json({"jsonrpc": "2.0", "id": 7, "method": "session/prompt", "params": {}})
+            failed = await websocket.receive_json(timeout=5)
+            assert failed["id"] == 7, failed
+            data = failed["error"]["data"]
+            assert data["reason"] == "out_of_memory" and data["signal"] == "SIGKILL", data
+            assert data["limit_bytes"] == 1073741824 and "1 GiB" in failed["error"]["message"], failed
+            closing = await websocket.receive(timeout=5)
+            assert closing.type == WSMsgType.CLOSE and websocket.close_code == 1011, closing
+            assert json.loads(closing.extra)["reason"] == "out_of_memory", closing
     finally:
         await runner.cleanup()
-    print("sandbox ACP gateway: 8 checks passed")
+        shutil.rmtree(cgroups, ignore_errors=True)
+    print("sandbox ACP gateway: 13 checks passed")
 
 
 def parser() -> argparse.ArgumentParser:
