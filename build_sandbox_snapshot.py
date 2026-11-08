@@ -85,8 +85,11 @@ def snapshot_image() -> Image:
             f"cd /home/daytona && ( printf '%s\\n' '{ACP_INITIALIZE}'; sleep 15 ) | "
             "sudo -u daytona -H timeout 30 /usr/local/bin/opencode acp | "
             "grep -q '\"protocolVersion\":1'",
-            # Leave no OpenCode state from that check in the image.
-            "rm -rf /home/daytona/.local /home/daytona/.cache",
+            # Leave no OpenCode state from these checks in the image. The root
+            # `opencode --version` above creates $TMPDIR/opencode owned by root,
+            # which the daytona user then cannot write tool output into.
+            "rm -rf /home/daytona/.local /home/daytona/.cache /tmp/opencode "
+            "/tmp/.bun-*.so",
             "sudo -u daytona sudo -n true",
             "ping -c 1 127.0.0.1",
             "tmux -V",

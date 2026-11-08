@@ -76,6 +76,15 @@ The snapshot installs OpenCode `2.2.5` from its GitHub release into
 `/usr/local/bin`. OpenCode 1.x through `1.18.4` served the 2026-07 deployments;
 2.x prints `opencode v2.2.5` for `--version`, which the build check accounts for.
 
+OpenCode keeps temporary tool output in `$TMPDIR/opencode` (`/tmp/opencode`;
+`opencode debug paths` shows it) and creates it on first run. The build's
+`opencode --version` check runs as root, so snapshots through
+`dogwalk-acp-20261108-v1` ship a root-owned `/tmp/opencode` the `daytona` user
+cannot write; on 2026-11-08 an Agent script lost a paid transcription response
+to that. The build now deletes it before the image is sealed. The existing
+Sandbox was fixed in place on 2026-11-08 (`sudo chown daytona:daytona
+/tmp/opencode`); a fresh Sandbox needs the next snapshot or the same fix.
+
 ### Inference
 
 OpenCode uses `openai/gpt-6.1-sol`, with `openai/gpt-6-luna` as its title model,
