@@ -20,7 +20,7 @@ from daytona import (
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_NAME = "dogwalk-acp-20261108-v1"
+DEFAULT_NAME = "dogwalk-acp-20261108-v2"
 OPENCODE_VERSION = "2.2.5"
 BASE_IMAGE = (
     "python:3.13.5-slim-bookworm@"
@@ -33,8 +33,9 @@ DESKTOP_PACKAGES = (
     "libxext6 libxrender1 libxfixes3 libxss1 libxtst6 libxi6 "
     "chromium fonts-dejavu-core"
 )
-# The binary guard plugin detects types with file(1); its hints name these.
-BINARY_TOOLS = "file poppler-utils unzip sqlite3 xxd"
+# The binary guard plugin detects types with file(1); its hints name these. ffmpeg and
+# ImageMagick also let sessions transcode audio and downscale images for reading.
+BINARY_TOOLS = "file poppler-utils unzip sqlite3 xxd binutils ffmpeg imagemagick"
 # Chromium's own sandbox and /dev/shm sizing do not fit inside the container.
 CHROMIUM_FLAGS = (
     'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS '
@@ -87,7 +88,7 @@ def snapshot_image() -> Image:
             f'v="$(opencode --version)" && echo "$v" && '
             f'case "$v" in *"{OPENCODE_VERSION}") ;; *) exit 1 ;; esac',
             "python -c 'import aiohttp'",
-            "file --version && command -v pdftotext unzip sqlite3 xxd",
+            "file --version && command -v pdftotext unzip sqlite3 xxd strings ffmpeg convert",
             "cd /tmp && python /opt/dogwalk/sandbox_acp_gateway.py test",
             # The Agent command must still answer ACP initialize over stdio.
             f"cd /home/daytona && ( printf '%s\\n' '{ACP_INITIALIZE}'; sleep 15 ) | "
