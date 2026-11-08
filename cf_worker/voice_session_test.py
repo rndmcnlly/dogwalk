@@ -386,9 +386,12 @@ async def run_protocol(identity: str) -> None:
         assert "tools" not in session
         frontend = session["instructions"]
         assert "Match the caller's sophistication" in frontend
-        assert "never mention a backend" in frontend
+        # The split-brain fiction: the voice defers to its head and names no backend
+        # except in GPT-Live's delegation-policy label and the one sentence forbidding it.
+        assert "Your head (a working fiction" in frontend
+        assert "never need to mention a backend" in frontend
         assert "backend" not in (
-            frontend.replace("Backend tools:", "").replace("never mention a backend", "").lower()
+            frontend.replace("Backend tools:", "").replace("never need to mention a backend", "").lower()
         )
         await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "initialize"

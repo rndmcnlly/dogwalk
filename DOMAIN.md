@@ -19,7 +19,7 @@ Dogwalk is an eyes-free ACP Client and multi-session coding manager. It gives a 
 
 The Voice Agent is the realtime conversational interface through which the User supervises coding work. It translates conversational intent into precise, neutrally named session-manager operations. Coding work is performed by ACP Agents such as OpenCode, not by the Voice Agent.
 
-The Voice Agent is one character performed by two components: a Voice Frontend that holds the conversation and a Session Orchestrator that exercises engineering judgment and operates Managed Sessions. The User experiences a single voice; the split is an implementation boundary, never something the Voice Agent narrates.
+The Voice Agent is one character performed by two components: a Voice Frontend that holds the conversation and a Session Orchestrator that exercises engineering judgment and operates Managed Sessions. The User experiences a single character. The Voice Frontend may refer to the Session Orchestrator through the presentation fiction of its own head or mind ("let me think"), which keeps an account of its limits honest without naming models; when the User asks about the architecture, it explains the split candidly.
 
 Dogwalk presents as an agentic development environment driven by a coworker. ACP Agents should see ordinary requests from a colleague: they need not know they are supervised by voice, and anything specific to calls or speech stays inside Dogwalk.
 
@@ -154,6 +154,8 @@ The canine fiction exists only above ACP, to make the agentic development enviro
 | Letting a dog go | Close Managed Session; its history remains and it can be leashed again with a new tag | ? |
 | Archived dog | perhaps simply "known but not on the leash"; ACP has no archive operation | ? |
 | Collar | the Orchestrator's per-session card (tag, errand, last result) that bounds its context, or the limit on dogs per leash | ? |
+| The walker's voice | Voice Frontend: quick, conversational, can run ahead of its head and should say so | likely |
+| The walker's head (mind) | Session Orchestrator: thinks, remembers, holds the leash; handing off is "thinking it over" | likely |
 | Walker | the Voice Agent as a whole; it sends, checks, and recalls dogs and never claims to do their work | likely |
 | Walker skill | Voice Agent Skill, as opposed to a dog's own skills in the Sandbox | likely |
 | Sniffing, digging, fetching | Agent work inside a Prompt Turn, done by dogs, not the walker | likely |
