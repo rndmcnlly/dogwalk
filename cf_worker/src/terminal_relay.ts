@@ -25,6 +25,17 @@ interface Relay {
   attachedAt: number;
   bytesOut: number;  // terminal output sent to the browser
   bytesIn: number;   // keystrokes sent to the terminal
+  // Binary frames arrive in Workers as Blobs, whose bytes are read asynchronously; each
+  // direction is a promise chain so frames keep their order.
+  toBrowser: Promise<void>;
+  toTerminal: Promise<void>;
+}
+
+// A binary WebSocket frame as bytes: Workers deliver binary frames as Blob, not ArrayBuffer.
+async function frameBytes(data: ArrayBuffer | Blob | ArrayBufferView): Promise<ArrayBuffer> {
+  if (data instanceof Blob) return data.arrayBuffer();
+  if (ArrayBuffer.isView(data)) return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+  return data;
 }
 
 export class TerminalRelay {
@@ -39,7 +50,10 @@ export class TerminalRelay {
       const pair = new WebSocketPair();
       const browser = pair[1];
       browser.accept();
-      this.relays.set(browser, { browserHash: null, upstream: null, toolbox: null, attachedAt: 0, bytesOut: 0, bytesIn: 0 });
+      this.relays.set(browser, {
+        browserHash: null, upstream: null, toolbox: null, attachedAt: 0, bytesOut: 0, bytesIn: 0,
+        toBrowser: Promise.resolve(), toTerminal: Promise.resolve(),
+      });
       browser.addEventListener("message", (event) => {
         void this.fromBrowser(browser, identity, event.data).catch((error) => this.fail(browser, String(error?.message ?? error)));
       });
@@ -61,15 +75,17 @@ export class TerminalRelay {
     return new Response("not found", { status: 404 });
   }
 
-  private async fromBrowser(browser: WebSocket, identity: string, data: string | ArrayBuffer): Promise<void> {
+  private async fromBrowser(browser: WebSocket, identity: string, data: string | ArrayBuffer | Blob): Promise<void> {
     const relay = this.relays.get(browser);
     if (!relay) return;
     if (typeof data !== "string") {
       // Keystrokes.
-      if (relay.upstream?.readyState === WebSocket.OPEN) {
-        relay.upstream.send(data);
-        relay.bytesIn += data.byteLength;
-      }
+      relay.toTerminal = relay.toTerminal.then(async () => {
+        const bytes = await frameBytes(data);
+        if (relay.upstream?.readyState !== WebSocket.OPEN) return;
+        relay.upstream.send(bytes);
+        relay.bytesIn += bytes.byteLength;
+      }).catch((error) => console.error("terminal: keystrokes failed", String(error)));
       return;
     }
     const message = JSON.parse(data) as Record<string, unknown>;
@@ -124,7 +140,7 @@ export class TerminalRelay {
     console.log("terminal: attached", { created, cols, rows });
     if (created) {
       // A fresh PTY starts a plain shell; hand it to tmux so later connections reattach.
-      relay.upstream.send(" command -v tmux >/dev/null && exec tmux new-session -A -s human\r");
+      relay.upstream.send(new TextEncoder().encode(" command -v tmux >/dev/null && exec tmux new-session -A -s human\r"));
     } else {
       // An existing tmux repaints only on a window change, and the new tab may have the same
       // size as the last one: change it by a row and back, so the screen is redrawn.
@@ -181,13 +197,23 @@ export class TerminalRelay {
     upstream.addEventListener("message", (event) => {
       if (browser.readyState !== WebSocket.OPEN) return;
       if (typeof event.data !== "string") {
-        relay.bytesOut += event.data.byteLength;
-        return browser.send(event.data);
+        const data = event.data as ArrayBuffer | Blob;
+        relay.toBrowser = relay.toBrowser.then(async () => {
+          const bytes = await frameBytes(data);
+          if (browser.readyState !== WebSocket.OPEN) return;
+          browser.send(bytes);
+          relay.bytesOut += bytes.byteLength;
+        }).catch((error) => console.error("terminal: output failed", String(error)));
+        return;
       }
       // Text frames are Daytona control messages: connected, or the shell exiting.
       try {
         const control = JSON.parse(event.data) as { type?: string; status?: string; exitCode?: number; exitReason?: string };
-        if (control.status === "exited") browser.send(JSON.stringify({ type: "exit", code: control.exitCode ?? 0, reason: control.exitReason ?? "" }));
+        if (control.status === "exited") {
+          relay.toBrowser = relay.toBrowser.then(() => {
+            if (browser.readyState === WebSocket.OPEN) browser.send(JSON.stringify({ type: "exit", code: control.exitCode ?? 0, reason: control.exitReason ?? "" }));
+          });
+        }
       } catch {
         browser.send(new TextEncoder().encode(event.data));
       }
