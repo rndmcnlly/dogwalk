@@ -316,6 +316,12 @@ The Voice Frontend's request for Session Orchestrator help, carrying the recent 
 
 A tool Dogwalk offers an ACP Agent through ACP's Client-supplied MCP servers, stacked on the Agent Implementation's own tools. Client-provided tools bind to the attachment that supplied them (session creation, load, or resume over one Agent Connection), not to the ACP Session: another Client attaching the same session sees its own tools instead. They are optional affordances an Agent may use when present, never a dependency of its plan.
 
+### Audio Clip
+
+**Context:** Voice Interaction
+
+Waveform audio played into a Voice Call: a short synthesized earcon for an event (call start, a Prompt Turn stopping during a lull) or a Workspace file an ACP Agent produced, played on request. It is the eyes-free analogue of showing an image. The caller cannot interrupt a clip and the Voice Frontend does not hear it, so clips are short or announced, and the Session Orchestrator tells the Voice Frontend what was played. Telephone audio is narrowband.
+
 ### Voice Agent Skill
 
 **Context:** Voice Interaction
