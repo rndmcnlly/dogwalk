@@ -266,10 +266,12 @@ Match the caller's sophistication, especially on technical topics. With a newcom
 Speech: short natural phone speech, usually one sentence, at most two, except when reading permission choices. After answering, stop and listen. Never speak identifiers, URLs, file paths, or provider details. Refer to dogs by their tags.
 
 Delegation policy:
-Backend tools: sending dogs on errands, checking on dogs and what they brought back, finding dogs that are not on the leash, leashing, retagging, or letting dogs go, recalling a dog from its errand, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its dog metaphor, reading out or spelling something the caller must copy exactly, recovery controls, and ending the call.
+Backend tools: sending dogs on errands, checking on dogs and what they brought back, finding dogs that are not on the leash, leashing, retagging, or letting dogs go, recalling a dog from its errand, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its dog metaphor, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, recovery controls, and ending the call.
 Generate <|SpawnThinking|> when: the caller asks for or about any of those, including questions about the setup or environment, or corrects or cancels something they asked earlier, or wants to hang up.
 Do not generate <|SpawnThinking|> when: greeting, small talk, conversational repair, or repeating what you were already told.
 Generate <|SpawnThinking|> before giving an answer that depends on that work. Do not guess the result while waiting, and never answer "I don't have that detail" when a dog could find out.
+
+You cannot record, play audio, send dogs, or change anything yourself. Never say you are doing any of those, or that one is done, unless an update says it happened; hand off instead.
 
 Audio clips and chimes are played into the call by the system between your turns; you cannot hear them. Never sing, hum, imitate, or perform a clip, and never say one is playing unless an update says it played.
 
@@ -307,7 +309,7 @@ Rules:
 
 Audio: play_audio plays a Workspace WAV to the caller, the way a graphical tool would show an image. Telephone audio is narrowband, so speech, tones, rhythm, and melody survive better than timbre. When a clip is ready, call say (what it is and how long) and play_audio in the same response: play_audio waits for the announcement to finish before playing. Never say a clip is playing or "here it is" without calling play_audio. Keep unrequested clips short. play_audio renders any audio or video format itself, so dogs need only produce or find the file. For long recordings such as podcasts, have a dog locate the moments that matter (for example by transcribing with timestamps), then play short samples by offset; offer further 30-second parts rather than playing long stretches. The first play in a fresh Sandbox may take longer while ffmpeg installs. After playing, brief the Voice Frontend on what the caller heard. Short chimes play automatically at call start and when a dog comes back into a quiet moment.
 
-Recording: start_recording captures the caller's voice into a Workspace WAV, following voicemail conventions. In the same response, say something like "Recording after the beep. Press pound when you're done, or star to discard." Recording also ends after 20 seconds of silence or at the limit. A recording_saved event gives the path; tell the caller it was saved and how long it was, then do what they asked with it (often a dog transcribes, files, or analyzes it). Keypad presses outside a recording arrive as keypad events; treat them as caller input.
+Recording: start_recording captures the caller's voice into a Workspace WAV, following voicemail conventions. In the same response, say something like "Recording after the beep. Press pound when you're done, or star to discard." Recording also ends after 20 seconds of silence or at the limit. A recording_saved event gives the path; tell the caller it was saved and how long it was, then do what they asked with it (often a dog transcribes, files, or analyzes it). Keypad presses outside a recording arrive as keypad events with the conversation since the last handoff; treat them as caller input. If that conversation shows the caller asked for something the Voice Frontend only claimed to do (it cannot record, play, or act), correct it and do the real thing; for example, a pound key after "let's record a voice note" means start_recording was never called.
 
 Voice Agent Skills: guidance you load on demand with load_voice_agent_skill when a request matches a description below. Load a skill once per call; it stays in your context. These are yours, not the Agents'.
 ${VOICE_AGENT_SKILL_INDEX}`;
@@ -586,13 +588,20 @@ export class VoiceSession {
     // The delegation carries no task text: the task is the transcript up to its offset.
     // Late transcript deltas for the same utterance get a short grace period.
     await new Promise((resolve) => setTimeout(resolve, 300));
-    const lines = this.transcript
-      .filter((entry) => entry.endMs > this.transcriptCutMs && entry.startMs <= offsetMs + 1500)
-      .map((entry) => `${entry.role === "caller" ? "Caller" : "Voice"}: ${entry.text.trim()}`);
-    this.transcriptCutMs = Math.max(this.transcriptCutMs, Math.min(offsetMs, this.transcript.at(-1)?.endMs ?? offsetMs));
+    const lines = this.takeTranscript(offsetMs);
     await this.record("voice.delegation.received", { delegation_id: delegationId });
     this.queueEarcon("handoff_received");
     await this.orchestratorEvent(`[handoff ${delegationId}]\n${lines.join("\n") || "(no new transcript)"}`);
+  }
+
+  // Conversation since the last handoff, up to offsetMs; advances the cut so the next
+  // handoff or event does not repeat it.
+  private takeTranscript(offsetMs = Infinity): string[] {
+    const lines = this.transcript
+      .filter((entry) => entry.endMs > this.transcriptCutMs && entry.startMs <= offsetMs + 1500)
+      .map((entry) => `${entry.role === "caller" ? "Caller" : "Voice"}: ${entry.text.trim()}`);
+    this.transcriptCutMs = Math.max(this.transcriptCutMs, Math.min(offsetMs, this.transcript.at(-1)?.endMs ?? 0));
+    return lines;
   }
 
   private async orchestratorEvent(text: string): Promise<void> {
@@ -995,7 +1004,10 @@ export class VoiceSession {
     await this.record("voice.keypad", { key });
     if (this.recording && key === "#") return this.finishRecording(true, "pound key");
     if (this.recording && key === "*") return this.finishRecording(false, "star key");
-    if (!this.recording && /^[0-9A-D*#]$/.test(key)) await this.orchestratorEvent(`[harness event] keypad: ${JSON.stringify({ key })}`);
+    // The key alone is ambiguous; the conversation around it says what the caller meant.
+    if (!this.recording && /^[0-9A-D*#]$/.test(key)) {
+      await this.orchestratorEvent(`[harness event] keypad: ${JSON.stringify({ key, conversation_since_last_handoff: this.takeTranscript() })}`);
+    }
   }
 
   private async finishRecording(save: boolean, endedBy: string): Promise<void> {
