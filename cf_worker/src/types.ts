@@ -15,7 +15,6 @@ export interface Env {
   ORCHESTRATOR_API_BASE?: string;
   ORCHESTRATOR_API_KEY?: string;
   ORCHESTRATOR_REASONING_EFFORT?: string;
-  EARCON_STYLE?: string;
   RECORDING_MUTE?: string;
   OPENAI_LIVE_API_BASE?: string;
   OPENAI_LIVE_ATTACH_BASE?: string;

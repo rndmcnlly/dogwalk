@@ -234,9 +234,15 @@ Telephone keypad presses have fixed meanings that depend on the mode of the Voic
 
 **Context:** Voice Interaction, with Agent Hosting actions
 
-A deterministic in-call menu opened with star: no model interprets it, the Voice Frontend does not hear the caller while it is open, and pre-rendered prompts speak it. One reads Managed Session status; two restarts the Sandbox after a second press confirms that running work stops; three hands the call to the deterministic recovery menu; nine hangs up; star, or fifteen seconds without a key, returns to the conversation. The Session Orchestrator learns of a restart through a harness event. Menu actions are recorded as Call Activity.
+A deterministic in-call menu opened with star: no model interprets it, the Voice Frontend does not hear the caller while it is open, and pre-rendered prompts speak it. One reads Managed Session status; two restarts the Sandbox after a second press confirms that running work stops; three hands the call to the deterministic recovery menu; four chooses the Earcon Style; nine hangs up; star, or fifteen seconds without a key, returns to the conversation. The Session Orchestrator learns of a restart through a harness event. Menu actions are recorded as Call Activity.
 
 **Not:** The recovery menu outside the Voice Agent, which is reached when realtime voice is unavailable.
+
+### Earcon Style
+
+**Context:** Voice Interaction
+
+The User's choice of how earcons sound, kept with their Sandbox's Voice Session state: default, tones, or spoken words. Default means whatever Dogwalk currently ships as its best vocabulary (now the semantic FM set designed in `earcon_lab.py`), so it changes without the User acting. Every style marks the same events; the System Menu's own prompts are always spoken.
 
 ### Agent Implementation
 

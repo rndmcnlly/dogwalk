@@ -5,7 +5,7 @@ import {
 import { VOICE_AGENT_SKILL_INDEX, voiceAgentSkill } from "./voice_agent_skills";
 import {
   base64ToBytes, earcon, loudness, MAX_FIXTURE_SECONDS, pcmToWav, prompt, SILENCE, wavToClip,
-  type Clip, type EarconName, type PromptName,
+  type Clip, type EarconName, type EarconStyle, type PromptName,
 } from "./audio";
 
 const ACP_PORT = 8765;
@@ -26,6 +26,15 @@ const PHASE_EARCONS: Record<string, EarconName> = {
 // A stopped or archived Sandbox can take minutes to start; the call goes on meanwhile.
 const ACP_CONNECT_WINDOW_MS = 3 * 60 * 1000;
 const MENU_TIMEOUT_MS = 15_000;
+// What an Earcon Style preference of "default" plays; change it to move every such caller.
+const DEFAULT_EARCON_STYLE: EarconStyle = "fm";
+type EarconPreference = "default" | "tonal" | "spoken";
+// System Menu four: the keys and how the readout names each preference.
+const EARCON_PREFERENCES: Record<string, { preference: EarconPreference; spoken: string }> = {
+  "1": { preference: "default", spoken: "the default sounds" },
+  "2": { preference: "tonal", spoken: "simple tones" },
+  "3": { preference: "spoken", spoken: "spoken words" },
+};
 const MAX_SINCE_GREETING = 4;
 const MAX_SESSION_LIST_PAGES = 10;
 const MAX_WORKSPACE_PROJECTS = 60;
@@ -134,7 +143,7 @@ interface AcpPreview {
 
 // The in-call system menu is deterministic: keys go to this state machine, never a model.
 interface SystemMenu {
-  stage: "main" | "confirm_restart";
+  stage: "main" | "confirm_restart" | "earcons";
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -472,6 +481,7 @@ export class VoiceSession {
   private lastSpeechAt = 0;
   private earconQueue: Array<{ name: EarconName; queuedAt: number }> = [];
   private earconPumping = false;
+  private earconPreference: EarconPreference = "default";
   private follow: Follow | null = null;
   private followPumping = false;
   private clipPending = false;
@@ -502,6 +512,7 @@ export class VoiceSession {
       this.orchestratorContext = await state.storage.get<unknown[]>("orchestrator_context") ?? [];
       this.orchestratorQueue = await state.storage.get<string[]>("orchestrator_queue") ?? [];
       this.agentCapabilities = await state.storage.get<Record<string, any>>("agent_capabilities") ?? {};
+      this.earconPreference = await state.storage.get<EarconPreference>("earcon_preference") ?? "default";
     });
   }
 
@@ -577,7 +588,11 @@ export class VoiceSession {
     const callerId = await this.callerIdAttestation().catch(() => null);
     const sinceLastCall = await this.sinceLastCall().catch((error) => ({ unavailable: errorMessage(error) }));
     const opening = await this.composeOpening(callerId, sinceLastCall);
-    await this.playFixture(earcon("call_started", this.earconStyle), "call_started");
+    // The opening is one phrase: call_started leaves it unresolved and dogs_ready resolves it,
+    // so a call whose dogs are already awake hears the whole phrase at once.
+    const openedWaking = !this.acpReady;
+    const opener: EarconName = openedWaking ? "call_started" : "call_started_ready";
+    await this.playFixture(earcon(opener, this.earconStyle), opener);
     this.sendLive({ type: "session.commentary.append", delegation_id: null, content: opening });
     await this.record("voice.opening", { first_call: this.firstCall, words: opening.split(/\s+/).length });
     // Diagnostics: where this call's slice of the cross-call Orchestrator context begins.
@@ -595,6 +610,9 @@ export class VoiceSession {
     this.dogsWaking = !this.acpReady;
     if (this.dogsWaking) {
       events.push(`[harness event] dogs_waking: ${JSON.stringify({ note: ACP_STARTING_ERROR })}`);
+    } else if (openedWaking) {
+      // The dogs woke during the opening: still resolve the phrase call_started began.
+      this.queueEarcon("dogs_ready");
     }
     await this.orchestratorEvent(events.join("\n"));
     return new Response(null, { status: 204 });
@@ -1023,6 +1041,23 @@ export class VoiceSession {
       if (key === "2") return this.restartSandbox();
       return this.closeMenu("restart not confirmed");
     }
+    if (menu.stage === "earcons") {
+      const choice = EARCON_PREFERENCES[key];
+      if (!choice) return this.closeMenu("back");
+      this.earconPreference = choice.preference;
+      await this.state.storage.put("earcon_preference", choice.preference);
+      await this.record("menu.earcons", { preference: choice.preference });
+      // A sample of the new style, once the menu prompt has finished: the opening, as the
+      // next call will begin. Detached, since fixture acknowledgements arrive on the same
+      // live message chain as this key.
+      void (async () => {
+        const deadline = Date.now() + 8000;
+        while (this.fixture && Date.now() < deadline) await sleep(100);
+        await this.playFixture(earcon("call_started_ready", this.earconStyle), "earcon_preview");
+        await this.closeMenu("earcons", `Sounds are now ${choice.spoken}.`);
+      })();
+      return;
+    }
     switch (key) {
       case "1":
         await this.record("menu.status", {});
@@ -1031,6 +1066,10 @@ export class VoiceSession {
         await this.record("menu.restart.requested", {});
         menu.stage = "confirm_restart";
         this.playPrompt("menu_restart_confirm");
+        return;
+      case "4":
+        menu.stage = "earcons";
+        this.playPrompt("menu_earcons");
         return;
       case "3":
         await this.record("menu.recovery", {});
@@ -1496,8 +1535,9 @@ export class VoiceSession {
     };
   }
 
-  private get earconStyle(): "spoken" | "tonal" {
-    return this.env.EARCON_STYLE === "tonal" ? "tonal" : "spoken";
+  // The caller's Earcon Style preference; "default" follows whatever Dogwalk ships as best.
+  private get earconStyle(): EarconStyle {
+    return this.earconPreference === "default" ? DEFAULT_EARCON_STYLE : this.earconPreference;
   }
 
   // Earcons queue rather than interrupt: each waits for a lull (fixtures cut off the model

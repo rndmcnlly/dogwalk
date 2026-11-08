@@ -32,6 +32,7 @@ OUT = Path(__file__).resolve().parent / "cf_worker" / "earcons"
 
 LABELS = {
     "call_started": "Line open.",
+    "call_started_ready": "Line open. Dogs awake.",
     "session_created": "New dog.",
     "turn_started": "Dog sent.",
     "turn_stopped": "Dog back.",
@@ -59,10 +60,11 @@ LABELS = {
     "pull": "Tug.",
 }
 
-# Keypad system menu prompts: always bundled regardless of EARCON_STYLE, because they are
+# Keypad system menu prompts: always spoken whatever the caller's earcon style, because they are
 # instructions the caller must understand rather than event markers. Slower and louder.
 PROMPTS = {
-    "menu": "Menu. One, status. Two, restart the sandbox. Three, recovery options. Nine, hang up. Star, back.",
+    "menu": "Menu. One, status. Two, restart the sandbox. Three, recovery options. Four, sound style. Nine, hang up. Star, back.",
+    "menu_earcons": "Sound style. One, default. Two, tones. Three, spoken words. Star, back.",
     "menu_restart_confirm": "Restarting stops running work. Press two again to confirm.",
     "menu_restarting": "Restarting the sandbox.",
     "menu_back": "Back.",
@@ -96,7 +98,7 @@ def render(text: str, voice: str, rate: int, target_rms: float = TARGET_RMS) -> 
 
 AUDIO_TS = OUT.parent / "src" / "audio.ts"
 GROUPS = [
-    ("Call", ["call_started", "dogs_ready"]),
+    ("Call", ["call_started", "dogs_ready", "call_started_ready"]),
     ("Sessions", ["session_created", "session_closed"]),
     ("Prompt Turns", ["turn_started", "turn_stopped", "turn_cancelled", "turn_truncated", "turn_refused", "turn_failed"]),
     ("Attention", ["permission_requested", "pull"]),

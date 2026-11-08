@@ -1,4 +1,7 @@
 import spoken_call_started from "../earcons/call_started.pcm";
+import spoken_call_started_ready from "../earcons/call_started_ready.pcm";
+import prompt_menu_earcons from "../earcons/menu_earcons.pcm";
+import FM_DESIGNS from "./earcon_designs.json";
 import spoken_session_created from "../earcons/session_created.pcm";
 import spoken_turn_started from "../earcons/turn_started.pcm";
 import spoken_turn_stopped from "../earcons/turn_stopped.pcm";
@@ -60,6 +63,7 @@ function synthesize(notes: Array<[number, number]>, gain = 0.28): Clip {
 
 export type EarconName =
   | "call_started"
+  | "call_started_ready"
   | "session_created"
   | "turn_started"
   | "turn_stopped"
@@ -85,11 +89,14 @@ export type EarconName =
   | "progress_plan_done"
   | "progress_tiring"
   | "pull";
-export type EarconStyle = "spoken" | "tonal";
+// fm: the semantic FM vocabulary (earcon_lab.py, SOUND_DESIGN_NOTES.md), the default;
+// tonal: the first monophonic chimes; spoken: Fred's labels.
+export type EarconStyle = "fm" | "tonal" | "spoken";
 
 // Tonal earcons: short note patterns, rising for arrivals and falling for departures.
 const TONAL: Record<EarconName, Clip> = {
   call_started: synthesize([[523.25, 140], [783.99, 220]]),
+  call_started_ready: synthesize([[392, 90], [523.25, 90], [659.25, 90], [783.99, 140], [1046.5, 220]]),
   session_created: synthesize([[523.25, 90], [659.25, 90], [783.99, 140]]),
   turn_started: synthesize([[659.25, 100], [987.77, 140]]),
   turn_stopped: synthesize([[783.99, 110], [1046.5, 170]]),
@@ -125,6 +132,7 @@ const TONAL: Record<EarconName, Clip> = {
 // diagnostic). Presentation only; the event names stay neutral.
 const SPOKEN: Record<EarconName, Clip> = {
   call_started: pcmClip(spoken_call_started),
+  call_started_ready: pcmClip(spoken_call_started_ready),
   session_created: pcmClip(spoken_session_created),
   turn_started: pcmClip(spoken_turn_started),
   turn_stopped: pcmClip(spoken_turn_stopped),
@@ -152,16 +160,62 @@ const SPOKEN: Record<EarconName, Clip> = {
   pull: pcmClip(spoken_pull),
 };
 
+// FM earcons: note lists exported by `earcon_lab.py --export` from the lab's semantic code,
+// rendered here by a port of the lab's render(). Regenerate the JSON rather than editing it.
+interface FmNote {
+  at: number; ms: number; f: number; voices: number[][];
+  c: number; m: number; i0: number; i1: number; tau: number; attack: number; k: number; glide: number;
+  rough: number; roughRate: number; cut: boolean;
+}
+
+// Two-operator FM per voice: sin(carrier + index(t) * sin(modulator)), phase-accumulated so
+// the glide stays continuous. The index decays from i0 to i1 (bright attack, mellow tail).
+function renderFm({ notes, gain }: { notes: FmNote[]; gain: number }): Clip {
+  const end = Math.max(...notes.map((n) => n.at + n.ms));
+  const out = new Float32Array(Math.ceil((end / 1000) * SAMPLE_RATE));
+  const release = Math.round(0.004 * SAMPLE_RATE);
+  for (const n of notes) {
+    const start = Math.round((n.at / 1000) * SAMPLE_RATE);
+    const full = Math.round((n.ms / 1000) * SAMPLE_RATE);
+    const len = n.cut ? Math.round(full * 0.35) : full;
+    const attack = Math.max(1, Math.round((n.attack / 1000) * SAMPLE_RATE));
+    const weight = n.voices.reduce((sum, [, w]) => sum + w, 0);
+    for (const [ratio, w] of n.voices) {
+      let pc = 0;
+      let pm = 0;
+      for (let i = 0; i < len && start + i < out.length; i++) {
+        const t = i / SAMPLE_RATE;
+        const f = n.f * ratio * (1 - (1 - n.glide) * Math.exp(-t / 0.008));
+        pc += (2 * Math.PI * f * n.c) / SAMPLE_RATE;
+        pm += (2 * Math.PI * f * n.m) / SAMPLE_RATE;
+        const index = n.i1 + (n.i0 - n.i1) * Math.exp((-t * 1000) / n.tau);
+        let env = Math.min(1, i / attack, (len - 1 - i) / release);
+        if (n.k) env *= Math.exp((-n.k * i) / full);
+        if (n.rough) env *= 1 - n.rough * 0.5 * (1 - Math.cos(2 * Math.PI * n.roughRate * t));
+        out[start + i] += (w / weight) * env * Math.sin(pc + index * Math.sin(pm)) * gain;
+      }
+    }
+  }
+  const samples = Int16Array.from(out, (v) => Math.max(-32768, Math.min(32767, Math.round(v * 32767))));
+  return { base64: toBase64(new Uint8Array(samples.buffer)), seconds: out.length / SAMPLE_RATE };
+}
+
+const FM_SOURCE = FM_DESIGNS as Record<EarconName, { notes: FmNote[]; gain: number }>;
+const FM = Object.fromEntries(
+  Object.entries(FM_SOURCE).map(([name, design]) => [name, renderFm(design)]),
+) as Record<EarconName, Clip>;
+
 export function earcon(name: EarconName, style: EarconStyle): Clip {
-  return (style === "tonal" ? TONAL : SPOKEN)[name];
+  return (style === "fm" ? FM : style === "tonal" ? TONAL : SPOKEN)[name];
 }
 
 // Keypad system menu prompts, also rendered by make_earcons.py. They are instructions the
 // caller must follow, so they are spoken whatever the earcon style.
-export type PromptName = "menu" | "menu_restart_confirm" | "menu_restarting" | "menu_back";
+export type PromptName = "menu" | "menu_earcons" | "menu_restart_confirm" | "menu_restarting" | "menu_back";
 
 const PROMPTS: Record<PromptName, Clip> = {
   menu: pcmClip(prompt_menu),
+  menu_earcons: pcmClip(prompt_menu_earcons),
   menu_restart_confirm: pcmClip(prompt_menu_restart_confirm),
   menu_restarting: pcmClip(prompt_menu_restarting),
   menu_back: pcmClip(prompt_menu_back),

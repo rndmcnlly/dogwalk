@@ -182,10 +182,12 @@ takes a minute or two." and the Orchestrator loads the `first-call-tour` skill.
 The System Menu is a deterministic state machine in the Durable Object: it
 mutes the Voice Frontend's input (`session.input_audio.mute`), holds
 Orchestrator speech and earcons, and plays pre-rendered prompts from
-`../make_earcons.py` (bundled regardless of `EARCON_STYLE`). `1` status, `2`
+`../make_earcons.py` (always spoken, whatever the earcon style). `1` status, `2`
 restart (a second `2` confirms; the Daytona Sandbox is stopped, then started,
 and the Orchestrator gets `sandbox_restart_requested`), `3` the TwiML recovery
-menu (as `open_recovery_menu`), `9` hang up, `*` or 15 s back. Leaving unmutes
+menu (as `open_recovery_menu`), `4` sound style (`1` default, `2` tones, `3`
+spoken words; stored per Durable Object as `earcon_preference`, previewed with
+the opening earcon), `9` hang up, `*` or 15 s back. Leaving unmutes
 and plays "Back." Actions are recorded as `menu.*` Call Activity.
 
 ## Voice Sessions
@@ -228,10 +230,13 @@ load through `load_voice_agent_skill`. Add a skill by writing the file and
 registering it in `src/voice_agent_skills.ts`. `platform-self-knowledge` embeds
 `DOMAIN.md` and `PSTN_CLOUDFLARE.md` at build time.
 
-Audio goes to the caller as GPT-Live output fixtures. Earcons mark events
-(`EARCON_STYLE`: `spoken` labels rendered by `../make_earcons.py` with macOS
-`say`, committed under `earcons/`, or `tonal` note patterns); they queue for
-lulls. `play_audio` renders a window of any Workspace audio or video file with
+Audio goes to the caller as GPT-Live output fixtures. Earcons mark events and
+queue for lulls, in the caller's Earcon Style (System Menu four): `default` plays
+`DEFAULT_EARCON_STYLE` in `src/voice_session.ts`, currently `fm`, the semantic FM
+vocabulary designed in `../earcon_lab.py` (see `../SOUND_DESIGN_NOTES.md`) and
+exported to `src/earcon_designs.json` with `earcon_lab.py --export`; `tonal` is
+the first note patterns; `spoken` is labels rendered by `../make_earcons.py` with
+macOS `say`, committed under `earcons/`. `play_audio` renders a window of any Workspace audio or video file with
 `ffmpeg` in the Sandbox. `start_recording` mutes the Voice Frontend, buffers the
 caller audio GPT-Live reflects to the sideband, and saves a WAV under
 `recordings/` when the caller presses pound (star discards), after 20 s of

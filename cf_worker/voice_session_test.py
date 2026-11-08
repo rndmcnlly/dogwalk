@@ -755,6 +755,15 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(dtmf("*"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.unmute"))
 
+        # Star, four chooses the Earcon Style: a preview plays, then the voice confirms.
+        await mocks.send_live(dtmf("*"))
+        await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
+        await mocks.send_live(dtmf("4"))
+        await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
+        await mocks.send_live(dtmf("2"))
+        await next_matching(mocks.live_messages, of_type("session.input_audio.unmute"))
+        await next_matching(mocks.live_messages, appended("commentary", "Sounds are now simple tones."))
+
         # Other digits still reach the Orchestrator with their conversational context.
         await mocks.send_live(dtmf("7"))
         await next_matching(mocks.live_messages, appended("commentary", KEYPAD_SAY))
@@ -765,7 +774,7 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(dtmf("9"))
         await wait_for(lambda: any(path == "/live/sessions/live-test-2/hangup" for path, _ in DaytonaMock.openai_requests), 10)
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
-        for expected in ("menu.opened", "menu.status", "menu.closed", "menu.hangup", "voice.keypad.stop", "voice.keypad.status"):
+        for expected in ("menu.opened", "menu.status", "menu.earcons", "menu.closed", "menu.hangup", "voice.keypad.stop", "voice.keypad.status"):
             assert expected in events, (expected, events)
         handoff_rows = OrchestratorMock.user_message('"key":"7"')
         assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows
