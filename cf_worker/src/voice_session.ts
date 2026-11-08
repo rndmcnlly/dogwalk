@@ -311,7 +311,7 @@ Rules:
 
 Audio: play_audio plays a Workspace WAV to the caller, the way a graphical tool would show an image. Telephone audio is narrowband, so speech, tones, rhythm, and melody survive better than timbre. When a clip is ready, call say (what it is and how long) and play_audio in the same response: play_audio waits for the announcement to finish before playing. Never say a clip is playing or "here it is" without calling play_audio. Keep unrequested clips short. play_audio renders any audio or video format itself, so dogs need only produce or find the file. For long recordings such as podcasts, have a dog locate the moments that matter (for example by transcribing with timestamps), then play short samples by offset; offer further 30-second parts rather than playing long stretches. The first play in a fresh Sandbox may take longer while ffmpeg installs. After playing, brief the Voice Frontend on what the caller heard. Short chimes play automatically at call start and when a dog comes back into a quiet moment.
 
-Recording: start_recording captures the caller's voice into a Workspace WAV, following voicemail conventions. In the same response, say something like "Recording after the beep. Press pound when you're done, or star to discard." Recording also ends after 20 seconds of silence or at the limit. A recording_saved event gives the path; tell the caller it was saved and how long it was, then do what they asked with it (often a dog transcribes, files, or analyzes it). Keypad presses outside a recording arrive as keypad events with the conversation since the last handoff; treat them as caller input. If that conversation shows the caller asked for something the Voice Frontend only claimed to do (it cannot record, play, or act), correct it and do the real thing; for example, a pound key after "let's record a voice note" means start_recording was never called.
+Recording (a recording_saved event with silent true means the file holds no audio; say so plainly rather than offering playback): start_recording captures the caller's voice into a Workspace WAV, following voicemail conventions. In the same response, say something like "Recording after the beep. Press pound when you're done, or star to discard." Recording also ends after 20 seconds of silence or at the limit. A recording_saved event gives the path; tell the caller it was saved and how long it was, then do what they asked with it (often a dog transcribes, files, or analyzes it). Keypad presses outside a recording arrive as keypad events with the conversation since the last handoff; treat them as caller input. If that conversation shows the caller asked for something the Voice Frontend only claimed to do (it cannot record, play, or act), correct it and do the real thing; for example, a pound key after "let's record a voice note" means start_recording was never called.
 
 Voice Agent Skills: guidance you load on demand with load_voice_agent_skill when a request matches a description below. Load a skill once per call; it stays in your context. These are yours, not the Agents'.
 ${VOICE_AGENT_SKILL_INDEX}`;
@@ -347,7 +347,9 @@ export class VoiceSession {
   private earconQueue: Array<{ name: EarconName; queuedAt: number }> = [];
   private earconPumping = false;
   private clipPending = false;
-  private recording: { chunks: Uint8Array[]; bytes: number; startedAt: number; lastLoudAt: number; maxSeconds: number } | null = null;
+  private recording: { chunks: Uint8Array[]; bytes: number; startedAt: number; lastLoudAt: number; maxSeconds: number; muted: boolean } | null = null;
+  // Diagnostics: levels of the caller audio GPT-Live reflects, outside and during recording.
+  private inputLevels = { open: newLevels(), recording: newLevels() };
   private liveError: string | null = null;
   private transcript: TranscriptEntry[] = [];
   private transcriptCutMs = 0;
@@ -533,7 +535,9 @@ export class VoiceSession {
         this.appendTranscript(message.type.startsWith("session.input") ? "caller" : "voice", message);
         break;
       case "session.input_audio.append":
-        if (this.recording && typeof message.audio === "string") await this.captureAudio(message.audio);
+        if (typeof message.audio !== "string") break;
+        if (this.recording) await this.captureAudio(message.audio);
+        else trackLevels(this.inputLevels.open, base64ToBytes(message.audio));
         break;
       case "transport.dtmf.received":
         await this.receiveKeypad(String(message.event ?? ""));
@@ -587,6 +591,11 @@ export class VoiceSession {
 
   private async receiveDelegation(delegationId: string, offsetMs: number): Promise<void> {
     this.delegations.add(delegationId);
+    if (this.recording) {
+      // The caller is dictating; anything the Voice Frontend hands off now is the note itself.
+      await this.record("voice.delegation.ignored", { delegation_id: delegationId, reason: "recording" });
+      return;
+    }
     // The delegation carries no task text: the task is the transcript up to its offset.
     // Late transcript deltas for the same utterance get a short grace period.
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -985,9 +994,14 @@ export class VoiceSession {
     } finally {
       this.clipPending = false;
     }
-    this.sendLive({ type: "session.input_audio.mute" });
-    this.recording = { chunks: [], bytes: 0, startedAt: Date.now(), lastLoudAt: Date.now(), maxSeconds };
-    await this.record("voice.recording.started", { max_seconds: maxSeconds });
+    // A playtest recorded pure digital silence with input muted, so by default the Voice
+    // Frontend is asked to stay silent instead; RECORDING_MUTE=true restores muting.
+    const muted = this.env.RECORDING_MUTE === "true";
+    if (muted) this.sendLive({ type: "session.input_audio.mute" });
+    else this.sendLive({ type: "session.instructions.append", delegation_id: null, content: "The caller is now recording a voice note. Stay completely silent: do not speak, acknowledge, or think anything over until you are told the recording has ended." });
+    this.inputLevels.recording = newLevels();
+    this.recording = { chunks: [], bytes: 0, startedAt: Date.now(), lastLoudAt: Date.now(), maxSeconds, muted };
+    await this.record("voice.recording.started", { max_seconds: maxSeconds, muted });
     return { ok: true, max_seconds: maxSeconds, note: "Recording now. It ends with pound (save), star (discard), 20 seconds of silence, or the limit; a harness event reports the result." };
   }
 
@@ -995,6 +1009,7 @@ export class VoiceSession {
     const recording = this.recording;
     if (!recording) return;
     const chunk = base64ToBytes(base64);
+    trackLevels(this.inputLevels.recording, chunk);
     recording.chunks.push(chunk);
     recording.bytes += chunk.length;
     if (loudness(chunk) > 0.01) recording.lastLoudAt = Date.now();
@@ -1016,10 +1031,12 @@ export class VoiceSession {
     const recording = this.recording;
     if (!recording) return;
     this.recording = null;
-    this.sendLive({ type: "session.input_audio.unmute" });
+    if (recording.muted) this.sendLive({ type: "session.input_audio.unmute" });
+    else this.sendLive({ type: "session.instructions.append", delegation_id: null, content: "The recording has ended. Resume the conversation normally." });
     const seconds = Math.round((recording.bytes / 48_000) * 10) / 10;
+    const levels = summarizeLevels(this.inputLevels.recording);
     if (!save || recording.bytes === 0) {
-      await this.record("voice.recording.discarded", { seconds, ended_by: endedBy });
+      await this.record("voice.recording.discarded", { seconds, ended_by: endedBy, muted: recording.muted, levels });
       this.queueEarcon("recording_discarded");
       await this.orchestratorEvent(`[harness event] recording_discarded: ${JSON.stringify({ seconds, ended_by: endedBy })}`);
       return;
@@ -1036,9 +1053,9 @@ export class VoiceSession {
       form.append("file", new Blob([pcmToWav(recording.chunks)], { type: "audio/wav" }), path.split("/").pop());
       const uploaded = await fetch(`${toolbox}/files/upload?path=${encodeURIComponent(path)}`, { method: "POST", headers, body: form });
       if (!uploaded.ok) throw new Error(`upload failed (${uploaded.status})`);
-      await this.record("voice.recording.saved", { seconds, ended_by: endedBy });
+      await this.record("voice.recording.saved", { seconds, ended_by: endedBy, muted: recording.muted, levels });
       this.queueEarcon("recording_saved");
-      await this.orchestratorEvent(`[harness event] recording_saved: ${JSON.stringify({ path, seconds, ended_by: endedBy })}`);
+      await this.orchestratorEvent(`[harness event] recording_saved: ${JSON.stringify({ path, seconds, ended_by: endedBy, silent: levels.peak === 0 })}`);
     } catch (error) {
       await this.record("voice.recording.failed", { message: errorMessage(error) });
       await this.orchestratorEvent(`[harness event] recording_failed: ${JSON.stringify({ seconds, ended_by: endedBy, error: errorMessage(error) })}`);
@@ -1458,6 +1475,8 @@ export class VoiceSession {
     this.cleaningUpVoice = true;
     if (this.recording) await this.finishRecording(true, "call ended");
     this.earconQueue = [];
+    await this.record("voice.input.levels", summarizeLevels(this.inputLevels.open));
+    this.inputLevels = { open: newLevels(), recording: newLevels() };
     await this.record("voice.live.detached", { reason, live_session_id: this.liveSessionId });
     const live = this.live;
     this.live = null;
@@ -1554,4 +1573,27 @@ function shellQuote(value: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface Levels { chunks: number; nonSilent: number; peak: number }
+
+function newLevels(): Levels {
+  return { chunks: 0, nonSilent: 0, peak: 0 };
+}
+
+function trackLevels(levels: Levels, pcm: Uint8Array): void {
+  const samples = new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.byteLength / 2));
+  let peak = 0;
+  for (const sample of samples) peak = Math.max(peak, Math.abs(sample));
+  levels.chunks += 1;
+  if (peak > 0) levels.nonSilent += 1;
+  levels.peak = Math.max(levels.peak, peak);
+}
+
+function summarizeLevels(levels: Levels): { chunks: number; non_silent_fraction: number; peak: number } {
+  return {
+    chunks: levels.chunks,
+    non_silent_fraction: levels.chunks ? Math.round((levels.nonSilent / levels.chunks) * 100) / 100 : 0,
+    peak: levels.peak,
+  };
 }
