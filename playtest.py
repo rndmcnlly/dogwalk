@@ -152,6 +152,10 @@ def stats_lines(call: dict, items: list) -> list[str]:
         f"{sum(1 for r in activity if r['event'] == 'acp.turn.stopped')} stopped, "
         f"{sum(1 for r in activity if r['event'] == 'acp.turn.failed')} failed",
     ]
+    fixtures = [(r["event"].removeprefix("voice.fixture."), detail(r).get("label")) for r in activity
+                if r["event"].startswith("voice.fixture.")]
+    if fixtures:
+        out.append("audio: " + ", ".join(f"{label} {outcome}" for outcome, label in fixtures))
     if "end_call" not in names and call.get("status") == "completed":
         out.append("note: no end_call; the caller or provider hung up")
     return out
