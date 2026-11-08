@@ -287,11 +287,15 @@ caller asks to pair; the `pair-browser` Voice Agent Skill walks them through
 opening `https://dogwalk.tools/pair` on another device and pressing Listen, then
 the Orchestrator calls `pair_browser`. The Durable Object stores a fresh Pairing
 Code's hash in D1 `pairing_codes` (90 s, single use), waits for a lull, and
-plays it as Pairing Tones (`src/pairing.ts`: 10 random bytes plus 6
-Reed-Solomon parity bytes over GF(256), 32 DTMF symbols of 62.5 ms, no gaps,
-2 s). The page (`src/pair_page.ts`) decodes with a Goertzel AudioWorklet, a
-symbol clock that marks unclear slots as erasures, and Reed-Solomon, claiming
-only frames with parity to spare. `POST /pair/claim` consumes the code row and
+plays a spoken "Pairing tones." cue (after the Voice Frontend has finished
+speaking) and then the Pairing Tones (`src/pairing.ts`: 10 random bytes plus 6
+Reed-Solomon parity bytes over GF(256), 32 DTMF symbols at a `baud` the
+Orchestrator picks from 4, 6, 8, 12, 16, default 8, so four seconds; each tone
+fills 60% of its slot, at most 70 ms, and the rest is silence so room echoes
+decay). The page (`src/pair_page.ts`) decodes with a Goertzel AudioWorklet,
+tries each allowed rate against the frame's length, runs a symbol clock that
+marks unclear slots as erasures, and claims only Reed-Solomon decodes with
+parity to spare. `POST /pair/claim` consumes the code row and
 forwards the browser's description (user agent) and place (Cloudflare `cf`
 city and region) to the Durable Object, which has the Voice Frontend name them;
 `1` accepts, `*` refuses, 30 s lapses. The page polls

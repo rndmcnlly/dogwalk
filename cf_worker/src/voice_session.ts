@@ -8,8 +8,8 @@ import {
   type Clip, type EarconName, type EarconStyle, type PromptName,
 } from "./audio";
 import {
-  MAX_PAIRED_BROWSERS, newBrowserSecret, newPairingCode, PAIRED_IDLE_MS, PAIRED_MAX_MS,
-  PAIRING_CODE_TTL_MS, PAIRING_CONFIRM_MS, pairingTones, sha256Hex,
+  MAX_PAIRED_BROWSERS, newBrowserSecret, newPairingCode, PAIRED_IDLE_MS, PAIRED_MAX_MS, PAIRING_BAUDS,
+  PAIRING_CODE_TTL_MS, PAIRING_CONFIRM_MS, PAIRING_DEFAULT_BAUD, pairingTones, sha256Hex, type PairingBaud,
 } from "./pairing";
 
 const ACP_PORT = 8765;
@@ -372,8 +372,18 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "pair_browser",
-    description: "Play a fresh Pairing Code into the call as two and a half seconds of keypad tones, so a browser listening at dogwalk.tools/pair can pair as a read-only companion (session status and Workspace files). Load the pair-browser skill first. Call it only once the caller says the page is open and listening; it returns after the tones have played. Pairing completes only if the caller then presses one.",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
+    description: "Play a fresh Pairing Code into the call as keypad tones, so a browser listening at dogwalk.tools/pair can pair as a read-only companion (session status and Workspace files). Call it as soon as the caller says the page is open and listening: a practiced caller often has it listening before they call, so then call it at once, with at most a few words first. A newcomer needs the pair-browser skill's walkthrough. The system waits for you to finish speaking, plays a spoken cue (\"Pairing tones.\"), then the tones; do not count down or announce them yourself. It returns after the tones have played. Pairing completes only if the caller then presses one.",
+    parameters: {
+      type: "object",
+      properties: {
+        baud: {
+          type: "integer",
+          enum: [...PAIRING_BAUDS],
+          description: "Symbols per second; 32 symbols are sent. 8 is the recommended default (4 seconds). If the page heard tones but failed to decode them (it may say ECC failed), retry slower: 6, then 4 (8 seconds). 12 or 16 suit only clean lines.",
+        },
+      },
+      additionalProperties: false,
+    },
   },
   {
     type: "function",
@@ -1177,7 +1187,9 @@ export class VoiceSession {
 
   // The pair_browser tool: a fresh Pairing Code as keypad tones, once the walker has stopped
   // speaking. Playing tones authorizes nothing; only the caller's press of one does.
-  private async playPairingCode(): Promise<Record<string, unknown>> {
+  private async playPairingCode(baudInput: number): Promise<Record<string, unknown>> {
+    const baud = PAIRING_BAUDS.find((item) => item === baudInput) as PairingBaud | undefined;
+    if (!baud) throw new Error(`baud must be one of ${PAIRING_BAUDS.join(", ")}`);
     if (!this.identityHash) throw new Error("pairing is not available on this call");
     if (this.recording) throw new Error("a recording is in progress; finish it first");
     const code = newPairingCode();
@@ -1190,12 +1202,15 @@ export class VoiceSession {
       this.env.DB.prepare("INSERT INTO pairing_codes (code_hash, identity_hash, expires_at) VALUES (?, ?, ?)")
         .bind(codeHash, this.identityHash, Math.ceil(expiresAt / 1000)),
     ]);
-    await this.record("pairing.started", {});
-    const tones = pairingTones(code.bytes);
+    await this.record("pairing.started", { baud });
+    const tones = pairingTones(code.bytes, baud);
     this.clipPending = true;
     let played = false;
     try {
-      await this.awaitLull();
+      // A fixture cuts the Voice Frontend off, so let it finish whatever it was asked to say
+      // first; then a fixed cue, so the caller knows the tones come next.
+      await this.awaitSpeechFinished();
+      await this.playFixture(prompt("pairing_cue"), "pairing_cue");
       this.pairingTonesPlaying = true;
       played = await this.playFixture(tones, "pairing_tones");
     } finally {
@@ -1205,8 +1220,9 @@ export class VoiceSession {
     }
     return {
       ok: played,
+      baud,
       seconds: Math.round(tones.seconds * 10) / 10,
-      next: "If a browser heard the tones, the system names it to the caller within a few seconds and asks them to press one, and a browser_pairing event follows. If nothing happens, the browser did not hear them: suggest the speakerphone, more volume, or holding the phone closer, then play them again.",
+      next: "If a browser heard the tones, the system names it to the caller within a few seconds and asks them to press one, and a browser_pairing event follows. If nothing happens, the browser did not hear them: suggest the speakerphone, more volume, or holding the phone closer, then play them again. If the caller says the page heard them but failed to decode, play them again at a slower baud.",
     };
   }
 
@@ -1696,7 +1712,7 @@ export class VoiceSession {
           result = await this.startRecording(Number(args.max_seconds ?? 300));
           break;
         case "pair_browser":
-          result = await this.playPairingCode();
+          result = await this.playPairingCode(args.baud === undefined ? PAIRING_DEFAULT_BAUD : Number(args.baud));
           break;
         case "restart_sandbox":
           if (!this.sandboxId) throw new Error("no sandbox is assigned to this call");
@@ -1923,6 +1939,16 @@ export class VoiceSession {
   }
 
   // Wait (bounded) for announcements to finish and other clips to drain.
+  // Stronger than awaitLull for speech requested just before: the Voice Frontend may not have
+  // begun speaking yet, and transcript deltas run ahead of the audio. Wait (bounded) for speech
+  // to start, then for a second and a half without any.
+  private async awaitSpeechFinished(): Promise<void> {
+    const since = Date.now();
+    const deadline = since + 20_000;
+    while (Date.now() < since + 3000 && this.lastSpeechAt < since && !this.fixture) await sleep(100);
+    while (Date.now() < deadline && (this.fixture || Date.now() - this.lastSpeechAt < 1500)) await sleep(150);
+  }
+
   private async awaitLull(): Promise<void> {
     const deadline = Date.now() + 8000;
     await sleep(700);

@@ -2,16 +2,27 @@
 //
 // The System Menu plays a Pairing Code into the call as keypad (DTMF) tones; a browser in
 // earshot decodes it (src/pair_page.ts) and claims it. The code is 80 random bits plus six
-// Reed-Solomon parity bytes over GF(256), each byte sent as two 4-bit DTMF symbols, 62.5 ms
-// each, back to back: 32 symbols, two seconds. The code is systematic (the first 20 symbols
-// are the data), and the receiver runs a symbol clock and treats unclear slots as erasures.
-// The browser-side decoder must use exactly these parameters.
+// Reed-Solomon parity bytes over GF(256), each byte sent as two 4-bit DTMF symbols: 32
+// symbols on a fixed clock. The Voice Agent picks the symbol rate from PAIRING_BAUDS (8 by
+// default: a 125 ms slot, four seconds in all). Each tone is short (60% of its slot, at most
+// 70 ms) and the rest of the slot is silence, so slower means longer gaps, not longer tones.
+// Speech codecs (G.711, G.723.1, low-rate Opus) pass even back-to-back 16 baud intact; what
+// breaks pairing is the room. A held tone's reverberation builds up to rival the next tone,
+// and a gap lets it decay. In a simulated reverberant room at 8 baud, 125 ms tones with no
+// gap decoded 1 frame in 6 and 70 ms tones with 55 ms gaps 10 in 10. The code is
+// systematic (the first 20 symbols are the data); the receiver tries each allowed rate,
+// runs a symbol clock, and treats unclear slots as erasures.
 
 import { SAMPLE_RATE, toBase64, type Clip } from "./audio";
 
 export const PAIRING_CODE_BYTES = 10;
 export const PAIRING_PARITY_BYTES = 6;
-export const PAIRING_SYMBOL_MS = 62.5;
+export const PAIRING_BAUDS = [4, 6, 8, 12, 16] as const;
+export type PairingBaud = (typeof PAIRING_BAUDS)[number];
+export const PAIRING_DEFAULT_BAUD: PairingBaud = 8;
+// How much of each symbol slot the tone fills, at most; the rest is silence for echoes to decay.
+export const PAIRING_TONE_DUTY = 0.6;
+export const PAIRING_MAX_TONE_MS = 70;
 export const PAIRING_CODE_TTL_MS = 90_000;
 export const PAIRING_CONFIRM_MS = 30_000;
 export const PAIRED_IDLE_MS = 60 * 60_000;
@@ -62,12 +73,12 @@ export function pairingSymbols(code: Uint8Array): string {
 // The tones as a GPT-Live output fixture: mono PCM16 at 24 kHz, with a little silence around
 // them so the receiver's clock sees a clean start. Raised-cosine edges keep clicks from
 // splattering energy into the neighboring DTMF bins.
-export function pairingTones(code: Uint8Array, amplitude = 0.3): Clip {
+export function pairingTones(code: Uint8Array, baud: PairingBaud = PAIRING_DEFAULT_BAUD, amplitude = 0.3): Clip {
   const symbols = pairingSymbols(code);
-  const slot = (PAIRING_SYMBOL_MS / 1000) * SAMPLE_RATE;
+  const slot = SAMPLE_RATE / baud;
   const lead = Math.round(0.3 * SAMPLE_RATE);
   const ramp = Math.round(0.004 * SAMPLE_RATE);
-  const tone = Math.round(slot);
+  const tone = Math.round(Math.min(slot * PAIRING_TONE_DUTY, (PAIRING_MAX_TONE_MS / 1000) * SAMPLE_RATE));
   const samples = new Int16Array(2 * lead + Math.ceil(symbols.length * slot));
   [...symbols].forEach((symbol, s) => {
     const row = KEYPAD.findIndex((line) => line.includes(symbol));

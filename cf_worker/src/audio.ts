@@ -30,6 +30,7 @@ import prompt_menu from "../earcons/menu.pcm";
 import prompt_menu_restart_confirm from "../earcons/menu_restart_confirm.pcm";
 import prompt_menu_restarting from "../earcons/menu_restarting.pcm";
 import prompt_menu_back from "../earcons/menu_back.pcm";
+import prompt_pairing_cue from "../earcons/pairing_cue.pcm";
 
 // Waveform audio for GPT-Live output fixtures: raw mono PCM16LE at 24 kHz, at most 30 s,
 // base64-encoded. Earcons are synthesized here; clips come from Sandbox WAV files.
@@ -210,13 +211,14 @@ export function earcon(name: EarconName, style: EarconStyle): Clip {
 
 // Keypad system menu prompts, also rendered by make_earcons.py. They are instructions the
 // caller must follow, so they are spoken whatever the earcon style.
-export type PromptName = "menu" | "menu_restart_confirm" | "menu_restarting" | "menu_back";
+export type PromptName = "menu" | "menu_restart_confirm" | "menu_restarting" | "menu_back" | "pairing_cue";
 
 const PROMPTS: Record<PromptName, Clip> = {
   menu: pcmClip(prompt_menu),
   menu_restart_confirm: pcmClip(prompt_menu_restart_confirm),
   menu_restarting: pcmClip(prompt_menu_restarting),
   menu_back: pcmClip(prompt_menu_back),
+  pairing_cue: pcmClip(prompt_pairing_cue),
 };
 
 export function prompt(name: PromptName): Clip {

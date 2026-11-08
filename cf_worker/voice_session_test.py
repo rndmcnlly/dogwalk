@@ -495,12 +495,13 @@ REPORT_TEXT = "# Parser report\n\nAll green.\n"
 def decode_pairing_tones(audio_b64: str) -> str | None:
     """Read the Pairing Code from a played fixture, as a browser would; None if it is not tones.
 
-    The fixture is exactly clocked (24 kHz, 0.3 s lead, 62.5 ms symbols), so a Goertzel
-    window in the middle of each slot suffices; real browsers need the symbol clock and ECC.
+    The fixture is exactly clocked (24 kHz, 0.3 s lead, 8 baud: a 125 ms slot opening with a
+    70 ms tone), so one Goertzel window early in each slot suffices; real browsers need the
+    symbol clock and ECC.
     """
     raw = base64.b64decode(audio_b64)
     samples = [int.from_bytes(raw[i:i + 2], "little", signed=True) / 32768 for i in range(0, len(raw) - 1, 2)]
-    lead, slot, window = 7200, 1500, 1000
+    lead, slot, window = 7200, 3000, 1000
     if len(samples) < lead + 32 * slot:
         return None
     symbols = []

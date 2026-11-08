@@ -67,6 +67,8 @@ PROMPTS = {
     "menu_restart_confirm": "Restarting stops running work. Press one again to confirm.",
     "menu_restarting": "Restarting the sandbox.",
     "menu_back": "Back.",
+    # Played by pair_browser right before the Pairing Tones, so the caller knows they are next.
+    "pairing_cue": "Pairing tones.",
 }
 
 TARGET_RMS = 0.06  # about -24 dBFS: audible, but quieter than the walker's voice

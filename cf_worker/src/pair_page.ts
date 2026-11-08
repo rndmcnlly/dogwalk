@@ -6,7 +6,9 @@
 // reach the browser as written. The page must therefore contain no backtick and no dollar-brace
 // sequence anywhere (a backtick is written "\x60" in the script). The decoder core between the
 // CORE markers is ported from prototypes/acoustic_pairing.html and must match src/pairing.ts:
-// 10 data bytes, 6 parity bytes, 62.5 ms symbols, no gap, one copy, 32 symbols.
+// 10 data bytes, 6 parity bytes, 32 symbols back to back with no gap, one copy, at a symbol rate
+// the Voice Agent picks from BAUD_RATES. The page is not told the rate: it tries each one whose
+// frame length fits the heard frame and keeps the one that Reed-Solomon confirms.
 
 export const PAIR_HTML = String.raw`<!doctype html>
 <html lang="en">
@@ -133,16 +135,17 @@ pre.plain{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.5 var(
     <li>Use a different device from the phone in the call (a laptop or tablet). Phones give the browser silence while a call holds the microphone.</li>
     <li>Put the phone on speaker, near this device.</li>
     <li>Press Listen and allow the microphone.</li>
-    <li>In the call, ask the walker to pair a browser, and say when this page is listening. The call plays about two seconds of keypad tones.</li>
+    <li>In the call, ask the walker to pair a browser, and say when this page is listening. After the walker says "Pairing tones", the call plays a few seconds of keypad tones.</li>
     <li>The call describes this browser: press one to accept it (star refuses).</li>
   </ol>
+  <p class="small muted">If the page hears the tones but cannot decode them, ask the walker to send the tones slower.</p>
   <div class="row">
     <button id="listen" class="primary">Listen</button>
     <button id="stop" disabled>Stop</button>
   </div>
   <div class="meter"><div id="level"></div></div>
   <div id="levelText" class="mono small muted">&nbsp;</div>
-  <p class="small muted">Symbols as heard, slot by slot (&middot; is an unclear slot):</p>
+  <p class="small muted">Tones as heard while a frame arrives, one mark per tone (&middot; is an unusually long silence); the rate is worked out when the frame ends:</p>
   <div id="live" class="stream"></div>
   <div id="frames"></div>
 </section>
@@ -190,13 +193,14 @@ const KEYPAD = ["123A", "456B", "789C", "*0#D"];
 const ALPHABET = "0123456789ABCD*#"; // nibble value -> keypad symbol
 const CODE_BYTES = 10;   // 80 random bits
 const PARITY_BYTES = 6;  // Reed-Solomon parity
-const SYMBOL_MS = 62.5;  // tones touch, no gap
+const BAUD_RATES = [4, 6, 8, 12, 16]; // symbols per second the call may use; tones touch, no gap
 const N_SLOTS = (CODE_BYTES + PARITY_BYTES) * 2;
+const DOT = "·";        // an unclear slot or stretch
 
 // Goertzel classifier: each hop labels the latest 25.6 ms window with a keypad symbol or null.
 // Rectangular window, as in classic DTMF receivers: its 39 Hz resolution keeps the nearest
-// neighbors (73 Hz apart) out of the main lobe. Hops are a quarter window, so a 62.5 ms slot
-// holds about six windows that lie entirely inside it.
+// neighbors (73 Hz apart) out of the main lobe. Hops are a quarter window, so even a 62.5 ms
+// slot (16 baud) holds about six windows that lie entirely inside it; slower rates get more.
 class Classifier {
   constructor(sampleRate, opts) {
     opts = opts || {};
@@ -409,15 +413,19 @@ function alignSlots(labels, firstHop, hop, win, slot, nSlots) {
       if (!best || score > best.score) best = { score, votes };
     }
   }
-  return slotSymbols(best.votes);
+  return { symbols: slotSymbols(best.votes), score: best.score };
 }
 
-// Streaming frame assembler: hop labels in, live slot symbols and finished frames out.
+// Streaming frame assembler: hop labels in, a live change stream and finished frames out.
+// A frame opens at the first tone after silence and closes after 0.25 s of silence, or once it
+// outlasts the slowest frame. Its rate is found at the end: see decodeFrame.
+const STEADY_HOPS = 3;  // a tone held this many hops (about 19 ms) is real, not a blip
+const GAP_HOPS = 6;      // a toneless stretch this long (about 38 ms) separates tones, so a repeat shows again
+const UNCLEAR_HOPS = 32; // longer than any designed gap (about 0.2 s): shows as a dot
 class FrameReceiver {
   constructor(sampleRate, hop, win, onLive, onFrame) {
     Object.assign(this, { sampleRate, hop, win, onLive, onFrame });
-    this.slot = SYMBOL_MS / 1000 * sampleRate;
-    this.nSlots = N_SLOTS;
+    this.maxHops = (N_SLOTS / Math.min(...BAUD_RATES) + 0.5) * sampleRate / hop;
     this.hopIndex = 0;
     this.frame = null;
     this.silent = 0;
@@ -426,30 +434,71 @@ class FrameReceiver {
     const i = this.hopIndex++;
     if (!this.frame) {
       if (!sym) return;
-      this.frame = { firstHop: i, labels: [], shown: 0 };
+      this.frame = { firstHop: i, labels: [], run: { sym: null, len: 0 }, live: "", heard: null, unclear: false };
       this.silent = 0;
+      this.onLive("");
     }
     const f = this.frame;
     f.labels.push(sym);
     this.silent = sym ? 0 : this.silent + 1;
-    // Live view: each slot with the naive clock as it completes.
-    const start = f.firstHop * this.hop + 0.4 * this.win;
-    const done = Math.min(this.nSlots, Math.floor((i * this.hop - start) / this.slot));
-    if (done > f.shown) {
-      const live = slotSymbols(slotVotes(f.labels, f.firstHop, this.hop, this.win, start, this.slot, this.nSlots));
-      for (let k = f.shown; k < done; k++) this.onLive(live[k], k);
-      f.shown = done;
+    // Live view: the rate is unknown until the frame ends, so show debounced changes of tone.
+    if (sym === f.run.sym) f.run.len++;
+    else f.run = { sym, len: 1 };
+    if (!sym && f.run.len === GAP_HOPS) f.heard = null;
+    if (!sym && f.run.len === UNCLEAR_HOPS) f.unclear = true;
+    if (sym && f.run.len === STEADY_HOPS && sym !== f.heard) {
+      f.live += (f.unclear && f.live ? DOT : "") + sym;
+      f.heard = sym;
+      f.unclear = false;
+      this.onLive(f.live);
     }
     const silenceOver = this.silent * this.hop > 0.25 * this.sampleRate;
-    const pastEnd = (i - f.firstHop) * this.hop > (this.nSlots + 2) * this.slot;
-    if (silenceOver || pastEnd) this.finish();
+    if (silenceOver || i - f.firstHop > this.maxHops) this.finish();
   }
   finish() {
     const f = this.frame;
     this.frame = null;
-    if (!f || f.labels.filter(Boolean).length < this.nSlots) return; // a blip, not a frame
-    this.onFrame(decodeSlots(alignSlots(f.labels, f.firstHop, this.hop, this.win, this.slot, this.nSlots)));
+    if (f) {
+      const frame = decodeFrame(f.labels, f.firstHop, this.hop, this.win, this.sampleRate);
+      if (frame) this.onFrame(frame);
+    }
   }
+}
+
+// The frame's span runs from the first to the last steady tone, so stray blips at either end
+// (speech before the tones, a click after) neither open nor stretch it.
+function steadySpan(labels) {
+  let first = -1, last = -1, runStart = 0;
+  for (let i = 1; i <= labels.length; i++) {
+    if (i < labels.length && labels[i] && labels[i] === labels[runStart]) continue;
+    if (labels[runStart] && i - runStart >= STEADY_HOPS) {
+      if (first < 0) first = runStart;
+      last = i - 1;
+    }
+    runStart = i;
+  }
+  return first < 0 ? null : { first, last };
+}
+
+// Tries each allowed rate whose frame length is within 25% of the heard span; keeps the claimable
+// decode with the fewest repaired bytes, or else the best-fitting clock as a failure to display.
+// Returns null for a blip that no rate could explain.
+function decodeFrame(labels, firstHop, hop, win, sampleRate) {
+  const span = steadySpan(labels);
+  if (!span || labels.slice(span.first, span.last + 1).filter(Boolean).length < N_SLOTS) return null;
+  const seconds = ((span.last - span.first) * hop + win) / sampleRate;
+  const trimmed = labels.slice(span.first, span.last + 1);
+  let decoded = null, closest = null;
+  for (const baud of BAUD_RATES) {
+    if (Math.abs(seconds - N_SLOTS / baud) > 0.25 * N_SLOTS / baud) continue;
+    const fit = alignSlots(trimmed, firstHop + span.first, hop, win, sampleRate / baud, N_SLOTS);
+    const frame = Object.assign(decodeSlots(fit.symbols), { baud, seconds, score: fit.score });
+    if (claimable(frame) && (!decoded || frame.errata.length < decoded.errata.length
+      || (frame.errata.length === decoded.errata.length && frame.score > decoded.score))) decoded = frame;
+    if (!closest || frame.score > closest.score) closest = frame;
+  }
+  if (!closest) return null;
+  return decoded ? Object.assign(decoded, { rateFound: true }) : Object.assign(closest, { rateFound: false });
 }
 
 // Raw: the data slots as heard. ECC: Reed-Solomon with unclear slots as erasures. Only ecc is claimed.
@@ -496,7 +545,6 @@ const WORKLET_SRC = "const ROWS = " + JSON.stringify(ROWS) + ", COLS = " + JSON.
 const $ = (id) => document.getElementById(id);
 const HOME = "/home/daytona";
 const TOKEN_KEY = "dogwalk.pair.token";
-const DOT = "·";
 
 // Builds an element; string children become text nodes, so server strings are never parsed as HTML.
 function el(tag, props, children) {
@@ -556,7 +604,7 @@ async function startListening() {
     sink.gain.value = 0;
     sink.connect(ctx.destination);
     const probe = new Classifier(ctx.sampleRate); // same window and hop as the worklet's
-    const rx = new FrameReceiver(ctx.sampleRate, probe.hop, probe.win, showLiveSymbol, onFrame);
+    const rx = new FrameReceiver(ctx.sampleRate, probe.hop, probe.win, showLive, onFrame);
     const onHop = (r) => { latestHop = r; rx.feed(r.sym); };
     let node;
     try {
@@ -606,11 +654,8 @@ function drawMeter() {
   requestAnimationFrame(drawMeter);
 }
 
-function showLiveSymbol(sym, k) {
-  const live = $("live");
-  if (k === 0) live.textContent = "";
-  if (k === CODE_BYTES * 2) live.textContent += "|";
-  live.textContent += sym == null ? DOT : sym;
+function showLive(text) {
+  $("live").textContent = text;
 }
 
 function symbolRow(label, symbols, classFor) {
@@ -631,7 +676,10 @@ function showFrame(frame) {
     ? (claimable(frame) ? "ECC ok: " : "ECC unverified: ") + frame.ecc.match(/.{1,4}/g).join(" ") + " (repaired " + frame.erased.length + " unclear and "
       + Math.max(0, wrong) + " wrong of " + PARITY_BYTES + " parity bytes)"
     : "ECC failed: " + frame.error;
+  const rate = (frame.rateFound ? "decoded at " : "no rate decoded; closest ") + frame.baud + " baud ("
+    + frame.seconds.toFixed(1) + " s of tones)";
   const box = el("div", { class: "frame" }, [
+    el("div", { class: "small muted" }, rate),
     symbolRow("raw", frame.symbols, (k) => {
       if (frame.symbols[k] === null) return "erased";
       if (corrected && corrected[k] !== frame.symbols[k]) return "wrong";
@@ -646,9 +694,13 @@ function showFrame(frame) {
 
 function onFrame(frame) {
   showFrame(frame);
-  log("frame: " + frame.erased.length + " unclear bytes, raw " + (frame.raw || "-") + ", ecc " + (frame.ecc || frame.error));
+  log("frame: " + frame.seconds.toFixed(2) + " s, " + (frame.rateFound ? "decoded at " : "closest ") + frame.baud
+    + " baud, " + frame.erased.length + " unclear bytes, raw " + (frame.raw || "-") + ", ecc " + (frame.ecc || frame.error));
   if (frame.ecc && !claimable(frame)) log("not claimed: the repair used all the parity, so it is unverified");
   if (claimable(frame) && claimState === "listening" && !rejectedCodes.has(frame.ecc)) claim(frame.ecc);
+  else if (!claimable(frame) && claimState === "listening") {
+    setStatus("Heard tones but could not decode them. Still listening: ask the walker to send the tones slower.", "bad");
+  }
 }
 
 async function claim(code) {

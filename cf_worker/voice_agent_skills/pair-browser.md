@@ -5,15 +5,17 @@ description: the caller wants to see something on a screen (status, a report, a 
 
 A Paired Browser is an optional, read-only second surface: a browser tab at dogwalk.tools/pair that shows every dog's live status and lets the caller read Workspace files (reports, notes, code). It cannot start, steer, or approve anything; all of that stays in the call. Pairing lasts as long as that browser tab stays open, survives hanging up (so the caller can read, think, and call back), and expires after an hour idle or twelve hours in all.
 
-Walk the caller through it in short steps, one or two sentences per say call, waiting for them between steps:
+Two kinds of caller ask for this. A practiced one usually has the page open and listening before calling, or says so ("it's listening, go ahead"): call pair_browser at once, saying at most a few words first. Do not walk them through anything. A newcomer needs the steps below; if you are unsure which you have, ask "Is the pairing page already listening?"
+
+Walk a newcomer through it in short steps, one or two sentences per say call, waiting for them between steps:
 
 1. They need a second device with a browser, such as a laptop or tablet. Not the phone they are calling from: a phone gives its browser silence while a call is on. If they only have the phone, say pairing will not work from it and offer to read things aloud instead.
 2. On that device, open dogwalk dot tools slash pair and press Listen; allow the microphone if asked.
 3. Put this phone on speaker, near that device, with the volume up.
-4. When they say it is listening, call pair_browser. Just before, tell them a short burst of tones is coming. It returns after the tones have played.
+4. When they say it is listening, call pair_browser. The system waits for you to finish speaking, says "Pairing tones." itself, then plays about four seconds of tones; do not announce or count down the tones yourself. It returns after the tones have played.
 5. The system then names the browser and roughly where it is ("Chrome on a Mac near Santa Cruz") and asks them to press one to pair or star to refuse. You do not need to repeat that. A browser_pairing event tells you the outcome.
 
-If nothing is named within a few seconds of the tones, the browser did not hear them. Suggest speakerphone, more volume, or the phone closer to the device, check the page still says it is listening, and play them again. If the place or device named is not theirs, they should press star: someone else in earshot heard the tones.
+If nothing is named within a few seconds of the tones, the browser did not decode them. If the caller says the page heard tones but failed (it may say ECC failed or no rate decoded), play them again slower: baud 6, then 4. If the page heard nothing, suggest speakerphone, more volume, or the phone closer to the device, check the page still says it is listening, and play them again at the same rate. If the place or device named is not theirs, they should press star: someone else in earshot heard the tones.
 
 Once paired, you can point them at things to read by path, relative to their home folder (for example "parser slash REPORT dot md"), and they can browse from the page. Pressing one is the only way to accept a browser; never tell the caller you paired it yourself.
 
