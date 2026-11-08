@@ -538,6 +538,15 @@ def pair_http(method: str, path: str, body: dict | None = None, headers: dict | 
         return error.code, json.loads(error.read() or b"{}")
 
 
+def pair_raw(path: str, headers: dict) -> tuple[int, dict, bytes]:
+    request = urllib.request.Request(f"http://127.0.0.1:8787{path}", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, dict(response.headers), response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, dict(error.headers), error.read()
+
+
 async def recv_type(socket, kind: str, timeout: float = 8) -> dict:
     """The next message of a kind, skipping the status pushes that may arrive in between."""
     async with asyncio.timeout(timeout):
@@ -880,6 +889,10 @@ async def run_protocol(identity: str) -> None:
             assert hello["device"] == "Chrome on a Mac" and hello["idle_expires_at"] > time.time() * 1000
             snapshot = await recv_type(browser, "status")
             assert any(item["alias"] == "Juniper" for item in snapshot["sessions"]) and snapshot["sandbox"]["call_attached"]
+            # The live feed starts with a snapshot of what the call has said and done so far.
+            feed = await recv_type(browser, "feed")
+            assert feed.get("snapshot") and any(e["role"] == "system" and e.get("lane") == "keypad" and e["text"] == "keypad 8" for e in feed["entries"]), feed["entries"][-5:]
+            assert any(e["role"] == "orchestrator" and e.get("lane") == "say" and "pairing tones" in e["text"] for e in feed["entries"])
             await browser.send(json.dumps({"type": "list", "id": 1, "path": ""}))
             listing = await recv_type(browser, "list")
             assert listing["id"] == 1 and listing["path"] == "/home/daytona"
@@ -892,6 +905,14 @@ async def run_protocol(identity: str) -> None:
             assert escaped["id"] == 3 and "/home/daytona" in escaped["error"]
             await browser.send(json.dumps({"type": "ping"}))
             await recv_type(browser, "pong")
+            # Media viewers fetch raw bytes with the credential in a header, never the URL.
+            bearer = {"authorization": f"Bearer {token}"}
+            status, headers, body = await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fhome%2Fdaytona%2FREPORT.md", bearer)
+            assert status == 200 and body == REPORT_TEXT.encode(), (status, body[:80])
+            assert headers.get("Content-Type", headers.get("content-type")) == "application/octet-stream"
+            assert "sandbox" in headers.get("Content-Security-Policy", headers.get("content-security-policy", ""))
+            assert (await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fetc%2Fpasswd", bearer))[0] == 400
+            assert (await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fhome%2Fdaytona%2FREPORT.md", {"authorization": f"Bearer {identity}.{'0' * 48}"}))[0] == 401
         # A wrong secret for the right identity is refused and closed with 4001.
         async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as stranger:
             await stranger.send(json.dumps({"type": "auth", "token": identity + "." + "0" * 48}))

@@ -174,6 +174,30 @@ interface PairedBrowser {
 
 const WORKSPACE_ROOT = "/home/daytona";
 const MAX_FILE_BYTES = 512 * 1024;
+const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
+const MAX_FEED_ENTRIES = 300;
+
+// The Paired Browser's live feed: who said or did what, in order, while the page is open.
+// Speech entries grow as transcript deltas arrive; the page upserts entries by id.
+interface FeedEntry {
+  id: number;
+  at: number;
+  role: "caller" | "voice" | "orchestrator" | "agent" | "system";
+  lane?: string;  // orchestrator: thinking, say, instructions, prompt; system: event, keypad
+  who?: string;   // agent: the Managed Session's Alias
+  text: string;
+}
+
+// Media types the Paired Browser may display, by extension. HTML and SVG documents are
+// served as text or images only: the response is sandboxed so nothing runs on our origin.
+const MEDIA_TYPES: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  avif: "image/avif", bmp: "image/bmp", ico: "image/x-icon", svg: "image/svg+xml",
+  pdf: "application/pdf",
+  mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4", aac: "audio/aac", ogg: "audio/ogg", oga: "audio/ogg",
+  opus: "audio/ogg", flac: "audio/flac", mid: "audio/midi", midi: "audio/midi",
+  mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm", mov: "video/quicktime", ogv: "video/ogg",
+};
 
 const UNSPEAKABLE = /https?:\/\/|\bses_[A-Za-z0-9]+|\b[0-9a-f]{12,}\b/;
 
@@ -518,6 +542,10 @@ export class VoiceSession {
   private pairing: PairingAttempt | null = null;
   private pairedStatusTimer: ReturnType<typeof setTimeout> | null = null;
   private pairingTonesPlaying = false;
+  private feed: FeedEntry[] = [];
+  private feedSeq = 0;
+  private feedDirty = new Set<number>();
+  private feedTimer: ReturnType<typeof setTimeout> | null = null;
   private rpcId = 1;
   private pendingRpc = new Map<string | number, PendingRpc>();
   private sessions = new Map<string, ManagedSession>();
@@ -1030,6 +1058,7 @@ export class VoiceSession {
 
   private async receiveKeypad(key: string): Promise<void> {
     await this.record("voice.keypad", { key });
+    this.feedPush("system", `keypad ${key}`, { lane: "keypad" });
     // An echo of the pairing tones that the carrier reads back as presses must not act.
     if (this.pairingTonesPlaying) return;
     if (this.recording) {
@@ -1258,6 +1287,7 @@ export class VoiceSession {
       claim.token = null;
       return Response.json(token ? { state: claim.state, token } : { state: claim.state });
     }
+    if (path === "/pair/file" && request.method === "GET") return this.pairedFile(request, new URL(request.url));
     if (path === "/pair/ws") {
       const pair = new WebSocketPair();
       this.state.acceptWebSocket(pair[1], ["browser"]);
@@ -1331,6 +1361,7 @@ export class VoiceSession {
         expires_at: browser.createdAt + PAIRED_MAX_MS, idle_expires_at: browser.lastSeen + PAIRED_IDLE_MS,
       });
       send(this.pairedStatus());
+      send({ type: "feed", entries: this.feed.slice(-150), snapshot: true });
       return;
     }
     const browser = browsers.find((item) => item.secretHash === attached);
@@ -1379,6 +1410,86 @@ export class VoiceSession {
     await this.state.storage.put("paired_browsers", browsers);
   }
 
+  private feedPush(role: FeedEntry["role"], text: string, extra: Partial<FeedEntry> = {}): void {
+    if (!text.trim()) return;
+    const entry: FeedEntry = { id: ++this.feedSeq, at: Date.now(), role, text: text.slice(0, 4000), ...extra };
+    this.feed.push(entry);
+    if (this.feed.length > MAX_FEED_ENTRIES) this.feed = this.feed.slice(-MAX_FEED_ENTRIES);
+    this.feedChanged(entry.id);
+  }
+
+  // Transcript deltas grow the latest entry while the same party keeps talking.
+  private feedSpeech(role: "caller" | "voice", delta: string): void {
+    const last = this.feed.at(-1);
+    if (last && last.role === role && !last.lane) {
+      last.text = (last.text + delta).slice(-4000);
+      this.feedChanged(last.id);
+    } else {
+      this.feedPush(role, delta);
+    }
+  }
+
+  private feedChanged(id: number): void {
+    this.feedDirty.add(id);
+    if (this.feedTimer) return;
+    if (!this.state.getWebSockets("browser").length) {
+      this.feedDirty.clear();  // nobody to tell; a page that connects later gets a snapshot
+      return;
+    }
+    this.feedTimer = setTimeout(() => {
+      this.feedTimer = null;
+      const entries = this.feed.filter((entry) => this.feedDirty.has(entry.id));
+      this.feedDirty.clear();
+      if (entries.length) this.broadcastBrowsers({ type: "feed", entries });
+    }, 300);
+  }
+
+  private broadcastBrowsers(value: unknown): void {
+    const message = JSON.stringify(value);
+    for (const ws of this.state.getWebSockets("browser")) {
+      if (!(ws.deserializeAttachment() as { secretHash?: string } | null)?.secretHash) continue;
+      try {
+        ws.send(message);
+      } catch {
+        // a closing socket
+      }
+    }
+  }
+
+  // A file's bytes for the page's media viewers, streamed from the toolbox. The credential
+  // arrives in a header (the page fetches into a blob URL), never in the URL.
+  private async pairedFile(request: Request, url: URL): Promise<Response> {
+    const secretHash = await sha256Hex(request.headers.get("x-dogwalk-secret") ?? "");
+    if (!(await this.pairedBrowsers()).some((item) => item.secretHash === secretHash)) {
+      return Response.json({ error: "this pairing has expired" }, { status: 401 });
+    }
+    try {
+      const path = this.workspacePath(url.searchParams.get("path") ?? "");
+      const { toolbox, headers } = await this.workspaceToolbox();
+      const info = await fetch(`${toolbox}/files/info?path=${encodeURIComponent(path)}`, { headers, signal: AbortSignal.timeout(15_000) });
+      if (!info.ok) return Response.json({ error: sandboxFileError(info.status, "find that file") }, { status: info.status === 404 ? 404 : 502 });
+      const stat = await info.json<{ isDir?: boolean; size?: number }>();
+      if (stat.isDir) return Response.json({ error: "that is a directory" }, { status: 400 });
+      if ((stat.size ?? 0) > MAX_MEDIA_BYTES) return Response.json({ error: `that file is too large to show (${stat.size} bytes)` }, { status: 413 });
+      const download = await fetch(`${toolbox}/files/download?path=${encodeURIComponent(path)}`, { headers });
+      if (!download.ok || !download.body) return Response.json({ error: sandboxFileError(download.status, "read that file") }, { status: 502 });
+      const extension = path.split(".").pop()?.toLowerCase() ?? "";
+      const name = path.split("/").pop() ?? "file";
+      return new Response(download.body, {
+        headers: {
+          "content-type": MEDIA_TYPES[extension] ?? "application/octet-stream",
+          ...(stat.size ? { "content-length": String(stat.size) } : {}),
+          "content-disposition": `inline; filename="${name.replace(/[^\w.\- ]/g, "_")}"`,
+          "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'",
+          "x-content-type-options": "nosniff",
+          "cache-control": "private, no-store",
+        },
+      });
+    } catch (error) {
+      return Response.json({ error: errorMessage(error) }, { status: 400 });
+    }
+  }
+
   private pairedStatus(): Record<string, unknown> {
     return {
       type: "status",
@@ -1394,15 +1505,7 @@ export class VoiceSession {
     if (this.pairedStatusTimer || !this.state.getWebSockets("browser").length) return;
     this.pairedStatusTimer = setTimeout(() => {
       this.pairedStatusTimer = null;
-      const message = JSON.stringify(this.pairedStatus());
-      for (const ws of this.state.getWebSockets("browser")) {
-        if (!(ws.deserializeAttachment() as { secretHash?: string } | null)?.secretHash) continue;
-        try {
-          ws.send(message);
-        } catch {
-          // a closing socket
-        }
-      }
+      this.broadcastBrowsers(this.pairedStatus());
     }, 500);
   }
 
@@ -1517,6 +1620,7 @@ export class VoiceSession {
   private appendTranscript(role: TranscriptEntry["role"], message: Record<string, any>): void {
     const delta = String(message.delta ?? "");
     if (!delta) return;
+    this.feedSpeech(role, delta);
     const last = this.transcript.at(-1);
     if (last && last.role === role) {
       last.text += delta;
@@ -1553,6 +1657,7 @@ export class VoiceSession {
   }
 
   private async orchestratorEvent(text: string): Promise<void> {
+    this.feedPush("system", text.replace(/^\[harness event\] /, ""), { lane: "event" });
     this.orchestratorQueue.push(text);
     await this.state.storage.put("orchestrator_queue", this.orchestratorQueue);
     if (this.liveAttached) void this.runOrchestrator();
@@ -1806,6 +1911,7 @@ export class VoiceSession {
     // another (DOMAIN.md, Followed Session). The turn_started earcon stands in for follow_started.
     const previous = this.followSession(session);
     // The Orchestrator writes the full engineering brief; it goes to the Agent unwrapped.
+    this.feedPush("orchestrator", prompt, { lane: "prompt", who: session.alias });
     void this.acpRequest("session/prompt", {
       sessionId: session.acpSessionId,
       prompt: [{ type: "text", text: prompt }],
@@ -1813,6 +1919,8 @@ export class VoiceSession {
       session.turnState = "stopped";
       session.stopReason = String(result.stopReason ?? "unknown");
       session.turnEndedAt = Date.now();
+      if (session.unsaid.trim()) this.feedPush("agent", session.unsaid.trim(), { who: session.alias, lane: "report" });
+      this.feedPush("system", `${session.alias}'s turn ended (${session.stopReason})`, { lane: "event" });
       await this.persistSessions();
       await this.record("acp.turn.stopped", { alias: session.alias, stop_reason: session.stopReason });
       // How a turn ended matters more than that it ended: each stop reason gets its own
@@ -2344,6 +2452,7 @@ export class VoiceSession {
       const remark = speakableRemark(session.unsaid);
       session.unsaid = "";
       if (remark) {
+        this.feedPush("agent", remark, { who: session.alias });
         session.remark = remark;
         this.beat(session, `${session.alias} says: ${remark}`, "progress_remark");
       }
@@ -2359,7 +2468,10 @@ export class VoiceSession {
       call.paths = [...new Set<string>(paths.filter(Boolean))].slice(0, 10);
     }
     if (call.status === previous) return;
-    if (call.status === "completed" || call.status === "failed") call.endedAt = Date.now();
+    if (call.status === "completed" || call.status === "failed") {
+      call.endedAt = Date.now();
+      this.feedPush("agent", `${call.title || call.kind} (${call.status})`, { who: session.alias, lane: "tool" });
+    }
     if (call.status === "in_progress") this.toolCallStarted(session, call);
     if (call.status === "failed") this.toolCallFailed(session);
   }
@@ -2559,6 +2671,11 @@ export class VoiceSession {
 
   private sendLive(message: unknown): void {
     if (!this.live || this.live.readyState !== WebSocket.OPEN) return;
+    const outgoing = message as { type?: string; content?: unknown };
+    const lane = /^session\.(thinking|commentary|instructions)\.append$/.exec(String(outgoing.type ?? ""))?.[1];
+    if (lane && typeof outgoing.content === "string") {
+      this.feedPush("orchestrator", outgoing.content, { lane: lane === "commentary" ? "say" : lane });
+    }
     // Appends wait out a playing clip and the keypad menu, so speech never talks over either.
     if ((this.fixture || this.menu) && String((message as { type?: string }).type ?? "").endsWith(".append")) {
       this.heldAppends.push(message);
