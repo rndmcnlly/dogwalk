@@ -123,7 +123,7 @@
   ],
   "gain": 0.28
  },
- "dogs_ready": {
+ "agent_connected": {
   "notes": [
    {
     "c": 1,
@@ -667,7 +667,7 @@
   ],
   "gain": 0.28
  },
- "pull": {
+ "bid": {
   "notes": [
    {
     "c": 3,
@@ -1598,7 +1598,7 @@
   ],
   "gain": 0.14
  },
- "progress_tiring": {
+ "progress_context_low": {
   "notes": [
    {
     "c": 3,

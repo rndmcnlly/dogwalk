@@ -89,7 +89,7 @@ All four homes spell one A minor seventh chord (A4 440, E5 659, G5 784, C6 1047)
 
 - **turn_truncated** has the same code as turn_failed. Running out of room is a cutoff, not a breakage: the falling tritone stops at 35% of its length, without roughness.
 - **turn_refused** has the same code as turn_failed. A refusal is a flat "no": it keeps the roughness but drops to a level pair an octave below home, after the TNG deny buzz.
-- **progress_tiring**: weariness reads as a slow 6 Hz wobble rather than 75 Hz grit, and needs 300 ms to read as a state rather than an event.
+- **progress_context_low**: weariness reads as a slow 6 Hz wobble rather than 75 Hz grit, and needs 300 ms to read as a state rather than an event.
 - The two lab axes are themselves overrides of a kind: without **scope**, session_created collides with turn_started and session_closed with turn_cancelled; without **activity**, five Progress Beats share one code.
 
 ### Classifications that felt ambiguous
@@ -98,7 +98,7 @@ All four homes spell one A minor seventh chord (A4 440, E5 659, G5 784, C6 1047)
 - **recording_discarded** is coded abnormal only so it differs from recording_saved; discarding is deliberate, not a fault. A valence axis (kept vs dropped) might be the honest fix.
 - **Initiator** for follow_started/stopped, session_created/closed, and call_started: usually the caller's request, but the Voice Agent may follow or open sessions on its own, and call_started is also the system greeting.
 - **permission_requested** source: the dog asks, but the gate is the User's authority (DOMAIN.md: Permission Requests authorize actions). Coded dog, routine, required.
-- **pull** layer: fg (it must cut through) versus mid (it is optional by definition).
+- **bid** layer: fg (it must cut through) versus mid (it is optional by definition).
 - **progress_failed** polarity: a tool call ending badly (offset) versus a state of trouble.
 
 ### Levels and the phone line
@@ -118,7 +118,7 @@ All four homes spell one A minor seventh chord (A4 440, E5 659, G5 784, C6 1047)
 
 ## The opening phrase (chosen 2026-11-08)
 
-`call_started` and `dogs_ready` are heard first and most often, so they were auditioned as a pair in `opening_audition.py` (half cadence, suspension, ladder, brightening, question and answer). Adam chose **Brightening**: progress carried by timbre rather than pitch. The line opens on C to G with a nearly pure, dim tone (FM index about 0.5), ending on the dominant so the wait feels unresolved; the dogs waking answers G to high C with the full bright system chirp (index about 3.5) and a fifth beneath the tonic. A third earcon, `call_started_ready`, plays the whole brightening climb at once when the Sandbox is already awake, because then `dogs_ready` never follows and a lone antecedent would hang forever. These three are `phrase` overrides in `earcon_lab.py`: the opening is deliberately one phrase across two events, not two independent codes.
+`call_started` and `agent_connected` are heard first and most often, so they were auditioned as a pair in `opening_audition.py` (half cadence, suspension, ladder, brightening, question and answer). Adam chose **Brightening**: progress carried by timbre rather than pitch. The line opens on C to G with a nearly pure, dim tone (FM index about 0.5), ending on the dominant so the wait feels unresolved; the dogs waking answers G to high C with the full bright system chirp (index about 3.5) and a fifth beneath the tonic. A third earcon, `call_started_ready`, plays the whole brightening climb at once when the Sandbox is already awake, because then `agent_connected` never follows and a lone antecedent would hang forever. These three are `phrase` overrides in `earcon_lab.py`: the opening is deliberately one phrase across two events, not two independent codes.
 
 ## Shipping
 

@@ -230,7 +230,7 @@ ORCHESTRATOR_SCRIPT = [
         call("cs-create", "create_managed_session", alias="Early", directory="."),
         call("cs-list", "list_managed_sessions"),
     ]),
-    ("[harness event] dogs_ready", lambda ctx: [call("dr-brief", "brief", text=READY_BRIEF, delegation_id=None)]),
+    ("[harness event] agent_connected", lambda ctx: [call("dr-brief", "brief", text=READY_BRIEF, delegation_id=None)]),
     ("[handoff del-1]", lambda ctx: [
         call("h1-brief", "brief", text=WORK_BRIEF, delegation_id="del-1"),
         call("h1-create", "create_managed_session", alias="Juniper", directory="."),
@@ -627,12 +627,12 @@ async def run_protocol(identity: str) -> None:
         started_event = OrchestratorMock.user_message("call_started")
         assert '"first_call":true' in started_event and FIRST_OPENING in started_event
         assert '"caller_id":null' in started_event
-        assert "dogs_waking" in started_event
+        assert "agent_connecting" in started_event
         await next_matching(mocks.live_messages, appended("thinking", READY_BRIEF))
         early = OrchestratorMock.tool_output("cs-create")
         assert early["ok"] is False and "still starting" in early["error"], early
         assert OrchestratorMock.tool_output("cs-list") == []
-        assert '"managed_session_count":0' in OrchestratorMock.user_message("[harness event] dogs_ready")
+        assert '"managed_session_count":0' in OrchestratorMock.user_message("[harness event] agent_connected")
 
         # Handoff 1: the Voice Frontend delegates; the task is the transcript.
         await mocks.send_live(transcript("input", "Start a session called Juniper ", 0, 900))
@@ -818,12 +818,12 @@ async def run_protocol(identity: str) -> None:
         assert mocks.acp_connections == 2 and DaytonaMock.preview_reads == 1, (
             "the ACP preview URL was not reused", mocks.acp_connections, DaytonaMock.preview_reads,
         )
-        await wait_for(lambda: latest_user_text().count("[harness event] dogs_ready") >= 2, 10)
+        await wait_for(lambda: latest_user_text().count("[harness event] agent_connected") >= 2, 10)
         second_start = next(
             str(item["content"]) for item in OrchestratorMock.requests[-1][1]["input"]
             if item.get("role") == "user" and RETURN_OPENING in str(item["content"])
         )
-        assert "first_call" not in second_start and "[harness event] dogs_waking" in second_start
+        assert "first_call" not in second_start and "[harness event] agent_connecting" in second_start
         assert '"stir_verstat":"TN-Validation-Passed-A"' in second_start
 
         # Keypad conventions, all handled without the Orchestrator.

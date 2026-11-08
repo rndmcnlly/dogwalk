@@ -30,7 +30,7 @@ const EVENTS: Record<EarconName, EventInfo> = {
     meaning: "The very first sound of a call when your Sandbox was asleep. It ends unresolved on purpose: the Voice Agent can talk at once, but the coding agents are not reachable yet.",
     label: "Line open.",
   },
-  dogs_ready: {
+  agent_connected: {
     title: "Sandbox ready",
     meaning: "The Sandbox finished waking during the call and the ACP Agents are reachable. It completes the phrase the opening sound left hanging.",
     label: "Dogs awake.",
@@ -130,7 +130,7 @@ const EVENTS: Record<EarconName, EventInfo> = {
     meaning: "A tool call failed in the followed session. One is routine; several in a row usually mean trouble.",
     label: "Stumbled.",
   },
-  progress_tiring: {
+  progress_context_low: {
     title: "Context nearly full",
     meaning: "The followed session has used most of its context window (about 80 percent). A fresh session may soon serve better.",
     label: "Tiring.",
@@ -140,8 +140,8 @@ const EVENTS: Record<EarconName, EventInfo> = {
     meaning: "An Agent wants to do something that needs your approval. Nothing is approved on your behalf: the Voice Agent reads you the Agent's own options and waits for your answer.",
     label: "Permission needed.",
   },
-  pull: {
-    title: "Pull",
+  bid: {
+    title: "Bid for attention",
     meaning: "A session you are not following wants attention, for example after several failed tool calls in a row. The Voice Agent mentions it and offers to follow; it never switches on its own.",
     label: "Tug.",
   },
@@ -179,7 +179,7 @@ const GROUPS: Group[] = [
     id: "call",
     title: "Call and readiness",
     intro: "How a call opens. The opening is one musical phrase split across two events, so you can hear whether the Sandbox was already awake.",
-    names: ["call_started", "dogs_ready", "call_started_ready"],
+    names: ["call_started", "agent_connected", "call_started_ready"],
   },
   {
     id: "turns",
@@ -191,13 +191,13 @@ const GROUPS: Group[] = [
     id: "following",
     title: "Following and Progress Beats",
     intro: "While the Voice Agent follows one session, short quiet beats mark changes in what it is doing. They are meant for the edge of your attention.",
-    names: ["follow_started", "follow_stopped", "progress_looking", "progress_changing", "progress_running", "progress_still_running", "progress_remark", "progress_step", "progress_plan_done", "progress_failed", "progress_tiring"],
+    names: ["follow_started", "follow_stopped", "progress_looking", "progress_changing", "progress_running", "progress_still_running", "progress_remark", "progress_step", "progress_plan_done", "progress_failed", "progress_context_low"],
   },
   {
     id: "attention",
-    title: "Attention and Pulls",
+    title: "Attention and bids",
     intro: "Sounds that ask something of you. The more repeats, the more it needs an answer.",
-    names: ["permission_requested", "pull"],
+    names: ["permission_requested", "bid"],
   },
   {
     id: "recording",
@@ -370,7 +370,7 @@ function page(): string {
   <ul class="legend">
     <li><b>Contour.</b> Rising means something began, falling means it ended, level means a state.</li>
     <li><b>Harmony.</b> Clean intervals are routine. A rough, sour sound means something went wrong.</li>
-    <li><b>Repeats.</b> Once is news. Twice is an optional ask (a Pull). Three times needs your answer.</li>
+    <li><b>Repeats.</b> Once is news. Twice is an optional ask (a bid). Three times needs your answer.</li>
     <li><b>Loudness.</b> Foreground events are fuller; Progress Beats are short and quiet on purpose.</li>
     <li><b>Timbre.</b> A bright chirp for the call and Sandbox, a glassy beep for a session's Agent, a soft hollow tone for the Voice Agent following, a near-pure tone for your own recordings.</li>
   </ul>

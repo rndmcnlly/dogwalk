@@ -37,7 +37,7 @@ LABELS = {
     "turn_started": "Dog sent.",
     "turn_stopped": "Dog back.",
     "turn_failed": "Errand failed.",
-    "dogs_ready": "Dogs awake.",
+    "agent_connected": "Dogs awake.",
     "turn_cancelled": "Dog recalled.",
     "turn_truncated": "Dog ran out of room.",
     "turn_refused": "Dog refused.",
@@ -57,8 +57,8 @@ LABELS = {
     "progress_remark": "Woof.",
     "progress_step": "Next step.",
     "progress_plan_done": "Plan done.",
-    "progress_tiring": "Tiring.",
-    "pull": "Tug.",
+    "progress_context_low": "Tiring.",
+    "bid": "Tug.",
 }
 
 # Keypad system menu prompts: always spoken whatever the caller's earcon style, because they are
@@ -100,17 +100,17 @@ def render(text: str, voice: str, rate: int, target_rms: float = TARGET_RMS) -> 
 
 AUDIO_TS = OUT.parent / "src" / "audio.ts"
 GROUPS = [
-    ("Call", ["call_started", "dogs_ready", "call_started_ready"]),
+    ("Call", ["call_started", "agent_connected", "call_started_ready"]),
     ("Sessions", ["session_created", "session_closed"]),
     ("Prompt Turns", ["turn_started", "turn_stopped", "turn_cancelled", "turn_truncated", "turn_refused", "turn_failed"]),
-    ("Attention", ["permission_requested", "pull"]),
+    ("Attention", ["permission_requested", "bid"]),
     ("Following", ["follow_started", "follow_stopped"]),
     ("Progress Beats", ["progress_looking", "progress_changing", "progress_running", "progress_still_running",
-                        "progress_failed", "progress_remark", "progress_step", "progress_plan_done", "progress_tiring"]),
+                        "progress_failed", "progress_remark", "progress_step", "progress_plan_done", "progress_context_low"]),
     ("Recording", ["recording_started", "recording_saved", "recording_discarded"]),
     ("Whiteboard", ["whiteboard_answer"]),
 ]
-NEW = {"pull", "follow_started", "follow_stopped"} | {name for name in LABELS if name.startswith("progress_")}
+NEW = {"bid", "follow_started", "follow_stopped"} | {name for name in LABELS if name.startswith("progress_")}
 # [earcon, seconds after the previous one]
 SCENES = {
     "A followed Prompt Turn": [
@@ -120,7 +120,7 @@ SCENES = {
     ],
     "Juggling two dogs": [
         ("turn_started", 0), ("progress_looking", 1.8), ("turn_started", 2.2), ("progress_changing", 2.0),
-        ("pull", 2.2), ("follow_started", 2.0), ("progress_tiring", 2.0), ("permission_requested", 2.0),
+        ("bid", 2.2), ("follow_started", 2.0), ("progress_context_low", 2.0), ("permission_requested", 2.0),
         ("follow_stopped", 2.2), ("turn_stopped", 2.0),
     ],
 }

@@ -2,14 +2,14 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""Audition the opening pair: call_started ("Line open.") and dogs_ready ("Dogs awake.").
+"""Audition the opening pair: call_started ("Line open.") and agent_connected ("Dogs awake.").
 
     uv run --script opening_audition.py
 
 These two set the tone for every call, so they are designed as one musical phrase: the
 line opening is an antecedent that leaves something unresolved while the dogs wake, and
-dogs_ready is the consequent that resolves it. Each candidate also has a one-shot for a
-call whose Sandbox is already awake, when dogs_ready never plays (voice_session.ts plays it
+agent_connected is the consequent that resolves it. Each candidate also has a one-shot for a
+call whose Sandbox is already awake, when agent_connected never plays (voice_session.ts plays it
 only if the dogs were waking when the call attached), so that version must resolve alone.
 
 Rendering reuses earcon_lab.py's FM renderer and phone-line simulation, so timbres match
@@ -112,8 +112,8 @@ function sequence(open, awake) {
   timers.push(setTimeout(() => playSamples(awake), +$("gap").value * 1000));
 }
 const reference = {
-  open: () => earconSamples("call_started", "current"), awake: () => earconSamples("dogs_ready", "current"),
-  labOpen: () => earconSamples("call_started", "new"), labAwake: () => earconSamples("dogs_ready", "new"),
+  open: () => earconSamples("call_started", "current"), awake: () => earconSamples("agent_connected", "current"),
+  labOpen: () => earconSamples("call_started", "new"), labAwake: () => earconSamples("agent_connected", "new"),
 };
 const list = $("candidates");
 const rows = [

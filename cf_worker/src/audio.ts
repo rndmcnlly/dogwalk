@@ -5,7 +5,7 @@ import spoken_session_created from "../earcons/session_created.pcm";
 import spoken_turn_started from "../earcons/turn_started.pcm";
 import spoken_turn_stopped from "../earcons/turn_stopped.pcm";
 import spoken_turn_failed from "../earcons/turn_failed.pcm";
-import spoken_dogs_ready from "../earcons/dogs_ready.pcm";
+import spoken_agent_connected from "../earcons/agent_connected.pcm";
 import spoken_turn_cancelled from "../earcons/turn_cancelled.pcm";
 import spoken_turn_truncated from "../earcons/turn_truncated.pcm";
 import spoken_turn_refused from "../earcons/turn_refused.pcm";
@@ -25,8 +25,8 @@ import spoken_progress_failed from "../earcons/progress_failed.pcm";
 import spoken_progress_remark from "../earcons/progress_remark.pcm";
 import spoken_progress_step from "../earcons/progress_step.pcm";
 import spoken_progress_plan_done from "../earcons/progress_plan_done.pcm";
-import spoken_progress_tiring from "../earcons/progress_tiring.pcm";
-import spoken_pull from "../earcons/pull.pcm";
+import spoken_progress_context_low from "../earcons/progress_context_low.pcm";
+import spoken_bid from "../earcons/bid.pcm";
 import prompt_menu from "../earcons/menu.pcm";
 import prompt_menu_restart_confirm from "../earcons/menu_restart_confirm.pcm";
 import prompt_menu_restarting from "../earcons/menu_restarting.pcm";
@@ -50,7 +50,7 @@ export type EarconName =
   | "turn_started"
   | "turn_stopped"
   | "turn_failed"
-  | "dogs_ready"
+  | "agent_connected"
   | "turn_cancelled"
   | "turn_truncated"
   | "turn_refused"
@@ -70,8 +70,8 @@ export type EarconName =
   | "progress_remark"
   | "progress_step"
   | "progress_plan_done"
-  | "progress_tiring"
-  | "pull";
+  | "progress_context_low"
+  | "bid";
 // fm: the semantic FM vocabulary (earcon_lab.py, SOUND_DESIGN_NOTES.md), the default;
 // tonal: the first monophonic chimes; spoken: Fred's labels.
 // Tonal is the semantic FM set designed in earcon_lab.py; spoken is short text-to-speech labels.
@@ -87,7 +87,7 @@ const SPOKEN: Record<EarconName, Clip> = {
   turn_started: pcmClip(spoken_turn_started),
   turn_stopped: pcmClip(spoken_turn_stopped),
   turn_failed: pcmClip(spoken_turn_failed),
-  dogs_ready: pcmClip(spoken_dogs_ready),
+  agent_connected: pcmClip(spoken_agent_connected),
   turn_cancelled: pcmClip(spoken_turn_cancelled),
   turn_truncated: pcmClip(spoken_turn_truncated),
   turn_refused: pcmClip(spoken_turn_refused),
@@ -107,8 +107,8 @@ const SPOKEN: Record<EarconName, Clip> = {
   progress_remark: pcmClip(spoken_progress_remark),
   progress_step: pcmClip(spoken_progress_step),
   progress_plan_done: pcmClip(spoken_progress_plan_done),
-  progress_tiring: pcmClip(spoken_progress_tiring),
-  pull: pcmClip(spoken_pull),
+  progress_context_low: pcmClip(spoken_progress_context_low),
+  bid: pcmClip(spoken_bid),
 };
 
 // FM earcons: note lists exported by `earcon_lab.py --export` from the lab's semantic code,

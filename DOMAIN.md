@@ -161,8 +161,8 @@ The canine fiction exists only above ACP, to make the agentic development enviro
 | Walker skill | Voice Agent Skill, as opposed to a dog's own skills in the Sandbox | likely |
 | Sniffing, digging, fetching | Agent work inside a Prompt Turn, done by dogs, not the walker | likely |
 | Following a dog | Followed Session: the walker keeps up with one dog and narrates it; observing, not commanding | likely |
-| Ranging | a working Managed Session that is not followed: out of earshot until it pulls or comes back | likely |
-| Pulling at the leash | Pull: a ranging dog asking for the walker's attention | likely |
+| Ranging | a working Managed Session that is not followed: out of earshot until it bids for attention or comes back | likely |
+| Pulling at the leash | Bid: a ranging dog asking for the walker's attention | likely |
 
 The fiction keeps power where it is: dogs (ACP Agents) act in the Sandbox and often take initiative; the User holds authority (intent and Permission Requests); the walker holds attention and translation. The walker suggests errands and follows dogs; it does not command them, and a dog may pull it along.
 
@@ -472,13 +472,13 @@ Following observes; it never directs the Agent.
 
 One sentence about a Followed Session's Activity, built deterministically without a model: a change of phase (looking around, changing files, running something), the first change of a turn, a failed step, a long-running command, a new plan step, an interim remark, or a nearly full context window. Beats reach the Voice Frontend as unspoken context at once, and the latest is spoken in a quiet moment, spaced well apart and dropped when stale.
 
-### Pull
+### Bid
 
 **Context:** Voice Interaction
 
-A Managed Session that is not followed asking for the Voice Agent's attention: a Permission Request, a Prompt Turn ending, or repeated failed tool calls. The Voice Agent mentions a Pull and offers to follow the session; it does not follow it without the User's agreement.
+A Managed Session that is not followed asking for the Voice Agent's attention: a Permission Request, a Prompt Turn ending, or repeated failed tool calls. The Voice Agent mentions a Bid and offers to follow the session; it does not follow it without the User's agreement.
 
-**Not:** An Attention Request. A Pull is a presentation of events; some are Attention Requests and some (a turn ending, a failure streak) are not.
+**Not:** An Attention Request. A Bid is a presentation of events; some are Attention Requests and some (a turn ending, a failure streak) are not.
 
 ### Report
 
@@ -620,7 +620,7 @@ These canonical terms name Voice Agent tools as well as core methods. Narration 
 - The Session Orchestrator is not the Session Manager; its memory is not a store of record.
 - Client-provided tools bind to an attachment, not to an ACP Session.
 - Following a session is not directing it, and Stop Following is not closing or cancelling anything.
-- A Pull is not an Attention Request.
+- A Bid is not an Attention Request.
 
 ## Adapter Vocabulary
 
@@ -672,7 +672,7 @@ The following language appears in Git history and is not canonical for productio
 ## Open Questions
 
 - Should queued follow-up prompts be first-class Prompt Turns immediately, or become Prompt Turns only when sent to the Agent?
-- Proactive speech about Activity is now limited to the Followed Session's Progress Beats, and attention from other sessions arrives as Pulls. Still open: which beats deserve an earcon or a per-session sound instead of speech, whether a failure streak is a good enough sign that a session is stuck, and whether the beat thresholds (4 s of quiet, 20 s between narrations) hold up in playtests.
+- Proactive speech about Activity is now limited to the Followed Session's Progress Beats, and attention from other sessions arrives as Bids. Still open: which beats deserve an earcon or a per-session sound instead of speech, whether a failure streak is a good enough sign that a session is stuck, and whether the beat thresholds (4 s of quiet, 20 s between narrations) hold up in playtests.
 - How should the Voice Agent resolve ambiguous spoken "stop" among stopping speech, cancelling one Prompt Turn, closing one Managed Session, stopping all Agent work, and ending the voice call?
 - Which parts of Assignment history belong to Dogwalk versus the ACP Agent's retained session context?
 

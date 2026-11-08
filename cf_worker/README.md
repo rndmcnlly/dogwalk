@@ -119,8 +119,8 @@ execution, identity isolation, webhook signatures, and fail-closed admin access.
 `voice_session_test.py` runs mock OpenAI GPT-Live control, Daytona preview, and
 ACP endpoints around a local Worker, over two calls. It checks signed
 incoming-call correlation, client delegation, the first-call Opening, ACP
-connecting in the background (`dogs_waking`, fail-fast session tools,
-`dogs_ready`), the Session Orchestrator loop against a mock Responses endpoint,
+connecting in the background (`agent_connecting`, fail-fast session tools,
+`agent_connected`), the Session Orchestrator loop against a mock Responses endpoint,
 Managed Session creation, asynchronous Prompt Turns, session inspection, the
 end-of-call welcome, a returning caller's composed Opening with caller-ID and
 since-last-call clauses, `session/resume` on reconnect with a cached preview
@@ -147,9 +147,9 @@ background with backoff for about three minutes (the preview URL fetch or the
 WebSocket upgrade fail until the Sandbox's gateway listens). The Daytona preview
 URL and token for the ACP port are cached in memory and Durable Object storage
 per Sandbox and refetched once whenever a connection through them fails. The
-Orchestrator gets `dogs_waking` with `call_started`, then `dogs_ready` (with the
-session count) or `dogs_unavailable`. Session tools that need the Agent fail
-fast with "the sandbox is still starting; try again after dogs_ready", while
+Orchestrator gets `agent_connecting` with `call_started`, then `agent_connected` (with the
+session count) or `agent_unavailable`. Session tools that need the Agent fail
+fast with "the sandbox is still starting; try again after agent_connected", while
 `list_managed_sessions` and `inspect_managed_session` answer from the persisted
 projection. A dropped Agent Connection mid-call reconnects in the background
 instead of hanging up. On reconnect, Managed Sessions are restored with
