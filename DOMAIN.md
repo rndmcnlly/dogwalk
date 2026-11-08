@@ -149,9 +149,18 @@ OpenCode is the current Agent implementation. Other ACP-compatible implementatio
 
 **Context:** Voice Interaction
 
-A presentation of the neutral session model for the voice surface: a fiction mapping domain concepts to the Theme's words, how the Voice Frontend speaks of the Session Orchestrator, a GPT-Live voice, an Intensity register, and the wording of deterministic speech (the first-call welcome, the keypad status readout). Themes exist only above ACP; ACP prompts, tools, schemas, harness events, and anything in the Sandbox never use them. A Theme carries no rules, so the Voice Agent behaves the same under any Theme. Plain, the identity Theme with no fiction, is a regression fixture rather than a User choice.
+A presentation of the neutral session model for the voice surface. A Theme is a **conceit** (the mapping from domain concepts to the Theme's words, including how the Voice Frontend speaks of the Session Orchestrator) played in a **genre** (the storyteller's stance toward that material), at a **register** that moves along an Intensity ladder, **cast** with a GPT-Live voice and **scored** with earcons. It also words the deterministic speech (the first-call welcome, the keypad status readout).
 
-Park is the current Theme and every Voice Call uses it. Survey (planetary romance relayed from orbit) and Patrol (present-day cyber operations under mission command) are planned; the public pages stay Park for now.
+Themes exist only above ACP; ACP prompts, tools, schemas, harness events, and anything in the Sandbox never use them. A Theme carries no rules, so the Voice Agent behaves the same under any Theme. Each Theme keeps authoring notes that no model sees, recording the intent its surface must keep serving: why the User and the Voice Agent are distinct, what authority the Voice Agent holds over sessions and Workspaces, what a closer look (Paired Browser, Whiteboard, Human Takeover) means in the conceit, how power stays where it is, and which tropes it draws on. `cf_worker/src/themes.ts` holds the Themes and their notes.
+
+| Theme | Conceit | Genre |
+|---|---|---|
+| Park (default) | a dog walk: sessions are dogs, the Voice Agent is the walker | magical realism, delivered deadpan: the impossible made mundane |
+| Survey | a survey ship in orbit: sessions are away teams, Workspaces are planets, the User is the captain | space opera and planetary romance, in measured wonder: the mundane made marvelous |
+| Patrol | a present-day cyber operation under mission command: sessions are operatives, tool calls are their drones, the User is Actual | military science fiction, laconic over hyperviolent vocabulary aimed only at code: the mundane made lethal |
+| Plain | none: the domain vocabulary shows through | plain |
+
+Plain is both a User choice and the regression fixture that shows the rules never live in a Theme. Every Voice Call currently uses Park; choosing a Theme is an Open Question. The public pages stay Park for now.
 
 **Not:** A rule set, a persona with its own capabilities, or a visual color scheme.
 
@@ -159,13 +168,13 @@ Park is the current Theme and every Voice Call uses it. Survey (planetary romanc
 
 **Context:** Voice Interaction
 
-How strongly the Voice Agent plays its Theme's fiction at a given moment, chosen by the Voice Agent rather than set by the User: it rises when the User plays along and falls when the User is terse, frustrated, or deep in a problem. The clarity floor holds at every Intensity: Permission Request choices, failures, destructive actions, numbers, and anything the User must act on are stated plainly; the fiction may frame a fact but never replace it.
+The ladder a Theme's register moves along, from plain words to the conceit at full strength, and the Voice Agent's current position on it. The Voice Agent chooses it rather than the User setting it: it rises when the User plays along and falls when the User is terse, frustrated, or deep in a problem. The clarity floor holds at every rung: Permission Request choices, failures, destructive actions, numbers, and anything the User must act on are stated plainly; the conceit may frame a fact but never replace it.
 
 **Not:** A setting, or the Voice Agent's matching of the User's technical sophistication, which is independent of Intensity.
 
 ### Park
 
-The canine fiction, in the register of magical realism: the dogs are not ordinary dogs, but the walker finds them perfectly normal and never explains the magic. Nothing here is committed yet: a `?` marks a mapping still under exploration, and none of these words are canonical domain terms.
+Park's conceit, kept here because it grew up with the domain model: the dogs are not ordinary dogs, but the walker finds them perfectly normal and never explains the magic. Nothing here is committed yet: a `?` marks a mapping still under exploration, and none of these words are canonical domain terms.
 
 | Fiction | Domain concept | Status |
 |---|---|---|

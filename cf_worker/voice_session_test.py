@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import math
+import re
 import secrets
 import signal
 import subprocess
@@ -180,8 +181,13 @@ PROMPT_UPDATES = [
 
 CALL_BRIEF = "Call started with no Managed Sessions."
 READY_BRIEF = "The sandbox is ready."
-# Mirrors PARK.lexicon in src/themes.ts: words that would show the theme leaking into ACP.
-PARK_LEXICON = ["dog", "leash", "walker", "sniff"]
+# Every theme's lexicon in src/themes.ts: words that would show a theme leaking into ACP.
+THEME_LEXICON = [
+    word
+    for words in re.findall(r"lexicon: \[(.*?)\]", (Path(__file__).parent / "src" / "themes.ts").read_text())
+    for word in re.findall(r'"([^"]+)"', words)
+]
+assert "dog" in THEME_LEXICON and "callsign" in THEME_LEXICON
 KEYPAD_SAY = "Seven noted."
 NEXT_GREETING = "Last time Juniper built a tiny verified artifact."
 FIRST_OPENING = (
@@ -1010,7 +1016,7 @@ async def run_protocol(identity: str) -> None:
         for message in prompts:
             for block in message["params"]["prompt"]:
                 text = block.get("text", "").lower()
-                assert not any(word in text for word in PARK_LEXICON), text
+                assert not any(word in text for word in THEME_LEXICON), text
 
         # Nothing with a URL reached the caller-facing lane.
         spoken = [m for m in mocks.seen if m.get("type") == "session.commentary.append"]
