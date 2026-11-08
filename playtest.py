@@ -164,6 +164,8 @@ def stats_lines(call: dict, items: list) -> list[str]:
     if keys:
         out.append(f"keypad: {keys}")
     for r in activity:
+        if r["event"] == "call.attestation":
+            out.append(f"caller id: {r['detail']}")
         if r["event"] == "voice.input.levels":
             out.append(f"caller audio outside recording: {r['detail']}")
     if "end_call" not in names and call.get("status") == "completed":
