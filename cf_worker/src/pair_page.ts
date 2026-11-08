@@ -344,15 +344,15 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
     <!-- ==== HANDS START: launchers for a terminal and a desktop, each opening in its own browser tab ==== -->
     <section id="panelHands" class="panel" role="tabpanel" aria-labelledby="tab-hands">
       <h2>Hands</h2>
-      <p class="muted">Take the controls yourself. Coming soon.</p>
+      <p class="muted">Take the controls yourself when a dog is stuck on something only a person can do: a CAPTCHA, a login, a consent page, a program with its own screen. Each opens in a new full-screen tab and ends when this browser is unpaired.</p>
       <div class="launchers">
         <div class="box">
-          <button id="handsTerminal" disabled>Open terminal</button>
-          <p class="small muted">A shell in the sandbox, in a new full-screen tab.</p>
+          <button id="handsTerminal">Open terminal</button>
+          <p class="small muted">A shell in the sandbox that survives closing the tab (tmux), good for TUIs such as opencode.</p>
         </div>
         <div class="box">
-          <button id="handsDesktop" disabled>Open desktop</button>
-          <p class="small muted">The sandbox's graphical desktop, in a new full-screen tab.</p>
+          <button id="handsDesktop">Open desktop</button>
+          <p class="small muted">The sandbox's graphical desktop with a browser, for a laptop or tablet. The link lasts up to an hour.</p>
         </div>
       </div>
       <p id="handsNote" class="small muted" role="status"></p>
@@ -1860,8 +1860,7 @@ function markdownBlock(source) {
 }
 
 // ==== HANDS START: launchers for a terminal and a desktop into the sandbox ====
-// Each opens in its own full-screen browser tab. The server side does not exist yet, so the buttons
-// stay disabled; to wire one up, enable its button in the HTML (HANDS section) and drop "coming soon".
+// Each opens in its own full-screen browser tab (DOMAIN.md, Human Takeover).
 // Protocol: the page sends {"type":"launch","kind":"terminal"|"desktop","id":n}; the server answers
 // {"type":"launch","id":n,"url":"..."} or {"type":"error","id":n,"error":"..."} (onMessage routes both here).
 const launches = new Map(); // id -> { tab, kind }

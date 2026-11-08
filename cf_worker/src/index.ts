@@ -13,8 +13,10 @@ import { PAIR_HTML } from "./pair_page";
 import { handleSounds } from "./sounds_page";
 import { describeBrowser, describePlace, sha256Hex, splitCredential } from "./pairing";
 import type { Env } from "./types";
+import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
+import { TerminalRelay } from "./terminal_relay";
 import { FRONTEND_INSTRUCTIONS, VoiceSession } from "./voice_session";
-export { VoiceSession };
+export { TerminalRelay, VoiceSession };
 
 // --- env ----------------------------------------------------------------
 
@@ -726,6 +728,33 @@ async function handlePair(req: Request, env: Env, url: URL): Promise<Response> {
     return voiceSessionFor(env, ticket.identity).fetch("https://voice-session/pair/claim/status", {
       headers: { "x-dogwalk-secret": ticket.secret },
     });
+  }
+  // Human Takeover terminal: a full-screen page, its vendored assets, and the relay socket.
+  if (url.pathname === "/pair/terminal" && req.method === "GET") {
+    return new Response(TERMINAL_HTML, {
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
+        // xterm injects its own style elements; scripts are same-origin assets only.
+        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      },
+    });
+  }
+  if (url.pathname.startsWith("/pair/assets/")) {
+    return handleTerminalAssets(url) ?? new Response("not found", { status: 404 });
+  }
+  if (url.pathname === "/pair/terminal/ws") {
+    if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("expected a WebSocket", { status: 426 });
+    const identity = url.searchParams.get("for") ?? "";
+    if (!/^[0-9a-f]{16,128}$/.test(identity) || !(await knownIdentity(env, identity))) {
+      return new Response("unknown pairing", { status: 404 });
+    }
+    const relay = env.TERMINAL_RELAYS.get(env.TERMINAL_RELAYS.idFromName(identity));
+    const headers = new Headers(req.headers);
+    headers.set("x-dogwalk-identity", identity);
+    return relay.fetch("https://terminal-relay/ws", { headers });
   }
   if (url.pathname === "/pair/file" && req.method === "GET") {
     const credential = splitCredential(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null);

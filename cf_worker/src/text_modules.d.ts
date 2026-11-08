@@ -9,3 +9,8 @@ declare module "*.pcm" {
   const data: ArrayBuffer;
   export default data;
 }
+
+declare module "*.txt" {
+  const content: string;
+  export default content;
+}

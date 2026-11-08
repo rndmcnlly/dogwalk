@@ -913,6 +913,30 @@ async def run_protocol(identity: str) -> None:
             assert "sandbox" in headers.get("Content-Security-Policy", headers.get("content-security-policy", ""))
             assert (await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fetc%2Fpasswd", bearer))[0] == 400
             assert (await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fhome%2Fdaytona%2FREPORT.md", {"authorization": f"Bearer {identity}.{'0' * 48}"}))[0] == 401
+            # Human Takeover: a terminal launch yields a one-time ticket in a URL fragment.
+            await browser.send(json.dumps({"type": "launch", "kind": "terminal", "id": 7}))
+            launch = await recv_type(browser, "launch")
+            assert launch["id"] == 7 and f"/pair/terminal#t={identity}." in launch["url"], launch
+            ticket_credential = launch["url"].split("#t=", 1)[1]
+            terminal_url = f"ws://127.0.0.1:8787/pair/terminal/ws?for={identity}"
+            async with connect(terminal_url) as terminal:
+                await terminal.send(json.dumps({"type": "auth", "ticket": ticket_credential, "cols": 100, "rows": 30}))
+                ready = await recv_type(terminal, "ready")
+                terminal_token = ready["token"]
+                assert terminal_token.startswith(identity + ".") and terminal_token != ticket_credential
+                # The mock toolbox has no PTY, so the relay reports why and closes.
+                notice = await recv_type(terminal, "notice")
+                assert "terminal" in notice["text"], notice
+            async with connect(terminal_url) as again:
+                await again.send(json.dumps({"type": "auth", "ticket": ticket_credential}))
+                assert "expired" in (await recv_type(again, "error"))["error"], "a launch ticket works once"
+            async with connect(terminal_url) as reload:
+                await reload.send(json.dumps({"type": "auth", "token": terminal_token}))
+                assert (await recv_type(reload, "ready"))["token"] == terminal_token, "a reload reconnects with its token"
+            # A desktop launch reports why it could not start (the mock has no computer use).
+            await browser.send(json.dumps({"type": "launch", "kind": "desktop", "id": 8}))
+            refused = await recv_type(browser, "error")
+            assert refused["id"] == 8 and "desktop" in refused["error"], refused
         # A wrong secret for the right identity is refused and closed with 4001.
         async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as stranger:
             await stranger.send(json.dumps({"type": "auth", "token": identity + "." + "0" * 48}))
@@ -927,6 +951,10 @@ async def run_protocol(identity: str) -> None:
             await recv_type(browser, "hello")
             await browser.send(json.dumps({"type": "unpair"}))
             await recv_type(browser, "unpaired")
+        # Unpairing ends what the browser launched: its terminal token no longer works.
+        async with connect(f"ws://127.0.0.1:8787/pair/terminal/ws?for={identity}") as revoked:
+            await revoked.send(json.dumps({"type": "auth", "token": terminal_token}))
+            await recv_type(revoked, "error")
         async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as browser:
             await browser.send(json.dumps({"type": "auth", "token": token}))
             await recv_type(browser, "error")

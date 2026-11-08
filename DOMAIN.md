@@ -363,7 +363,21 @@ Pairing is acoustic and confirmed by keypad. On request the Session Orchestrator
 
 An accepted browser holds a credential that names its Sandbox Assignment's Voice Session and a secret checked only there, kept in that browser tab's session storage. It outlasts the Voice Call and lapses after an hour without use, twelve hours in all, when the User unpairs it from the page, or when the Sandbox is replaced. Its connection never keeps Agent work or the Sandbox awake.
 
-**Not:** The Diagnostics Surface (operator-only, all Users and calls), a control surface, a required interface, or a terminal. It succeeds the retired Scoped Diagnostic View, with the call itself replacing SMS as the channel that proves the User is present.
+The page shows the files' content as it is (rendered Markdown, images, PDF, audio, video, tables, code) and a live feed of the Voice Call: the caller's and the Voice Frontend's words, the Session Orchestrator's briefs and the prompts it sends to ACP Agents, Agent remarks, tool calls and Reports, and harness events, so the User can see how the page relates to the call.
+
+**Not:** The Diagnostics Surface (operator-only, all Users and calls), a control surface, a required interface, or a terminal. Hands-on work launched from it is a Human Takeover. It succeeds the retired Scoped Diagnostic View, with the call itself replacing SMS as the channel that proves the User is present.
+
+### Human Takeover
+
+**Context:** Agent Hosting, launched through Access Control
+
+The User working in the Sandbox directly, for what ACP Agents cannot do themselves: solving a CAPTCHA, completing a login or consent page, driving a GUI, or running a terminal program such as an ACP Agent's own interface. It is launched from a Paired Browser into a new full-screen browser tab and ends with that Paired Browser (unpairing, expiry, or Sandbox replacement end it).
+
+A **Takeover Terminal** relays a terminal multiplexer session in the Sandbox, so closing the tab detaches rather than kills it, and reopening redraws it. The tab receives a single-use launch ticket in its URL fragment and exchanges it for its own reconnect token; Sandbox provider credentials never reach the browser. A **Takeover Desktop** is the Sandbox's virtual desktop (with a browser that the User and, later, ACP Agents can share), viewed through a provider-signed link whose lifetime caps the session and which is expired on revocation.
+
+Unlike a Paired Browser, a Human Takeover in use keeps the Sandbox awake, bounded by the launch's lifetime. It is a deliberate exception to the voice-only control rule: authorization still happens over voice (pairing requires the User's key press), but the actions taken during a takeover are the User's own, outside Session Management, so Managed Sessions do not see them except through their effects on the Workspace.
+
+**Not:** A Managed Session, an ACP Session, or a Prompt Turn. The Session Orchestrator does not operate it.
 
 ### Handoff
 
@@ -666,7 +680,8 @@ The following language appears in Git history and is not canonical for productio
 - Is a project an Agent Hosting fact (a directory found in the Sandbox) or a Session Management concept with its own identity, for example so a Managed Session survives a clone being moved or re-cloned?
 - Is the caller-ID clause permanent product behavior or a diagnostic to remove once STIR/SHAKEN attestation is understood across carriers?
 
-- Paired Browser: should it ever offer a terminal into the Sandbox (Daytona's signed web-terminal URL or an SSH token), which would make it a control surface outside the Voice Call? Should the Session Orchestrator learn which files the User opened, so a callback can start from what they read? Should unpairing also be possible by voice? Pairing Tones are not yet verified over a real carrier (speech codecs can smear tones) or against a phone's own echo.
+- Paired Browser: should the Session Orchestrator learn which files the User opened, so a callback can start from what they read? Should unpairing also be possible by voice? Pairing Tones decode through simulated speech codecs and reverberant rooms but are not yet verified over a real carrier.
+- Human Takeover: should the Session Orchestrator learn that a takeover happened (and hand off to it, "the desktop is ready for you"), or summon one ("a dog is stuck on a CAPTCHA; pair a browser and open the desktop")? Should ACP Agents drive the same desktop through the provider's computer-use API, so human and Agent take turns on one screen? Is a one-hour desktop link the right cap, and should a terminal idle out?
 
 ## ACP References
 

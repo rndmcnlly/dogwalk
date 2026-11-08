@@ -312,6 +312,35 @@ the `publicSession` projection on connect and (throttled) on changes, and can
 list and read files under `/home/daytona` through the Daytona toolbox (512 KiB
 shown, binary refused).
 
+The page also streams raw Workspace files for its viewers from
+`GET /pair/file?path=` (the credential as a bearer header; served sandboxed and
+`nosniff`, 50 MB cap) and shows a live feed of the call (`feed` messages:
+caller and Voice Frontend speech, Orchestrator briefs, says, and Agent prompts,
+Agent remarks, tool calls and Reports, harness events, keypad presses).
+
+### Human Takeover
+
+The page's Hands tab launches a terminal or a desktop in a new full-screen tab
+(`../DOMAIN.md`, Human Takeover). `launch` with `kind: "terminal"` returns
+`/pair/terminal#t=<identity>.<ticket>`: a single-use ticket (60 s) in the
+fragment. The terminal page (`src/terminal_page.ts`, vendored xterm.js under
+`vendor/xterm/`) strips it, opens `/pair/terminal/ws?for=<identity>`, and
+authenticates in its first message; the `TerminalRelay` Durable Object (its own
+class, so `VoiceSession` keeps hibernating) has `VoiceSession` redeem the ticket
+for a reconnect token, creates or reuses the toolbox PTY `human`, hands a new
+one to `tmux new-session -A -s human`, and relays bytes both ways (binary
+frames; JSON `resize`, `ping`, `exit`, `notice`). `kind: "desktop"` starts
+Daytona computer use and returns a signed noVNC URL for port 6080
+(`vnc.html?autoconnect=1&resize=scale&path=websockify`), valid at most an hour
+and never beyond the pairing. Unpairing, pairing expiry, or Sandbox
+replacement revoke both: terminals close with 4003, desktop links are expired,
+and computer use stops once no link remains.
+
+The desktop needs the snapshot's desktop packages (Xvfb, xfce4, x11vnc, noVNC,
+Chromium with `--no-sandbox`); a Sandbox from an older snapshot answers
+"the desktop is not installed on this sandbox yet" until it is back-patched.
+At 1 GiB the desktop with Chromium leaves little room for an Agent.
+
 The prototype that settled the signal design is
 `../prototypes/acoustic_pairing.html`: a transmitter, a live raw versus ECC
 decoder view, and a simulated phone line (mu-law, noise, burst loss).

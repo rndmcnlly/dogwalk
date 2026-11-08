@@ -164,6 +164,16 @@ interface PairingAttempt {
   } | null;
 }
 
+// Human Takeover (DOMAIN.md): a terminal or desktop launched from a Paired Browser, ended
+// with it. A launch ticket is single-use and short-lived; a terminal token lets the takeover
+// tab reconnect; a desktop link is a signed noVNC URL, expired on revocation.
+interface TakeoverTicket { hash: string; browserHash: string; expiresAt: number }
+interface TakeoverToken { hash: string; browserHash: string; createdAt: number }
+interface DesktopLink { token: string; browserHash: string; expiresAt: number }
+const TAKEOVER_TICKET_MS = 60_000;
+const DESKTOP_LINK_MAX_SECONDS = 3600;
+const DESKTOP_PORT = 6080;
+
 interface PairedBrowser {
   secretHash: string;
   device: string;
@@ -1288,6 +1298,7 @@ export class VoiceSession {
       return Response.json(token ? { state: claim.state, token } : { state: claim.state });
     }
     if (path === "/pair/file" && request.method === "GET") return this.pairedFile(request, new URL(request.url));
+    if (path === "/pair/takeover/redeem" && request.method === "POST") return this.redeemTakeover(request);
     if (path === "/pair/ws") {
       const pair = new WebSocketPair();
       this.state.acceptWebSocket(pair[1], ["browser"]);
@@ -1329,7 +1340,11 @@ export class VoiceSession {
     const now = Date.now();
     const all = await this.state.storage.get<PairedBrowser[]>("paired_browsers") ?? [];
     const live = all.filter((item) => now - item.lastSeen < PAIRED_IDLE_MS && now - item.createdAt < PAIRED_MAX_MS);
-    if (live.length !== all.length) await this.state.storage.put("paired_browsers", live);
+    if (live.length !== all.length) {
+      await this.state.storage.put("paired_browsers", live);
+      const expired = all.filter((item) => !live.includes(item)).map((item) => item.secretHash);
+      void this.revokeTakeovers(expired).catch((error) => console.error("takeover revocation failed", errorMessage(error)));
+    }
     return live;
   }
 
@@ -1374,12 +1389,15 @@ export class VoiceSession {
           return send({ type: "pong", idle_expires_at: browser.lastSeen + PAIRED_IDLE_MS });
         case "unpair":
           await this.state.storage.put("paired_browsers", browsers.filter((item) => item !== browser));
+          await this.revokeTakeovers([browser.secretHash]);
           for (const other of this.state.getWebSockets("browser")) {
             if ((other.deserializeAttachment() as { secretHash?: string } | null)?.secretHash !== attached) continue;
             other.send(JSON.stringify({ type: "unpaired" }));
             other.close(4003, "unpaired");
           }
           return;
+        case "launch":
+          return send({ type: "launch", id, url: await this.launchTakeover(String(message.kind ?? ""), browser) });
         case "list":
           return send({ type: "list", id, ...(await this.workspaceList(String(message.path ?? ""))) });
         case "read":
@@ -1507,6 +1525,112 @@ export class VoiceSession {
       this.pairedStatusTimer = null;
       this.broadcastBrowsers(this.pairedStatus());
     }, 500);
+  }
+
+  // A terminal gets a one-time ticket for its new tab (the fragment of the URL, so it never
+  // reaches a server log); a desktop starts computer use and gets a signed noVNC URL whose
+  // lifetime caps the session, since Daytona closes its sockets about a minute after expiry.
+  private async launchTakeover(kind: string, browser: PairedBrowser): Promise<string> {
+    if (!this.identityHash) throw new Error("this pairing cannot launch anything");
+    if (kind === "terminal") {
+      const secret = newBrowserSecret();
+      const tickets = (await this.state.storage.get<TakeoverTicket[]>("takeover_tickets") ?? []).filter((item) => item.expiresAt > Date.now());
+      tickets.push({ hash: await sha256Hex(secret), browserHash: browser.secretHash, expiresAt: Date.now() + TAKEOVER_TICKET_MS });
+      await this.state.storage.put("takeover_tickets", tickets.slice(-10));
+      await this.record("takeover.terminal.launched", { device: browser.device });
+      return `${this.env.PUBLIC_ORIGIN ?? "https://dogwalk.tools"}/pair/terminal#t=${this.identityHash}.${secret}`;
+    }
+    if (kind === "desktop") {
+      const { toolbox, headers } = await this.workspaceToolbox();
+      const started = await fetch(`${toolbox}/computeruse/start`, { method: "POST", headers, signal: AbortSignal.timeout(30_000) })
+        .catch((error) => { throw new Error(`the desktop did not start (${errorMessage(error)})`); });
+      if (!started.ok) {
+        throw new Error(started.status === 503 ? "the desktop is not installed on this sandbox yet" : `the desktop did not start (${started.status})`);
+      }
+      const seconds = Math.max(60, Math.min(DESKTOP_LINK_MAX_SECONDS, Math.floor((browser.createdAt + PAIRED_MAX_MS - Date.now()) / 1000)));
+      const signed = await this.daytona<{ url: string; token: string }>(
+        `/sandbox/${encodeURIComponent(this.sandboxId!)}/ports/${DESKTOP_PORT}/signed-preview-url?expiresInSeconds=${seconds}`,
+      );
+      const links = (await this.state.storage.get<DesktopLink[]>("desktop_links") ?? []).filter((item) => item.expiresAt > Date.now());
+      links.push({ token: signed.token, browserHash: browser.secretHash, expiresAt: Date.now() + seconds * 1000 });
+      await this.state.storage.put("desktop_links", links);
+      await this.record("takeover.desktop.launched", { device: browser.device, seconds });
+      return `${signed.url.replace(/\/$/, "")}/vnc.html?autoconnect=1&resize=scale&path=websockify`;
+    }
+    throw new Error(`unknown takeover ${kind}; choose terminal or desktop`);
+  }
+
+  // The TerminalRelay's check: a ticket (once) or a terminal token, from a browser still paired.
+  private async redeemTakeover(request: Request): Promise<Response> {
+    const body = await request.json<{ ticket?: string | null; token?: string | null }>().catch(() => ({ ticket: null, token: null }));
+    const browsers = await this.pairedBrowsers();
+    const secretOf = (credential: string | null | undefined) => {
+      const [identity, secret] = String(credential ?? "").split(".");
+      return identity === this.identityHash && secret ? secret : null;
+    };
+    let browserHash: string | null = null;
+    let token: string | null = null;
+    const ticketSecret = secretOf(body.ticket);
+    const tokenSecret = secretOf(body.token);
+    if (ticketSecret) {
+      const hash = await sha256Hex(ticketSecret);
+      const tickets = await this.state.storage.get<TakeoverTicket[]>("takeover_tickets") ?? [];
+      const ticket = tickets.find((item) => item.hash === hash && item.expiresAt > Date.now());
+      await this.state.storage.put("takeover_tickets", tickets.filter((item) => item !== ticket && item.expiresAt > Date.now()));
+      if (ticket) {
+        const secret = newBrowserSecret();
+        const tokens = await this.state.storage.get<TakeoverToken[]>("takeover_tokens") ?? [];
+        tokens.push({ hash: await sha256Hex(secret), browserHash: ticket.browserHash, createdAt: Date.now() });
+        await this.state.storage.put("takeover_tokens", tokens.slice(-20));
+        browserHash = ticket.browserHash;
+        token = `${this.identityHash}.${secret}`;
+      }
+    } else if (tokenSecret) {
+      const hash = await sha256Hex(tokenSecret);
+      const found = (await this.state.storage.get<TakeoverToken[]>("takeover_tokens") ?? []).find((item) => item.hash === hash);
+      if (found) {
+        browserHash = found.browserHash;
+        token = body.token ?? null;
+      }
+    }
+    const browser = browsers.find((item) => item.secretHash === browserHash);
+    const sandboxId = this.sandboxId ?? this.attachedSandboxId;
+    if (!browser || !token || !sandboxId) return Response.json({ error: "this terminal link has expired" }, { status: 401 });
+    return Response.json({ token, browserHash, sandboxId, expiresAt: browser.createdAt + PAIRED_MAX_MS });
+  }
+
+  // End everything these browsers launched: terminals close now, desktop links are expired,
+  // and computer use stops once no link remains.
+  private async revokeTakeovers(browserHashes: string[]): Promise<void> {
+    if (!browserHashes.length) return;
+    const gone = (item: { browserHash: string }) => browserHashes.includes(item.browserHash);
+    const tickets = await this.state.storage.get<TakeoverTicket[]>("takeover_tickets") ?? [];
+    const tokens = await this.state.storage.get<TakeoverToken[]>("takeover_tokens") ?? [];
+    const links = await this.state.storage.get<DesktopLink[]>("desktop_links") ?? [];
+    await this.state.storage.put({
+      takeover_tickets: tickets.filter((item) => !gone(item)),
+      takeover_tokens: tokens.filter((item) => !gone(item)),
+      desktop_links: links.filter((item) => !gone(item) && item.expiresAt > Date.now()),
+    });
+    if (this.identityHash) {
+      const relay = this.env.TERMINAL_RELAYS.get(this.env.TERMINAL_RELAYS.idFromName(this.identityHash));
+      await relay.fetch("https://terminal-relay/revoke", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ browserHashes }),
+      }).catch(() => undefined);
+    }
+    const revoked = links.filter(gone);
+    const sandboxId = this.sandboxId ?? this.attachedSandboxId;
+    if (!revoked.length || !sandboxId) return;
+    for (const link of revoked) {
+      await this.daytona(`/sandbox/${encodeURIComponent(sandboxId)}/ports/${DESKTOP_PORT}/signed-preview-url/${encodeURIComponent(link.token)}/expire`, "POST")
+        .catch(() => undefined);
+    }
+    // Expiry closes Daytona's sockets only on a best-effort basis; stopping the desktop is certain.
+    if (!links.some((item) => !gone(item) && item.expiresAt > Date.now())) {
+      const { toolbox, headers } = await this.workspaceToolbox().catch(() => ({ toolbox: "", headers: {} }));
+      if (toolbox) await fetch(`${toolbox}/computeruse/stop`, { method: "POST", headers }).catch(() => undefined);
+    }
+    await this.record("takeover.revoked", { browsers: browserHashes.length, desktop_links: revoked.length });
   }
 
   // Paths resolve under the Workspace root; ".." cannot climb out of it.
@@ -2776,6 +2900,8 @@ export class VoiceSession {
     this.follow = null;
     this.orchestratorQueue = [];
     this.orchestratorContext = [];
+    const browsers = await this.state.storage.get<PairedBrowser[]>("paired_browsers") ?? [];
+    await this.revokeTakeovers(browsers.map((item) => item.secretHash)).catch(() => undefined);
     await this.state.storage.delete(["managed_sessions", "orchestrator_queue", "orchestrator_context", "paired_browsers"]);
     // A replaced Sandbox is a different Workspace: browsers paired to the old one are revoked.
     for (const ws of this.state.getWebSockets("browser")) ws.close(4001, "sandbox replaced");

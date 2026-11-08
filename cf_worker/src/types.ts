@@ -1,6 +1,7 @@
 export interface Env {
   DB: D1Database;
   VOICE_SESSIONS: DurableObjectNamespace;
+  TERMINAL_RELAYS: DurableObjectNamespace;
   TWILIO_AUTH_TOKEN: string;
   DAYTONA_API_KEY: string;
   DOGWALK_IDENTITY_SECRET: string;
