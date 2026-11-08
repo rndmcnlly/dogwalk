@@ -89,6 +89,19 @@ dedicated OpenAI project with a budget. Daytona already points
 no TLS changes. Verified 2026-11-07: a fresh Sandbox from `-v2` completed a real
 ACP Prompt Turn (`end_turn`) through the gateway.
 
+### Web search
+
+`sandbox_opencode.json` sets `"websearch": {"provider": "exa"}`. Without a
+configured provider, OpenCode's first `websearch` asks the Client to choose one
+through an ACP Elicitation; Dogwalk advertises no Elicitation capability, so the
+tool failed with "Web search cancelled". Exa's hosted MCP endpoint
+(`mcp.exa.ai`) works without a key; OpenCode sends one only if `EXA_API_KEY` is
+set, which would raise its rate limits. TinyFish also has a keyless mode and is
+the fallback if Exa starts refusing anonymous searches. The existing Sandbox
+received the key in place on 2026-11-08 and an `opencode run` there completed a
+`websearch` with results. Snapshot `dogwalk-acp-20261108-v1` predates it, so a
+fresh Sandbox needs the next snapshot or the same in-place edit.
+
 The 2026-07 free-model bootstrap (`opencode/deepseek-v4-flash-free`) ended when
 that model left the free lineup.
 
