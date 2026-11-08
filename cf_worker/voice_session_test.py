@@ -113,24 +113,12 @@ class SocketMocks:
                         result["nextCursor"] = str(start + 2)
                 elif method == "session/prompt":
                     await asyncio.sleep(0.2)
-                    await socket.send(
-                        json.dumps(
-                            {
-                                "jsonrpc": "2.0",
-                                "method": "session/update",
-                                "params": {
-                                    "sessionId": "acp-session-test",
-                                    "update": {
-                                        "sessionUpdate": "agent_message_chunk",
-                                        "content": {
-                                            "type": "text",
-                                            "text": "Bridge report complete.",
-                                        },
-                                    },
-                                },
-                            }
-                        )
-                    )
+                    for update in PROMPT_UPDATES:
+                        await socket.send(json.dumps({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {"sessionId": "acp-session-test", "update": update},
+                        }))
                     result = {"stopReason": "end_turn"}
                 else:
                     result = {}
@@ -163,6 +151,29 @@ class SocketMocks:
         assert self.live is not None
         await self.live.send(json.dumps(message))
 
+
+def message_chunk(text: str) -> dict:
+    return {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}
+
+
+# One Prompt Turn's traffic, shaped like OpenCode's: a plan, a read whose locations arrive
+# with in_progress, the Agent narrating between tool calls, then the first edit.
+PROMPT_UPDATES = [
+    {"sessionUpdate": "plan", "entries": [
+        {"content": "Find the parser", "priority": "high", "status": "in_progress"},
+        {"content": "Write the artifact", "priority": "medium", "status": "pending"},
+    ]},
+    {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "read", "kind": "read", "status": "pending"},
+    {"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "in_progress",
+     "locations": [{"path": "/home/daytona/src/parser.py"}]},
+    {"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"},
+    message_chunk("The parser lives in **src**. "),
+    {"sessionUpdate": "tool_call", "toolCallId": "t2", "title": "write", "kind": "edit", "status": "pending"},
+    {"sessionUpdate": "tool_call_update", "toolCallId": "t2", "status": "in_progress",
+     "locations": [{"path": "/home/daytona/artifact.txt"}]},
+    {"sessionUpdate": "tool_call_update", "toolCallId": "t2", "status": "completed"},
+    message_chunk("Bridge report complete."),
+]
 
 CALL_BRIEF = "Call started with no Managed Sessions."
 READY_BRIEF = "The dogs are awake."
@@ -232,6 +243,7 @@ ORCHESTRATOR_SCRIPT = [
     ("[handoff del-2]", lambda ctx: [
         call("h2-inspect", "inspect_managed_session", alias=created_alias(ctx)),
     ]),
+    ("[handoff del-2]", lambda ctx: [call("h2-unfollow", "stop_following")]),
     ("[handoff del-2]", lambda ctx: [call("h2-say", "say", text=REPORTED_SAY, delegation_id="del-2")]),
     # Handoff 3: persisted-session lifecycle (discover, load, retag, close, list).
     ("[handoff del-3]", lambda ctx: [call("h3-discover", "discover_persisted_sessions")]),
@@ -262,7 +274,7 @@ ORCHESTRATOR_SCRIPT = [
 ]
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
-    "ts-say", "h2-inspect", "h2-say",
+    "ts-say", "h2-inspect", "h2-unfollow", "h2-say",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
     "h4-say", "h4-end", "k7-say",
@@ -553,7 +565,24 @@ async def run_protocol(identity: str) -> None:
         assert rejected["ok"] is False and "URL" in rejected["error"]
         juniper = OrchestratorMock.tool_output("h1-create")["session"]
         assert juniper["alias"] == "Juniper" and juniper["directory"] == "."
-        assert OrchestratorMock.tool_output("h1-begin")["turn_state"] == "in_progress"
+        begun = OrchestratorMock.tool_output("h1-begin")
+        assert begun["turn_state"] == "in_progress" and begun["following"] == "Juniper", begun
+        assert '"followed":true' in stopped
+
+        # Sending Juniper off followed it: progress beats reach the Voice Frontend as
+        # thinking, built from ACP updates without a model call.
+        # Beats a few seconds apart are coalesced into one append.
+        def beats() -> str:
+            return "\n".join(
+                m["content"] for m in mocks.seen
+                if m.get("type") == "session.thinking.append" and m["content"].startswith("Following Juniper:")
+            )
+
+        expected_beats = [
+            "Juniper is working", "step 1 of 2: Find the parser.", "Juniper is reading parser.py.",
+            "Juniper says: The parser lives in src.", "started changing files: editing artifact.txt.",
+        ]
+        await wait_for(lambda: all(fragment in beats() for fragment in expected_beats))
 
         # Handoff 2: a follow-up question answered from session inspection.
         await mocks.send_live(transcript("input", "What did it report?", 5000, 6200))
@@ -564,6 +593,11 @@ async def run_protocol(identity: str) -> None:
         assert "Caller: What did it report?" in handoff and "Juniper" not in handoff
         inspected = OrchestratorMock.tool_output("h2-inspect")
         assert inspected["alias"] == "Juniper" and inspected["stop_reason"] == "end_turn"
+        assert inspected["followed"] is True and inspected["remark"] == "The parser lives in src."
+        assert [(c["kind"], c["status"], c["paths"]) for c in inspected["recent_tool_calls"]] == [
+            ("read", "completed", ["src/parser.py"]), ("edit", "completed", ["artifact.txt"]),
+        ], inspected
+        assert OrchestratorMock.tool_output("h2-unfollow") == {"ok": True, "stopped_following": "Juniper"}
 
         # Handoff 3: leash earlier work, retag it, let it go home, and list what remains.
         await mocks.send_live(transcript("input", "Pick up that parser work from yesterday ", 7000, 8000))

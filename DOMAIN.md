@@ -159,6 +159,11 @@ The canine fiction exists only above ACP, to make the agentic development enviro
 | Walker | the Voice Agent as a whole; it sends, checks, and recalls dogs and never claims to do their work | likely |
 | Walker skill | Voice Agent Skill, as opposed to a dog's own skills in the Sandbox | likely |
 | Sniffing, digging, fetching | Agent work inside a Prompt Turn, done by dogs, not the walker | likely |
+| Following a dog | Followed Session: the walker keeps up with one dog and narrates it; observing, not commanding | likely |
+| Ranging | a working Managed Session that is not followed: out of earshot until it pulls or comes back | likely |
+| Pulling at the leash | Pull: a ranging dog asking for the walker's attention | likely |
+
+The fiction keeps power where it is: dogs (ACP Agents) act in the Sandbox and often take initiative; the User holds authority (intent and Permission Requests); the walker holds attention and translation. The walker suggests errands and follows dogs; it does not command them, and a dog may pull it along.
 
 The Voice Agent mirrors the caller's sophistication, especially on technical topics: modest and plain with a newcomer, fluent with someone who already speaks about agents, sessions, and delegation, so existing agentic literacy amplifies the experience.
 
@@ -401,7 +406,31 @@ The first prompt content Dogwalk constructs from the User's Assignment plus role
 
 **Context:** Session Management and Voice Interaction
 
-A concise, User-safe projection of current Agent updates, usually plans and tool-call status. Activity is observable progress, not private reasoning and not a second Agent turn.
+A concise, User-safe projection of current Agent updates: tool calls (kind, status, locations, timing), the Agent Plan, and the Agent's interim remarks (message text between tool calls). Activity is observable progress, not private reasoning and not a second Agent turn; thought chunks are never projected. Dogwalk keeps Activity structured and turns it into speech, earcons, or inspection results at the point of use.
+
+### Followed Session
+
+**Context:** Voice Interaction
+
+The one Managed Session, if any, whose Activity the Voice Agent keeps up with during a Voice Call. Beginning a Prompt Turn follows that session; following another replaces it; Stop Following leaves it working unobserved. Following lasts for one Voice Call and survives the followed session's Prompt Turn ending.
+
+Following observes; it never directs the Agent.
+
+**Not:** A session state, a lock, or Attention.
+
+### Progress Beat
+
+**Context:** Voice Interaction
+
+One sentence about a Followed Session's Activity, built deterministically without a model: a change of phase (looking around, changing files, running something), the first change of a turn, a failed step, a long-running command, a new plan step, an interim remark, or a nearly full context window. Beats reach the Voice Frontend as unspoken context at once, and the latest is spoken in a quiet moment, spaced well apart and dropped when stale.
+
+### Pull
+
+**Context:** Voice Interaction
+
+A Managed Session that is not followed asking for the Voice Agent's attention: a Permission Request, a Prompt Turn ending, or repeated failed tool calls. The Voice Agent mentions a Pull and offers to follow the session; it does not follow it without the User's agreement.
+
+**Not:** An Attention Request. A Pull is a presentation of events; some are Attention Requests and some (a turn ending, a failure streak) are not.
 
 ### Report
 
@@ -516,6 +545,8 @@ An Attention Request is received from the Agent, queued for the appropriate inte
 | Resolve Permission | Select one Agent-supplied permission option |
 | Resolve Elicitation | Accept, decline, or cancel requested input |
 | Set Session Config Option | Change an Agent-advertised session setting |
+| Follow Managed Session | Make one session the Followed Session for this Voice Call, replacing any other |
+| Stop Following | Leave the Followed Session working unobserved |
 
 These canonical terms name Voice Agent tools as well as core methods. Narration may add metaphor after a tool result, but tool names and arguments remain neutral.
 
@@ -540,6 +571,8 @@ These canonical terms name Voice Agent tools as well as core methods. Narration 
 - A Voice Call connecting is not the Agent Connection being ready.
 - The Session Orchestrator is not the Session Manager; its memory is not a store of record.
 - Client-provided tools bind to an attachment, not to an ACP Session.
+- Following a session is not directing it, and Stop Following is not closing or cancelling anything.
+- A Pull is not an Attention Request.
 
 ## Adapter Vocabulary
 
@@ -591,7 +624,7 @@ The following language appears in Git history and is not canonical for productio
 ## Open Questions
 
 - Should queued follow-up prompts be first-class Prompt Turns immediately, or become Prompt Turns only when sent to the Agent?
-- Which Agent plan and tool-call changes deserve proactive speech, an earcon, or silent state projection?
+- Proactive speech about Activity is now limited to the Followed Session's Progress Beats, and attention from other sessions arrives as Pulls. Still open: which beats deserve an earcon or a per-session sound instead of speech, whether a failure streak is a good enough sign that a session is stuck, and whether the beat thresholds (4 s of quiet, 20 s between narrations) hold up in playtests.
 - How should the Voice Agent resolve ambiguous spoken "stop" among stopping speech, cancelling one Prompt Turn, closing one Managed Session, stopping all Agent work, and ending the voice call?
 - Which parts of Assignment history belong to Dogwalk versus the ACP Agent's retained session context?
 

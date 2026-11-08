@@ -11,6 +11,14 @@ import {
 const ACP_PORT = 8765;
 const WORKSPACE = "/home/daytona";
 const MAX_ACTIVITY = 20;
+// Following (DOMAIN.md, Followed Session and Progress Beat).
+const BEAT_TELL_GAP_MS = 3_000;
+const NARRATION_GAP_MS = 20_000;
+const BEAT_STALE_MS = 45_000;
+const QUIET_MS = 4_000;
+const LONG_TOOL_CALL_MS = 25_000;
+const STUCK_STREAK = 3;
+const CONTEXT_WARNING = 0.8;
 // A stopped or archived Sandbox can take minutes to start; the call goes on meanwhile.
 const ACP_CONNECT_WINDOW_MS = 3 * 60 * 1000;
 const MENU_TIMEOUT_MS = 15_000;
@@ -31,16 +39,50 @@ interface ManagedSession {
   turnState: TurnState;
   assignment: string | null;
   report: string;
-  activity: string[];
+  // Activity (DOMAIN.md): structured, so beats, earcons, and inspection each project it
+  // their own way. Reset at each Prompt Turn.
+  toolCalls: ToolCallActivity[];
+  plan: PlanEntry[];
+  // Agent message text since the last tool call, and the latest such interim remark.
+  unsaid: string;
+  remark: string | null;
+  // The latest local failure: a failed or interrupted turn, or a session that would not reload.
+  failure: string | null;
   stopReason: string | null;
   title: string | null;
-  usage: unknown;
+  usage: { used?: number; size?: number; cost?: unknown } | null;
   // The Workspace directory chosen at creation; ACP requires it again on load and resume.
   // Absent in older projections, which were all created in WORKSPACE.
   cwd: string;
   // Epoch milliseconds, for spoken "how long" readouts; absent in older projections.
   turnStartedAt?: number | null;
   turnEndedAt?: number | null;
+}
+
+interface ToolCallActivity {
+  toolCallId: string;
+  kind: string;  // ACP ToolKind: read, edit, delete, move, search, execute, think, fetch, switch_mode, other
+  title: string;
+  status: string;  // ACP ToolCallStatus: pending, in_progress, completed, failed
+  paths: string[];  // ACP locations, relative to the session's directory
+  startedAt: number;
+  endedAt: number | null;
+}
+
+interface PlanEntry {
+  content: string;
+  status: string;  // ACP PlanEntryStatus: pending, in_progress, completed
+}
+
+// The Followed Session (DOMAIN.md): at most one per Voice Call. Its Progress Beats reach the
+// Voice Frontend directly, without a model call, the way the keypad status readout does.
+interface Follow {
+  sessionId: string;
+  phase: string | null;
+  told: string[];  // beats not yet sent as thinking
+  toldAt: number;
+  unspoken: { text: string; at: number } | null;  // the latest beat worth narrating
+  narratedAt: number;
 }
 
 interface PendingPermission {
@@ -171,6 +213,23 @@ export const ORCHESTRATOR_TOOLS = [
     type: "function",
     name: "list_managed_sessions",
     description: "Lightweight, read-only session inventory. Invoke freely to resolve references or status without permission or advance announcement.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    type: "function",
+    name: "follow_managed_session",
+    description: "Follow one session: its progress reaches the Voice Frontend as it happens and is narrated in quiet moments. At most one session is followed; this replaces any other. Beginning a Prompt Turn already follows that session. Following observes; it does not direct the Agent.",
+    parameters: {
+      type: "object",
+      properties: { alias: { type: "string" } },
+      required: ["alias"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "stop_following",
+    description: "Stop following the followed session; it keeps working unobserved, and its turn ending still arrives as an event.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -324,6 +383,8 @@ Keypad: the caller can press star for a menu (status, restart, recovery, hang up
 
 Thoughts arriving from your head: thinking is background you now know; use it when relevant but do not recite it. Commentary is something you have decided to tell the caller now; say it in your own words. These are your own thoughts, not the caller speaking; never thank or address them. Never say a dog is back or work is done unless your head said so.
 
+Following: you follow at most one dog, and thoughts beginning "Following" are what it is doing right now. Use them to answer "what's it doing?" at once, without thinking it over. When one arrives as commentary, mention it in a few words and stop. You cannot see dogs you are not following; for those, think it over.
+
 ${DOGWALK_VOICE_FLAVOR}`;
 
 export const ORCHESTRATOR_INSTRUCTIONS = `You are the Session Orchestrator inside Dogwalk, an eyes-free agentic development environment used over the phone. A separate realtime Voice Frontend model talks with the caller; you never speak directly. Together you present as one character, the dog walker; in that fiction you are the walker's head (its mind), and the Voice Frontend is its voice, which may say "let me think" while it waits on you. The Voice Frontend is good at conversation and weak at engineering; you supply engineering judgment and operate Managed Sessions, each wrapping one ACP Session with a coding Agent working in the caller's sandbox Workspace.
@@ -349,7 +410,8 @@ Rules:
 - A started Prompt Turn is not a completed one. Report completion only from a turn event or inspection. end_turn means the Agent stopped normally, not that the work is correct; say what was verified versus merely claimed.
 - Cancelling a Prompt Turn is not closing a session, and closing is not deleting history.
 - Permission Requests: describe the supplied choices plainly, and resolve only with an option_id the application supplied, after the caller chooses.
-- For a turn event: if the caller is likely waiting on it or it needs a decision, say it briefly; otherwise brief it and let the Voice Frontend mention it at a natural pause.
+- For a turn event: if the caller is likely waiting on it or it needs a decision, say it briefly; otherwise brief it and let the Voice Frontend mention it at a natural pause. A turn event with followed true is for the session being followed: say it now.
+- Following: beginning a Prompt Turn follows that session, replacing any other. The Voice Frontend then hears its progress directly and narrates it in quiet moments without you. Use follow_managed_session when the caller wants to keep up with a session, and stop_following when they want to let it work unobserved; both are cheap. Following observes; it never directs the Agent. A pull event, or a turn or permission event with followed false, is a session the walker is not following asking for attention: mention it and offer to follow it, and do not call follow_managed_session unless the caller agrees.
 - call_started includes opening: the exact words already spoken to the caller at connection (a caller-ID verification clause, then a reorienting welcome written from your context at the end of the last call, plus anything that happened since). Do not repeat or paraphrase it. caller_id (the STIR/SHAKEN result) and since_last_call are context; brief the Voice Frontend with what it needs from them and wait for the caller. Say something unprompted only when the opening missed something the caller needs now. Use inspect_call_activity when the caller asks what happened to a call or connection; explain plainly what is known and what is not.
 - call_started with first_call true is the caller's first call after registering, and their sandbox is still being set up: load the first-call-tour skill and follow it.
 - dogs_waking means the sandbox is still starting, so session tools fail fast until dogs_ready arrives (with the session count). Keep conversing meanwhile. If the caller asks for work, tell them briefly that the dogs are still waking up and that you will start as soon as they are ready, then do it when dogs_ready arrives without asking again. Inspection and listing answer from the last known state throughout. dogs_unavailable means the sandbox could not be reached; say so plainly and offer open_recovery_menu. sandbox_restart_requested means the caller restarted the sandbox from the keypad menu: running work stopped, and dogs_ready follows when it is back.
@@ -405,6 +467,8 @@ export class VoiceSession {
   private lastSpeechAt = 0;
   private earconQueue: Array<{ name: EarconName; queuedAt: number }> = [];
   private earconPumping = false;
+  private follow: Follow | null = null;
+  private followPumping = false;
   private clipPending = false;
   private recording: { chunks: Uint8Array[]; bytes: number; startedAt: number; lastLoudAt: number; maxSeconds: number; muted: boolean } | null = null;
   // Diagnostics: levels of the caller audio GPT-Live reflects, outside and during recording.
@@ -418,7 +482,17 @@ export class VoiceSession {
   constructor(private state: DurableObjectState, private env: Env) {
     state.blockConcurrencyWhile(async () => {
       const stored = await state.storage.get<ManagedSession[]>("managed_sessions");
-      for (const session of stored ?? []) this.sessions.set(session.id, session);
+      for (const session of stored ?? []) {
+        // One-time back-patch (pending cleanup in AGENTS.md): activity strings became
+        // structured tool calls and a failure field.
+        const legacy = session as ManagedSession & { activity?: string[] };
+        if (legacy.activity) {
+          legacy.failure = legacy.turnState === "failed" || legacy.sessionState === "unavailable" ? legacy.activity.at(-1) ?? null : null;
+          delete legacy.activity;
+          Object.assign(legacy, { toolCalls: [], plan: [], unsaid: "", remark: null });
+        }
+        this.sessions.set(session.id, session);
+      }
       this.attachedSandboxId = await state.storage.get<string>("sandbox_id") ?? null;
       this.orchestratorContext = await state.storage.get<unknown[]>("orchestrator_context") ?? [];
       this.orchestratorQueue = await state.storage.get<string[]>("orchestrator_queue") ?? [];
@@ -716,13 +790,12 @@ export class VoiceSession {
           session.turnState = "failed";
           session.stopReason = null;
           session.turnEndedAt = Date.now();
-          session.activity.push("The previous Prompt Turn was interrupted by a disconnected Agent Connection.");
+          session.failure = "The previous Prompt Turn was interrupted by a disconnected Agent Connection.";
         }
       } catch (error) {
         session.sessionState = "unavailable";
-        session.activity.push(`Could not reload persisted session: ${errorMessage(error)}`);
+        session.failure = `Could not reload persisted session: ${errorMessage(error)}`;
       }
-      session.activity = session.activity.slice(-MAX_ACTIVITY);
     }
     await this.persistSessions();
   }
@@ -922,7 +995,9 @@ export class VoiceSession {
       if (session.turnState === "failed") return `${session.alias}'s last errand failed.`;
       return `${session.alias} is resting${session.turnEndedAt ? `, back ${spokenDuration(now - session.turnEndedAt)} ago` : ""}.`;
     });
-    const text = sentences.length ? sentences.slice(0, 6).join(" ") : NO_SESSIONS_STATUS;
+    const followed = this.follow && this.sessions.get(this.follow.sessionId);
+    if (followed) sentences.unshift(`Following ${followed.alias}.`);
+    const text = sentences.length ? sentences.slice(0, 7).join(" ") : NO_SESSIONS_STATUS;
     return this.acpReady ? text : `${text} The sandbox is still waking up.`;
   }
 
@@ -1205,6 +1280,15 @@ export class VoiceSession {
         case "list_managed_sessions":
           result = Array.from(this.sessions.values(), (session) => this.publicSession(session));
           break;
+        case "follow_managed_session": {
+          const session = this.sessionByAlias(requiredString(args, "alias"));
+          const previous = this.followSession(session);
+          result = { ok: true, following: session.alias, stopped_following: previous, now: this.currentDoing(session) };
+          break;
+        }
+        case "stop_following":
+          result = { ok: true, stopped_following: this.stopFollowing() };
+          break;
         case "cancel_prompt_turn":
           result = await this.cancelPromptTurn(requiredString(args, "alias"));
           break;
@@ -1280,20 +1364,7 @@ export class VoiceSession {
     const result = await this.acpRequest("session/new", { cwd, mcpServers: [] });
     const acpSessionId = String(result.sessionId ?? "");
     if (!acpSessionId) throw new Error("ACP Agent returned no session ID");
-    const session: ManagedSession = {
-      id: crypto.randomUUID(),
-      alias,
-      acpSessionId,
-      sessionState: "ready",
-      turnState: "idle",
-      assignment: null,
-      report: "",
-      activity: [],
-      stopReason: null,
-      title: null,
-      usage: null,
-      cwd,
-    };
+    const session = newManagedSession(alias, acpSessionId, cwd);
     this.sessions.set(session.id, session);
     await this.persistSessions();
     await this.record("acp.session.created", { alias, directory: relativeDirectory(cwd) });
@@ -1307,15 +1378,16 @@ export class VoiceSession {
     if (["queued", "in_progress"].includes(session.turnState)) throw new Error(`${session.alias} already has an active Prompt Turn`);
     session.turnState = "queued";
     session.assignment = prompt;
-    session.report = "";
-    session.activity = [];
-    session.stopReason = null;
+    Object.assign(session, { report: "", toolCalls: [], plan: [], unsaid: "", remark: null, failure: null, stopReason: null });
     await this.persistSessions();
 
     session.turnState = "in_progress";
     session.turnStartedAt = Date.now();
     session.turnEndedAt = null;
     await this.persistSessions();
+    // Sending a dog off means the walker follows it, until the caller says otherwise or sends
+    // another (DOMAIN.md, Followed Session).
+    const previous = this.followSession(session);
     // The Orchestrator writes the full engineering brief; it goes to the Agent unwrapped.
     void this.acpRequest("session/prompt", {
       sessionId: session.acpSessionId,
@@ -1331,24 +1403,28 @@ export class VoiceSession {
       const ending = turnEnding(session.stopReason);
       await this.noteSinceGreeting(`${session.alias} ${ending.clause}`);
       this.queueEarcon(ending.earcon);
+      const followed = this.turnEndedWhileFollowed(session);
       await this.orchestratorEvent(`[harness event] turn_stopped: ${JSON.stringify({
-        alias: session.alias, stop_reason: session.stopReason, agent_message: session.report.slice(-3000),
+        alias: session.alias, stop_reason: session.stopReason, followed, agent_message: session.report.slice(-3000),
       })}`);
     }).catch(async (error) => {
       session.turnState = "failed";
       session.stopReason = null;
       session.turnEndedAt = Date.now();
-      session.activity.push(`Prompt Turn failed: ${errorMessage(error)}`);
-      session.activity = session.activity.slice(-MAX_ACTIVITY);
+      session.failure = `Prompt Turn failed: ${errorMessage(error)}`;
       await this.persistSessions();
       await this.record("acp.turn.failed", { alias: session.alias, message: errorMessage(error) });
       await this.noteSinceGreeting(`${session.alias}'s errand failed`);
       this.queueEarcon("turn_failed");
-      await this.orchestratorEvent(`[harness event] turn_failed: ${JSON.stringify({ alias: session.alias, error: errorMessage(error) })}`);
+      const followed = this.turnEndedWhileFollowed(session);
+      await this.orchestratorEvent(`[harness event] turn_failed: ${JSON.stringify({ alias: session.alias, followed, error: errorMessage(error) })}`);
     });
     await this.record("acp.turn.started", { alias: session.alias });
     this.queueEarcon("turn_started");
-    return { ok: true, alias: session.alias, turn_state: session.turnState, note: "Started, not completed. A harness event arrives when it stops." };
+    return {
+      ok: true, alias: session.alias, turn_state: session.turnState, following: session.alias, stopped_following: previous,
+      note: "Started, not completed. A harness event arrives when it stops.",
+    };
   }
 
   private async playAudio(pathInput: string, startSeconds: number, durationSeconds: number): Promise<Record<string, unknown>> {
@@ -1605,7 +1681,7 @@ export class VoiceSession {
     }
     const failed = Array.from(this.sessions.values())
       .filter((session) => session.turnState === "failed")
-      .map((session) => ({ alias: session.alias, why: session.activity.at(-1) ?? null }));
+      .map((session) => ({ alias: session.alias, why: session.failure }));
     return {
       minutes_ago: Math.round((Date.now() - last.ended_at) / 60_000),
       ended_by: last.reason,
@@ -1697,10 +1773,7 @@ export class VoiceSession {
     // session/resume restores context without replaying history into this projection, and
     // only from the directory the session was created in.
     await this.acpRequest("session/resume", { sessionId: acpSessionId, cwd, mcpServers: [] });
-    const session: ManagedSession = {
-      id: crypto.randomUUID(), alias, acpSessionId, sessionState: "ready", turnState: "idle",
-      assignment: null, report: "", activity: [], stopReason: null, title: null, usage: null, cwd,
-    };
+    const session = newManagedSession(alias, acpSessionId, cwd);
     this.sessions.set(session.id, session);
     this.persistedRefs.delete(ref);
     await this.persistSessions();
@@ -1733,6 +1806,7 @@ export class VoiceSession {
     session.sessionState = "closing";
     await this.acpRequest("session/close", { sessionId: session.acpSessionId });
     // The ACP Session's history persists with the Agent; only this attachment ends.
+    if (this.follow?.sessionId === session.id) this.stopFollowing();
     this.sessions.delete(session.id);
     await this.persistSessions();
     await this.record("acp.session.closed", { alias: session.alias });
@@ -1813,18 +1887,186 @@ export class VoiceSession {
     if (!update) return;
     const kind = String(update.sessionUpdate ?? "update");
     if (kind === "agent_message_chunk" && update.content?.type === "text") {
-      session.report = (session.report + String(update.content.text ?? "")).slice(-64_000);
+      const text = String(update.content.text ?? "");
+      session.report = (session.report + text).slice(-64_000);
+      session.unsaid = (session.unsaid + text).slice(-2000);
     } else if (kind === "session_info_update" && update.title) {
       session.title = String(update.title);
     } else if (kind === "usage_update") {
+      const before = contextFill(session.usage);
       session.usage = { used: update.used, size: update.size, cost: update.cost };
+      if (before < CONTEXT_WARNING && contextFill(session.usage) >= CONTEXT_WARNING) {
+        this.beat(session, `${session.alias} has used most of its context window.`);
+      }
     } else if (kind === "tool_call" || kind === "tool_call_update") {
-      session.activity.push(`${String(update.title ?? "Tool")}: ${String(update.status ?? "updated")}`);
-    } else if (kind === "plan" || kind === "plan_update") {
-      session.activity.push("Agent plan updated.");
+      this.applyToolCall(session, update);
+    } else if (kind === "plan") {
+      this.applyPlan(session, update);
     }
-    session.activity = session.activity.slice(-MAX_ACTIVITY);
     await this.persistSessions();
+  }
+
+  private applyToolCall(session: ManagedSession, update: Record<string, any>): void {
+    const id = String(update.toolCallId ?? "");
+    if (!id) return;
+    let call = session.toolCalls.find((item) => item.toolCallId === id);
+    const previous = call?.status ?? null;
+    if (!call) {
+      // Agent text between tool calls is the Agent narrating its own progress.
+      const remark = speakableRemark(session.unsaid);
+      session.unsaid = "";
+      if (remark) {
+        session.remark = remark;
+        this.beat(session, `${session.alias} says: ${remark}`);
+      }
+      call = { toolCallId: id, kind: "other", title: "", status: "pending", paths: [], startedAt: Date.now(), endedAt: null };
+      session.toolCalls.push(call);
+      session.toolCalls = session.toolCalls.slice(-MAX_ACTIVITY);
+    }
+    if (update.kind) call.kind = String(update.kind);
+    if (update.title) call.title = String(update.title);
+    if (update.status) call.status = String(update.status);
+    if (Array.isArray(update.locations) && update.locations.length) {
+      const paths = update.locations.map((location: any) => relativePath(session.cwd, String(location?.path ?? "")));
+      call.paths = [...new Set<string>(paths.filter(Boolean))].slice(0, 10);
+    }
+    if (call.status === previous) return;
+    if (call.status === "completed" || call.status === "failed") call.endedAt = Date.now();
+    if (call.status === "in_progress") this.toolCallStarted(session, call);
+    if (call.status === "failed") this.toolCallFailed(session);
+  }
+
+  // Beats for a phase change (looking around, changing files, running something), for the
+  // first change of the turn, and for a command still running after a while.
+  private toolCallStarted(session: ManagedSession, call: ToolCallActivity): void {
+    if (call.kind === "execute") {
+      setTimeout(() => {
+        if (call.status !== "in_progress" || !session.toolCalls.includes(call)) return;
+        this.beat(session, `${session.alias} is still ${toolDoing(call)}, ${Math.round((Date.now() - call.startedAt) / 1000)} seconds in.`);
+      }, LONG_TOOL_CALL_MS);
+    }
+    if (this.follow?.sessionId !== session.id) return;
+    const phase = toolPhase(call.kind);
+    const firstChange = phase === "changing"
+      && !session.toolCalls.some((item) => item !== call && toolPhase(item.kind) === "changing" && item.status !== "pending");
+    if (firstChange) this.beat(session, `${session.alias} started changing files: ${toolDoing(call)}.`);
+    else if (phase !== this.follow.phase) this.beat(session, `${session.alias} is ${toolDoing(call)}.`);
+    this.follow.phase = phase;
+  }
+
+  // A followed dog's failures are beats. A ranging dog that keeps failing pulls: the walker
+  // mentions it and offers to follow, and never switches on its own.
+  private toolCallFailed(session: ManagedSession): void {
+    let streak = 0;
+    for (const item of [...session.toolCalls].reverse()) {
+      if (item.status === "failed") streak++;
+      else if (item.status === "completed") break;
+    }
+    if (this.follow?.sessionId === session.id) {
+      this.beat(session, `A step failed for ${session.alias}${streak > 1 ? `, ${streak} in a row` : ""}.`);
+    } else if (streak === STUCK_STREAK) {
+      void this.orchestratorEvent(`[harness event] pull: ${JSON.stringify({
+        alias: session.alias, reason: `${streak} tool calls failed in a row`, recent_tool_calls: session.toolCalls.slice(-STUCK_STREAK).map(toolCallSummary),
+      })}`);
+    }
+  }
+
+  // ACP sends the whole plan each time; a beat when the current step changes.
+  private applyPlan(session: ManagedSession, update: Record<string, any>): void {
+    const before = currentStep(session.plan);
+    session.plan = (Array.isArray(update.entries) ? update.entries : []).slice(0, 20).map((entry: any) => ({
+      content: String(entry?.content ?? ""), status: String(entry?.status ?? "pending"),
+    }));
+    const now = currentStep(session.plan);
+    if (now && now.key !== before?.key) {
+      this.beat(session, `${session.alias} is on step ${now.index + 1} of ${session.plan.length}: ${now.content}.`);
+    } else if (!now && before && session.plan.length) {
+      this.beat(session, `${session.alias} has checked off its whole plan.`);
+    }
+  }
+
+  // --- Following -------------------------------------------------------------
+
+  // Returns the alias no longer followed, if any.
+  private followSession(session: ManagedSession): string | null {
+    if (this.follow?.sessionId === session.id) return null;
+    const previous = this.follow ? this.sessions.get(this.follow.sessionId)?.alias ?? null : null;
+    this.follow = { sessionId: session.id, phase: null, told: [], toldAt: 0, unspoken: null, narratedAt: Date.now() };
+    void this.record("session.followed", { alias: session.alias, previous });
+    // Catch up silently, so "what is it doing?" has an answer at once.
+    this.beat(session, this.currentDoing(session), false);
+    return previous;
+  }
+
+  private stopFollowing(): string | null {
+    const previous = this.follow ? this.sessions.get(this.follow.sessionId)?.alias ?? null : null;
+    this.follow = null;
+    if (previous) void this.record("session.unfollowed", { alias: previous });
+    return previous;
+  }
+
+  // The followed dog stays followed while it rests; a stale beat must not outlive its turn.
+  private turnEndedWhileFollowed(session: ManagedSession): boolean {
+    if (this.follow?.sessionId !== session.id) return false;
+    this.follow.unspoken = null;
+    this.follow.phase = null;
+    return true;
+  }
+
+  private currentDoing(session: ManagedSession): string {
+    if (session.turnState !== "in_progress") return `${session.alias} is resting.`;
+    const running = [...session.toolCalls].reverse().find((item) => item.status === "in_progress");
+    const step = currentStep(session.plan);
+    const parts = [`${session.alias} is ${running ? toolDoing(running) : "working"}${session.turnStartedAt ? `, ${spokenDuration(Date.now() - session.turnStartedAt)} into its errand` : ""}.`];
+    if (step) parts.push(`Step ${step.index + 1} of ${session.plan.length}: ${step.content}.`);
+    if (session.remark) parts.push(`It last said: ${session.remark}`);
+    return parts.join(" ");
+  }
+
+  // A Progress Beat (DOMAIN.md) about the Followed Session; other sessions' beats are dropped.
+  private beat(session: ManagedSession, text: string, narrate = true): void {
+    const follow = this.follow;
+    if (!follow || follow.sessionId !== session.id || !this.liveAttached) return;
+    follow.told = [...follow.told, text].slice(-4);
+    if (narrate) follow.unspoken = { text, at: Date.now() };
+    void this.record("session.beat", { alias: session.alias, narrate, text: text.slice(0, 300) });
+    void this.pumpFollow();
+  }
+
+  // Beats reach the Voice Frontend as thinking (known, not said) at most every few seconds.
+  // The latest worth saying becomes commentary in a quiet moment, spaced well apart, and is
+  // dropped once stale.
+  private async pumpFollow(): Promise<void> {
+    if (this.followPumping) return;
+    this.followPumping = true;
+    try {
+      while (this.liveAttached && this.follow) {
+        const follow = this.follow;
+        const now = Date.now();
+        const alias = this.sessions.get(follow.sessionId)?.alias ?? "the followed session";
+        if (follow.told.length && now - follow.toldAt >= BEAT_TELL_GAP_MS) {
+          this.sendLive({ type: "session.thinking.append", delegation_id: null, content: `Following ${alias}: ${follow.told.join(" ")}` });
+          follow.told = [];
+          follow.toldAt = now;
+        }
+        if (follow.unspoken && now - follow.unspoken.at > BEAT_STALE_MS) follow.unspoken = null;
+        if (follow.unspoken && now - follow.narratedAt >= NARRATION_GAP_MS && this.quietMoment()) {
+          this.sendLive({ type: "session.commentary.append", delegation_id: null, content: follow.unspoken.text });
+          await this.record("session.narrated", { alias });
+          follow.unspoken = null;
+          follow.narratedAt = now;
+        }
+        if (!follow.told.length && !follow.unspoken) break;
+        await sleep(500);
+      }
+    } finally {
+      this.followPumping = false;
+    }
+  }
+
+  private quietMoment(): boolean {
+    return !this.fixture && !this.menu && !this.recording && !this.clipPending && !this.orchestrating
+      && this.earconQueue.length === 0 && Date.now() - this.lastSpeechAt >= QUIET_MS;
   }
 
   private async receivePermission(requestId: string | number, params: Record<string, unknown>): Promise<void> {
@@ -1853,7 +2095,7 @@ export class VoiceSession {
     await this.noteSinceGreeting(`${session.alias} asked for permission`);
     this.queueEarcon("permission_requested");
     await this.orchestratorEvent(`[harness event] permission_requested: ${JSON.stringify({
-      alias: session.alias, title: permission.title, options,
+      alias: session.alias, followed: this.follow?.sessionId === session.id, title: permission.title, options,
     })}`);
   }
 
@@ -1928,9 +2170,13 @@ export class VoiceSession {
       session_state: session.sessionState,
       turn_state: session.turnState,
       stop_reason: session.stopReason,
+      followed: this.follow?.sessionId === session.id,
       title: session.title,
       assignment: session.assignment,
-      recent_activity: session.activity.slice(-5),
+      plan: session.plan,
+      recent_tool_calls: session.toolCalls.slice(-6).map(toolCallSummary),
+      remark: session.remark,
+      failure: session.failure,
       report: session.report.slice(-4000),
       usage: session.usage,
     };
@@ -1946,7 +2192,8 @@ export class VoiceSession {
         stop_reason: session.stopReason,
         title: session.title,
         assignment: session.assignment?.slice(0, 500) ?? null,
-        recent_activity: session.activity.slice(-3),
+        recent_activity: session.toolCalls.slice(-3).map((call) => `${toolDoing(call)}: ${call.status}`),
+        failure: session.failure,
         report_excerpt: session.report.slice(-500),
       })),
       pending_permissions: Array.from(this.permissions.values()).map((permission) => ({
@@ -1973,6 +2220,7 @@ export class VoiceSession {
     this.pendingRpc.clear();
     this.permissions.clear();
     this.sessions.clear();
+    this.follow = null;
     this.orchestratorQueue = [];
     this.orchestratorContext = [];
     await this.state.storage.delete(["managed_sessions", "orchestrator_queue", "orchestrator_context"]);
@@ -2040,6 +2288,8 @@ export class VoiceSession {
     this.endMenu();
     this.heldAppends = [];
     this.earconQueue = [];
+    // Following is per call: there is nobody to narrate to between calls.
+    this.follow = null;
     await this.record("voice.input.levels", summarizeLevels(this.inputLevels.open));
     this.inputLevels = { open: newLevels(), recording: newLevels() };
     await this.record("voice.live.detached", { reason, live_session_id: this.liveSessionId });
@@ -2075,6 +2325,7 @@ export class VoiceSession {
     this.firstCall = false;
     this.endMenu();
     this.heldAppends = [];
+    this.follow = null;
     this.delegations.clear();
     this.transcript = [];
     this.transcriptCutMs = 0;
@@ -2228,6 +2479,79 @@ function summarizeLevels(levels: Levels): { chunks: number; non_silent_fraction:
     non_silent_fraction: levels.chunks ? Math.round((levels.nonSilent / levels.chunks) * 100) / 100 : 0,
     peak: levels.peak,
   };
+}
+
+function newManagedSession(alias: string, acpSessionId: string, cwd: string): ManagedSession {
+  return {
+    id: crypto.randomUUID(), alias, acpSessionId, sessionState: "ready", turnState: "idle", assignment: null,
+    report: "", toolCalls: [], plan: [], unsaid: "", remark: null, failure: null,
+    stopReason: null, title: null, usage: null, cwd,
+  };
+}
+
+function contextFill(usage: ManagedSession["usage"]): number {
+  return usage?.used && usage.size ? usage.used / usage.size : 0;
+}
+
+function relativePath(cwd: string, path: string): string {
+  if (!path) return "";
+  return path.startsWith(`${cwd}/`) ? path.slice(cwd.length + 1) : relativeDirectory(path);
+}
+
+// What the Agent said between tool calls, cleaned for speech; null when nothing usable.
+function speakableRemark(text: string): string | null {
+  const plain = text.replace(/```[\s\S]*?```/g, " ").replace(/[*_`#>|]/g, "").replace(/\s+/g, " ").trim();
+  if (plain.length < 12 || UNSPEAKABLE.test(plain)) return null;
+  if (plain.length <= 240) return plain;
+  const tail = plain.slice(-240);
+  const sentence = tail.search(/[.!?]\s+\S/);
+  return sentence >= 0 ? tail.slice(sentence + 1).trim() : tail;
+}
+
+function toolPhase(kind: string): string {
+  if (["read", "search", "fetch"].includes(kind)) return "looking";
+  if (["edit", "delete", "move"].includes(kind)) return "changing";
+  if (kind === "execute") return "running";
+  return kind;
+}
+
+function spokenFiles(paths: string[]): string {
+  const names = [...new Set(paths.map((path) => path.split("/").filter(Boolean).at(-1) ?? path))];
+  if (names.length <= 2) return names.join(" and ");
+  return `${names.slice(0, 2).join(", ")} and ${names.length - 2} more`;
+}
+
+// A tool call as a present participle phrase: "reading parser.py", "running the tests".
+function toolDoing(call: ToolCallActivity): string {
+  const files = spokenFiles(call.paths);
+  const title = call.title && !UNSPEAKABLE.test(call.title) && call.title.toLowerCase() !== call.kind ? call.title.slice(0, 60) : "";
+  switch (call.kind) {
+    case "read": return `reading ${files || "files"}`;
+    case "search": return "searching the code";
+    case "fetch": return "looking something up on the web";
+    case "edit": return `editing ${files || "files"}`;
+    case "delete": return `deleting ${files || "files"}`;
+    case "move": return `moving ${files || "files"}`;
+    case "execute": return title && !/^(bash|shell)$/i.test(title) ? `running a command (${title})` : "running a command";
+    case "think": return "thinking it over";
+    case "switch_mode": return "switching modes";
+    default: return title ? `using ${title}` : "using a tool";
+  }
+}
+
+function toolCallSummary(call: ToolCallActivity): Record<string, unknown> {
+  return {
+    kind: call.kind, title: call.title, status: call.status, paths: call.paths.slice(0, 5),
+    seconds: Math.round(((call.endedAt ?? Date.now()) - call.startedAt) / 1000),
+  };
+}
+
+// The plan step in progress, else the next pending one.
+function currentStep(plan: PlanEntry[]): { index: number; content: string; key: string } | null {
+  let index = plan.findIndex((entry) => entry.status === "in_progress");
+  if (index < 0) index = plan.findIndex((entry) => entry.status === "pending");
+  if (index < 0) return null;
+  return { index, content: plan[index].content, key: `${index}:${plan[index].content}` };
 }
 
 // ACP stop reasons mapped to presentation: an earcon and a clause for the next opening.
