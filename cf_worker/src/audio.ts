@@ -12,6 +12,18 @@ import spoken_session_closed from "../earcons/session_closed.pcm";
 import spoken_recording_started from "../earcons/recording_started.pcm";
 import spoken_recording_saved from "../earcons/recording_saved.pcm";
 import spoken_recording_discarded from "../earcons/recording_discarded.pcm";
+import spoken_follow_started from "../earcons/follow_started.pcm";
+import spoken_follow_stopped from "../earcons/follow_stopped.pcm";
+import spoken_progress_looking from "../earcons/progress_looking.pcm";
+import spoken_progress_changing from "../earcons/progress_changing.pcm";
+import spoken_progress_running from "../earcons/progress_running.pcm";
+import spoken_progress_still_running from "../earcons/progress_still_running.pcm";
+import spoken_progress_failed from "../earcons/progress_failed.pcm";
+import spoken_progress_remark from "../earcons/progress_remark.pcm";
+import spoken_progress_step from "../earcons/progress_step.pcm";
+import spoken_progress_plan_done from "../earcons/progress_plan_done.pcm";
+import spoken_progress_tiring from "../earcons/progress_tiring.pcm";
+import spoken_pull from "../earcons/pull.pcm";
 import prompt_menu from "../earcons/menu.pcm";
 import prompt_menu_restart_confirm from "../earcons/menu_restart_confirm.pcm";
 import prompt_menu_restarting from "../earcons/menu_restarting.pcm";
@@ -60,7 +72,19 @@ export type EarconName =
   | "session_closed"
   | "recording_started"
   | "recording_saved"
-  | "recording_discarded";
+  | "recording_discarded"
+  | "follow_started"
+  | "follow_stopped"
+  | "progress_looking"
+  | "progress_changing"
+  | "progress_running"
+  | "progress_still_running"
+  | "progress_failed"
+  | "progress_remark"
+  | "progress_step"
+  | "progress_plan_done"
+  | "progress_tiring"
+  | "pull";
 export type EarconStyle = "spoken" | "tonal";
 
 // Tonal earcons: short note patterns, rising for arrivals and falling for departures.
@@ -79,6 +103,22 @@ const TONAL: Record<EarconName, Clip> = {
   recording_started: synthesize([[1046.5, 260]]),
   recording_saved: synthesize([[1046.5, 100], [1318.51, 180]]),
   recording_discarded: synthesize([[659.25, 120], [440, 220]]),
+  // Following brackets a stretch of narration: a rising sixth in, its mirror out.
+  follow_started: synthesize([[440, 110], [739.99, 200]]),
+  follow_stopped: synthesize([[739.99, 110], [440, 200]]),
+  // Progress Beats are peripheral: quieter and shorter, one register per phase of work
+  // (looking high, changing low, running in between), so the walk is audible at a glance.
+  progress_looking: synthesize([[1174.66, 90]], 0.18),
+  progress_changing: synthesize([[587.33, 80], [587.33, 110]], 0.18),
+  progress_running: synthesize([[880, 60], [880, 60], [880, 90]], 0.18),
+  progress_still_running: synthesize([[880, 320]], 0.16),
+  progress_failed: synthesize([[622.25, 110], [587.33, 200]], 0.2),
+  progress_remark: synthesize([[987.77, 70], [830.61, 110]], 0.18),
+  progress_step: synthesize([[783.99, 80], [880, 120]], 0.18),
+  progress_plan_done: synthesize([[783.99, 80], [987.77, 80], [1174.66, 150]], 0.2),
+  progress_tiring: synthesize([[392, 380]], 0.18),
+  // A ranging session tugging: two quick pulls, loud enough to cut through.
+  pull: synthesize([[698.46, 90], [0.001, 60], [698.46, 140]]),
 };
 
 // Spoken earcons: macOS text-to-speech labels rendered by make_earcons.py (verbose and
@@ -98,6 +138,18 @@ const SPOKEN: Record<EarconName, Clip> = {
   recording_started: pcmClip(spoken_recording_started),
   recording_saved: pcmClip(spoken_recording_saved),
   recording_discarded: pcmClip(spoken_recording_discarded),
+  follow_started: pcmClip(spoken_follow_started),
+  follow_stopped: pcmClip(spoken_follow_stopped),
+  progress_looking: pcmClip(spoken_progress_looking),
+  progress_changing: pcmClip(spoken_progress_changing),
+  progress_running: pcmClip(spoken_progress_running),
+  progress_still_running: pcmClip(spoken_progress_still_running),
+  progress_failed: pcmClip(spoken_progress_failed),
+  progress_remark: pcmClip(spoken_progress_remark),
+  progress_step: pcmClip(spoken_progress_step),
+  progress_plan_done: pcmClip(spoken_progress_plan_done),
+  progress_tiring: pcmClip(spoken_progress_tiring),
+  pull: pcmClip(spoken_pull),
 };
 
 export function earcon(name: EarconName, style: EarconStyle): Clip {

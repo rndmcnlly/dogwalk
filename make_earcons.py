@@ -41,6 +41,18 @@ LABELS = {
     "recording_started": "Recording.",
     "recording_saved": "Recording saved.",
     "recording_discarded": "Recording discarded.",
+    "follow_started": "Following.",
+    "follow_stopped": "Ranging.",
+    "progress_looking": "Sniffing.",
+    "progress_changing": "Digging.",
+    "progress_running": "Running.",
+    "progress_still_running": "Still running.",
+    "progress_failed": "Stumbled.",
+    "progress_remark": "Woof.",
+    "progress_step": "Next step.",
+    "progress_plan_done": "Plan done.",
+    "progress_tiring": "Tiring.",
+    "pull": "Tug.",
 }
 
 # Keypad system menu prompts: always bundled regardless of EARCON_STYLE, because they are

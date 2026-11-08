@@ -19,6 +19,10 @@ const QUIET_MS = 4_000;
 const LONG_TOOL_CALL_MS = 25_000;
 const STUCK_STREAK = 3;
 const CONTEXT_WARNING = 0.8;
+const BEAT_EARCON_GAP_MS = 5_000;
+const PHASE_EARCONS: Record<string, EarconName> = {
+  looking: "progress_looking", changing: "progress_changing", running: "progress_running",
+};
 // A stopped or archived Sandbox can take minutes to start; the call goes on meanwhile.
 const ACP_CONNECT_WINDOW_MS = 3 * 60 * 1000;
 const MENU_TIMEOUT_MS = 15_000;
@@ -83,6 +87,7 @@ interface Follow {
   toldAt: number;
   unspoken: { text: string; at: number } | null;  // the latest beat worth narrating
   narratedAt: number;
+  earconAt: number;
 }
 
 interface PendingPermission {
@@ -1282,13 +1287,18 @@ export class VoiceSession {
           break;
         case "follow_managed_session": {
           const session = this.sessionByAlias(requiredString(args, "alias"));
+          const already = this.follow?.sessionId === session.id;
           const previous = this.followSession(session);
+          if (!already) this.queueEarcon("follow_started");
           result = { ok: true, following: session.alias, stopped_following: previous, now: this.currentDoing(session) };
           break;
         }
-        case "stop_following":
-          result = { ok: true, stopped_following: this.stopFollowing() };
+        case "stop_following": {
+          const previous = this.stopFollowing();
+          if (previous) this.queueEarcon("follow_stopped");
+          result = { ok: true, stopped_following: previous };
           break;
+        }
         case "cancel_prompt_turn":
           result = await this.cancelPromptTurn(requiredString(args, "alias"));
           break;
@@ -1386,7 +1396,7 @@ export class VoiceSession {
     session.turnEndedAt = null;
     await this.persistSessions();
     // Sending a dog off means the walker follows it, until the caller says otherwise or sends
-    // another (DOMAIN.md, Followed Session).
+    // another (DOMAIN.md, Followed Session). The turn_started earcon stands in for follow_started.
     const previous = this.followSession(session);
     // The Orchestrator writes the full engineering brief; it goes to the Agent unwrapped.
     void this.acpRequest("session/prompt", {
@@ -1896,7 +1906,7 @@ export class VoiceSession {
       const before = contextFill(session.usage);
       session.usage = { used: update.used, size: update.size, cost: update.cost };
       if (before < CONTEXT_WARNING && contextFill(session.usage) >= CONTEXT_WARNING) {
-        this.beat(session, `${session.alias} has used most of its context window.`);
+        this.beat(session, `${session.alias} has used most of its context window.`, "progress_tiring");
       }
     } else if (kind === "tool_call" || kind === "tool_call_update") {
       this.applyToolCall(session, update);
@@ -1917,7 +1927,7 @@ export class VoiceSession {
       session.unsaid = "";
       if (remark) {
         session.remark = remark;
-        this.beat(session, `${session.alias} says: ${remark}`);
+        this.beat(session, `${session.alias} says: ${remark}`, "progress_remark");
       }
       call = { toolCallId: id, kind: "other", title: "", status: "pending", paths: [], startedAt: Date.now(), endedAt: null };
       session.toolCalls.push(call);
@@ -1942,15 +1952,15 @@ export class VoiceSession {
     if (call.kind === "execute") {
       setTimeout(() => {
         if (call.status !== "in_progress" || !session.toolCalls.includes(call)) return;
-        this.beat(session, `${session.alias} is still ${toolDoing(call)}, ${Math.round((Date.now() - call.startedAt) / 1000)} seconds in.`);
+        this.beat(session, `${session.alias} is still ${toolDoing(call)}, ${Math.round((Date.now() - call.startedAt) / 1000)} seconds in.`, "progress_still_running");
       }, LONG_TOOL_CALL_MS);
     }
     if (this.follow?.sessionId !== session.id) return;
     const phase = toolPhase(call.kind);
     const firstChange = phase === "changing"
       && !session.toolCalls.some((item) => item !== call && toolPhase(item.kind) === "changing" && item.status !== "pending");
-    if (firstChange) this.beat(session, `${session.alias} started changing files: ${toolDoing(call)}.`);
-    else if (phase !== this.follow.phase) this.beat(session, `${session.alias} is ${toolDoing(call)}.`);
+    if (firstChange) this.beat(session, `${session.alias} started changing files: ${toolDoing(call)}.`, "progress_changing");
+    else if (phase !== this.follow.phase) this.beat(session, `${session.alias} is ${toolDoing(call)}.`, PHASE_EARCONS[phase] ?? null);
     this.follow.phase = phase;
   }
 
@@ -1963,8 +1973,9 @@ export class VoiceSession {
       else if (item.status === "completed") break;
     }
     if (this.follow?.sessionId === session.id) {
-      this.beat(session, `A step failed for ${session.alias}${streak > 1 ? `, ${streak} in a row` : ""}.`);
+      this.beat(session, `A step failed for ${session.alias}${streak > 1 ? `, ${streak} in a row` : ""}.`, "progress_failed");
     } else if (streak === STUCK_STREAK) {
+      this.queueEarcon("pull");
       void this.orchestratorEvent(`[harness event] pull: ${JSON.stringify({
         alias: session.alias, reason: `${streak} tool calls failed in a row`, recent_tool_calls: session.toolCalls.slice(-STUCK_STREAK).map(toolCallSummary),
       })}`);
@@ -1979,9 +1990,9 @@ export class VoiceSession {
     }));
     const now = currentStep(session.plan);
     if (now && now.key !== before?.key) {
-      this.beat(session, `${session.alias} is on step ${now.index + 1} of ${session.plan.length}: ${now.content}.`);
+      this.beat(session, `${session.alias} is on step ${now.index + 1} of ${session.plan.length}: ${now.content}.`, "progress_step");
     } else if (!now && before && session.plan.length) {
-      this.beat(session, `${session.alias} has checked off its whole plan.`);
+      this.beat(session, `${session.alias} has checked off its whole plan.`, "progress_plan_done");
     }
   }
 
@@ -1991,10 +2002,10 @@ export class VoiceSession {
   private followSession(session: ManagedSession): string | null {
     if (this.follow?.sessionId === session.id) return null;
     const previous = this.follow ? this.sessions.get(this.follow.sessionId)?.alias ?? null : null;
-    this.follow = { sessionId: session.id, phase: null, told: [], toldAt: 0, unspoken: null, narratedAt: Date.now() };
+    this.follow = { sessionId: session.id, phase: null, told: [], toldAt: 0, unspoken: null, narratedAt: Date.now(), earconAt: 0 };
     void this.record("session.followed", { alias: session.alias, previous });
     // Catch up silently, so "what is it doing?" has an answer at once.
-    this.beat(session, this.currentDoing(session), false);
+    this.beat(session, this.currentDoing(session), null, false);
     return previous;
   }
 
@@ -2024,12 +2035,18 @@ export class VoiceSession {
   }
 
   // A Progress Beat (DOMAIN.md) about the Followed Session; other sessions' beats are dropped.
-  private beat(session: ManagedSession, text: string, narrate = true): void {
+  // Each beat may cue an earcon at once; the speech comes later, if at all. A burst of beats
+  // cues only its first earcon.
+  private beat(session: ManagedSession, text: string, earconName: EarconName | null, narrate = true): void {
     const follow = this.follow;
     if (!follow || follow.sessionId !== session.id || !this.liveAttached) return;
     follow.told = [...follow.told, text].slice(-4);
     if (narrate) follow.unspoken = { text, at: Date.now() };
-    void this.record("session.beat", { alias: session.alias, narrate, text: text.slice(0, 300) });
+    if (earconName && Date.now() - follow.earconAt >= BEAT_EARCON_GAP_MS) {
+      follow.earconAt = Date.now();
+      this.queueEarcon(earconName);
+    }
+    void this.record("session.beat", { alias: session.alias, narrate, earcon: earconName, text: text.slice(0, 300) });
     void this.pumpFollow();
   }
 

@@ -598,6 +598,9 @@ async def run_protocol(identity: str) -> None:
             ("read", "completed", ["src/parser.py"]), ("edit", "completed", ["artifact.txt"]),
         ], inspected
         assert OrchestratorMock.tool_output("h2-unfollow") == {"ok": True, "stopped_following": "Juniper"}
+        events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST")
+        for expected in ("session.followed", "session.beat", "session.unfollowed"):
+            assert expected in events, (expected, events)
 
         # Handoff 3: leash earlier work, retag it, let it go home, and list what remains.
         await mocks.send_live(transcript("input", "Pick up that parser work from yesterday ", 7000, 8000))
