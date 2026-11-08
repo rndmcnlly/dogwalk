@@ -407,7 +407,8 @@ and computer use stops once no link remains.
 The desktop needs the snapshot's desktop packages (Xvfb, xfce4, x11vnc, noVNC,
 Chromium with `--no-sandbox`); a Sandbox from an older snapshot answers
 "the desktop is not installed on this sandbox yet" until it is back-patched.
-At 1 GiB the desktop with Chromium leaves little room for an Agent.
+At 1 GiB the desktop with Chromium leaves little room for an Agent; snapshots from
+`dogwalk-acp-20261108-v2` on default to 4 GiB.
 
 The prototype that settled the signal design is
 `../prototypes/acoustic_pairing.html`: a transmitter, a live raw versus ECC

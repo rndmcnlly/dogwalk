@@ -150,7 +150,7 @@ def main() -> None:
         CreateSnapshotParams(
             name=args.name,
             image=snapshot_image(),
-            resources=Resources(cpu=1, memory=1, disk=3),
+            resources=Resources(cpu=2, memory=4, disk=10),
         ),
         on_logs=lambda chunk: print(chunk, end=""),
         timeout=0,

@@ -153,8 +153,9 @@ them its toolbox endpoints answer 503), plus Debian's Chromium.
 which Chromium needs inside the container. `POST /computeruse/start` on the
 toolbox launches Xvfb, xfce4, x11vnc on 5901, and noVNC on 6080; the image sets
 `VNC_RESOLUTION=1280x800`, which Daytona reads only when a Sandbox is created.
-The packages add about 0.6 GB on disk and fit the existing 3 GB disk and 1 GiB
-memory. Sandboxes created from `-20261107-v2` received the same packages and
+The packages add about 0.6 GB on disk. Snapshots from `-20261108-v2` on default to 2 vCPU,
+4 GiB memory, and a 10 GB disk: at 1 GiB a `pnpm install` was OOM-killed, and the desktop,
+ffmpeg, and ImageMagick need the room. Sandboxes created from `-20261107-v2` received the same packages and
 flags file in place, keeping their 1024x768 resolution.
 
 ## Verification
