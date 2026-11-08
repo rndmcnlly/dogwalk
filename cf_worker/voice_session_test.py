@@ -291,8 +291,13 @@ ORCHESTRATOR_SCRIPT = [
     ('"key":"5"', lambda ctx: [call("k5-board", "draw_on_whiteboard", program=BOARD_PROGRAM, note="pick one")]),
     ('"key":"3"', lambda ctx: [
         call("k3-say", "say", text=SWITCH_SAY, delegation_id=None),
-        call("k3-theme", "set_theme", theme="survey"),
+        call("k3-theme", "set_theme", theme="survey", register="high"),
     ]),
+    # After the bounce, Runtime Dramaturgy renders the active theme's authoring notes.
+    ('"key":"2"', lambda ctx: [{
+        **call("k2-dramaturgy", "load_voice_agent_skill"),
+        "arguments": json.dumps({"name": "runtime-dramaturgy"}),
+    }]),
 ]
 BOARD_PROGRAM = 'root = Stack([pick])\npick = Choice("approach", ["Quick fix", "Refactor"], "Which approach?")'
 STEP_IDS = [
@@ -301,6 +306,7 @@ STEP_IDS = [
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
     "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair", "k9-show", "k4-state", "k5-board", "k3-say", "k3-theme",
+    "k2-dramaturgy",
 ]
 
 
@@ -1011,6 +1017,7 @@ async def run_protocol(identity: str) -> None:
         await wait_for(lambda: len(OrchestratorMock.greeting_requests) > greetings, 10)
         switch_instructions = OrchestratorMock.greeting_requests[-1]["instructions"]
         assert "The survey (Survey theme)" in switch_instructions and "switched to this theme mid-call" in switch_instructions
+        assert "at the high rung" in switch_instructions, switch_instructions
         await wait_for(lambda: any(path == "/live/sessions/live-test-2/hangup" for path, _ in DaytonaMock.openai_requests), 10)
         assert OrchestratorMock.tool_output("k3-theme")["bouncing"] is True
         await mocks.live.close()
@@ -1022,6 +1029,12 @@ async def run_protocol(identity: str) -> None:
         assert rejoined["session"]["audio"]["output"]["voice"] == "sage", rejoined["session"]["audio"]
         assert "The survey (Survey theme)" in rejoined["session"]["instructions"]
         await next_matching(mocks.live_messages, appended("commentary", f"Dogwalk. {NEXT_GREETING}"))
+        # The register carries across the bounce as unspoken context for the new voice.
+        await next_matching(mocks.live_messages, appended("thinking", "The caller had the register at high; start there."))
+        await mocks.send_live(dtmf("2"))
+        await wait_for(lambda: '"call_id": "k2-dramaturgy"' in json.dumps([p["input"] for _, p in OrchestratorMock.requests]), 10)
+        dramaturgy = OrchestratorMock.tool_output("k2-dramaturgy")["guidance"]
+        assert "Planetary Romance" in dramaturgy and "Survey theme" in dramaturgy, dramaturgy
 
         # Star then two hands the call to the recovery menu, which ends the GPT-Live leg.
         await mocks.send_live(dtmf("*"))

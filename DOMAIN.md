@@ -160,7 +160,7 @@ Themes exist only above ACP; ACP prompts, tools, schemas, harness events, and an
 | Patrol | a present-day cyber operation under mission command: sessions are operatives, tool calls are their drones, the User is Actual | military science fiction, laconic over hyperviolent vocabulary aimed only at code: the mundane made lethal |
 | Plain | none: the domain vocabulary shows through | plain |
 
-Plain is both a User choice and the regression fixture that shows the rules never live in a Theme. Park is the default. The User switches by asking, and the choice is kept with their Sandbox's Voice Session state like the Earcon Style. GPT-Live fixes a voice for the life of a voice session, so a switch bounces the Voice Call: the Session Orchestrator writes the new voice's first line in the new Theme, re-presenting where things stand, then the voice session ends and the same Voice Call reconnects to a fresh one, which opens with that line and no caller-ID clause. The public pages stay Park for now.
+Plain is both a User choice and the regression fixture that shows the rules never live in a Theme. Park is the default. The User switches by asking, and the choice is kept with their Sandbox's Voice Session state like the Earcon Style. GPT-Live fixes a voice for the life of a voice session, so a switch bounces the Voice Call: the Session Orchestrator writes the new voice's first line in the new Theme, re-presenting where things stand, then the voice session ends and the same Voice Call reconnects to a fresh one, which opens with that line and no caller-ID clause. The register carries across the bounce: the Session Orchestrator names the rung the conversation stood at, the line is written at it, and the fresh Voice Frontend is told to start there. Aliases stay across a switch; the User may ask for sessions to be renamed in the new conceit's naming style, and the Voice Agent does so only then. The public pages stay Park for now.
 
 **Not:** A rule set, a persona with its own capabilities, or a visual color scheme.
 
@@ -168,7 +168,7 @@ Plain is both a User choice and the regression fixture that shows the rules neve
 
 **Context:** Voice Interaction
 
-The ladder a Theme's register moves along, from plain words to the conceit at full strength, and the Voice Agent's current position on it. The Voice Agent chooses it rather than the User setting it: it rises when the User plays along and falls when the User is terse, frustrated, or deep in a problem. The clarity floor holds at every rung: Permission Request choices, failures, destructive actions, numbers, and anything the User must act on are stated plainly; the conceit may frame a fact but never replace it.
+The ladder a Theme's register moves along, from plain words to the conceit at full strength, and the Voice Agent's current position on it. The Voice Agent chooses it rather than the User setting it: it rises when the User plays along and falls when the User is frustrated or deep in a problem. An explicit request to lean into the Theme climbs at once, and a request to drop it goes to plain words. Intensity is independent of length: brevity governs how much is said and the register governs which words, so a standing preference for short replies never lowers the register, and a short line can sit at the top rung. The clarity floor holds at every rung: Permission Request choices, failures, destructive actions, numbers, and anything the User must act on are stated plainly; the conceit may frame a fact but never replace it.
 
 Moving the register along the ladder is drama management.
 
@@ -178,7 +178,7 @@ Moving the register along the ladder is drama management.
 
 **Context:** Voice Interaction
 
-The performing Voice Agent consulting its Theme's genre sources (the tropes the Theme draws on) and authoring notes during a live Voice Call, to interpret the conceit faithfully: how a moment the conceit never anticipated should be presented, or what a closer look means in this fiction. Only the Session Orchestrator can consult; the Voice Frontend asks it by thinking it over, like any other work.
+The performing Voice Agent consulting its Theme's genre sources (the tropes the Theme draws on) and authoring notes during a live Voice Call, to interpret the conceit faithfully: how a moment the conceit never anticipated should be presented, or what a closer look means in this fiction. Only the Session Orchestrator can consult; the Voice Frontend asks it by thinking it over, like any other work, when the User asks to lean into the Theme or a moment falls outside the conceit. It arrives as the `runtime-dramaturgy` Voice Agent Skill, rendered from the active Theme's authoring notes (Plain has no conceit to interpret). The Session Orchestrator may ask a Managed Session for ordinary research on a genre source, such as summarizing a trope page, as a coworker would, without mentioning the Theme; ACP Agents never perform the Theme.
 
 **Not:** Drama management, which adapts the register to the audience (Intensity). Dramaturgy answers to the work; drama management answers to the User.
 
@@ -464,7 +464,7 @@ The caller's own audio captured during a Voice Call into a Workspace file, such 
 
 **Context:** Voice Interaction
 
-Version-controlled guidance the Session Orchestrator loads on demand when a request matches the skill's description (its trigger), such as precise transcription or self-knowledge about Dogwalk. A skill has a body for the Orchestrator and may carry speech guidance applied to the Voice Frontend for the rest of the call. Voice Agent Skills change only through Dogwalk's repository; nothing at runtime writes them. Self-knowledge skills embed the project's own documents rather than paraphrasing them.
+Version-controlled guidance the Session Orchestrator loads on demand when a request matches the skill's description (its trigger), such as precise transcription or self-knowledge about Dogwalk. A skill has a body for the Orchestrator and may carry speech guidance applied to the Voice Frontend for the rest of the call. Voice Agent Skills change only through Dogwalk's repository; nothing at runtime writes them. Self-knowledge skills embed the project's own documents rather than paraphrasing them, and a themed skill (Runtime Dramaturgy) renders the active Theme's authoring notes when it loads.
 
 **Not:** A skill held by an ACP Agent in the Sandbox, which the Agent may create and maintain itself, or a Client-Provided Tool.
 
@@ -512,7 +512,7 @@ Following observes; it never directs the Agent.
 
 **Context:** Voice Interaction
 
-One sentence about a Followed Session's Activity, built deterministically without a model: a change of phase (looking around, changing files, running something), the first change of a turn, a failed step, a long-running command, a new plan step, an interim remark, or a nearly full context window. Beats reach the Voice Frontend as unspoken context at once, and the latest is spoken in a quiet moment, spaced well apart and dropped when stale.
+One sentence about a Followed Session's Activity, built deterministically without a model: a change of phase (looking around, changing files, running something), the first change of a turn, a failed step, a long-running command, a new plan step, an interim remark, or a nearly full context window. Beats reach the Voice Frontend as unspoken context at once, and the latest is spoken in a quiet moment, spaced well apart and dropped when stale. A beat's text is neutral; the Voice Frontend restates it in the Theme's words at the current register, never reciting it or chaining several.
 
 ### Bid
 
@@ -725,8 +725,6 @@ The following language appears in Git history and is not canonical for productio
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Could Access Control identify a User by something spoken, such as a passphrase in the style of Invite Codes, so a call from any telephone, even a payphone, works without caller ID?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
-- How is Runtime Dramaturgy delivered? A per-Theme Voice Agent Skill could embed the authoring notes, as self-knowledge skills embed project documents; consulting the genre sources themselves would need a web tool the Session Orchestrator does not have.
-- Should a Theme switch also rename Aliases in the new conceit's naming style (Cedar becoming Team Kestrel), and who decides: the User, or the Session Orchestrator with the User's agreement?
 
 - Should the Voice Frontend also receive recent conversation directly (as provider session history at call start), rather than only through the Session Orchestrator's reorienting speech?
 

@@ -238,7 +238,8 @@ Voice Agent Skills live in `voice_agent_skills/*.md`: frontmatter `name` and
 when the skill loads. The index is inlined in the Orchestrator prompt; bodies
 load through `load_voice_agent_skill`. Add a skill by writing the file and
 registering it in `src/voice_agent_skills.ts`. `platform-self-knowledge` embeds
-`DOMAIN.md` and `PSTN_CLOUDFLARE.md` at build time.
+`DOMAIN.md` and `PSTN_CLOUDFLARE.md` at build time; `runtime-dramaturgy` appends
+the active Theme's authoring notes from `src/themes.ts` when it loads.
 
 Audio goes to the caller as GPT-Live output fixtures. Earcons mark events and
 queue for lulls, in the caller's Earcon Style (set by voice): `tonal`, the

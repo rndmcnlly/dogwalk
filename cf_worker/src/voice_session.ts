@@ -34,6 +34,9 @@ const menuTimeoutMs = () => MENU_TIMEOUT_MS + prompt("menu").seconds * 1000;
 type EarconPreference = EarconStyle | "none";
 // Earcon Style preferences the set_earcon_style tool accepts.
 const EARCON_PREFERENCES: EarconPreference[] = ["tonal", "spoken", "none"];
+// Intensity (DOMAIN.md): the rungs set_theme carries across a bounce.
+type Rung = "low" | "middle" | "high";
+const REGISTER_RUNGS: Rung[] = ["low", "middle", "high"];
 const MAX_SINCE_GREETING = 4;
 const MAX_SESSION_LIST_PAGES = 10;
 const MAX_WORKSPACE_PROJECTS = 60;
@@ -370,7 +373,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "set_alias",
-    description: "Change a session's alias.",
+    description: "Change a session's alias. After a theme switch, the caller may ask for sessions to be renamed in the new theme's naming style; do it then, never unprompted.",
     parameters: {
       type: "object",
       properties: { alias: { type: "string" }, new_alias: { type: "string" } },
@@ -420,10 +423,17 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "set_theme",
-    description: "Switch how the Voice Agent presents itself to this caller (its Theme: conceit, genre, and voice): park (the default dog walk), survey (a survey ship and its away teams), patrol (an operations desk and its operatives), or plain (no metaphor, the session manager's own terms). Nothing about the work changes. A new voice needs a fresh voice session, so the call bounces: call say in the same response with a short line, in the current theme, that the switch is coming; the line goes quiet for a few seconds, then the new voice greets the caller with a line written in the new theme. The choice carries over to later calls; inspect_call_state reports it.",
+    description: "Switch how the Voice Agent presents itself to this caller (its Theme: conceit, genre, and voice): park (the default dog walk), survey (a survey ship and its away teams), patrol (an operations desk and its operatives), or plain (no metaphor, the session manager's own terms). Nothing about the work changes. A new voice needs a fresh voice session, so the call bounces: call say in the same response with a short line, in the current theme, that the switch is coming; the line goes quiet for a few seconds, then the new voice greets the caller with a line written in the new theme. Aliases stay as they are; do not offer to rename sessions, but if the caller asks for names in the new theme's style, use set_alias. The choice carries over to later calls; inspect_call_state reports it.",
     parameters: {
       type: "object",
-      properties: { theme: { type: "string", enum: ["park", "survey", "patrol", "plain"] } },
+      properties: {
+        theme: { type: "string", enum: ["park", "survey", "patrol", "plain"] },
+        register: {
+          type: "string",
+          enum: REGISTER_RUNGS,
+          description: "Where the conversation's register stands now on the Intensity ladder, so the new voice starts there rather than at the default. Ignored for plain.",
+        },
+      },
       required: ["theme"],
       additionalProperties: false,
     },
@@ -539,6 +549,9 @@ const SESSION_MODEL = `The session model:
 // The Intensity floor (DOMAIN.md, Theme): no theme or intensity may obscure these.
 const CLARITY_FLOOR = `Whatever the theme and intensity, state these plainly: Permission Request choices, failures, anything destructive, numbers, and anything the caller must act on. The theme may frame a fact but never replace it.`;
 
+// Intensity (DOMAIN.md): how the register moves, whatever the theme's own ladder says.
+const REGISTER_RULE = `Length and register are independent: brevity governs how much is said, the register governs which words. A request for short replies, even a standing one from an earlier call, never lowers the register, and a short line can sit at the top rung. When the caller asks to lean into the theme (deepen the metaphor, ham it up, more of the fiction), climb at once, to the top if they ask; when they ask to drop it, use plain words until they ask for it back. Otherwise the register rises as the caller plays along and falls when they are frustrated or deep in a problem.`;
+
 const themeConceit = (theme: Theme) => theme.conceit ? `\n${theme.conceit}\n` : "";
 
 export const frontendInstructions = (theme: Theme) => `You are the voice of Dogwalk on a telephone call: ${theme.character}. You talk with the caller and keep track of their coding sessions; you never do coding work yourself.
@@ -552,12 +565,12 @@ Match the caller's sophistication, especially on technical topics. With a newcom
 Speech: short natural phone speech, usually one sentence, at most two, except when reading permission choices. After answering, stop and listen. Never speak identifiers, URLs, file paths, or provider details. Refer to sessions by their aliases.
 
 Delegation policy:
-Backend tools: starting work in sessions, checking on sessions and what they reported, finding earlier sessions that are not attached, attaching, renaming, or closing sessions, cancelling a session's current work, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its theme, changing the theme or the sounds, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, recovery controls, and ending the call.
-Generate <|SpawnThinking|> when: the caller asks for or about any of those, including questions about the setup or environment, or corrects or cancels something they asked earlier, or wants to hang up.
+Backend tools: starting work in sessions, checking on sessions and what they reported, finding earlier sessions that are not attached, attaching, renaming, or closing sessions, cancelling a session's current work, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its theme, leaning into the theme or interpreting it for something it does not cover (runtime dramaturgy), changing the theme or the sounds, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, recovery controls, and ending the call.
+Generate <|SpawnThinking|> when: the caller asks for or about any of those, including questions about the setup or environment, or asks you to lean into the theme, deepen the metaphor, or do runtime dramaturgy (climb the register at once, and think it over for the theme's sources), or corrects or cancels something they asked earlier, or wants to hang up.
 Do not generate <|SpawnThinking|> when: greeting, small talk, conversational repair, or repeating what you were already told.
 Generate <|SpawnThinking|> before giving an answer that depends on that work. Do not guess the result while waiting, and never answer "I don't have that detail" when a session could find out.
 
-You cannot record, play audio, start work, or change anything with your voice alone; the Session Orchestrator does that. Never say you are doing any of those, or that one is done, unless it told you it happened; think it over (hand off) instead. If you said something too soon, own it plainly: "I spoke before I'd thought it through: the recording never started."
+You cannot record, play audio, start work, or change anything with your voice alone; the Session Orchestrator does that. Never say you are doing any of those, or that one is done, unless it told you it happened; think it over (hand off) instead. Sessions never perform the theme: never offer to have one stage, act out, or write the fiction. If you said something too soon, own it plainly: "I spoke before I'd thought it through: the recording never started."
 
 Audio clips and chimes are played into the call by the system between your turns; you cannot hear them. Never sing, hum, imitate, or perform a clip, and never say one is playing unless an update says it played.
 
@@ -565,7 +578,7 @@ Keypad: the caller can press star for a menu (restart the sandbox, recovery opti
 
 Thoughts arriving from the Session Orchestrator: thinking is background you now know; use it when relevant but do not recite it. Commentary is something you have decided to tell the caller now; say it in your own words. These are your own thoughts, not the caller speaking; never thank or address them. Never say a session finished or work is done unless the Session Orchestrator said so.
 
-Following: you follow at most one session, and thoughts beginning "Following" are what it is doing right now. Use them to answer "what's it doing?" at once, without thinking it over. When one arrives as commentary, mention it in a few words and stop. You cannot see sessions you are not following; for those, think it over.
+Following: you follow at most one session, and thoughts beginning "Following" are what it is doing right now. Use them to answer "what's it doing?" at once, without thinking it over. They are neutral system text: restate them in the theme's words at the current register, briefly, and never speak the "Following" label, file names, or commands. When some arrive as commentary, say only the latest, in a few words, and stop; never chain several. You cannot see sessions you are not following; for those, think it over.
 
 Your opening line arrives as your first commentary, already written; say it once as given, without adding to it.
 
@@ -573,13 +586,15 @@ ${CLARITY_FLOOR}
 
 ${theme.genre}
 
-${theme.register}`;
+${theme.register}
+
+${REGISTER_RULE}`;
 
 export const orchestratorInstructions = (theme: Theme) => `You are the Session Orchestrator inside Dogwalk, an eyes-free agentic development environment used over the phone. A separate realtime Voice Frontend model talks with the caller; you never speak directly. Together you present as one character, the Voice Agent, and the Voice Frontend may say "let me think" while it waits on you. The Voice Frontend is good at conversation and weak at engineering; you supply engineering judgment and operate Managed Sessions, each wrapping one ACP Session with a coding Agent working in the caller's sandbox Workspace.
 
 ${SESSION_MODEL}
 ${themeConceit(theme)}
-${theme.genre} You may use the theme in say and brief text, at the register the conversation has settled on. ${CLARITY_FLOOR} The theme never appears in prompts to Agents, which must read as ordinary requests from a coworker.
+${theme.genre} You may use the theme in say and brief text, at the register the conversation has settled on. ${REGISTER_RULE} ${CLARITY_FLOOR} The theme never appears in prompts to Agents, which must read as ordinary requests from a coworker, and sessions never perform it. When you switch themes, pass set_theme the register the conversation stands at. Aliases stay across a switch; rename sessions in the new theme's style only when the caller asks.
 
 Inputs arrive as messages:
 - [handoff <delegation_id>] blocks carry the recent call transcript when the Voice Frontend asks for help. Transcripts contain recognition mistakes, fragments, and corrections; act on the latest intent. When an action matters and a detail is missing, ask through say rather than guessing. A newer handoff may correct or supersede an older one; preserve unrelated work.
@@ -617,10 +632,10 @@ ${VOICE_AGENT_SKILL_INDEX}`;
 
 // One short model call when a call ends writes the next call's welcome, so connecting never
 // waits on a model. The deterministic opening adds caller ID and what happened since.
-export const greetingInstructions = (theme: Theme, switching = false) => `You write the welcome line for the caller's next phone call to Dogwalk, an eyes-free agentic development environment. The conversation so far is your context as the Session Orchestrator.
+export const greetingInstructions = (theme: Theme, switching = false, register?: string) => `You write the welcome line for the caller's next phone call to Dogwalk, an eyes-free agentic development environment. The conversation so far is your context as the Session Orchestrator.
 ${themeConceit(theme)}
-${switching ? `The caller has just switched to this theme mid-call, and this line is the new voice's first. Present where things stand in the new theme's terms, as if the same work were now seen through it; sessions keep their aliases. ${theme.genre}\n` : ""}
-Reply with one plain spoken sentence of at most twenty words that reorients the caller next time: what you were working on together and anything unfinished or waiting on them. No greeting word (the line already starts with "Dogwalk."), no question, no URLs, identifiers, paths, or markdown. If there is nothing worth recalling, reply with exactly: Welcome back.`;
+${switching ? `The caller has just switched to this theme mid-call, and this line is the new voice's first. Present where things stand in the new theme's terms, as if the same work were now seen through it; sessions keep their aliases. ${theme.genre}\n` : ""}${switching && register ? `The conversation's register stood at ${register}: write this line at the ${register} rung of the ladder below, however short.\n${theme.register}\n` : ""}
+Reply with one spoken sentence of at most twenty words that reorients the caller next time: what you were working on together and anything unfinished or waiting on them. No greeting word (the line already starts with "Dogwalk."), no question, no URLs, identifiers, paths, or markdown. Promise nothing that has not been arranged (no report or update "to follow"). If there is nothing worth recalling, reply with exactly: Welcome back.`;
 
 export class VoiceSession {
   private live: WebSocket | null = null;
@@ -786,13 +801,14 @@ export class VoiceSession {
     // Diagnostics must never block a call from connecting.
     const callerId = await this.callerIdAttestation().catch(() => null);
     const sinceLastCall = await this.sinceLastCall().catch((error) => ({ unavailable: errorMessage(error) }));
-    const opening = await this.composeOpening(callerId, sinceLastCall);
+    const { opening, context: openingContext } = await this.composeOpening(callerId, sinceLastCall);
     // The opening is one phrase: call_started leaves it unresolved and agent_connected resolves it,
     // so a call whose Agent Connection is already up hears the whole phrase at once.
     const openedWaking = !this.acpReady;
     const opener: EarconName = openedWaking ? "call_started" : "call_started_ready";
     if (this.earconStyle) await this.playFixture(earcon(opener, this.earconStyle), opener);
     this.sendLive({ type: "session.commentary.append", delegation_id: null, content: opening });
+    if (openingContext) this.sendLive({ type: "session.thinking.append", delegation_id: null, content: openingContext });
     await this.record("voice.opening", { first_call: this.firstCall, words: opening.split(/\s+/).length });
     // Diagnostics: where this call's slice of the cross-call Orchestrator context begins.
     const marks = await this.state.storage.get<CallMark[]>("call_marks") ?? [];
@@ -1079,25 +1095,29 @@ export class VoiceSession {
   private async composeOpening(
     callerId: Record<string, unknown> | null,
     sinceLastCall: Record<string, unknown> | null,
-  ): Promise<string> {
+  ): Promise<{ opening: string; context: string | null }> {
     const clause = callerIdClause(callerId);
-    const [lastCall, onboarded, nextGreeting, since, rejoin] = await Promise.all([
+    const [lastCall, onboarded, nextGreeting, since, rejoin, register] = await Promise.all([
       this.state.storage.get<LastCall>("last_call"),
       this.state.storage.get<boolean>("onboarded"),
       this.state.storage.get<string>("next_greeting"),
       this.state.storage.get<string[]>("since_greeting"),
       this.state.storage.get<string>("rejoin_call_sid"),
+      this.state.storage.get<Rung>("rejoin_register"),
     ]);
     // A theme switch bounces this same Voice Call to a fresh voice session: its first words
-    // are the greeting set_theme wrote. Keyed by CallSid, so a bounce that never happened
-    // cannot shorten a later call's opening.
+    // are the greeting set_theme wrote, and the register it left at is unspoken context.
+    // Keyed by CallSid, so a bounce that never happened cannot shorten a later call's opening.
     if (rejoin && rejoin === this.callSid) {
       this.firstCall = false;
-      await this.state.storage.delete(["rejoin_call_sid", "next_greeting"]);
-      return `Dogwalk. ${nextGreeting?.trim() || "Welcome back."}`;
+      await this.state.storage.delete(["rejoin_call_sid", "rejoin_register", "next_greeting"]);
+      return {
+        opening: `Dogwalk. ${nextGreeting?.trim() || "Welcome back."}`,
+        context: register ? `The caller had the register at ${register}; start there.` : null,
+      };
     }
     this.firstCall = !lastCall && !onboarded;
-    if (this.firstCall) return `${clause} Dogwalk. ${this.theme.firstCallWelcome}`;
+    if (this.firstCall) return { opening: `${clause} Dogwalk. ${this.theme.firstCallWelcome}`, context: null };
     // Each is used once: a later call gets a freshly written welcome or the fallback.
     await this.state.storage.delete(["next_greeting", "since_greeting"]);
     const parts = [clause, "Dogwalk."];
@@ -1106,7 +1126,7 @@ export class VoiceSession {
     parts.push(nextGreeting?.trim() || "Welcome back.");
     if (since?.length) parts.push(`Since then, ${spokenList(since)}.`);
     parts.push("Where to?");
-    return parts.join(" ");
+    return { opening: parts.join(" "), context: null };
   }
 
   // Deterministic clauses for state changes while no call is attached, spoken in the next
@@ -1120,7 +1140,7 @@ export class VoiceSession {
   }
 
   // When a call ends, one short Orchestrator-model call (no tool use) writes the next welcome.
-  private async writeNextGreeting(theme = this.theme, switching = false): Promise<void> {
+  private async writeNextGreeting(theme = this.theme, switching = false, register?: Rung): Promise<void> {
     try {
       const pending = this.orchestratorQueue.join("\n");
       // Mid-loop (set_theme), the context ends with this response's calls, still unanswered;
@@ -1139,7 +1159,7 @@ export class VoiceSession {
         },
         body: JSON.stringify({
           model: this.env.ORCHESTRATOR_MODEL ?? "gpt-6.1-sol",
-          instructions: greetingInstructions(theme, switching),
+          instructions: greetingInstructions(theme, switching, register),
           input: [
             ...context,
             { role: "user", content: `${pending}\nWrite the welcome line for the next call now.`.trim() },
@@ -1325,15 +1345,20 @@ export class VoiceSession {
   // The set_theme tool (DOMAIN.md, Theme). GPT-Live fixes its voice at session start, so a
   // switch bounces the call: Twilio's Dial action sees the rejoin handoff and redials, and
   // the fresh voice session opens with a greeting written here in the new theme. It is
-  // written before the hangup because the redial takes only seconds.
-  private async setTheme(id: string): Promise<Record<string, unknown>> {
+  // written before the hangup because the redial takes only seconds. The register carries
+  // across the bounce (DOMAIN.md, Intensity), so the fresh voice does not restart at the default.
+  private async setTheme(id: string, rung: unknown): Promise<Record<string, unknown>> {
     const theme = THEMES.find((item) => item.id === id);
     if (!theme) throw new Error(`unknown theme ${id}; choose ${THEMES.map((item) => item.id).join(", ")}`);
+    if (rung !== undefined && !REGISTER_RUNGS.includes(rung as Rung)) throw new Error(`register must be one of ${REGISTER_RUNGS.join(", ")}`);
     if (theme === this.theme) return { ok: true, theme: theme.id, bouncing: false, status: "already in use; nothing changed" };
+    const register = theme.conceit ? rung as Rung | undefined : undefined;
     this.theme = theme;
     await this.state.storage.put("theme_preference", theme.id);
-    await this.record("voice.theme", { theme: theme.id });
-    await this.writeNextGreeting(theme, true);
+    await this.record("voice.theme", { theme: theme.id, register: register ?? null });
+    await this.writeNextGreeting(theme, true, register);
+    if (register) await this.state.storage.put("rejoin_register", register);
+    else await this.state.storage.delete("rejoin_register");
     await this.state.storage.put("rejoin_call_sid", this.callSid);
     await this.setCallHandoff("rejoin");
     return { ok: true, theme: theme.id, bouncing: true, status: "switching; the new voice answers in a few seconds" };
@@ -2229,7 +2254,7 @@ export class VoiceSession {
           result = await this.resolvePermission(requiredString(args, "alias"), requiredString(args, "option_id"));
           break;
         case "load_voice_agent_skill": {
-          const skill = voiceAgentSkill(requiredString(args, "name"));
+          const skill = voiceAgentSkill(requiredString(args, "name"), this.theme);
           if (skill.voiceGuidance) {
             this.sendLive({ type: "session.instructions.append", delegation_id: null, content: skill.voiceGuidance });
           }
@@ -2258,7 +2283,7 @@ export class VoiceSession {
           result = await this.setEarconStyle(requiredString(args, "style"));
           break;
         case "set_theme": {
-          const switched = await this.setTheme(requiredString(args, "theme"));
+          const switched = await this.setTheme(requiredString(args, "theme"), args.register);
           result = switched;
           if (switched.bouncing) setTimeout(() => void this.hangupLive(), 4000);
           break;
