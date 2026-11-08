@@ -2,7 +2,8 @@
 // plays as keypad tones, claims it, waits for the caller to accept, then shows live Managed
 // Session status, a timeline of the call, a read-only Workspace file viewer, Human Takeover
 // launchers, and the Whiteboard (boards the walker draws for the caller to read or answer) over /pair/ws.
-// Media files (images, PDF, audio, video, downloads) come from GET /pair/file as blob URLs.
+// Media files (images, PDF, audio, video, downloads) come from GET /pair/file as blob URLs, and
+// Whiteboard images, captured when the board was drawn, from GET /pair/asset/<hash>.
 //
 // String.raw keeps every backslash in the page script literal, so regexes and "\n" escapes
 // reach the browser as written. The page must therefore contain no backtick and no dollar-brace
@@ -1984,11 +1985,12 @@ function viewerFailed(message) {
 // Fetches a file's bytes with the pairing token in a header. limit > 0 stops before reading a larger body.
 // as "image" asks the server to prove the bytes are an image (Whiteboard images).
 async function fetchFile(path, limit, controller, as) {
+  return fetchPaired("/pair/file?path=" + encodeURIComponent(path) + (as ? "&as=" + encodeURIComponent(as) : ""), limit, controller);
+}
+async function fetchPaired(url, limit, controller) {
   const token = sessionStorage.getItem(TOKEN_KEY);
   if (!token) throw new Error("This browser is not paired.");
-  const response = await fetch("/pair/file?path=" + encodeURIComponent(path) + (as ? "&as=" + encodeURIComponent(as) : ""), {
-    headers: { authorization: "Bearer " + token }, signal: controller.signal,
-  });
+  const response = await fetch(url, { headers: { authorization: "Bearer " + token }, signal: controller.signal });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.error ? String(body.error) : "The server answered " + response.status + ".");
@@ -3022,34 +3024,36 @@ function wbChart(node, ctx) {
   return figure;
 }
 
-// ---- Images: Workspace files fetched with the pairing token into blob URLs this page owns. A program
-// carries only the path. SVG only ever sits in an <img>, where its scripts never run and it loads
-// nothing else. Each path is fetched once and shared by every board showing it (reference counted);
-// a board releases its paths when it leaves the page, and the last release aborts the fetch and
-// revokes the URL. Boards moved into the whiteboard's own tab keep using this page's URLs, which
-// stay valid because that tab closes with this page. A failed fetch is retried by the next board.
+// ---- Images: a program carries only the path; the board's manifest maps it to the Board Asset
+// captured when it was drawn (or why it was not), so viewing a board never reads the Sandbox.
+// Assets are fetched with the pairing token into blob URLs this page owns. SVG only ever sits in an
+// <img>, where its scripts never run and it loads nothing else. Each asset is fetched once and
+// shared by every board showing it (reference counted by hash); a board releases its assets when
+// it leaves the page, and the last release aborts the fetch and revokes the URL. Boards moved into
+// the whiteboard's own tab keep using this page's URLs, which stay valid because that tab closes
+// with this page. A failed fetch is retried by the next board.
 const WB_IMAGE_MAX = 8;   // images per board; the rest are left out with an error
 const WB_IMAGE_LOADS = 3; // fetches at once
-const wbImages = new Map(); // path -> { path, refs, url, error, waiters, controller }
+const wbImages = new Map(); // hash -> { hash, refs, url, error, waiters, controller }
 const wbImageQueue = [];
 let wbImageLoads = 0;
 
-function wbImageAcquire(path, done) {
-  let entry = wbImages.get(path);
-  if (entry && entry.error) { wbImages.delete(path); entry = null; }
+function wbImageAcquire(hash, done) {
+  let entry = wbImages.get(hash);
+  if (entry && entry.error) { wbImages.delete(hash); entry = null; }
   if (!entry) {
-    entry = { path, refs: 0, url: "", error: "", waiters: [], controller: null };
-    wbImages.set(path, entry);
+    entry = { hash, refs: 0, url: "", error: "", waiters: [], controller: null };
+    wbImages.set(hash, entry);
     wbImageQueue.push(entry);
     wbImagePump();
   }
   entry.refs++;
   if (entry.url) done(entry); else entry.waiters.push(done);
 }
-function wbImageRelease(path) {
-  const entry = wbImages.get(path);
+function wbImageRelease(hash) {
+  const entry = wbImages.get(hash);
   if (!entry || --entry.refs > 0) return;
-  wbImages.delete(path);
+  wbImages.delete(hash);
   entry.waiters = [];
   if (entry.controller) entry.controller.abort();
   if (entry.url) URL.revokeObjectURL(entry.url);
@@ -3057,25 +3061,26 @@ function wbImageRelease(path) {
 function wbImagePump() {
   while (wbImageLoads < WB_IMAGE_LOADS && wbImageQueue.length) {
     const entry = wbImageQueue.shift();
-    if (wbImages.get(entry.path) !== entry) continue; // released while it waited
+    if (wbImages.get(entry.hash) !== entry) continue; // released while it waited
     wbImageLoads++;
     entry.controller = new AbortController();
-    fetchFile(entry.path, 0, entry.controller, "image")
-      .then((blob) => { if (wbImages.get(entry.path) === entry) entry.url = URL.createObjectURL(blob); })
+    fetchPaired("/pair/asset/" + entry.hash, 0, entry.controller)
+      .then((blob) => { if (wbImages.get(entry.hash) === entry) entry.url = URL.createObjectURL(blob); })
       .catch((error) => { entry.error = error.message || "it could not be fetched"; })
       .finally(() => {
         wbImageLoads--;
         entry.controller = null;
         const waiters = entry.waiters;
         entry.waiters = [];
-        if (wbImages.get(entry.path) === entry) for (const done of waiters) done(entry);
+        if (wbImages.get(entry.hash) === entry) for (const done of waiters) done(entry);
         wbImagePump();
       });
   }
 }
 
 // A figure that holds its place while loading and, on failure, keeps its alt text and the reason
-// so the rest of the board reads and answers as usual. alt "" marks a decorative image.
+// so the rest of the board reads and answers as usual. alt "" marks a decorative image. A capture
+// failure was already in draw_on_whiteboard's result, so only a failure here reaches the walker.
 function wbImage(node, ctx) {
   const p = node.props;
   const size = p.size || "medium";
@@ -3084,20 +3089,25 @@ function wbImage(node, ctx) {
   const status = el("span", { class: "small muted" }, decorative ? "" : "Loading " + basename(p.path));
   const frame = el(zoomable ? "button" : "div", { class: "wb-img-frame", type: zoomable ? "button" : null, "aria-busy": "true", title: p.path }, status);
   const figure = el("figure", { class: "wb-image size-" + size }, [frame, p.caption ? wbInline("figcaption", "small", p.caption) : null]);
-  const fail = (reason) => {
+  const fail = (reason, known) => {
     figure.classList.add("failed");
     frame.removeAttribute("aria-busy");
     if (zoomable) frame.disabled = true;
     status.textContent = (p.alt ? p.alt + ". " : "") + "Not shown: " + reason;
-    if (ctx.open) wbImageFailed(ctx.boardId, p.path, reason);
+    if (ctx.open && !known) wbImageFailed(ctx.boardId, p.path, reason);
   };
   if (ctx.images.length >= WB_IMAGE_MAX) {
     ctx.errors.push("line " + node.line + ": a board shows at most " + WB_IMAGE_MAX + " images; " + p.path + " was left out");
     fail("too many images on this board");
     return figure;
   }
-  ctx.images.push(p.path);
-  wbImageAcquire(p.path, (entry) => {
+  const asset = ctx.manifest[p.path];
+  if (!asset || !asset.hash) {
+    fail(asset && asset.error ? String(asset.error) : "it was not captured when the board was drawn", Boolean(asset));
+    return figure;
+  }
+  ctx.images.push(asset.hash);
+  wbImageAcquire(asset.hash, (entry) => {
     const img = el("img", { alt: p.alt, decoding: "async" });
     img.src = entry.url;
     img.decode().then(() => {
@@ -3118,7 +3128,7 @@ function wbImageFailed(boardId, path, reason) {
   if (send({ type: "board_error", id: boardId, error: "the image " + path + " was not shown (" + reason + "); the rest of the board is drawn" })) wbImageFailures.add(key);
 }
 function wbReleaseImages(entry) {
-  for (const path of entry.images || []) wbImageRelease(path);
+  for (const hash of entry.images || []) wbImageRelease(hash);
   entry.images = [];
 }
 
@@ -3128,7 +3138,7 @@ function wbReleaseImages(entry) {
 // they collect per item and send once every item has one, or early with Send now.
 function wbBoardNode(board) {
   const ctx = {
-    errors: [], fields: [], buttons: [], items: [], controls: [], images: [], boardId: board.id, open: board.status === "open",
+    errors: [], fields: [], buttons: [], items: [], controls: [], images: [], manifest: board.images, boardId: board.id, open: board.status === "open",
     field(name, line, controls, get, set) {
       this.controls.push(...controls);
       if (this.fields.some((f) => f.name === name)) { this.errors.push("line " + line + ": two fields are named " + JSON.stringify(name) + "; only the first is sent (drawn anyway)"); return; }
@@ -3260,6 +3270,7 @@ function wbNormalize(raw) {
   return {
     id: String(raw.id), at: Number(raw.at) || Date.now(), program: String(raw.program || ""), note: String(raw.note || "").slice(0, 300),
     status: raw.status === "answered" ? "answered" : "open", answer: raw.answer && typeof raw.answer === "object" ? raw.answer : null,
+    images: raw.images && typeof raw.images === "object" ? raw.images : {},
   };
 }
 // Rebuilds a board only when what it shows changed, so an update never wipes half-entered input.

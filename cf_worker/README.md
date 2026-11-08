@@ -333,13 +333,26 @@ shown, binary refused).
 The page also streams raw Workspace files for its viewers from
 `GET /pair/file?path=` (the credential as a bearer header; served sandboxed and
 `nosniff`, 50 MB cap). Reads resolve symlinks in the Sandbox (`realpath`) and
-refuse anything that leads outside `/home/daytona`. Whiteboard `Image` components
-fetch with `&as=image`, and any `.png`, `.jpg`, `.gif`, `.webp`, or `.svg` is read
-the same way: at most 8 MB actually downloaded, typed by sniffing the bytes (a
-name that disagrees is refused), and SVG served with
-`default-src 'none'; style-src 'unsafe-inline'; img-src data:`. The page shows
-every image through an `<img>` from a blob URL it revokes when the last board
-using it leaves. It also shows a live feed of the call (`feed` messages:
+refuse anything that leads outside `/home/daytona`. `&as=image`, or any `.png`,
+`.jpg`, `.gif`, `.webp`, or `.svg`, reads the file as an image: at most 8 MB
+actually downloaded, typed by sniffing the bytes (a name that disagrees is
+refused), and SVG served with
+`default-src 'none'; style-src 'unsafe-inline'; img-src data:`.
+
+Whiteboard images are Board Assets, captured when `draw_on_whiteboard` runs
+through the same image checks (at most 1.5 MB each, 6 MB and 8 images per board,
+25 MB stored per identity). Each is stored once in Durable Object storage under
+`board_asset:<sha-256>` (`{type, bytes}`), indexed in `board_assets`, and the
+board keeps a manifest `images: {path: {hash, type, bytes} | {error}}`. The page
+fetches `GET /pair/asset/<hash>` (bearer credential, `private, no-store`,
+`nosniff`, the image CSP), which serves only hashes a retained board refers to
+and never touches the Sandbox. Assets no retained board refers to are deleted
+when a draw evicts boards, and all of them on Sandbox replacement. The page
+shows every image through an `<img>` from a blob URL, one per hash, revoked when
+the last board using it leaves. When the page reads an `.html` file, each
+`<img src>` naming a Workspace image (absolute, or relative to the report) is
+rewritten with `HTMLRewriter` into a `data:` URI (1.5 MB each, 6 MB and 24
+images per document); others keep their tag, with the reason in `alt`. It also shows a live feed of the call (`feed` messages:
 caller and Voice Frontend speech, Orchestrator briefs, says, and Agent prompts,
 Agent remarks, tool calls and Reports, harness events, keypad presses).
 

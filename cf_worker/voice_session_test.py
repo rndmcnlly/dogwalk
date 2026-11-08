@@ -382,6 +382,9 @@ ORCHESTRATOR_SCRIPT = [
     # A chapter closes: the Orchestrator compacts. An over-long Memory is refused first.
     ("[harness event] whiteboard_answer", lambda ctx: [call("cc-long", "compact_context", memory="x" * 12_001)]),
     ("[harness event] whiteboard_answer", lambda ctx: [call("cc-memory", "compact_context", memory=MEMORY_TEXT)]),
+    # Five more boards push the first out of retention, and its captured image with it.
+    ('"key":"A"', lambda ctx: [call(f"kA-evict-{n}", "draw_on_whiteboard", program=ICON_PROGRAM, note=f"icon {n}") for n in range(1, 6)]),
+    ('"key":"B"', lambda ctx: [call("kB-html", "show_in_browser", uri="dogwalk:file/report.html", note="the chart report")]),
     ('"key":"3"', lambda ctx: [
         call("k3-say", "say", text=SWITCH_SAY, delegation_id=None),
         call("k3-theme", "set_theme", theme="survey", register="high"),
@@ -407,16 +410,18 @@ RIVAL_PHONE = "+15555550107"
 TEST_NUMBERS = [TEST_PHONE, SEED_INVITER, BOUND_PHONE, INVITEE_PHONE, REBOUND_PHONE, RACE_PHONE, LATE_PHONE, RIVAL_PHONE]
 MEMORY_TEXT = "Caller prefers terse updates. Juniper fixes the parser; Dozer works in honeydozer."
 BOARD_PROGRAM = (
-    'root = Stack([fig, pick])\nfig = Image("diagram.svg", "The parser\'s two stages", "Drawn by an agent", "small")\n'
+    'root = Stack([fig, big, pick])\nfig = Image("diagram.svg", "The parser\'s two stages", "Drawn by an agent", "small")\n'
+    'big = Image(\'big.png\', "A generated chart")\n'
     'pick = Choice("approach", ["Quick fix", "Refactor"], "Which approach?")'
 )
+ICON_PROGRAM = 'root = Stack([Image("/home/daytona/chart.png", "", null, "icon"), Text("Next")])'
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say", "f-begin", "f-inspect",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
     "h4-say", "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
-    "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "k3-say", "k3-theme",
+    "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5", "kB-html", "k3-say", "k3-theme",
     "k2-dramaturgy",
 ]
 
@@ -720,7 +725,13 @@ IMAGE_FILES = {
     "notes.png": (b"just some text\n", 15),
     "huge.png": (PNG_BYTES + bytes(8 * 1024 * 1024), 1000),
     "escape.png": (PNG_BYTES, len(PNG_BYTES)),
+    "big.png": (PNG_BYTES + bytes(1_600_000), len(PNG_BYTES) + 1_600_000),
 }
+# An HTML report: a Workspace image (relative) is inlined, a web image and one outside the Workspace are not.
+REPORT_HTML = (
+    '<!doctype html><h1>Chart</h1><img src="chart.png" srcset="chart.png 2x" alt="The chart">'
+    '<img src="https://example.com/a.png" alt="web"><img src="/etc/x.png" alt="Outside"><img src="data:image/gif;base64,R0lG" alt="inline">'
+)
 
 
 def sandbox_files(path: str):
@@ -735,6 +746,10 @@ def sandbox_files(path: str):
         listing = [{"name": "REPORT.md", "isDir": False, "size": len(REPORT_TEXT), "modTime": "2026-11-08T10:00:00Z"},
                    {"name": "parser", "isDir": True, "size": 4096, "modTime": "2026-11-08T09:00:00Z"}]
         return 200, json.dumps(listing).encode(), "application/json"
+    if path == f"{prefix}/info?path=%2Fhome%2Fdaytona%2Freport.html":
+        return 200, json.dumps({"name": "report.html", "isDir": False, "size": len(REPORT_HTML)}).encode(), "application/json"
+    if path == f"{prefix}/download?path=%2Fhome%2Fdaytona%2Freport.html":
+        return 200, REPORT_HTML.encode(), "application/octet-stream"
     if path == f"{prefix}/info?path=%2Fhome%2Fdaytona%2FREPORT.md":
         return 200, json.dumps({"name": "REPORT.md", "isDir": False, "size": len(REPORT_TEXT)}).encode(), "application/json"
     if path == f"{prefix}/download?path=%2Fhome%2Fdaytona%2FREPORT.md":
@@ -1180,8 +1195,15 @@ async def run_protocol(identity: str) -> None:
             await mocks.send_live(dtmf("5"))
             board = (await recv_type(browser, "board", 15))["board"]
             assert board["program"] == BOARD_PROGRAM and board["status"] == "open" and board["note"] == "pick one", board
+            # Images are captured when drawn: a manifest of content hashes, never bytes in the program.
+            svg_hash = hashlib.sha256(SVG_BYTES).hexdigest()
+            assert board["images"]["/home/daytona/diagram.svg"] == {"hash": svg_hash, "type": "image/svg+xml", "bytes": len(SVG_BYTES)}, board["images"]
+            assert "too large" in board["images"]["/home/daytona/big.png"]["error"], board["images"]
             await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "k5-board" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-            assert "page_stale" in OrchestratorMock.tool_output("k5-board"), "draw_on_whiteboard warns of the stale page"
+            drawn = OrchestratorMock.tool_output("k5-board")
+            assert "page_stale" in drawn, "draw_on_whiteboard warns of the stale page"
+            assert [item["path"] for item in drawn["images_not_captured"]] == ["/home/daytona/big.png"] and "WebP" in drawn["images_not_captured"][0]["error"], drawn
+            assert svg_hash not in json.dumps(drawn), "no hash reaches the Orchestrator"
             # The stale page cannot render Image; its error says the page is out of date.
             await stale.send(json.dumps({"type": "board_error", "id": board["id"], "error": "line 2: unknown component Image (left out)"}))
             await wait_for(lambda: any("whiteboard_error" in str(item.get("content")) and "out of date" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
@@ -1243,6 +1265,42 @@ async def run_protocol(identity: str) -> None:
             assert (await asyncio.to_thread(pair_raw, "/pair/file?path=notes.png", bearer))[0] == 415
             assert (await asyncio.to_thread(image, "chart.png", {"authorization": f"Bearer {identity}.{'0' * 48}"}))[0] == 401
             assert not any("example.com" in command for command in DaytonaMock.executed)
+            # A board's images come from its captured assets, never the Sandbox: with the file
+            # gone, the asset still serves, typed and confined like an image read.
+            def asset(digest: str, headers: dict = bearer) -> tuple[int, dict, bytes]:
+                status, raw, body = pair_raw(f"/pair/asset/{digest}", headers)
+                return status, {key.lower(): value for key, value in raw.items()}, body
+            removed = IMAGE_FILES.pop("diagram.svg")
+            try:
+                assert (await asyncio.to_thread(image, "diagram.svg"))[0] == 404
+                status, headers, body = await asyncio.to_thread(asset, svg_hash)
+                assert status == 200 and body == SVG_BYTES and headers.get("content-type") == "image/svg+xml", (status, headers)
+                assert headers.get("x-content-type-options") == "nosniff" and "no-store" in headers.get("cache-control", "")
+                assert "default-src 'none'" in headers.get("content-security-policy", "") and "sandbox" in headers.get("content-security-policy", "")
+            finally:
+                IMAGE_FILES["diagram.svg"] = removed
+            assert (await asyncio.to_thread(asset, hashlib.sha256(PNG_BYTES).hexdigest()))[0] == 404, "only hashes a board refers to"
+            assert (await asyncio.to_thread(asset, svg_hash, {"authorization": f"Bearer {identity}.{'0' * 48}"}))[0] == 401
+            assert (await asyncio.to_thread(asset, "../file"))[0] == 404
+            # Five newer boards retire the first: its asset is collected and no longer served.
+            await mocks.send_live(dtmf("A"))
+            for _ in range(5):
+                await recv_type(browser, "board", 15)
+            await wait_for(lambda: any(item.get("call_id") == "kA-evict-5" and item.get("type") == "function_call_output" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
+            icon = OrchestratorMock.tool_output("kA-evict-5")
+            assert icon["ok"] and "images_not_captured" not in icon, icon
+            assert (await asyncio.to_thread(asset, svg_hash))[0] == 404, "an evicted board's asset is gone"
+            status, headers, body = await asyncio.to_thread(asset, hashlib.sha256(PNG_BYTES).hexdigest())
+            assert status == 200 and body == PNG_BYTES and headers.get("content-type") == "image/png", "one asset shared by five boards"
+            assert "whiteboard.assets_collected" in await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
+            # An HTML report's Workspace images are inlined when it is read for the page.
+            await mocks.send_live(dtmf("B"))
+            assert (await recv_type(browser, "show", 15))["uri"] == "dogwalk:file//home/daytona/report.html"
+            await browser.send(json.dumps({"type": "read", "id": 9, "path": "/home/daytona/report.html"}))
+            html = (await recv_type(browser, "file"))["text"]
+            assert f'src="data:image/png;base64,{base64.b64encode(PNG_BYTES).decode()}"' in html and "srcset" not in html, html[:400]
+            assert 'src="https://example.com/a.png"' in html and 'src="data:image/gif;base64,R0lG"' in html, html
+            assert 'src="/etc/x.png" alt="Outside (image not shown: only files under /home/daytona can be read)"' in html, html
             # Human Takeover: a terminal launch yields a one-time ticket in a URL fragment.
             await browser.send(json.dumps({"type": "launch", "kind": "terminal", "id": 7}))
             launch = await recv_type(browser, "launch")
@@ -1541,7 +1599,7 @@ def sandbox_toolbox(command: str) -> dict | None:
         path = re.search(r"/home/daytona[^'\\]*", command).group(0)
         if path.endswith("/escape.png"):
             return {"result": "/etc/shadow\n", "exitCode": 0}
-        known = path.endswith("/REPORT.md") or path.rsplit("/", 1)[-1] in IMAGE_FILES
+        known = path.endswith("/REPORT.md") or path.endswith("/report.html") or path.rsplit("/", 1)[-1] in IMAGE_FILES
         return {"result": f"{path}\n", "exitCode": 0} if known else {"result": "", "exitCode": 1}
     if "test -d" in command:
         return {"result": "", "exitCode": 0 if "/home/daytona/honeydozer" in command else 1}
