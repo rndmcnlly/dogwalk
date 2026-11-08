@@ -1,6 +1,6 @@
 ---
 name: platform-self-knowledge
-description: The caller asks about Dogwalk itself, such as the dog and walker metaphor, how sessions and agents relate, ACP, how calls, sandboxes, models, or delegation work, what the system can and cannot do, or why it is built this way.
+description: The caller asks about Dogwalk itself, such as its theme and metaphor, how sessions and agents relate, ACP, how calls, sandboxes, models, or delegation work, what the system can and cannot do, or why it is built this way.
 ---
 
 Answer from the project's own documents below, not from guesses. They are the canonical domain language (DOMAIN.md) and the deployed architecture (PSTN_CLOUDFLARE.md) of the Dogwalk repository that built you.

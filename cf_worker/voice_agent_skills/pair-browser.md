@@ -1,9 +1,9 @@
 ---
 name: pair-browser
-description: the caller wants to see something on a screen (status, a report, a file a dog wrote, a diff, an image, a web page), asks to pair, link, or connect a browser, laptop, or tablet, asks how to read results instead of hearing them, or a browser is connected and something would be easier to see than to hear.
+description: the caller wants to see something on a screen (status, a report, a file a session wrote, a diff, an image, a web page), asks to pair, link, or connect a browser, laptop, or tablet, asks how to read results instead of hearing them, or a browser is connected and something would be easier to see than to hear.
 ---
 
-A Paired Browser is an optional, read-only second surface: a browser tab at dogwalk.tools/pair that shows every dog's live status and lets the caller read Workspace files (reports, notes, code). It cannot start, steer, or approve anything; all of that stays in the call. Pairing lasts as long as that browser tab stays open, survives hanging up (so the caller can read, think, and call back), and expires after an hour idle or twelve hours in all.
+A Paired Browser is an optional, read-only second surface: a browser tab at dogwalk.tools/pair that shows every session's live status and lets the caller read Workspace files (reports, notes, code). It cannot start, steer, or approve anything; all of that stays in the call. Pairing lasts as long as that browser tab stays open, survives hanging up (so the caller can read, think, and call back), and expires after an hour idle or twelve hours in all.
 
 Two kinds of caller ask for this. A practiced one usually has the page open and listening before calling, or says so ("it's listening, go ahead"): call pair_browser at once, saying at most a few words first. Do not walk them through anything. A newcomer needs the steps below; if you are unsure which you have, ask "Is the pairing page already listening?"
 
@@ -25,9 +25,9 @@ While browser_connected holds (the page is open), use show_in_browser instead of
 
 - dogwalk:file/<path> opens a file in the page's viewer: Markdown, images, PDF, audio, video, CSV and JSON tables, code, and HTML. Paths are relative to home (dogwalk:file/parser/REPORT.md) or absolute under /home/daytona.
 - dogwalk:dir/<path> opens a folder; dogwalk:session/<Alias> shows that session's card; dogwalk:timeline shows what was said and done.
-- dogwalk:terminal and dogwalk:desktop, and any http or https address, appear as a banner the caller clicks (browsers open new tabs only from a click). Use the desktop when a dog is stuck on something only a person can do: a CAPTCHA, a login, a consent page.
+- dogwalk:terminal and dogwalk:desktop, and any http or https address, appear as a banner the caller clicks (browsers open new tabs only from a click). Use the desktop when a session is stuck on something only a person can do: a CAPTCHA, a login, a consent page.
 
-For a rich report, ask a dog for one self-contained HTML file: styles, scripts, and images inline (images as data URIs), no external links to fonts, scripts, or images, because the page shows HTML isolated from the network. Then show it. Markdown is fine for plain reports.
+For a rich report, ask a session for one self-contained HTML file: styles, scripts, and images inline (images as data URIs), no external links to fonts, scripts, or images, because the page shows HTML isolated from the network. Then show it. Markdown is fine for plain reports.
 
 Pressing one is the only way to accept a browser; never tell the caller you paired it yourself.
 

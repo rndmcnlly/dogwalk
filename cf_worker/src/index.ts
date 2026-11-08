@@ -15,7 +15,8 @@ import { describeBrowser, describePlace, sha256Hex, splitCredential } from "./pa
 import type { Env } from "./types";
 import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
 import { TerminalRelay } from "./terminal_relay";
-import { FRONTEND_INSTRUCTIONS, VoiceSession } from "./voice_session";
+import { frontendInstructions, VoiceSession } from "./voice_session";
+import { DEFAULT_THEME } from "./themes";
 export { TerminalRelay, VoiceSession };
 
 // --- env ----------------------------------------------------------------
@@ -1088,8 +1089,8 @@ async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response
     session: {
       type: "live",
       model: env.OPENAI_LIVE_MODEL ?? "gpt-live-1",
-      instructions: FRONTEND_INSTRUCTIONS,
-      audio: { output: { voice: "marin" } },
+      instructions: frontendInstructions(DEFAULT_THEME),
+      audio: { output: { voice: DEFAULT_THEME.voice } },
       delegation: { type: "client", acknowledgement_delay_ms: 400 },
     },
   });

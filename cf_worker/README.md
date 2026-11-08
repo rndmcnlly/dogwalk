@@ -270,7 +270,7 @@ attestation, and a since-last-call summary as a harness event; tools remain
 authoritative for current reads and all actions.
 
 The Voice Frontend normally speaks one short sentence, then listens. Dog-walking
-presentation language is isolated in `src/voice_flavors.ts`; machine-facing
+presentation language is isolated in Themes (`src/themes.ts`); machine-facing
 contracts remain neutral. `end_call` closes the call, while
 `open_recovery_menu` hands control back to deterministic TwiML for restart or
 confirmed destructive replacement.

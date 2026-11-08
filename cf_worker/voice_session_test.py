@@ -179,7 +179,9 @@ PROMPT_UPDATES = [
 ]
 
 CALL_BRIEF = "Call started with no Managed Sessions."
-READY_BRIEF = "The dogs are awake."
+READY_BRIEF = "The sandbox is ready."
+# Mirrors PARK.lexicon in src/themes.ts: words that would show the theme leaking into ACP.
+PARK_LEXICON = ["dog", "leash", "walker", "sniff"]
 KEYPAD_SAY = "Seven noted."
 NEXT_GREETING = "Last time Juniper built a tiny verified artifact."
 FIRST_OPENING = (
@@ -610,12 +612,14 @@ async def run_protocol(identity: str) -> None:
         frontend = session["instructions"]
         assert "Match the caller's sophistication" in frontend
         assert "press star for a menu" in frontend and "pound to make you stop talking" in frontend
-        # The split-brain fiction: the voice defers to its head and names no backend
-        # except in GPT-Live's delegation-policy label and the one sentence forbidding it.
-        assert "Your head (a working fiction" in frontend
-        assert "never need to mention a backend" in frontend
+        # A neutral core holds the rules; the Park theme only presents them. The voice
+        # defers to its head and names no backend except in GPT-Live's delegation-policy
+        # label and the one sentence forbidding it.
+        assert "The session model:" in frontend and "Whatever the theme and intensity" in frontend
+        assert "The walk (Park theme)" in frontend and "your head (your mind)" in frontend
+        assert "Never mention a backend" in frontend
         assert "backend" not in (
-            frontend.replace("Backend tools:", "").replace("never need to mention a backend", "").lower()
+            frontend.replace("Backend tools:", "").replace("Never mention a backend", "").lower()
         )
 
         # Talk first: the opening is spoken before the Agent has even initialized.
@@ -909,7 +913,7 @@ async def run_protocol(identity: str) -> None:
             assert escaped["id"] == 3 and "/home/daytona" in escaped["error"]
             await browser.send(json.dumps({"type": "ping"}))
             await recv_type(browser, "pong")
-            # The walker learns the page is open, and can put a file on it.
+            # The Orchestrator learns the page is open, and can put a file on it.
             await wait_for(lambda: any("browser_connected" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
             await mocks.send_live(dtmf("9"))
             shown = await recv_type(browser, "show", 15)
@@ -924,7 +928,7 @@ async def run_protocol(identity: str) -> None:
             assert browser_state["paired"] and browser_state["page_open"] and browser_state["device"] == "Chrome on a Mac", browser_state
             assert browser_state["showing_now"] == {"view": "files", "path": "/home/daytona/REPORT.md"}, browser_state
             assert state["earcon_style"] == "tonal", state
-            # The walker draws a board; the caller answers it on the page; the walker hears it.
+            # The Orchestrator draws a board; the caller answers it on the page; it hears the answer.
             await mocks.send_live(dtmf("5"))
             board = (await recv_type(browser, "board", 15))["board"]
             assert board["program"] == BOARD_PROGRAM and board["status"] == "open" and board["note"] == "pick one", board
@@ -1000,12 +1004,13 @@ async def run_protocol(identity: str) -> None:
         handoff_rows = OrchestratorMock.user_message('"key":"7"')
         assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows
 
-        # The canine fiction stays above ACP: no Agent prompt mentions dogs.
+        # Themes stay above ACP: no Agent prompt uses the theme's words.
         prompts = [m for m in mocks.acp_seen if m.get("method") == "session/prompt"]
         assert prompts
         for message in prompts:
             for block in message["params"]["prompt"]:
-                assert "dog" not in block.get("text", "").lower()
+                text = block.get("text", "").lower()
+                assert not any(word in text for word in PARK_LEXICON), text
 
         # Nothing with a URL reached the caller-facing lane.
         spoken = [m for m in mocks.seen if m.get("type") == "session.commentary.append"]
@@ -1018,14 +1023,14 @@ async def run_protocol(identity: str) -> None:
             assert payload["model"] == "gpt-6.1-sol"
             assert payload["store"] is False and payload["parallel_tool_calls"] is True
             assert "Session Orchestrator" in payload["instructions"]
-            assert "The walk (a working fiction)" in payload["instructions"]
+            assert "The session model:" in payload["instructions"] and "The walk (Park theme)" in payload["instructions"]
             assert "first-call-tour" in payload["instructions"]
             assert {tool["name"] for tool in payload["tools"]} >= {
                 "brief", "say", "create_managed_session", "begin_prompt_turn", "end_call",
                 "discover_persisted_sessions", "load_persisted_session", "set_alias",
                 "close_managed_session", "list_workspace_projects",
             }
-            assert "Never create a dog in home and tell it to work in another directory" in payload["instructions"]
+            assert "Never create a session in home and tell it to work in another directory" in payload["instructions"]
         fed_back = {
             item["call_id"]
             for _, payload in requests

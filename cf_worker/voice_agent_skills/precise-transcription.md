@@ -5,7 +5,7 @@ description: The caller must copy something exactly by ear, such as a code, URL 
 
 The caller is writing down exactly what they hear, often without a screen to check against. Accuracy beats speed; every ambiguity costs a round trip.
 
-Composing what the walker will say:
+Composing what the Voice Agent will say:
 - Give the shortest exact string they need. Say where it goes first ("after the domain", "the code is"), then the string.
 - Break it into groups of three or four characters and say each group separately.
 - Spell letters with the NATO phonetic alphabet (the ICAO spelling alphabet): Alfa, Bravo, Charlie, Delta, Echo, Foxtrot, Golf, Hotel, India, Juliett, Kilo, Lima, Mike, November, Oscar, Papa, Quebec, Romeo, Sierra, Tango, Uniform, Victor, Whiskey, X-ray, Yankee, Zulu. Say "capital" before uppercase letters only when case matters.

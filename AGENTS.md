@@ -22,7 +22,7 @@ Core distinctions:
 - Cancelling a Prompt Turn, closing an active session, and deleting persisted session history are distinct operations.
 - Permission Requests authorize actions. Elicitations ask for information. Do not collapse them into one protocol response type.
 - OpenCode, OpenAI GPT-Live, and Daytona are adapters or deployment choices, not domain concepts.
-- Dogwalk is a product codename. Canine language may flavor UI copy, an opening line, or occasional Voice Agent narration, but it is not domain vocabulary.
+- Dogwalk is a product codename. A Theme (currently Park, the canine fiction) may flavor UI copy and Voice Agent speech, but it is not domain vocabulary and carries no rules: every Voice Agent rule is stated neutrally in the core prompts, and `themes.ts` only presents it.
 - Voice Agent tool names, payloads, logs, schemas, tests, ACP prompts, and sandbox internals use neutral ACP and session-management terms.
 
 When introducing or changing a domain concept, use the canonical term from `DOMAIN.md` in core code and tests, update `DOMAIN.md` in the same change, and record unresolved ambiguity under Open Questions rather than silently choosing a new meaning.

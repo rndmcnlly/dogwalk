@@ -216,7 +216,7 @@ export function loudness(pcm: Uint8Array): number {
   return samples.length ? sum / samples.length / 32768 : 0;
 }
 
-// Accepts only 16-bit PCM, mono, 24 kHz WAV, which a dog can produce with
+// Accepts only 16-bit PCM, mono, 24 kHz WAV, which an Agent can produce with
 // `ffmpeg -i input -ac 1 -ar 24000 -c:a pcm_s16le output.wav`.
 export function wavToClip(bytes: Uint8Array): Clip & { truncated: boolean; totalSeconds: number } {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

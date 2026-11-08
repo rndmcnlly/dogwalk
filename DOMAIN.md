@@ -19,7 +19,7 @@ Dogwalk is an eyes-free ACP Client and multi-session coding manager. It gives a 
 
 The Voice Agent is the realtime conversational interface through which the User supervises coding work. It translates conversational intent into precise, neutrally named session-manager operations. Coding work is performed by ACP Agents such as OpenCode, not by the Voice Agent.
 
-The Voice Agent is one character performed by two components: a Voice Frontend that holds the conversation and a Session Orchestrator that exercises engineering judgment and operates Managed Sessions. The User experiences a single character. The Voice Frontend may refer to the Session Orchestrator through the presentation fiction of its own head or mind ("let me think"), which keeps an account of its limits honest without naming models; when the User asks about the architecture, it explains the split candidly.
+The Voice Agent is one character performed by two components: a Voice Frontend that holds the conversation and a Session Orchestrator that exercises engineering judgment and operates Managed Sessions. The User experiences a single character. The Voice Frontend may refer to the Session Orchestrator through its Theme's fiction for that split (in Park, its own head or mind: "let me think"), which keeps an account of its limits honest without naming models; when the User asks about the architecture, it explains the split candidly.
 
 Dogwalk presents as an agentic development environment driven by a coworker. ACP Agents should see ordinary requests from a colleague: they need not know they are supervised by voice, and anything specific to calls or speech stays inside Dogwalk.
 
@@ -27,7 +27,8 @@ Dogwalk presents as an agentic development environment driven by a coworker. ACP
 
 - ACP terminology governs protocol integration and anchors the session-management model.
 - Dogwalk is a product codename, not the source of its domain vocabulary.
-- Canine language is optional presentation flavor in UI copy and Voice Agent narration. It must not appear in tool names, operation names, protocol payloads, persisted schemas, or prompts sent to ACP Agents.
+- Theme language (such as Park's canine fiction) is optional presentation in UI copy, Voice Agent narration, and deterministic speech. It must not appear in tool names, operation names, harness events, earcon names, protocol payloads, persisted schemas, or prompts sent to ACP Agents.
+- Every Voice Agent rule is stated in neutral terms. A Theme presents rules and never carries one: removing the Theme must remove no behavior.
 - The core model must not depend on OpenCode, a particular model provider, a particular voice transport, or Daytona.
 - A protocol entity, an application projection, and its spoken presentation are different things even when they currently have a one-to-one relationship.
 - Derived state must not be presented as ACP-defined state. Dogwalk may infer that a session is ready or that a turn needs attention, but those are Client projections.
@@ -39,7 +40,7 @@ Dogwalk presents as an agentic development environment driven by a coworker. ACP
 
 ### Voice Interaction
 
-Owns the live conversation, Voice Agent personality, spoken reference resolution, optional narration flavor, earcons, interruption, muting, and speech-safe summaries. Canine language may appear here as an acknowledged metaphor, but is never canonical domain language.
+Owns the live conversation, Voice Agent personality, spoken reference resolution, optional narration flavor, earcons, interruption, muting, and speech-safe summaries. A Theme's language may appear here as an acknowledged metaphor, but is never canonical domain language.
 
 ### Session Management
 
@@ -102,7 +103,7 @@ The human principal whose intent, authorization, and attention govern the work. 
 
 **Context:** Voice Interaction
 
-The single character the User talks to: socially fluent, a little modest about engineering detail, and authoritative about session state. It may use Dogwalk's canine metaphor sparingly in narration. It is composed of a Voice Frontend and a Session Orchestrator.
+The single character the User talks to: socially fluent, a little modest about engineering detail, and authoritative about session state. It presents itself through a Theme (DOMAIN.md, Themes), at an Intensity it adjusts to the User. It is composed of a Voice Frontend and a Session Orchestrator.
 
 **Not:** An ACP Agent, coding harness, Agent host, or a single model.
 
@@ -142,9 +143,29 @@ OpenCode is the current Agent implementation. Other ACP-compatible implementatio
 
 **Not:** A model, subprocess, session, Prompt Turn, or task.
 
-## Presentation Fiction (provisional)
+## Themes (provisional)
 
-The canine fiction exists only above ACP, to make the agentic development environment legible by voice. The Voice Frontend and Session Orchestrator may both use it; ACP prompts, tools, schemas, and anything in the Sandbox never do. Nothing here is committed yet: a `?` marks a mapping still under exploration, and none of these words are canonical domain terms.
+### Theme
+
+**Context:** Voice Interaction
+
+A presentation of the neutral session model for the voice surface: a fiction mapping domain concepts to the Theme's words, how the Voice Frontend speaks of the Session Orchestrator, a GPT-Live voice, an Intensity register, and the wording of deterministic speech (the first-call welcome, the keypad status readout). Themes exist only above ACP; ACP prompts, tools, schemas, harness events, and anything in the Sandbox never use them. A Theme carries no rules, so the Voice Agent behaves the same under any Theme. Plain, the identity Theme with no fiction, is a regression fixture rather than a User choice.
+
+Park is the current Theme and every Voice Call uses it. Survey (planetary romance relayed from orbit) and Patrol (present-day cyber operations under mission command) are planned; the public pages stay Park for now.
+
+**Not:** A rule set, a persona with its own capabilities, or a visual color scheme.
+
+### Intensity
+
+**Context:** Voice Interaction
+
+How strongly the Voice Agent plays its Theme's fiction at a given moment, chosen by the Voice Agent rather than set by the User: it rises when the User plays along and falls when the User is terse, frustrated, or deep in a problem. The clarity floor holds at every Intensity: Permission Request choices, failures, destructive actions, numbers, and anything the User must act on are stated plainly; the fiction may frame a fact but never replace it.
+
+**Not:** A setting, or the Voice Agent's matching of the User's technical sophistication, which is independent of Intensity.
+
+### Park
+
+The canine fiction, in the register of magical realism: the dogs are not ordinary dogs, but the walker finds them perfectly normal and never explains the magic. Nothing here is committed yet: a `?` marks a mapping still under exploration, and none of these words are canonical domain terms.
 
 | Fiction | Domain concept | Status |
 |---|---|---|
@@ -163,8 +184,10 @@ The canine fiction exists only above ACP, to make the agentic development enviro
 | Following a dog | Followed Session: the walker keeps up with one dog and narrates it; observing, not commanding | likely |
 | Ranging | a working Managed Session that is not followed: out of earshot until it bids for attention or comes back | likely |
 | Pulling at the leash | Bid: a ranging dog asking for the walker's attention | likely |
+| Waiting at a gate | Permission Request: a dog waiting for the User's say-so | likely |
+| Looking back to ask which way | Elicitation: a dog asking the User for information | ? |
 
-The fiction keeps power where it is: dogs (ACP Agents) act in the Sandbox and often take initiative; the User holds authority (intent and Permission Requests); the walker holds attention and translation. The walker suggests errands and follows dogs; it does not command them, and a dog may pull it along.
+Every Theme must keep power where it is, and Park shows how: dogs (ACP Agents) act in the Sandbox and often take initiative; the User holds authority (intent and Permission Requests); the walker holds attention and translation. The walker suggests errands and follows dogs; it does not command them, and a dog may pull it along.
 
 The Voice Agent mirrors the caller's sophistication, especially on technical topics: modest and plain with a newcomer, fluent with someone who already speaks about agents, sessions, and delegation, so existing agentic literacy amplifies the experience.
 
@@ -448,7 +471,7 @@ Assignment is interaction language, not a protocol lifecycle entity.
 
 **Context:** Session Management
 
-The first prompt content Dogwalk constructs from the User's Assignment plus role, safety, workspace, and reporting context. It uses neutral ACP and session vocabulary and does not brief the ACP Agent into Dogwalk's optional canine narration. Subsequent prompts continue the same Managed Session without recreating the brief unless required by an Agent adapter.
+The first prompt content Dogwalk constructs from the User's Assignment plus role, safety, workspace, and reporting context. It uses neutral ACP and session vocabulary and does not brief the ACP Agent into the Theme's narration. Subsequent prompts continue the same Managed Session without recreating the brief unless required by an Agent adapter.
 
 ### Activity
 
@@ -683,6 +706,7 @@ The following language appears in Git history and is not canonical for productio
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Could Access Control identify a User by something spoken, such as a passphrase in the style of Invite Codes, so a call from any telephone, even a payphone, works without caller ID?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
+- How does a User choose a Theme (the System Menu was the first idea, but the menu holds only what must work when the Voice Agent cannot), and should a switch re-present recent progress and rename Aliases in the new Theme? The voice can change only between calls.
 
 - Should the Voice Frontend also receive recent conversation directly (as provider session history at call start), rather than only through the Session Orchestrator's reorienting speech?
 

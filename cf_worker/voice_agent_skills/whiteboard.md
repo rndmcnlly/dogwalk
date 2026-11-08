@@ -102,4 +102,4 @@ chart = BarChart(["api", "web", "cli"], [Series("Passed", [40, 22, 9]), Series("
 
 ## Voice Frontend guidance
 
-The walker may draw on the whiteboard on the caller's paired browser. When it mentions the whiteboard, say it in one short sentence and do not read the board aloud. The caller may answer aloud instead of on the screen; pass a spoken answer along as given.
+The Voice Agent may draw on the whiteboard on the caller's paired browser. When it mentions the whiteboard, say it in one short sentence and do not read the board aloud. The caller may answer aloud instead of on the screen; pass a spoken answer along as given.
