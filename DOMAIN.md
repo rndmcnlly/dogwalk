@@ -151,7 +151,7 @@ OpenCode is the current Agent implementation. Other ACP-compatible implementatio
 
 A presentation of the neutral session model for the voice surface. A Theme is a **conceit** (the mapping from domain concepts to the Theme's words, including how the Voice Frontend speaks of the Session Orchestrator) played in a **genre** (the storyteller's stance toward that material), at a **register** that moves along an Intensity ladder, **cast** with a GPT-Live voice and **scored** with earcons. It also words the deterministic speech (the first-call welcome, the keypad status readout).
 
-Themes exist only above ACP; ACP prompts, tools, schemas, harness events, and anything in the Sandbox never use them. A Theme carries no rules, so the Voice Agent behaves the same under any Theme. Each Theme keeps authoring notes that no model sees, recording the intent its surface must keep serving: why the User and the Voice Agent are distinct, what authority the Voice Agent holds over sessions and Workspaces, what a closer look (Paired Browser, Whiteboard, Human Takeover) means in the conceit, how power stays where it is, and which tropes it draws on. `cf_worker/src/themes.ts` holds the Themes and their notes.
+Themes exist only above ACP; ACP prompts, tools, schemas, harness events, and anything in the Sandbox never use them. A Theme carries no rules, so the Voice Agent behaves the same under any Theme. Each Theme keeps authoring notes outside the standing prompts, recording the intent its surface must keep serving, for its authors and for Runtime Dramaturgy: why the User and the Voice Agent are distinct, what authority the Voice Agent holds over sessions and Workspaces, what a closer look (Paired Browser, Whiteboard, Human Takeover) means in the conceit, how power stays where it is, and which tropes it draws on. `cf_worker/src/themes.ts` holds the Themes and their notes.
 
 | Theme | Conceit | Genre |
 |---|---|---|
@@ -170,7 +170,17 @@ Plain is both a User choice and the regression fixture that shows the rules neve
 
 The ladder a Theme's register moves along, from plain words to the conceit at full strength, and the Voice Agent's current position on it. The Voice Agent chooses it rather than the User setting it: it rises when the User plays along and falls when the User is terse, frustrated, or deep in a problem. The clarity floor holds at every rung: Permission Request choices, failures, destructive actions, numbers, and anything the User must act on are stated plainly; the conceit may frame a fact but never replace it.
 
+Moving the register along the ladder is drama management.
+
 **Not:** A setting, or the Voice Agent's matching of the User's technical sophistication, which is independent of Intensity.
+
+### Runtime Dramaturgy
+
+**Context:** Voice Interaction
+
+The performing Voice Agent consulting its Theme's genre sources (the tropes the Theme draws on) and authoring notes during a live Voice Call, to interpret the conceit faithfully: how a moment the conceit never anticipated should be presented, or what a closer look means in this fiction. Only the Session Orchestrator can consult; the Voice Frontend asks it by thinking it over, like any other work.
+
+**Not:** Drama management, which adapts the register to the audience (Intensity). Dramaturgy answers to the work; drama management answers to the User.
 
 ### Park
 
@@ -715,6 +725,7 @@ The following language appears in Git history and is not canonical for productio
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Could Access Control identify a User by something spoken, such as a passphrase in the style of Invite Codes, so a call from any telephone, even a payphone, works without caller ID?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
+- How is Runtime Dramaturgy delivered? A per-Theme Voice Agent Skill could embed the authoring notes, as self-knowledge skills embed project documents; consulting the genre sources themselves would need a web tool the Session Orchestrator does not have.
 - How does a User choose a Theme (the System Menu was the first idea, but the menu holds only what must work when the Voice Agent cannot), and should a switch re-present recent progress and rename Aliases in the new Theme? The voice can change only between calls.
 
 - Should the Voice Frontend also receive recent conversation directly (as provider session history at call start), rather than only through the Session Orchestrator's reorienting speech?

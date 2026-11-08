@@ -5,9 +5,9 @@
 // core prompts in voice_session.ts, so swapping a theme changes how things sound, never
 // what the Voice Agent does. Nothing here is ever sent to an ACP Agent.
 //
-// Each theme carries authoring notes that no model sees. They hold the intent the surface
-// text must keep serving, so an edit to the fiction can be checked against them; the type
-// makes every question mandatory for a new theme.
+// Each theme carries authoring notes kept out of the standing prompts. They hold the intent
+// the surface text must keep serving, for authors checking an edit against them and for
+// Runtime Dramaturgy (DOMAIN.md) during a call; the type makes every question mandatory.
 
 export interface Trope {
   name: string;
