@@ -1060,7 +1060,25 @@ function onFrame(frame) {
   if (claimable(frame) && claimState === "listening" && !rejectedCodes.has(frame.ecc)) claim(frame.ecc);
   else if (!claimable(frame) && claimState === "listening") {
     setStatus("Heard tones but could not decode them. Still listening: ask the walker to send the tones slower.", "bad");
+    reportDecodeFailure(frame);
   }
+}
+
+// Anonymous telemetry, so the call can tell "heard nothing" from "heard tones, could not
+// decode": coarse counts only, never symbols or code bits. Best effort.
+function reportDecodeFailure(frame) {
+  const report = {
+    stage: frame.ecc ? "ecc_unverified" : "ecc_failed",
+    baud: frame.baud,
+    seconds: Math.round(frame.seconds * 10) / 10,
+    symbols_heard: frame.symbols.filter((s) => s !== null).length,
+    erasures: frame.erased.length,
+  };
+  fetch("/pair/decode-failed", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(report),
+  }).catch(() => {});
 }
 
 async function claim(code) {

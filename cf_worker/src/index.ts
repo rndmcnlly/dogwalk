@@ -11,7 +11,9 @@ import { ADMIN_HTML } from "./admin";
 import { LANDING_HTML } from "./landing";
 import { PAIR_HTML } from "./pair_page";
 import { handleSounds } from "./sounds_page";
-import { describeBrowser, describePlace, sha256Hex, splitCredential } from "./pairing";
+import {
+  DECODE_FAILURE_KEEP_ROWS, DECODE_FAILURE_MAX_BYTES, describeBrowser, describePlace, sha256Hex, splitCredential,
+} from "./pairing";
 import type { Env } from "./types";
 import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
 import { TerminalRelay } from "./terminal_relay";
@@ -722,6 +724,39 @@ async function handlePair(req: Request, env: Env, url: URL): Promise<Response> {
         "x-dogwalk-place": describePlace(cf),
       },
     });
+  }
+  // Anonymous decode-failure telemetry: a page heard Pairing Tones but could not decode them.
+  // Before a claim nothing says whose call it is, so only coarse diagnostics are kept, and
+  // only while some Pairing Code is outstanding; the table is trimmed to its newest rows.
+  if (url.pathname === "/pair/decode-failed" && req.method === "POST") {
+    const length = Number(req.headers.get("content-length") ?? "");
+    if (!Number.isFinite(length) || length <= 0 || length > DECODE_FAILURE_MAX_BYTES) {
+      return jsonResponse({ error: "body missing or too large" }, 413);
+    }
+    const text = await req.text();
+    if (text.length > DECODE_FAILURE_MAX_BYTES) return jsonResponse({ error: "body too large" }, 413);
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return jsonResponse({ error: "malformed report" }, 400);
+    }
+    if (body?.stage !== "ecc_failed" && body?.stage !== "ecc_unverified") return jsonResponse({ error: "unknown stage" }, 400);
+    const bounded = (value: unknown, max: number) =>
+      typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(max, value)) : null;
+    const seconds = bounded(body.seconds, 60);
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO pairing_decode_failures (ts, stage, baud, seconds, symbols_heard, erasures)
+         SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM pairing_codes WHERE expires_at > unixepoch())`,
+      ).bind(
+        Date.now(), body.stage, bounded(body.baud, 64), seconds === null ? null : Math.round(seconds * 10) / 10,
+        bounded(body.symbols_heard, 64), bounded(body.erasures, 64),
+      ),
+      env.DB.prepare("DELETE FROM pairing_decode_failures WHERE id <= (SELECT MAX(id) FROM pairing_decode_failures) - ?")
+        .bind(DECODE_FAILURE_KEEP_ROWS),
+    ]);
+    return new Response(null, { status: 204 });
   }
   if (url.pathname === "/pair/claim/status" && req.method === "GET") {
     const ticket = splitCredential(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null);

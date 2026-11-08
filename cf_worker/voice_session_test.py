@@ -210,6 +210,7 @@ SWITCH_SAY = "Switching themes; a new voice will pick up in a moment."
 PERSISTED_SESSION_ID = "ses_earlier0parser"
 PERSISTED_TITLE = "Earlier parser work"
 LEASH_SAY = "Rowan has gone home; Juniper is still with us."
+REPLAY_SAY = "The page heard them but could not read them; sending them again."
 
 
 def call(call_id: str, name: str, **arguments) -> dict:
@@ -286,6 +287,11 @@ ORCHESTRATOR_SCRIPT = [
     # Preferences and pairing are voice operations; keypad digits stand in for asking here.
     ('"key":"6"', lambda ctx: [call("k6-style", "set_earcon_style", style="tonal")]),
     ('"key":"8"', lambda ctx: [call("k8-pair", "pair_browser")]),
+    # No browser claimed the first tones: the Orchestrator answers and plays them again.
+    ("[harness event] pairing_unclaimed", lambda ctx: [
+        call("pu-say", "say", text=REPLAY_SAY, delegation_id=None),
+        call("pu-pair", "pair_browser"),
+    ]),
     ('"key":"9"', lambda ctx: [call("k9-show", "show_in_browser", uri="dogwalk:file/REPORT.md", note="the report")]),
     ('"key":"4"', lambda ctx: [call("k4-state", "inspect_call_state")]),
     ('"key":"5"', lambda ctx: [call("k5-board", "draw_on_whiteboard", program=BOARD_PROGRAM, note="pick one")]),
@@ -305,7 +311,7 @@ STEP_IDS = [
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
-    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair", "k9-show", "k4-state", "k5-board", "k3-say", "k3-theme",
+    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "k3-say", "k3-theme",
     "k2-dramaturgy",
 ]
 
@@ -556,7 +562,7 @@ def pair_http(method: str, path: str, body: dict | None = None, headers: dict | 
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            return response.status, json.loads(response.read())
+            return response.status, json.loads(response.read() or b"{}")
     except urllib.error.HTTPError as error:
         return error.code, json.loads(error.read() or b"{}")
 
@@ -635,6 +641,9 @@ async def run_protocol(identity: str) -> None:
         assert "The session model:" in frontend and "Whatever the theme and intensity" in frontend
         assert "The walk (Park theme)" in frontend and "your head (your mind)" in frontend
         assert "Never mention a backend" in frontend
+        # Pairing is thinking work: the Voice Frontend hands off rather than standing by.
+        delegated = frontend.split("Backend tools:", 1)[1].split("\n", 1)[0]
+        assert "pairing a browser" in delegated and "paired screen" in delegated and "whiteboard" in delegated, delegated
         assert "backend" not in (
             frontend.replace("Backend tools:", "").replace("Never mention a backend", "").lower()
         )
@@ -702,6 +711,14 @@ async def run_protocol(identity: str) -> None:
             "Juniper says: The parser lives in src.", "started changing files: editing artifact.txt.",
         ]
         await wait_for(lambda: all(fragment in beats() for fragment in expected_beats))
+        # Tool calls failing in a burst (parallel web searches) make one beat with the streak.
+        for index in range(3):
+            await mocks.acp.send(json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": "acp-session-test",
+                "update": {"sessionUpdate": "tool_call", "toolCallId": f"f{index}", "title": "websearch", "kind": "fetch", "status": "failed"},
+            }}))
+        await wait_for(lambda: "A step failed for Juniper, 3 in a row." in beats(), 10)
+        assert beats().count("A step failed for Juniper") == 1, beats()
 
         # Handoff 2: a follow-up question answered from session inspection.
         await mocks.send_live(transcript("input", "What did it report?", 5000, 6200))
@@ -712,9 +729,11 @@ async def run_protocol(identity: str) -> None:
         assert "Caller: What did it report?" in handoff and "Juniper" not in handoff
         inspected = OrchestratorMock.tool_output("h2-inspect")
         assert inspected["alias"] == "Juniper" and inspected["stop_reason"] == "end_turn"
-        assert inspected["followed"] is True and inspected["remark"] == "The parser lives in src."
+        # The failed searches after the turn made its closing words the latest remark.
+        assert inspected["followed"] is True and inspected["remark"] == "Bridge report complete.", inspected
         assert [(c["kind"], c["status"], c["paths"]) for c in inspected["recent_tool_calls"]] == [
             ("read", "completed", ["src/parser.py"]), ("edit", "completed", ["artifact.txt"]),
+            ("fetch", "failed", []), ("fetch", "failed", []), ("fetch", "failed", []),
         ], inspected
         assert OrchestratorMock.tool_output("h2-unfollow") == {"ok": True, "stopped_following": "Juniper"}
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST")
@@ -886,12 +905,31 @@ async def run_protocol(identity: str) -> None:
         # Pairing a browser (pair_browser, asked for by voice): the tones carry a Pairing Code, a
         # browser claims it, the Voice Frontend names the browser, and a press of one accepts.
         # Then the browser reads status and files.
+        async def next_pairing_code() -> str:
+            async with asyncio.timeout(20):
+                while True:
+                    played = await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
+                    if code := decode_pairing_tones(played["audio"]):
+                        return code
+
+        # The first tones go unclaimed: a page reports that it heard them but could not decode
+        # them, and about ten seconds later the Orchestrator hears pairing_unclaimed with that
+        # count, answers, and plays them again.
         await mocks.send_live(dtmf("8"))
-        code = None
-        async with asyncio.timeout(20):
-            while code is None:
-                played = await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
-                code = decode_pairing_tones(played["audio"])
+        unclaimed_code = await next_pairing_code()
+        assert (await asyncio.to_thread(pair_http, "POST", "/pair/decode-failed", {"stage": "ecc_failed", "padding": "x" * 2000}))[0] == 413
+        assert (await asyncio.to_thread(pair_http, "POST", "/pair/decode-failed", {"stage": "guess"}))[0] == 400
+        failure = {"stage": "ecc_failed", "baud": 8, "seconds": 4.1, "symbols_heard": 25, "erasures": 4}
+        assert (await asyncio.to_thread(pair_http, "POST", "/pair/decode-failed", failure))[0] == 204
+        await wait_for(lambda: "[harness event] pairing_unclaimed" in latest_user_text(), 15)
+        unclaimed = OrchestratorMock.user_message("[harness event] pairing_unclaimed")
+        assert '"baud":8' in unclaimed and '"decode_failures":1' in unclaimed, unclaimed
+        assert OrchestratorMock.tool_output("k8-pair")["ok"] is True
+        await next_matching(mocks.live_messages, appended("commentary", REPLAY_SAY))
+        code = await next_pairing_code()
+        assert code != unclaimed_code
+        status, _ = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": unclaimed_code})
+        assert status == 404, "a new attempt retires the previous Pairing Code"
         status, claim = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": code}, {"user-agent": CHROME_MAC})
         assert status == 200 and claim["ticket"].startswith(identity + "."), (status, claim)
         named = await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "pairing tones" in m.get("content", ""))
@@ -1043,7 +1081,7 @@ async def run_protocol(identity: str) -> None:
         await wait_for(lambda: any(path == "/live/sessions/live-test-3/hangup" for path, _ in DaytonaMock.openai_requests), 10)
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
         for expected in ("menu.opened", "menu.closed", "menu.restart.requested", "menu.recovery", "voice.keypad.stop", "voice.keypad.status",
-                         "voice.earcons", "voice.theme", "pairing.started", "pairing.claimed", "pairing.accepted"):
+                         "voice.earcons", "voice.theme", "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted"):
             assert expected in events, (expected, events)
         handoff_rows = OrchestratorMock.user_message('"key":"7"')
         assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows

@@ -25,6 +25,11 @@ export const PAIRING_TONE_DUTY = 0.6;
 export const PAIRING_MAX_TONE_MS = 70;
 export const PAIRING_CODE_TTL_MS = 90_000;
 export const PAIRING_CONFIRM_MS = 30_000;
+// How long after the tones a missing claim means no browser decoded them.
+export const PAIRING_UNCLAIMED_MS = 10_000;
+// Anonymous decode-failure telemetry (POST /pair/decode-failed): a small body, a bounded table.
+export const DECODE_FAILURE_MAX_BYTES = 1024;
+export const DECODE_FAILURE_KEEP_ROWS = 500;
 export const PAIRED_IDLE_MS = 60 * 60_000;
 export const PAIRED_MAX_MS = 12 * 60 * 60_000;
 
