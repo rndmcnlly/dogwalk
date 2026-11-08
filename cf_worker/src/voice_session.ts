@@ -552,6 +552,7 @@ export class VoiceSession {
         if (attempt > 1) await this.record("acp.connect.recovered", { attempt });
         if (this.liveAttached && this.dogsWaking) {
           this.dogsWaking = false;
+          this.queueEarcon("dogs_ready");
           await this.orchestratorEvent(`[harness event] dogs_ready: ${JSON.stringify({
             managed_session_count: Array.from(this.sessions.values()).filter((item) => item.sessionState !== "closed").length,
           })}`);
@@ -1278,9 +1279,11 @@ export class VoiceSession {
       session.turnEndedAt = Date.now();
       await this.persistSessions();
       await this.record("acp.turn.stopped", { alias: session.alias, stop_reason: session.stopReason });
-      await this.noteSinceGreeting(session.stopReason === "cancelled" ? `${session.alias} stopped` : `${session.alias} finished`);
-      // An earcon only into a lull; mid-sentence it would cut the walker off.
-      this.queueEarcon("turn_stopped");
+      // How a turn ended matters more than that it ended: each stop reason gets its own
+      // earcon and opening clause.
+      const ending = turnEnding(session.stopReason);
+      await this.noteSinceGreeting(`${session.alias} ${ending.clause}`);
+      this.queueEarcon(ending.earcon);
       await this.orchestratorEvent(`[harness event] turn_stopped: ${JSON.stringify({
         alias: session.alias, stop_reason: session.stopReason, agent_message: session.report.slice(-3000),
       })}`);
@@ -2092,4 +2095,15 @@ function summarizeLevels(levels: Levels): { chunks: number; non_silent_fraction:
     non_silent_fraction: levels.chunks ? Math.round((levels.nonSilent / levels.chunks) * 100) / 100 : 0,
     peak: levels.peak,
   };
+}
+
+// ACP stop reasons mapped to presentation: an earcon and a clause for the next opening.
+function turnEnding(stopReason: string | null): { earcon: EarconName; clause: string } {
+  switch (stopReason) {
+    case "cancelled": return { earcon: "turn_cancelled", clause: "was recalled" };
+    case "max_tokens":
+    case "max_turn_requests": return { earcon: "turn_truncated", clause: "ran out of room" };
+    case "refusal": return { earcon: "turn_refused", clause: "refused its errand" };
+    default: return { earcon: "turn_stopped", clause: "finished" };
+  }
 }

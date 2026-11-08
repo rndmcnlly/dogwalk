@@ -3,6 +3,10 @@ import spoken_session_created from "../earcons/session_created.pcm";
 import spoken_turn_started from "../earcons/turn_started.pcm";
 import spoken_turn_stopped from "../earcons/turn_stopped.pcm";
 import spoken_turn_failed from "../earcons/turn_failed.pcm";
+import spoken_dogs_ready from "../earcons/dogs_ready.pcm";
+import spoken_turn_cancelled from "../earcons/turn_cancelled.pcm";
+import spoken_turn_truncated from "../earcons/turn_truncated.pcm";
+import spoken_turn_refused from "../earcons/turn_refused.pcm";
 import spoken_permission_requested from "../earcons/permission_requested.pcm";
 import spoken_session_closed from "../earcons/session_closed.pcm";
 import spoken_recording_started from "../earcons/recording_started.pcm";
@@ -48,6 +52,10 @@ export type EarconName =
   | "turn_started"
   | "turn_stopped"
   | "turn_failed"
+  | "dogs_ready"
+  | "turn_cancelled"
+  | "turn_truncated"
+  | "turn_refused"
   | "permission_requested"
   | "session_closed"
   | "recording_started"
@@ -62,6 +70,10 @@ const TONAL: Record<EarconName, Clip> = {
   turn_started: synthesize([[659.25, 100], [987.77, 140]]),
   turn_stopped: synthesize([[783.99, 110], [1046.5, 170]]),
   turn_failed: synthesize([[493.88, 150], [349.23, 260]]),
+  dogs_ready: synthesize([[392, 90], [523.25, 90], [659.25, 90], [783.99, 160]]),
+  turn_cancelled: synthesize([[783.99, 110], [659.25, 170]]),
+  turn_truncated: synthesize([[783.99, 110], [783.99, 110], [739.99, 200]]),
+  turn_refused: synthesize([[523.25, 120], [369.99, 240]]),
   permission_requested: synthesize([[880, 110], [880, 110], [1174.66, 180]]),
   session_closed: synthesize([[783.99, 110], [523.25, 170]]),
   recording_started: synthesize([[1046.5, 260]]),
@@ -77,6 +89,10 @@ const SPOKEN: Record<EarconName, Clip> = {
   turn_started: pcmClip(spoken_turn_started),
   turn_stopped: pcmClip(spoken_turn_stopped),
   turn_failed: pcmClip(spoken_turn_failed),
+  dogs_ready: pcmClip(spoken_dogs_ready),
+  turn_cancelled: pcmClip(spoken_turn_cancelled),
+  turn_truncated: pcmClip(spoken_turn_truncated),
+  turn_refused: pcmClip(spoken_turn_refused),
   permission_requested: pcmClip(spoken_permission_requested),
   session_closed: pcmClip(spoken_session_closed),
   recording_started: pcmClip(spoken_recording_started),
