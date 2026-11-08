@@ -16,7 +16,7 @@ import type { Env } from "./types";
 import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
 import { TerminalRelay } from "./terminal_relay";
 import { frontendInstructions, VoiceSession } from "./voice_session";
-import { DEFAULT_THEME } from "./themes";
+import { DEFAULT_THEME, THEMES } from "./themes";
 export { TerminalRelay, VoiceSession };
 
 // --- env ----------------------------------------------------------------
@@ -950,6 +950,8 @@ async function handleAfterLive(req: Request, env: Env): Promise<Response> {
   ).bind(callSid, from).first<{ action: string }>();
   await env.DB.prepare("DELETE FROM call_handoffs WHERE call_sid = ?").bind(callSid).run();
   if (handoff?.action === "hangup") return twiml(Hangup());
+  // A theme switch: back through /voice to a fresh GPT-Live session with the new voice.
+  if (handoff?.action === "rejoin") return twiml(Redirect("/voice"));
   return recoveryMenu(handoff?.action === "recovery" ? "Recovery options. " : "Voice dropped. ");
 }
 
@@ -1083,14 +1085,17 @@ async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response
     await decideLiveCall(env, liveSessionId, "reject", { status_code: prepare.status === 409 ? 486 : 500 });
     return new Response(null, { status: 204 });
   }
+  // The caller's Theme casts the voice and presents the Voice Frontend's instructions.
+  const prepared = await prepare.json<{ theme?: string }>().catch(() => ({ theme: undefined }));
+  const theme = THEMES.find((item) => item.id === prepared.theme) ?? DEFAULT_THEME;
   // Client delegation: GPT-Live only converses. The VoiceSession Durable Object runs the
   // Session Orchestrator and answers each delegation through the sideband.
   const accepted = await decideLiveCall(env, liveSessionId, "accept", {
     session: {
       type: "live",
       model: env.OPENAI_LIVE_MODEL ?? "gpt-live-1",
-      instructions: frontendInstructions(DEFAULT_THEME),
-      audio: { output: { voice: DEFAULT_THEME.voice } },
+      instructions: frontendInstructions(theme),
+      audio: { output: { voice: theme.voice } },
       delegation: { type: "client", acknowledgement_delay_ms: 400 },
     },
   });

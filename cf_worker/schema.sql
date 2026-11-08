@@ -85,7 +85,7 @@ CREATE INDEX IF NOT EXISTS idx_call_activity_call
 CREATE TABLE IF NOT EXISTS call_handoffs (
   call_sid TEXT PRIMARY KEY,
   phone_number TEXT NOT NULL,
-  action TEXT NOT NULL CHECK (action IN ('hangup', 'recovery')),
+  action TEXT NOT NULL CHECK (action IN ('hangup', 'recovery', 'rejoin')),
   created_at INTEGER NOT NULL
 );
 

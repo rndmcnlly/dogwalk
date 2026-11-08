@@ -206,6 +206,7 @@ STARTED_SAY = "Juniper is on it."
 FINISHED_SAY = "Juniper finished; it reports the artifact is verified."
 REPORTED_SAY = "Juniper says the artifact is verified."
 FAREWELL_SAY = "Talk soon."
+SWITCH_SAY = "Switching themes; a new voice will pick up in a moment."
 PERSISTED_SESSION_ID = "ses_earlier0parser"
 PERSISTED_TITLE = "Earlier parser work"
 LEASH_SAY = "Rowan has gone home; Juniper is still with us."
@@ -288,6 +289,10 @@ ORCHESTRATOR_SCRIPT = [
     ('"key":"9"', lambda ctx: [call("k9-show", "show_in_browser", uri="dogwalk:file/REPORT.md", note="the report")]),
     ('"key":"4"', lambda ctx: [call("k4-state", "inspect_call_state")]),
     ('"key":"5"', lambda ctx: [call("k5-board", "draw_on_whiteboard", program=BOARD_PROGRAM, note="pick one")]),
+    ('"key":"3"', lambda ctx: [
+        call("k3-say", "say", text=SWITCH_SAY, delegation_id=None),
+        call("k3-theme", "set_theme", theme="survey"),
+    ]),
 ]
 BOARD_PROGRAM = 'root = Stack([pick])\npick = Choice("approach", ["Quick fix", "Refactor"], "Which approach?")'
 STEP_IDS = [
@@ -295,7 +300,7 @@ STEP_IDS = [
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
-    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair", "k9-show", "k4-state", "k5-board",
+    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair", "k9-show", "k4-state", "k5-board", "k3-say", "k3-theme",
 ]
 
 
@@ -998,14 +1003,34 @@ async def run_protocol(identity: str) -> None:
             await browser.send(json.dumps({"type": "auth", "token": token}))
             await recv_type(browser, "error")
 
+        # A theme switch bounces the call: the new theme's greeting is written before the
+        # GPT-Live leg hangs up, then the same CallSid returns with the new voice and conceit.
+        greetings = len(OrchestratorMock.greeting_requests)
+        await mocks.send_live(dtmf("3"))
+        await next_matching(mocks.live_messages, appended("commentary", SWITCH_SAY))
+        await wait_for(lambda: len(OrchestratorMock.greeting_requests) > greetings, 10)
+        switch_instructions = OrchestratorMock.greeting_requests[-1]["instructions"]
+        assert "The survey (Survey theme)" in switch_instructions and "switched to this theme mid-call" in switch_instructions
+        await wait_for(lambda: any(path == "/live/sessions/live-test-2/hangup" for path, _ in DaytonaMock.openai_requests), 10)
+        assert OrchestratorMock.tool_output("k3-theme")["bouncing"] is True
+        await mocks.live.close()
+        mocks.live_connected.clear()
+        body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST2", "live-test-3")
+        assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
+        await asyncio.wait_for(mocks.live_connected.wait(), 8)
+        rejoined = next(payload for path, payload in DaytonaMock.openai_requests if path == "/live/sessions/live-test-3/accept")
+        assert rejoined["session"]["audio"]["output"]["voice"] == "sage", rejoined["session"]["audio"]
+        assert "The survey (Survey theme)" in rejoined["session"]["instructions"]
+        await next_matching(mocks.live_messages, appended("commentary", f"Dogwalk. {NEXT_GREETING}"))
+
         # Star then two hands the call to the recovery menu, which ends the GPT-Live leg.
         await mocks.send_live(dtmf("*"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
         await mocks.send_live(dtmf("2"))
-        await wait_for(lambda: any(path == "/live/sessions/live-test-2/hangup" for path, _ in DaytonaMock.openai_requests), 10)
+        await wait_for(lambda: any(path == "/live/sessions/live-test-3/hangup" for path, _ in DaytonaMock.openai_requests), 10)
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
         for expected in ("menu.opened", "menu.closed", "menu.restart.requested", "menu.recovery", "voice.keypad.stop", "voice.keypad.status",
-                         "voice.earcons", "pairing.started", "pairing.claimed", "pairing.accepted"):
+                         "voice.earcons", "voice.theme", "pairing.started", "pairing.claimed", "pairing.accepted"):
             assert expected in events, (expected, events)
         handoff_rows = OrchestratorMock.user_message('"key":"7"')
         assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows
@@ -1029,7 +1054,7 @@ async def run_protocol(identity: str) -> None:
             assert payload["model"] == "gpt-6.1-sol"
             assert payload["store"] is False and payload["parallel_tool_calls"] is True
             assert "Session Orchestrator" in payload["instructions"]
-            assert "The session model:" in payload["instructions"] and "The walk (Park theme)" in payload["instructions"]
+            assert "The session model:" in payload["instructions"]
             assert "first-call-tour" in payload["instructions"]
             assert {tool["name"] for tool in payload["tools"]} >= {
                 "brief", "say", "create_managed_session", "begin_prompt_turn", "end_call",
@@ -1037,6 +1062,9 @@ async def run_protocol(identity: str) -> None:
                 "close_managed_session", "list_workspace_projects",
             }
             assert "Never create a session in home and tell it to work in another directory" in payload["instructions"]
+        # The Orchestrator presents the caller's theme: Park until the switch, Survey after it.
+        assert "The walk (Park theme)" in requests[0][1]["instructions"]
+        assert "The survey (Survey theme)" in requests[-1][1]["instructions"]
         fed_back = {
             item["call_id"]
             for _, payload in requests

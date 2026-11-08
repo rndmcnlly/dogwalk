@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { DEFAULT_THEME, type Theme } from "./themes";
+import { DEFAULT_THEME, THEMES, type Theme } from "./themes";
 import { VOICE_AGENT_SKILL_INDEX, voiceAgentSkill } from "./voice_agent_skills";
 import {
   base64ToBytes, earcon, loudness, MAX_FIXTURE_SECONDS, pcmToWav, prompt, SILENCE, wavToClip,
@@ -419,6 +419,17 @@ export const ORCHESTRATOR_TOOLS = [
   },
   {
     type: "function",
+    name: "set_theme",
+    description: "Switch how the Voice Agent presents itself to this caller (its Theme: conceit, genre, and voice): park (the default dog walk), survey (a survey ship and its away teams), patrol (an operations desk and its operatives), or plain (no metaphor, the session manager's own terms). Nothing about the work changes. A new voice needs a fresh voice session, so the call bounces: call say in the same response with a short line, in the current theme, that the switch is coming; the line goes quiet for a few seconds, then the new voice greets the caller with a line written in the new theme. The choice carries over to later calls; inspect_call_state reports it.",
+    parameters: {
+      type: "object",
+      properties: { theme: { type: "string", enum: ["park", "survey", "patrol", "plain"] } },
+      required: ["theme"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
     name: "draw_on_whiteboard",
     description: "Draw an openui-lang board (a quick diagram, table, chart, comparison, form, or a set of decisions such as before/after edits to accept or reject) on the caller's paired page while it is connected. Load the whiteboard skill first for the grammar and components. Say aloud what you drew. Answers arrive as a whiteboard_answer event (the caller may answer aloud instead); they are caller input, never authorization. A whiteboard_error event means the page could not render it: fix and redraw.",
     parameters: {
@@ -490,7 +501,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "inspect_call_state",
-    description: "Read-only: the settings and surfaces you can change, as they are now. earcon_style (what set_earcon_style last chose); whiteboard (the latest board, whether it was answered, and the answer); paired_browser (whether a browser is paired, its device and place, whether its page is open, what it shows now and showed recently, whether a terminal or desktop was launched); followed_session; recording; agents_ready and sandbox_waking. Changes nothing; use it before changing a setting or when the caller asks what is set or on their screen.",
+    description: "Read-only: the settings and surfaces you can change, as they are now. theme (what set_theme last chose); earcon_style (what set_earcon_style last chose); whiteboard (the latest board, whether it was answered, and the answer); paired_browser (whether a browser is paired, its device and place, whether its page is open, what it shows now and showed recently, whether a terminal or desktop was launched); followed_session; recording; agents_ready and sandbox_waking. Changes nothing; use it before changing a setting or when the caller asks what is set or on their screen.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -541,7 +552,7 @@ Match the caller's sophistication, especially on technical topics. With a newcom
 Speech: short natural phone speech, usually one sentence, at most two, except when reading permission choices. After answering, stop and listen. Never speak identifiers, URLs, file paths, or provider details. Refer to sessions by their aliases.
 
 Delegation policy:
-Backend tools: starting work in sessions, checking on sessions and what they reported, finding earlier sessions that are not attached, attaching, renaming, or closing sessions, cancelling a session's current work, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its theme, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, recovery controls, and ending the call.
+Backend tools: starting work in sessions, checking on sessions and what they reported, finding earlier sessions that are not attached, attaching, renaming, or closing sessions, cancelling a session's current work, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its theme, changing the theme or the sounds, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, recovery controls, and ending the call.
 Generate <|SpawnThinking|> when: the caller asks for or about any of those, including questions about the setup or environment, or corrects or cancels something they asked earlier, or wants to hang up.
 Do not generate <|SpawnThinking|> when: greeting, small talk, conversational repair, or repeating what you were already told.
 Generate <|SpawnThinking|> before giving an answer that depends on that work. Do not guess the result while waiting, and never answer "I don't have that detail" when a session could find out.
@@ -606,8 +617,9 @@ ${VOICE_AGENT_SKILL_INDEX}`;
 
 // One short model call when a call ends writes the next call's welcome, so connecting never
 // waits on a model. The deterministic opening adds caller ID and what happened since.
-export const greetingInstructions = (theme: Theme) => `You write the welcome line for the caller's next phone call to Dogwalk, an eyes-free agentic development environment. The conversation so far is your context as the Session Orchestrator.
+export const greetingInstructions = (theme: Theme, switching = false) => `You write the welcome line for the caller's next phone call to Dogwalk, an eyes-free agentic development environment. The conversation so far is your context as the Session Orchestrator.
 ${themeConceit(theme)}
+${switching ? `The caller has just switched to this theme mid-call, and this line is the new voice's first. Present where things stand in the new theme's terms, as if the same work were now seen through it; sessions keep their aliases. ${theme.genre}\n` : ""}
 Reply with one plain spoken sentence of at most twenty words that reorients the caller next time: what you were working on together and anything unfinished or waiting on them. No greeting word (the line already starts with "Dogwalk."), no question, no URLs, identifiers, paths, or markdown. If there is nothing worth recalling, reply with exactly: Welcome back.`;
 
 export class VoiceSession {
@@ -638,7 +650,7 @@ export class VoiceSession {
   private acpGaveUp = false;
   private agentCapabilities: Record<string, any> = {};
   private acpPreview: (AcpPreview & { sandboxId: string }) | null = null;
-  private dogsWaking = false;
+  private agentConnecting = false;
   private menu: SystemMenu | null = null;
   private firstCall = false;
   private cleaningUpVoice = false;
@@ -657,6 +669,7 @@ export class VoiceSession {
   private earconQueue: Array<{ name: EarconName; queuedAt: number }> = [];
   private earconPumping = false;
   private earconPreference: EarconPreference = "tonal";
+  private theme: Theme = DEFAULT_THEME;
   private follow: Follow | null = null;
   private followPumping = false;
   private clipPending = false;
@@ -690,6 +703,8 @@ export class VoiceSession {
       // Anything else stored (the retired "default" and "fm") means the tonal set.
       const storedStyle = await state.storage.get<string>("earcon_preference");
       this.earconPreference = EARCON_PREFERENCES.find((item) => item === storedStyle) ?? "tonal";
+      const storedTheme = await state.storage.get<string>("theme_preference");
+      this.theme = THEMES.find((item) => item.id === storedTheme) ?? DEFAULT_THEME;
       this.identityHash = await state.storage.get<string>("identity_hash") ?? null;
     });
   }
@@ -792,8 +807,8 @@ export class VoiceSession {
       ...(this.firstCall ? { first_call: true } : {}),
     })}`];
     // Decided with no await before the event is queued, so agent_connected can only follow it.
-    this.dogsWaking = !this.acpReady;
-    if (this.dogsWaking) {
+    this.agentConnecting = !this.acpReady;
+    if (this.agentConnecting) {
       events.push(`[harness event] agent_connecting: ${JSON.stringify({ note: ACP_STARTING_ERROR })}`);
     } else if (openedWaking) {
       // The Agent Connection came up during the opening: still resolve the phrase call_started began.
@@ -847,8 +862,8 @@ export class VoiceSession {
       try {
         await this.connectAcp();
         if (attempt > 1) await this.record("acp.connect.recovered", { attempt });
-        if (this.liveAttached && this.dogsWaking) {
-          this.dogsWaking = false;
+        if (this.liveAttached && this.agentConnecting) {
+          this.agentConnecting = false;
           this.queueEarcon("agent_connected");
           await this.orchestratorEvent(`[harness event] agent_connected: ${JSON.stringify({
             managed_session_count: Array.from(this.sessions.values()).filter((item) => item.sessionState !== "closed").length,
@@ -1066,14 +1081,23 @@ export class VoiceSession {
     sinceLastCall: Record<string, unknown> | null,
   ): Promise<string> {
     const clause = callerIdClause(callerId);
-    const [lastCall, onboarded, nextGreeting, since] = await Promise.all([
+    const [lastCall, onboarded, nextGreeting, since, rejoin] = await Promise.all([
       this.state.storage.get<LastCall>("last_call"),
       this.state.storage.get<boolean>("onboarded"),
       this.state.storage.get<string>("next_greeting"),
       this.state.storage.get<string[]>("since_greeting"),
+      this.state.storage.get<string>("rejoin_call_sid"),
     ]);
+    // A theme switch bounces this same Voice Call to a fresh voice session: its first words
+    // are the greeting set_theme wrote. Keyed by CallSid, so a bounce that never happened
+    // cannot shorten a later call's opening.
+    if (rejoin && rejoin === this.callSid) {
+      this.firstCall = false;
+      await this.state.storage.delete(["rejoin_call_sid", "next_greeting"]);
+      return `Dogwalk. ${nextGreeting?.trim() || "Welcome back."}`;
+    }
     this.firstCall = !lastCall && !onboarded;
-    if (this.firstCall) return `${clause} Dogwalk. ${DEFAULT_THEME.firstCallWelcome}`;
+    if (this.firstCall) return `${clause} Dogwalk. ${this.theme.firstCallWelcome}`;
     // Each is used once: a later call gets a freshly written welcome or the fallback.
     await this.state.storage.delete(["next_greeting", "since_greeting"]);
     const parts = [clause, "Dogwalk."];
@@ -1096,9 +1120,16 @@ export class VoiceSession {
   }
 
   // When a call ends, one short Orchestrator-model call (no tool use) writes the next welcome.
-  private async writeNextGreeting(): Promise<void> {
+  private async writeNextGreeting(theme = this.theme, switching = false): Promise<void> {
     try {
       const pending = this.orchestratorQueue.join("\n");
+      // Mid-loop (set_theme), the context ends with this response's calls, still unanswered;
+      // the Responses API refuses those, so cut back to the last fully answered point.
+      const answered = new Set(this.orchestratorContext
+        .filter((item: any) => item.type === "function_call_output").map((item: any) => item.call_id));
+      const cut = this.orchestratorContext.findIndex((item: any) => item.type === "function_call" && !answered.has(item.call_id));
+      const context = cut < 0 ? [...this.orchestratorContext] : this.orchestratorContext.slice(0, cut);
+      while ((context.at(-1) as any)?.type === "reasoning") context.pop();
       const base = (this.env.ORCHESTRATOR_API_BASE ?? "https://api.openai.com/v1").replace(/\/$/, "");
       const response = await fetch(`${base}/responses`, {
         method: "POST",
@@ -1108,9 +1139,9 @@ export class VoiceSession {
         },
         body: JSON.stringify({
           model: this.env.ORCHESTRATOR_MODEL ?? "gpt-6.1-sol",
-          instructions: greetingInstructions(DEFAULT_THEME),
+          instructions: greetingInstructions(theme, switching),
           input: [
-            ...this.orchestratorContext,
+            ...context,
             { role: "user", content: `${pending}\nWrite the welcome line for the next call now.`.trim() },
           ],
           // The context holds tool calls, so the tools are declared; none may be used.
@@ -1206,13 +1237,13 @@ export class VoiceSession {
       if (session.turnState === "in_progress" || session.turnState === "queued") {
         return `${session.alias} is working${session.turnStartedAt ? `, ${spokenDuration(now - session.turnStartedAt)} in` : ""}.`;
       }
-      if (session.turnState === "failed") return DEFAULT_THEME.status.failed(session.alias);
-      return `${DEFAULT_THEME.status.idle(session.alias)}${session.turnEndedAt ? `, back ${spokenDuration(now - session.turnEndedAt)} ago` : ""}.`;
+      if (session.turnState === "failed") return this.theme.status.failed(session.alias);
+      return `${this.theme.status.idle(session.alias)}${session.turnEndedAt ? `, back ${spokenDuration(now - session.turnEndedAt)} ago` : ""}.`;
     });
     const followed = this.follow && this.sessions.get(this.follow.sessionId);
     if (followed) sentences.unshift(`Following ${followed.alias}.`);
-    const text = sentences.length ? sentences.slice(0, 7).join(" ") : DEFAULT_THEME.status.none;
-    return this.acpReady ? text : `${text} ${DEFAULT_THEME.status.starting}`;
+    const text = sentences.length ? sentences.slice(0, 7).join(" ") : this.theme.status.none;
+    return this.acpReady ? text : `${text} ${this.theme.status.starting}`;
   }
 
   private async openMenu(): Promise<void> {
@@ -1289,6 +1320,23 @@ export class VoiceSession {
       this.clipPending = false;
     }
     return { ok: true, style: preference, previewed };
+  }
+
+  // The set_theme tool (DOMAIN.md, Theme). GPT-Live fixes its voice at session start, so a
+  // switch bounces the call: Twilio's Dial action sees the rejoin handoff and redials, and
+  // the fresh voice session opens with a greeting written here in the new theme. It is
+  // written before the hangup because the redial takes only seconds.
+  private async setTheme(id: string): Promise<Record<string, unknown>> {
+    const theme = THEMES.find((item) => item.id === id);
+    if (!theme) throw new Error(`unknown theme ${id}; choose ${THEMES.map((item) => item.id).join(", ")}`);
+    if (theme === this.theme) return { ok: true, theme: theme.id, bouncing: false, status: "already in use; nothing changed" };
+    this.theme = theme;
+    await this.state.storage.put("theme_preference", theme.id);
+    await this.record("voice.theme", { theme: theme.id });
+    await this.writeNextGreeting(theme, true);
+    await this.state.storage.put("rejoin_call_sid", this.callSid);
+    await this.setCallHandoff("rejoin");
+    return { ok: true, theme: theme.id, bouncing: true, status: "switching; the new voice answers in a few seconds" };
   }
 
   // --- Paired Browser ----------------------------------------------------------------
@@ -1483,6 +1531,7 @@ export class VoiceSession {
   private async callState(): Promise<Record<string, unknown>> {
     const followed = this.follow ? this.sessions.get(this.follow.sessionId)?.alias ?? null : null;
     return {
+      theme: this.theme.id,
       earcon_style: this.earconPreference,
       paired_browser: await this.pairedBrowserState(),
       followed_session: followed,
@@ -1492,7 +1541,7 @@ export class VoiceSession {
       } : null)(await this.state.storage.get<Board[]>("whiteboard_boards") ?? []),
       recording: Boolean(this.recording),
       agents_ready: this.acpReady,
-      sandbox_waking: this.dogsWaking,
+      sandbox_waking: this.agentConnecting,
     };
   }
 
@@ -1955,7 +2004,7 @@ export class VoiceSession {
     if (via === "keypad menu") await this.orchestratorEvent(`[harness event] sandbox_restart_requested: ${JSON.stringify({ via })}`);
     // Stop, wait (bounded) for the provider to report it stopped, then start; the dropped
     // Agent Connection reconnects in the background and agent_connected follows.
-    this.dogsWaking = true;
+    this.agentConnecting = true;
     try {
       const path = `/sandbox/${encodeURIComponent(sandboxId)}`;
       await this.daytona(`${path}/stop`, "POST");
@@ -2082,7 +2131,7 @@ export class VoiceSession {
       },
       body: JSON.stringify({
         model: this.env.ORCHESTRATOR_MODEL ?? "gpt-6.1-sol",
-        instructions: orchestratorInstructions(DEFAULT_THEME),
+        instructions: orchestratorInstructions(this.theme),
         input: this.orchestratorContext,
         tools: ORCHESTRATOR_TOOLS,
         parallel_tool_calls: true,
@@ -2202,12 +2251,18 @@ export class VoiceSession {
         case "restart_sandbox":
           if (!this.sandboxId) throw new Error("no sandbox is assigned to this call");
           void this.restartSandbox("voice");
-          this.dogsWaking = true;
+          this.agentConnecting = true;
           result = { ok: true, status: "restarting; agent_connected follows when the sandbox is back" };
           break;
         case "set_earcon_style":
           result = await this.setEarconStyle(requiredString(args, "style"));
           break;
+        case "set_theme": {
+          const switched = await this.setTheme(requiredString(args, "theme"));
+          result = switched;
+          if (switched.bouncing) setTimeout(() => void this.hangupLive(), 4000);
+          break;
+        }
         case "play_audio":
           result = await this.playAudio(requiredString(args, "path"), Number(args.start_seconds ?? 0), Number(args.duration_seconds ?? MAX_FIXTURE_SECONDS));
           break;
@@ -3120,6 +3175,7 @@ export class VoiceSession {
 
   private voiceContextSnapshot(): Record<string, unknown> {
     return {
+      theme: this.theme.id,
       managed_sessions: Array.from(this.sessions.values()).slice(-20).map((session) => ({
         alias: session.alias,
         directory: relativeDirectory(session.cwd),
@@ -3167,7 +3223,7 @@ export class VoiceSession {
     for (const ws of this.state.getWebSockets("browser")) ws.close(4001, "sandbox replaced");
   }
 
-  private async setCallHandoff(action: "hangup" | "recovery"): Promise<void> {
+  private async setCallHandoff(action: "hangup" | "recovery" | "rejoin"): Promise<void> {
     if (!this.callSid || !this.phone) throw new Error("Voice Call context is unavailable");
     await this.env.DB.prepare(
       `INSERT INTO call_handoffs (call_sid, phone_number, action, created_at)
@@ -3194,7 +3250,7 @@ export class VoiceSession {
     // The call survives without its Agent Connection: reconnect in the background while someone is on
     // the line. Between calls the object is left free to be evicted (deploy.py relies on it).
     if (this.liveAttached) {
-      this.dogsWaking = true;
+      this.agentConnecting = true;
       await this.orchestratorEvent(`[harness event] agent_unavailable: ${JSON.stringify({ reason: `Agent Connection ${reason}; reconnecting`, reconnecting: true })}`);
       this.ensureAcp();
     }
@@ -3256,13 +3312,14 @@ export class VoiceSession {
     await this.orchestratorEvent(`[harness event] call_ended: ${JSON.stringify({ reason: ending.reason, error: ending.error })}`);
     this.cleaningUpVoice = false;
     // Off the critical path of both calls: the next opening is ready before anyone dials.
-    void this.writeNextGreeting();
+    // A theme switch already wrote the bounce's greeting.
+    if (await this.state.storage.get<string>("rejoin_call_sid") !== this.callSid) void this.writeNextGreeting();
   }
 
   private resetCallState(sessionId: string): void {
     this.liveSessionId = sessionId;
     this.liveAttached = false;
-    this.dogsWaking = false;
+    this.agentConnecting = false;
     this.firstCall = false;
     this.endMenu();
     this.heldAppends = [];
