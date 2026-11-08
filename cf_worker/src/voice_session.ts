@@ -37,7 +37,7 @@ interface ManagedSession {
   usage: unknown;
   // The Workspace directory chosen at creation; ACP requires it again on load and resume.
   // Absent in older projections, which were all created in WORKSPACE.
-  cwd?: string;
+  cwd: string;
   // Epoch milliseconds, for spoken "how long" readouts; absent in older projections.
   turnStartedAt?: number | null;
   turnEndedAt?: number | null;
@@ -683,9 +683,9 @@ export class VoiceSession {
     const restore = (session: ManagedSession, cwd: string) => this.acpRequest(method, {
       sessionId: session.acpSessionId, cwd, mcpServers: [],
     });
-    // The Agent rejects a reload from any directory but the session's own, so a legacy record
-    // without one, or one the Agent has since associated elsewhere, is repaired from
-    // session/list, fetched at most once per restore.
+    // The Agent rejects a reload from any directory but the session's own, so a session the
+    // Agent has since associated elsewhere is repaired from session/list, fetched at most once
+    // per restore.
     let listed: Map<string, string> | null = null;
     const agentCwd = async (acpSessionId: string) => {
       listed ??= await this.listAgentSessions()
@@ -696,7 +696,7 @@ export class VoiceSession {
     for (const session of this.sessions.values()) {
       if (session.sessionState === "closed") continue;
       try {
-        let cwd = session.cwd ?? await agentCwd(session.acpSessionId) ?? WORKSPACE;
+        let cwd = session.cwd;
         try {
           await restore(session, cwd);
         } catch (error) {
@@ -707,7 +707,7 @@ export class VoiceSession {
         }
         if (session.cwd !== cwd) {
           await this.record("acp.session.directory_repaired", {
-            alias: session.alias, from: session.cwd ? relativeDirectory(session.cwd) : null, to: relativeDirectory(cwd),
+            alias: session.alias, from: relativeDirectory(session.cwd), to: relativeDirectory(cwd),
           });
           session.cwd = cwd;
         }
@@ -1924,7 +1924,7 @@ export class VoiceSession {
   private publicSession(session: ManagedSession): Record<string, unknown> {
     return {
       alias: session.alias,
-      directory: relativeDirectory(session.cwd ?? WORKSPACE),
+      directory: relativeDirectory(session.cwd),
       session_state: session.sessionState,
       turn_state: session.turnState,
       stop_reason: session.stopReason,
@@ -1940,7 +1940,7 @@ export class VoiceSession {
     return {
       managed_sessions: Array.from(this.sessions.values()).slice(-20).map((session) => ({
         alias: session.alias,
-        directory: relativeDirectory(session.cwd ?? WORKSPACE),
+        directory: relativeDirectory(session.cwd),
         session_state: session.sessionState,
         turn_state: session.turnState,
         stop_reason: session.stopReason,
