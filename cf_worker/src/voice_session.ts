@@ -42,6 +42,8 @@ type Rung = "low" | "middle" | "high";
 const REGISTER_RUNGS: Rung[] = ["low", "middle", "high"];
 const MAX_SINCE_GREETING = 4;
 const MAX_SESSION_LIST_PAGES = 10;
+// Alarm interval that keeps this object resident during a call (see alarm()).
+const KEEPALIVE_MS = 30_000;
 const MAX_WORKSPACE_PROJECTS = 60;
 const ACP_STARTING_ERROR = "the sandbox is still starting; try again after agent_connected";
 const ACP_UNAVAILABLE_ERROR = "the sandbox could not be reached; another attempt has started, and open_recovery_menu offers a restart";
@@ -765,6 +767,17 @@ export class VoiceSession {
     });
   }
 
+  // Cloudflare keeps a Durable Object resident for an open outbound WebSocket only during its
+  // first 15 minutes; after that, with no incoming events, it is evicted like an idle object,
+  // and the GPT-Live sideband and the ACP connection die without close events (two calls
+  // ended this way at 902 s and 918 s). An alarm is an incoming event, so one every 30 s keeps
+  // the object resident while a call is attached or Agent work is running, and lapses after.
+  async alarm(): Promise<void> {
+    const working = Array.from(this.sessions.values())
+      .some((session) => session.turnState === "in_progress" || session.turnState === "queued");
+    if (this.liveAttached || working) await this.state.storage.setAlarm(Date.now() + KEEPALIVE_MS);
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/conversation") {
@@ -840,6 +853,7 @@ export class VoiceSession {
     }
     // Voice never waits on the Agent: ACP connects (or keeps connecting) in the background.
     this.ensureAcp();
+    await this.state.storage.setAlarm(Date.now() + KEEPALIVE_MS);
     await this.record("voice.live.attached", { live_session_id: incomingLiveSessionId, acp_ready: this.acpReady });
     // Diagnostics must never block a call from connecting.
     const callerId = await this.callerIdAttestation().catch(() => null);
