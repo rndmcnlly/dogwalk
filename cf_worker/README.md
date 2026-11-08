@@ -319,6 +319,17 @@ The page also streams raw Workspace files for its viewers from
 caller and Voice Frontend speech, Orchestrator briefs, says, and Agent prompts,
 Agent remarks, tool calls and Reports, harness events, keypad presses).
 
+One Paired Browser at a time: accepting a new one unpairs the old (its takeovers
+are revoked, its page closes with 4003). The Orchestrator gets
+`browser_connected` and `browser_disconnected` harness events and
+`paired_browser` in its call-start snapshot, and `show_in_browser` sends the
+page `{type: "show", uri, note}` for `dogwalk:file/<path>`, `dogwalk:dir/<path>`,
+`dogwalk:session/<Alias>`, `dogwalk:timeline`, `dogwalk:terminal`,
+`dogwalk:desktop`, or an http(s) address. Files and views open directly;
+takeovers and web pages show a banner the User clicks. HTML renders in an
+`<iframe sandbox="allow-scripts">` from `srcdoc` with a prepended CSP of
+`default-src 'none'` (inline scripts, styles, and data: images only).
+
 ### Human Takeover
 
 The page's Hands tab launches a terminal or a desktop in a new full-screen tab

@@ -1,6 +1,6 @@
 ---
 name: pair-browser
-description: the caller wants to see something on a screen (status, a report, a file a dog wrote, a diff), asks to pair, link, or connect a browser, laptop, or tablet, or asks how to read results instead of hearing them.
+description: the caller wants to see something on a screen (status, a report, a file a dog wrote, a diff, an image, a web page), asks to pair, link, or connect a browser, laptop, or tablet, asks how to read results instead of hearing them, or a browser is connected and something would be easier to see than to hear.
 ---
 
 A Paired Browser is an optional, read-only second surface: a browser tab at dogwalk.tools/pair that shows every dog's live status and lets the caller read Workspace files (reports, notes, code). It cannot start, steer, or approve anything; all of that stays in the call. Pairing lasts as long as that browser tab stays open, survives hanging up (so the caller can read, think, and call back), and expires after an hour idle or twelve hours in all.
@@ -17,7 +17,19 @@ Walk a newcomer through it in short steps, one or two sentences per say call, wa
 
 If nothing is named within a few seconds of the tones, the browser did not decode them. If the caller says the page heard tones but failed (it may say ECC failed or no rate decoded), play them again slower: baud 6, then 4. If the page heard nothing, suggest speakerphone, more volume, or the phone closer to the device, check the page still says it is listening, and play them again at the same rate. If the place or device named is not theirs, they should press star: someone else in earshot heard the tones.
 
-Once paired, you can point them at things to read by path, relative to their home folder (for example "parser slash REPORT dot md"), and they can browse from the page. Pressing one is the only way to accept a browser; never tell the caller you paired it yourself.
+Only one browser is paired at a time: pairing a new one unpairs the old one and closes its terminal and desktop, and the system says so.
+
+## Showing things once paired
+
+While browser_connected holds (the page is open), use show_in_browser instead of reading long things aloud, then say in a sentence what is now on their screen:
+
+- dogwalk:file/<path> opens a file in the page's viewer: Markdown, images, PDF, audio, video, CSV and JSON tables, code, and HTML. Paths are relative to home (dogwalk:file/parser/REPORT.md) or absolute under /home/daytona.
+- dogwalk:dir/<path> opens a folder; dogwalk:session/<Alias> shows that session's card; dogwalk:timeline shows what was said and done.
+- dogwalk:terminal and dogwalk:desktop, and any http or https address, appear as a banner the caller clicks (browsers open new tabs only from a click). Use the desktop when a dog is stuck on something only a person can do: a CAPTCHA, a login, a consent page.
+
+For a rich report, ask a dog for one self-contained HTML file: styles, scripts, and images inline (images as data URIs), no external links to fonts, scripts, or images, because the page shows HTML isolated from the network. Then show it. Markdown is fine for plain reports.
+
+Pressing one is the only way to accept a browser; never tell the caller you paired it yourself.
 
 ## Voice Frontend guidance
 

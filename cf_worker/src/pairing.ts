@@ -27,7 +27,6 @@ export const PAIRING_CODE_TTL_MS = 90_000;
 export const PAIRING_CONFIRM_MS = 30_000;
 export const PAIRED_IDLE_MS = 60 * 60_000;
 export const PAIRED_MAX_MS = 12 * 60 * 60_000;
-export const MAX_PAIRED_BROWSERS = 3;
 
 const ROWS = [697, 770, 852, 941];
 const COLS = [1209, 1336, 1477, 1633];

@@ -277,13 +277,14 @@ ORCHESTRATOR_SCRIPT = [
     # Preferences and pairing are voice operations; keypad digits stand in for asking here.
     ('"key":"6"', lambda ctx: [call("k6-style", "set_earcon_style", style="tonal")]),
     ('"key":"8"', lambda ctx: [call("k8-pair", "pair_browser")]),
+    ('"key":"9"', lambda ctx: [call("k9-show", "show_in_browser", uri="dogwalk:file/REPORT.md", note="the report")]),
 ]
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
-    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair",
+    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair", "k9-show",
 ]
 
 
@@ -905,6 +906,11 @@ async def run_protocol(identity: str) -> None:
             assert escaped["id"] == 3 and "/home/daytona" in escaped["error"]
             await browser.send(json.dumps({"type": "ping"}))
             await recv_type(browser, "pong")
+            # The walker learns the page is open, and can put a file on it.
+            await wait_for(lambda: any("browser_connected" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
+            await mocks.send_live(dtmf("9"))
+            shown = await recv_type(browser, "show", 15)
+            assert shown["uri"] == "dogwalk:file//home/daytona/REPORT.md" and shown["note"] == "the report", shown
             # Media viewers fetch raw bytes with the credential in a header, never the URL.
             bearer = {"authorization": f"Bearer {token}"}
             status, headers, body = await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fhome%2Fdaytona%2FREPORT.md", bearer)

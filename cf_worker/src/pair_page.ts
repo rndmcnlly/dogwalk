@@ -103,7 +103,8 @@ details summary{cursor:pointer}
 .permissions h2{margin:0 0 6px;color:var(--accent)}
 .permissions ul{margin:0;padding-left:1.2em}
 
-/* Tabs; on a wide screen the Sessions and Call timeline tabs both show the two panels side by side */
+/* Tabs: Live, Files, Hands. Live shows sessions and the call timeline side by side on a wide
+   screen; on a narrow one a segmented control picks one of the two columns. */
 .tabs{position:sticky;top:0;z-index:5;display:flex;gap:2px;background:var(--paper);border-bottom:1px solid var(--rule);margin:14px 0 12px;overflow-x:auto}
 .tab{border:0;border-bottom:3px solid transparent;border-radius:0;background:none;padding:10px 14px;min-height:46px;font-weight:600;color:var(--muted);white-space:nowrap}
 .tab[aria-selected=true]{color:var(--ink);border-bottom-color:var(--accent)}
@@ -111,15 +112,32 @@ details summary{cursor:pointer}
 @media (hover:none){.tab .key{display:none}}
 .count{display:inline-block;min-width:1.6em;margin-left:6px;padding:2px 6px;border-radius:999px;background:var(--accent);color:var(--accent-ink);font:700 11px/1.2 var(--sans);text-align:center}
 .panel{display:none;min-width:0}
-.panel>h2:first-child{margin-top:4px}
-.panes[data-tab=sessions] #panelSessions,.panes[data-tab=feed] #panelFeed,.panes[data-tab=files] #panelFiles,.panes[data-tab=hands] #panelHands{display:block}
+.panel>h2:first-child,.live-col>h2:first-child{margin-top:4px}
+.panes[data-tab=live] #panelLive,.panes[data-tab=files] #panelFiles,.panes[data-tab=hands] #panelHands{display:block}
+.segmented{display:inline-flex;margin:0 0 10px;border:1px solid var(--rule);border-radius:var(--radius);overflow:hidden}
+.segmented button{border:0;border-radius:0;background:var(--card);padding:6px 14px;min-height:38px;font-weight:600;color:var(--muted)}
+.segmented button+button{border-left:1px solid var(--rule)}
+.segmented button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink)}
+.segmented button[aria-pressed=true] .count{background:var(--accent-ink);color:var(--accent)}
+.live-col{min-width:0}
+.live-cols[data-view=sessions] #liveFeed,.live-cols[data-view=timeline] #liveSessions{display:none}
 @media (min-width:1100px){
-  .panes[data-tab=sessions],.panes[data-tab=feed]{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:0 28px;align-items:start}
-  .panes[data-tab=sessions] #panelFeed,.panes[data-tab=feed] #panelSessions{display:block}
-  .panes #panelFeed{position:sticky;top:58px}
-  .panes .see-also{display:none}
+  #liveSwitch{display:none}
+  .live-cols{display:grid;grid-template-columns:minmax(0,.85fr) minmax(0,1.15fr);gap:0 28px;align-items:start}
+  .live-cols[data-view] #liveFeed,.live-cols[data-view] #liveSessions{display:block}
+  #liveFeed{position:sticky;top:58px}
 }
 .explain{margin:-4px 0 10px}
+
+/* What the walker shows: a toast for navigations, a banner for tabs only a click may open */
+.toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:20;max-width:min(560px,calc(100vw - 28px));padding:10px 16px;border-radius:var(--radius);background:var(--ink);color:var(--paper);box-shadow:0 4px 16px rgb(0 0 0 / .3);font-size:14px}
+.toast .note{display:block;opacity:.8;font-size:13px}
+.banner{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:20;width:min(720px,calc(100vw - 20px));display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:12px 14px;border:2px solid var(--accent);border-radius:var(--radius);background:var(--highlight);box-shadow:0 6px 20px rgb(0 0 0 / .3)}
+.banner .text{flex:1 1 16em;min-width:0}
+.banner .note{display:block;font-size:13px;color:var(--body)}
+.banner .host{display:block;font:700 19px/1.3 var(--mono);color:var(--ink);overflow-wrap:anywhere}
+.card.flash{animation:flash 2.4s ease-out}
+@keyframes flash{0%,40%{box-shadow:0 0 0 4px var(--accent);background:var(--highlight)}100%{box-shadow:0 0 0 0 transparent}}
 
 /* Sessions */
 .card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin:0 0 12px}
@@ -243,6 +261,14 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
 .table-wrap table{border-collapse:collapse;font:12.5px/1.4 var(--mono)}
 .table-wrap th,.table-wrap td{padding:4px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;max-width:36ch;overflow:hidden;text-overflow:ellipsis}
 .table-wrap th{position:sticky;top:0;background:var(--code-bg)}
+.html-bar{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:0 0 6px}
+.html-bar .small{flex:1 1 18em;margin:0}
+.html-stage{background:#fff;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.html-stage iframe{display:block;width:100%;height:clamp(360px,calc(100dvh - 210px),2400px);border:0;background:#fff}
+.html-stage:fullscreen{border:0;border-radius:0}
+.html-stage:fullscreen iframe{height:100%}
+.html-stage:-webkit-full-screen{width:100%;height:100%;border:0;border-radius:0}
+.html-stage:-webkit-full-screen iframe{height:100%}
 
 /* Hands */
 .launchers{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));max-width:720px}
@@ -288,6 +314,12 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
 </section>
 
 <section id="pairedScreen" hidden>
+  <div id="showBanner" class="banner" role="alert" hidden>
+    <span class="text"><b id="bannerText"></b><span id="bannerNote" class="note"></span></span>
+    <button id="bannerOpen" class="primary"></button>
+    <button id="bannerDismiss">Dismiss</button>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <div class="box pairing">
     <div>
       <div class="who" id="who"></div>
@@ -304,29 +336,35 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
   <div id="permissions" class="permissions" hidden></div>
 
   <nav id="tabs" class="tabs" role="tablist" aria-label="Views">
-    <button id="tab-sessions" class="tab" role="tab" aria-controls="panelSessions">Sessions<span class="key">1</span></button>
-    <button id="tab-feed" class="tab" role="tab" aria-controls="panelFeed">Call timeline<span id="feedCount" class="count" hidden></span><span class="key">2</span></button>
-    <button id="tab-files" class="tab" role="tab" aria-controls="panelFiles">Files<span class="key">3</span></button>
-    <button id="tab-hands" class="tab" role="tab" aria-controls="panelHands">Hands<span class="key">4</span></button>
+    <button id="tab-live" class="tab" role="tab" aria-controls="panelLive">Live<span id="feedCount" class="count" hidden></span><span class="key">1</span></button>
+    <button id="tab-files" class="tab" role="tab" aria-controls="panelFiles">Files<span class="key">2</span></button>
+    <button id="tab-hands" class="tab" role="tab" aria-controls="panelHands">Hands<span class="key">3</span></button>
   </nav>
 
-  <div id="panes" class="panes" data-tab="feed">
-    <section id="panelSessions" class="panel" role="tabpanel" aria-labelledby="tab-sessions">
-      <h2>Sessions</h2>
-      <p class="explain small muted">Where each coding session stands right now.<span class="see-also"> For what was said, see <button class="link" data-goto="feed">Call timeline</button>.</span></p>
-      <p id="sandbox" class="small muted"></p>
-      <div id="sessions"></div>
-      <div id="closed"></div>
-    </section>
-
-    <section id="panelFeed" class="panel" role="tabpanel" aria-labelledby="tab-feed">
-      <h2>Call timeline</h2>
-      <p class="explain small muted">Everything said and done on the call, in order, as it happens.<span class="see-also"> For where each session stands, see <button class="link" data-goto="sessions">Sessions</button>.</span></p>
-      <div id="feedFilters" class="feed-bar" role="group" aria-label="Show or hide"></div>
-      <div class="feed-wrap">
-        <ol id="feedList" class="feed-list" aria-live="off"></ol>
-        <p id="feedEmpty" class="feed-empty muted small">Nothing yet. What is said and done in the call appears here as it happens.</p>
-        <button id="feedPill" class="pill" hidden>New messages below</button>
+  <div id="panes" class="panes" data-tab="live">
+    <section id="panelLive" class="panel" role="tabpanel" aria-labelledby="tab-live">
+      <div id="liveSwitch" class="segmented" role="group" aria-label="Show">
+        <button id="seg-sessions" aria-pressed="false">Sessions</button>
+        <button id="seg-timeline" aria-pressed="false">Timeline<span id="feedCountSeg" class="count" hidden></span></button>
+      </div>
+      <div id="liveCols" class="live-cols" data-view="timeline">
+        <div id="liveSessions" class="live-col">
+          <h2>Sessions</h2>
+          <p class="explain small muted">Where each session stands</p>
+          <p id="sandbox" class="small muted"></p>
+          <div id="sessions"></div>
+          <div id="closed"></div>
+        </div>
+        <div id="liveFeed" class="live-col">
+          <h2>Call timeline</h2>
+          <p class="explain small muted">What was said and done, as it happens</p>
+          <div id="feedFilters" class="feed-bar" role="group" aria-label="Show or hide"></div>
+          <div class="feed-wrap">
+            <ol id="feedList" class="feed-list" aria-live="off"></ol>
+            <p id="feedEmpty" class="feed-empty muted small">Nothing yet. What is said and done in the call appears here as it happens.</p>
+            <button id="feedPill" class="pill" hidden>New messages below</button>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -1012,6 +1050,7 @@ let pingTimer = null;
 let pairing = null;     // the hello message, with idle_expires_at refreshed by pongs
 let serverError = "";
 let lastStatus = null;  // the newest status message, for the chips and the recent paths
+let unpairRequested = false; // this page asked to unpair, so a 4003 close is expected
 
 function connect() {
   const token = sessionStorage.getItem(TOKEN_KEY);
@@ -1048,9 +1087,12 @@ function onClose(ws, event) {
   renderChips();
   if (event.code === 4001 || event.code === 4003) {
     forgetPairing();
-    if (event.code === 4003) setStatus("Unpaired. Press Listen to pair again.");
+    // 4003 without our own request: the server allows one Paired Browser, so another one replaced this one.
+    if (event.code === 4003 && unpairRequested) setStatus("Unpaired. Press Listen to pair again.");
+    else if (event.code === 4003) setStatus("This browser was unpaired (another browser may have paired in its place). Press Listen to pair again.", "bad");
     else setStatus("This pairing is no longer valid" + (serverError ? " (" + serverError + ")" : "") + ". Press Listen to pair again.", "bad");
     serverError = "";
+    unpairRequested = false;
     return;
   }
   setConnection("Disconnected, reconnecting in " + Math.round(backoff / 1000) + " s");
@@ -1078,6 +1120,7 @@ function onMessage(m) {
     case "list": if (m.id === pendingList) renderListing(m); break;
     case "file": if (m.id === pendingRead) renderTextFile(m); break;
     case "launch": settleLaunch(m); break;
+    case "show": onShow(m); break;
     case "error":
       if (m.id != null) {
         if (m.id === pendingList) $("fileNote").textContent = "Error: " + m.error;
@@ -1140,24 +1183,35 @@ function forgetPairing() {
   prevPermissions = null;
   closeViewer();
   clearFeed();
+  hideBanner();
   renderChips();
   showScreen("pair");
 }
 
 function unpair() {
   if (!confirm("Unpair this browser? You will need to pair it again from the call.")) return;
+  unpairRequested = true;
   if (send({ type: "unpair" })) return; // the server replies, then closes with 4003
+  unpairRequested = false;
   clearTimeout(reconnectTimer);
   socket = null;
   forgetPairing();
   setStatus("Unpaired. Press Listen to pair again.");
 }
 
-// ---- Tabs: Sessions, Call timeline (key "feed", after the server's "feed" message), Files, Hands.
-// A wide screen shows Sessions and Call timeline side by side.
-const TABS = ["sessions", "feed", "files", "hands"];
+// ---- Tabs: Live (sessions and the call timeline), Files, Hands.
+// A wide screen shows both Live columns; a narrow one shows the column its segmented control picks.
+const TABS = ["live", "files", "hands"];
 const TAB_KEY = "dogwalk.pair.tab";
-let currentTab = TABS.indexOf(stored(TAB_KEY, "feed")) >= 0 ? stored(TAB_KEY, "feed") : "feed";
+const LIVE_KEY = "dogwalk.pair.liveView";
+// The Sessions and Call timeline tabs ("sessions", "feed") became the one Live tab and its two views.
+const savedTab = stored(TAB_KEY, "live");
+if (savedTab === "sessions" || savedTab === "feed") {
+  store(TAB_KEY, "live");
+  store(LIVE_KEY, savedTab === "sessions" ? "sessions" : "timeline");
+}
+let currentTab = TABS.indexOf(stored(TAB_KEY, "live")) >= 0 ? stored(TAB_KEY, "live") : "live";
+let liveView = stored(LIVE_KEY, "timeline") === "sessions" ? "sessions" : "timeline";
 
 function showTab(name) {
   if (TABS.indexOf(name) < 0) return;
@@ -1169,13 +1223,28 @@ function showTab(name) {
     button.setAttribute("aria-selected", String(tab === name));
     button.tabIndex = tab === name ? 0 : -1;
   }
-  if (feedVisible()) {
-    feedUnseen = 0;
-    renderFeedCount();
-    if (feedStick) scrollFeedToEnd();
-  }
+  onFeedShown();
 }
-const feedVisible = () => currentTab === "feed" || (WIDE.matches && currentTab === "sessions");
+function showLiveView(view) {
+  liveView = view === "sessions" ? "sessions" : "timeline";
+  store(LIVE_KEY, liveView);
+  $("liveCols").dataset.view = liveView;
+  $("seg-sessions").setAttribute("aria-pressed", String(liveView === "sessions"));
+  $("seg-timeline").setAttribute("aria-pressed", String(liveView === "timeline"));
+  onFeedShown();
+}
+// Opens the Live tab with view in front (on a wide screen both columns show anyway).
+function showLive(view) {
+  showLiveView(view);
+  showTab("live");
+}
+function onFeedShown() {
+  if (!feedVisible()) return;
+  feedUnseen = 0;
+  renderFeedCount();
+  if (feedStick) scrollFeedToEnd();
+}
+const feedVisible = () => currentTab === "live" && (WIDE.matches || liveView === "timeline");
 
 // ---- Session status
 const openReports = new Set();
@@ -1218,7 +1287,7 @@ function sessionCard(s) {
     s.stop_reason ? el("span", { class: "small muted" }, s.stop_reason) : null,
   ]);
   const directory = s.directory ? resolvePath("", s.directory) : "";
-  const card = el("article", { class: "card turn-" + s.turn_state }, [
+  const card = el("article", { class: "card turn-" + s.turn_state, "data-alias": s.alias }, [
     head,
     directory ? el("div", { class: "pathline" }, [
       el("button", { class: "link mono small", onclick: () => { showTab("files"); listDir(directory); } }, s.directory),
@@ -1469,8 +1538,10 @@ function onFeed(m) {
 }
 
 function renderFeedCount() {
-  $("feedCount").textContent = feedUnseen ? String(Math.min(feedUnseen, 99)) + (feedUnseen > 99 ? "+" : "") : "";
-  $("feedCount").hidden = !feedUnseen;
+  for (const id of ["feedCount", "feedCountSeg"]) {
+    $(id).textContent = feedUnseen ? String(Math.min(feedUnseen, 99)) + (feedUnseen > 99 ? "+" : "") : "";
+    $(id).hidden = !feedUnseen;
+  }
 }
 
 function scrollFeedToEnd() {
@@ -1605,6 +1676,7 @@ const kinds = {
   audio: "mp3 wav m4a aac ogg oga opus flac",
   video: "mp4 m4v webm mov ogv",
   markdown: "md markdown mdx",
+  html: "html htm",
   json: "json geojson ipynb webmanifest",
   csv: "csv",
   tsv: "tsv tab",
@@ -1612,7 +1684,7 @@ const kinds = {
     + "woff woff2 ttf otf eot psd xcf blend fbx glb npy npz pt pth onnx safetensors parquet doc docx xls xlsx ppt pptx key pages numbers dmg iso",
 };
 for (const kind in kinds) for (const ext of kinds[kind].split(" ")) EXT_KIND[ext] = kind;
-const TEXT_KINDS = new Set(["markdown", "json", "csv", "tsv", "text"]);
+const TEXT_KINDS = new Set(["markdown", "html", "json", "csv", "tsv", "text"]);
 const WARN_BYTES = 10 * 1024 * 1024;
 const TABLE_ROWS = 500;
 
@@ -1792,6 +1864,7 @@ function renderTextFile(m) {
   const text = String(m.text || "");
   const kind = viewer.kind;
   if (kind === "markdown") return setViewerBody(markdownBlock(text));
+  if (kind === "html") return setViewerBody(htmlBlock(text));
   if (kind === "json") {
     try { return setViewerBody(codeBlock(JSON.stringify(JSON.parse(text), null, 2))); }
     catch (error) { $("viewerNote").textContent = m.truncated ? "Too long to pretty-print; shown as is." : "Not valid JSON; shown as is."; }
@@ -1800,13 +1873,56 @@ function renderTextFile(m) {
   setViewerBody(codeBlock(text));
 }
 
-// Source with line numbers (HTML and XML included, shown as text, never rendered).
+// Source with line numbers (XML, and HTML under its Source toggle, shown as text, never rendered).
 function codeBlock(text) {
   const pre = el("pre", { class: "code" });
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
   for (const line of lines) pre.append(el("span", { class: "ln" }, line));
   return pre;
+}
+
+// ---- HTML reports: rendered in an isolated frame, with a Source toggle.
+// The frame is sandboxed with allow-scripts only (never allow-same-origin, -popups, -forms,
+// -top-navigation or -modals), so the report runs in an opaque origin: its scripts cannot reach
+// this page, the pairing token in sessionStorage, or any storage of ours. The CSP meta below makes
+// it self-contained: nothing loads from or reaches the network (fetch, images, styles, fonts, frames).
+// Residual risk: CSP cannot stop a script from navigating its own frame to an outside URL (or a
+// WebRTC connection, or a DNS prefetch); what such a request could carry is limited to the report's
+// own contents, since nothing else is reachable from inside the frame.
+const REPORT_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' data:; img-src data: blob:; "
+  + "font-src data:; media-src data: blob:; base-uri 'none'; form-action 'none'";
+// The meta goes before any of the document's own markup (after a leading doctype, if any). The HTML
+// parser then opens the html and head elements for it itself, folds a later <html> tag's attributes
+// into that element, and ignores a later <head> tag, so the policy is the first thing in head
+// whether or not the document has html or head tags, and nothing in the document can precede it.
+function isolateHtml(text) {
+  const lead = /^﻿?(\s|<!--[\s\S]*?-->)*<!doctype[^>]*>/i.exec(text);
+  const doctype = lead ? lead[0] : "<!doctype html>";
+  return doctype + "<meta http-equiv=\"Content-Security-Policy\" content=\"" + REPORT_CSP + "\">"
+    + (lead ? text.slice(lead[0].length) : text);
+}
+function htmlBlock(text) {
+  const frame = el("iframe", { sandbox: "allow-scripts", referrerpolicy: "no-referrer", title: basename(viewer.path) });
+  frame.srcdoc = isolateHtml(text);
+  const stage = el("div", { class: "html-stage" }, frame);
+  const source = codeBlock(text);
+  source.hidden = true;
+  const note = el("p", { class: "small muted" }, "Shown isolated: scripts run, but nothing loads from or reaches the network; images and styles must be inline.");
+  const toggle = el("button", { class: "mini", "aria-pressed": "false", onclick: () => {
+    const showSource = stage.hidden === false;
+    stage.hidden = showSource;
+    source.hidden = !showSource;
+    note.hidden = showSource;
+    full.hidden = showSource || !canFull;
+    toggle.setAttribute("aria-pressed", String(showSource));
+  } }, "Source");
+  const canFull = !!(stage.requestFullscreen || stage.webkitRequestFullscreen);
+  const full = el("button", { class: "mini", hidden: !canFull, onclick: () => {
+    const request = stage.requestFullscreen || stage.webkitRequestFullscreen;
+    Promise.resolve(request.call(stage)).catch((error) => { $("viewerNote").textContent = "Full screen failed: " + error.message; });
+  } }, "Full screen");
+  return el("div", null, [el("div", { class: "html-bar" }, [note, toggle, full]), stage, source]);
 }
 
 // Quote-aware CSV/TSV parsing, stopping after max rows.
@@ -1945,6 +2061,109 @@ $("handsTerminal").addEventListener("click", launchTerminal);
 $("handsDesktop").addEventListener("click", launchDesktop);
 // ==== HANDS END ====
 
+// ---- The walker shows the user something: {"type":"show","uri":"...","note":"..."}.
+// dogwalk:file/<path>, dogwalk:dir/<path>, dogwalk:session/<Alias> and dogwalk:timeline navigate
+// this page at once, with a toast. dogwalk:terminal, dogwalk:desktop and http(s) URLs need a new tab,
+// which a browser opens only from a click, so they raise a banner with a button instead.
+const BANNER_MS = 120000;
+let bannerAction = null;
+let bannerTimer = null;
+let toastTimer = null;
+
+function onShow(m) {
+  const uri = String(m.uri || "");
+  const note = String(m.note || "").slice(0, 300);
+  const path = /^dogwalk:(file|dir)\/(.*)$/.exec(uri);
+  if (path) {
+    // Paths are absolute under the sandbox home; anything else is ignored.
+    const full = resolvePath("", path[2]);
+    if (path[2].charAt(0) !== "/" || (full !== HOME && full.indexOf(HOME + "/") !== 0)) {
+      console.warn("show: ignoring a path outside " + HOME + ": " + uri);
+      return;
+    }
+    if (path[1] === "file") openFile(full);
+    else { showTab("files"); listDir(full); }
+    return walkerShowed("The walker opened " + (path[1] === "dir" ? "the folder " : "") + basename(full), note);
+  }
+  const session = /^dogwalk:session\/(.+)$/.exec(uri);
+  if (session) {
+    const alias = session[1];
+    showLive("sessions");
+    const card = [...document.querySelectorAll(".card[data-alias]")].find((node) => node.dataset.alias === alias);
+    if (card) {
+      const group = card.closest("details");
+      if (group && !group.open) { group.open = true; closedOpen = true; }
+      card.classList.remove("flash");
+      void card.offsetWidth; // restart the animation
+      card.classList.add("flash");
+      card.scrollIntoView({ block: "center", behavior: REDUCED_MOTION.matches ? "auto" : "smooth" });
+    }
+    return walkerShowed("The walker pointed you to " + alias, note);
+  }
+  if (uri === "dogwalk:timeline") {
+    showLive("timeline");
+    feedStick = true;
+    scrollFeedToEnd();
+    const last = $("feedList").lastElementChild;
+    if (last) last.scrollIntoView({ block: "nearest", behavior: REDUCED_MOTION.matches ? "auto" : "smooth" });
+    return walkerShowed("The walker opened the call timeline", note);
+  }
+  if (uri === "dogwalk:terminal" || uri === "dogwalk:desktop") {
+    const kind = uri.slice("dogwalk:".length);
+    return showBanner("The walker wants to show you the " + kind, "", note, "Open " + kind, () => launch(kind));
+  }
+  if (/^https?:/i.test(uri)) {
+    let url = null;
+    try { url = new URL(uri); } catch (error) { /* ignored below */ }
+    if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) {
+      console.warn("show: ignoring a malformed web address: " + uri);
+      return;
+    }
+    const href = url.href;
+    return showBanner("The walker wants to show you a web page", url.hostname, note, "Open page",
+      () => window.open(href, "_blank", "noopener,noreferrer"));
+  }
+  console.warn("show: ignoring an unknown URI: " + uri);
+}
+
+// A navigation already happened: say so briefly, and notify if the tab is hidden.
+function walkerShowed(text, note) {
+  log("show: " + text + (note ? " (" + note + ")" : ""));
+  const toast = $("toast");
+  toast.replaceChildren(...[text, note ? el("span", { class: "note" }, note) : null].filter(Boolean));
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, note ? 8000 : 5000);
+  notifyHidden(text, note);
+}
+function notifyHidden(title, body) {
+  if (alertsOn && document.hidden) raiseAlert(title, body || "Open the Paired Browser to see it.");
+}
+
+function showBanner(text, host, note, button, action) {
+  log("show: " + text + (host ? " " + host : "") + (note ? " (" + note + ")" : ""));
+  $("bannerText").replaceChildren(...[text, host ? el("span", { class: "host" }, host) : null].filter(Boolean));
+  $("bannerNote").textContent = note;
+  $("bannerNote").hidden = !note;
+  $("bannerOpen").textContent = button;
+  bannerAction = action;
+  $("showBanner").hidden = false;
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(hideBanner, BANNER_MS);
+  notifyHidden(text, [host, note].filter(Boolean).join(": "));
+}
+function hideBanner() {
+  clearTimeout(bannerTimer);
+  bannerAction = null;
+  $("showBanner").hidden = true;
+}
+// Runs inside the click, so the new tab is allowed.
+function openBanner() {
+  const action = bannerAction;
+  hideBanner();
+  if (action) action();
+}
+
 // ---- Start
 $("listen").addEventListener("click", startListening);
 $("stop").addEventListener("click", () => {
@@ -1957,9 +2176,10 @@ $("closeViewer").addEventListener("click", closeViewer);
 $("copyPath").addEventListener("click", (event) => copyText(viewer.path, event.currentTarget));
 $("downloadFile").addEventListener("click", () => downloadFile(viewer.path));
 for (const tab of TABS) $("tab-" + tab).addEventListener("click", () => showTab(tab));
-for (const link of document.querySelectorAll("[data-goto]")) {
-  link.addEventListener("click", () => { showTab(link.dataset.goto); $("tab-" + link.dataset.goto).focus(); });
-}
+$("seg-sessions").addEventListener("click", () => showLiveView("sessions"));
+$("seg-timeline").addEventListener("click", () => showLiveView("timeline"));
+$("bannerDismiss").addEventListener("click", hideBanner);
+$("bannerOpen").addEventListener("click", openBanner);
 $("tabs").addEventListener("keydown", (event) => {
   // Arrow keys move between tabs, as in the ARIA tabs pattern.
   const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
@@ -1985,8 +2205,9 @@ document.addEventListener("keydown", (event) => {
   if (event.altKey || event.ctrlKey || event.metaKey) return;
   const target = event.target;
   if (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable)) return;
+  if (event.key === "Escape" && !$("showBanner").hidden) { hideBanner(); return; }
   if (event.key === "Escape" && !$("viewer").hidden) { closeViewer(); return; }
-  const index = "1234".indexOf(event.key);
+  const index = "123".indexOf(event.key);
   if (index >= 0 && event.key.length === 1 && !$("pairedScreen").hidden) showTab(TABS[index]);
 });
 document.addEventListener("visibilitychange", () => {
@@ -2004,6 +2225,7 @@ setInterval(tick, 15000);
 renderCrumbs(HOME);
 renderFilters();
 applyFilters();
+showLiveView(liveView);
 showTab(currentTab);
 acquireWake();
 if (sessionStorage.getItem(TOKEN_KEY)) connect();
