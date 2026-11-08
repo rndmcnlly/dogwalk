@@ -988,7 +988,7 @@ async function startListening() {
     sink.gain.value = 0;
     sink.connect(ctx.destination);
     const probe = new Classifier(ctx.sampleRate); // same window and hop as the worklet's
-    const rx = new FrameReceiver(ctx.sampleRate, probe.hop, probe.win, showLive, onFrame);
+    const rx = new FrameReceiver(ctx.sampleRate, probe.hop, probe.win, showLiveText, onFrame);
     const onHop = (r) => { latestHop = r; rx.feed(r.sym); };
     let node;
     try {
@@ -1038,7 +1038,7 @@ function drawMeter() {
   requestAnimationFrame(drawMeter);
 }
 
-function showLive(text) {
+function showLiveText(text) {
   $("live").textContent = text;
 }
 

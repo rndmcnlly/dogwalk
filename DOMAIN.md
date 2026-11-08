@@ -60,10 +60,12 @@ Owns realtime audio transport, speech turn detection, browser or telephone media
 
 ### Access Control
 
-Owns phone Registration and Invite Codes at the PSTN boundary. A registered
-phone number identifies a User for access purposes; Dogwalk does not maintain a
-separate personal name in this context. Telephony providers and sandbox hosts
-are adapters, not identity authorities.
+Owns phone Registration, Invite Codes, and Invitations at the PSTN boundary. A
+registered phone number identifies a User for access purposes; Dogwalk does not
+maintain a separate personal name in this context. Telephony providers and
+sandbox hosts are adapters, not identity authorities. Phone numbers and the
+invitation graph stay here and in the caller's Voice Session state: they never
+reach ACP Agents, Sandbox files, or hosting-provider labels.
 
 ## Context Map
 
@@ -231,7 +233,10 @@ The Voice Agent mirrors the caller's sophistication, especially on technical top
 Authorization for one phone number to use Dogwalk. The normalized phone number
 is the Registration's identity and is unique. Registration records which Invite
 Code authorized it and when it occurred, but does not contain a personal name,
-sandbox identity, or hosting policy.
+sandbox identity, or hosting policy. When the Invite Code belongs to an
+Invitation, the Registration is the durable inviter -> Invitation -> invitee
+edge, and the invitee can ask the Voice Agent who invited them (the inviter's
+number).
 
 ### Invite Code
 
@@ -241,7 +246,33 @@ A speakable capability that authorizes Registration. An Invite Code may have an
 expiration time and a maximum number of uses. No expiration means it remains
 valid indefinitely; no maximum means unlimited registrations. A code is usable
 only while unexpired and below its maximum, and each phone number may register
-only once regardless of how many codes it knows.
+only once regardless of how many codes it knows. An operator mints Invite Codes
+directly; a User mints one by creating an Invitation.
+
+### Invitation
+
+**Context:** Access Control
+
+A User-created, single-use Invite Code with provenance: the inviting User
+(resolved from the authenticated Voice Call, never from what a model claims),
+an optional bound recipient number, and a lifecycle of active, then redeemed,
+expired (24 hours after creation), or revoked. A User may hold at most three
+active Invitations. Unbound, the words work for whichever unregistered phone
+redeems them first; bound, only for that number. The inviter binds or changes
+the recipient only while it is unredeemed, and only after the Voice Agent read
+the number back and the inviter confirmed it; this records an intended
+recipient and does not verify that the recipient controls the number, which
+only their own Voice Call does. Redemption goes through the ordinary
+Registration ritual and applies expiration, single use, revocation, and the
+bound number in one transaction: a failed claim consumes nothing and records no
+edge. Removing an Invitation from the User's list revokes it if still active
+and hides it; nothing is deleted, so provenance and the Registration it
+produced survive. The inviter hears each Invitation's status, when it was
+redeemed, and by which number; the invitee may hear the inviter's number. The
+operator-wide graph is visible only on the Diagnostics Surface or in D1.
+
+**Not:** An operator Invite Code (no inviter, any expiry or use count), a
+Registration, or proof of identity.
 
 ### Voice Call
 
@@ -739,6 +770,7 @@ The following language appears in Git history and is not canonical for productio
 - When a newer Handoff arrives while work for an older one is in flight, which supersession rules belong in deterministic code rather than Orchestrator judgment?
 
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
+- Invitations: should a successful Registration by Invitation continue straight into the new User's first call rather than hanging up? Should the Diagnostics Surface draw the invitation graph, and should an operator be able to raise or lower a User's active-Invitation limit?
 - Could Access Control identify a User by something spoken, such as a passphrase in the style of Invite Codes, so a call from any telephone, even a payphone, works without caller ID?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
 

@@ -99,6 +99,22 @@ INSERT INTO invite_codes (code_words, expires_at, max_uses)
 VALUES ('three pgp words', unixepoch('now', '+7 days'), 5);
 ```
 
+Registered Users can also create Invitations by voice (`src/invitations.ts`):
+each is an `invite_codes` row with `max_uses = 1` and a 24-hour expiry, plus an
+`invitations` row naming the inviter, an optional bound recipient, and
+revocation, hiding, and redemption times. A User holds at most three active
+Invitations. Operator codes are unaffected. Nothing is deleted; trace the
+invitation graph with:
+
+```sql
+SELECT v.inviter_phone, v.code_words, r.phone_number AS invitee, r.registered_at,
+       v.recipient_phone, v.revoked_at, v.hidden_at
+  FROM invitations v LEFT JOIN registrations r ON r.phone_number = v.redeemed_by
+ ORDER BY v.inviter_phone, r.registered_at;
+```
+
+Apply `migrations/2026-11-08-invitations.sql` before deploying this feature.
+
 ## Verification
 
 The local smoke test runs a fake Daytona lifecycle and toolbox server:

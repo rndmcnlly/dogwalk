@@ -17,6 +17,7 @@ import {
 import type { Env } from "./types";
 import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
 import { TerminalRelay } from "./terminal_relay";
+import { redemptionStatements, USABLE_FOR_PHONE_SQL } from "./invitations";
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
 export { TerminalRelay, VoiceSession };
@@ -258,16 +259,15 @@ const attemptsFromRequest = (req: Request): number => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
 };
 
-async function usableInviteCodes(env: Env): Promise<{ code_words: string }[]> {
+// Invite Codes this phone could redeem now; an Invitation bound to another number is not one.
+async function usableInviteCodes(env: Env, phone: string): Promise<{ code_words: string }[]> {
   const now = Math.floor(Date.now() / 1000);
   const candidates = await env.DB.prepare(
     `SELECT i.code_words
        FROM invite_codes i
-      WHERE (i.expires_at IS NULL OR i.expires_at > ?)
-        AND (i.max_uses IS NULL OR
-             (SELECT COUNT(*) FROM registrations r WHERE r.invite_code = i.code_words) < i.max_uses)
+      WHERE ${USABLE_FOR_PHONE_SQL}
       ORDER BY i.code_words`,
-  ).bind(now).all<{ code_words: string }>();
+  ).bind(now, phone).all<{ code_words: string }>();
   return candidates.results ?? [];
 }
 
@@ -954,7 +954,7 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
 
   // Unregistered caller: begin the registration ritual.
   await audit(env, "claim.ritual.start", from, callSid, {});
-  const invites = await usableInviteCodes(env);
+  const invites = await usableInviteCodes(env, from);
   return twiml(GatherSpeech(
     "This is Dogwalk, a voice line for supervising coding agents. If you have an invite, say your three invite words now.",
     "/voice/claim", 1, invites.map((i) => i.code_words),
@@ -1248,7 +1248,7 @@ async function handleClaim(req: Request, env: Env): Promise<Response> {
     return retryOrHangup(env, from, callSid, attempts, "I did not hear anything. ");
   }
 
-  const candidates = await usableInviteCodes(env);
+  const candidates = await usableInviteCodes(env, from);
   const match = matchInviteCode(spoken, candidates);
 
   if (!match) {
@@ -1303,7 +1303,7 @@ async function handleConfirm(req: Request, env: Env): Promise<Response> {
   if (!pending) {
     // No pending claim; re-enter the ritual.
     await audit(env, "confirm.no_pending", from, callSid, {});
-    const invites = await usableInviteCodes(env);
+    const invites = await usableInviteCodes(env, from);
     return twiml(GatherSpeech("Let's start over. Say your invite words.", "/voice/claim", 1, invites.map((i) => i.code_words)));
   }
 
@@ -1324,7 +1324,7 @@ async function handleConfirm(req: Request, env: Env): Promise<Response> {
       return twiml(Say("Too many attempts. Try again later. Goodbye.") + Hangup());
     }
     await audit(env, "confirm.retry", from, callSid, { attempts });
-    const invites = await usableInviteCodes(env);
+    const invites = await usableInviteCodes(env, from);
     return twiml(GatherSpeech("Let's try again. Say your invite words.", "/voice/claim", attempts + 1, invites.map((i) => i.code_words)));
   }
 
@@ -1422,28 +1422,19 @@ async function bindClaim(
   codeWords: string,
 ): Promise<Response> {
   const now = Math.floor(Date.now() / 1000);
-  const registrationStatement = env.DB.prepare(
-    `INSERT INTO registrations (phone_number, invite_code, registered_at, last_seen_at)
-     SELECT ?, i.code_words, ?, ?
-       FROM invite_codes i
-      WHERE i.code_words = ?
-        AND (i.expires_at IS NULL OR i.expires_at > ?)
-        AND (i.max_uses IS NULL OR
-             (SELECT COUNT(*) FROM registrations r WHERE r.invite_code = i.code_words) < i.max_uses)
-        AND NOT EXISTS (SELECT 1 FROM registrations WHERE phone_number = ?)`,
-  )
-    .bind(from, now, now, codeWords, now, from);
+  // Expiry, uses, revocation, and a bound recipient are checked in the same transaction that
+  // registers the phone and records the Invitation's redeemer (invitations.ts).
   const clearPendingStatement = env.DB.prepare(
     "DELETE FROM claim_attempt WHERE call_sid = ? AND phone_number = ?",
   ).bind(callSid, from);
-  const [registration] = await env.DB.batch([registrationStatement, clearPendingStatement]);
+  const [registration, redeemed] = await env.DB.batch([...redemptionStatements(env.DB, from, codeWords, now), clearPendingStatement]);
 
   if (registration.meta.changes === 0) {
     await audit(env, "registration.rejected", from, callSid, {});
     return twiml(Say("That invite is no longer available, or this phone is already registered. Goodbye.") + Hangup());
   }
 
-  await audit(env, "registration.success", from, callSid, {});
+  await audit(env, "registration.success", from, callSid, { invitation: redeemed.meta.changes > 0 });
 
   return twiml(
     Say("Registered. This phone number can now use Dogwalk. Goodbye.") + Hangup(),
@@ -1464,7 +1455,7 @@ async function retryOrHangup(
     return twiml(Say("Too many attempts. Try again later. Goodbye.") + Hangup());
   }
   await audit(env, "claim.retry", from, callSid, { attempts });
-  const invites = await usableInviteCodes(env);
+  const invites = await usableInviteCodes(env, from);
   return twiml(
     GatherSpeech(
       `${prefix}Say your invite words.`,

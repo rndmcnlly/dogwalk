@@ -245,6 +245,14 @@ def call(call_id: str, name: str, **arguments) -> dict:
     }
 
 
+def invite_words(context: list[dict], call_id: str) -> str:
+    output = next(
+        item for item in context
+        if item.get("type") == "function_call_output" and item["call_id"] == call_id
+    )
+    return json.loads(output["output"])["invitation"]["words"]
+
+
 def created_alias(context: list[dict]) -> str:
     output = next(
         item for item in context
@@ -306,6 +314,35 @@ ORCHESTRATOR_SCRIPT = [
     ]),
     # Second call: digits without a system meaning still reach the Orchestrator.
     ('"key":"7"', lambda ctx: [call("k7-say", "say", text=KEYPAD_SAY, delegation_id=None)]),
+    # Invitations: the caller (invited by SEED_INVITER) invites friends, by voice alone.
+    ("[handoff del-i1]", lambda ctx: [
+        call("i1-create", "create_invitation", recipient_phone=None, caller_confirmed_readback=False),
+        call("i1-who", "inspect_registration"),
+        call("i1-foreign", "revoke_invitation", invitation=FOREIGN_WORDS.upper()),
+    ]),
+    # A number is read back before it binds anything.
+    ("[handoff del-i1]", lambda ctx: [call("i2-readback", "create_invitation", recipient_phone="555 555 0102", caller_confirmed_readback=False)]),
+    ("[handoff del-i1]", lambda ctx: [call("i2-create", "create_invitation", recipient_phone="(555) 555-0102", caller_confirmed_readback=True)]),
+    ("[handoff del-i1]", lambda ctx: [call("i3-create", "create_invitation", recipient_phone=None, caller_confirmed_readback=False)]),
+    ("[handoff del-i1]", lambda ctx: [call("i4-limit", "create_invitation", recipient_phone=None, caller_confirmed_readback=False)]),
+    ("[handoff del-i1]", lambda ctx: [
+        call("i3-abroad", "set_invitation_recipient", invitation=invite_words(ctx, "i3-create"), recipient_phone="+44 20 7946 0958", caller_confirmed_readback=False),
+        call("i3-bare", "set_invitation_recipient", invitation=invite_words(ctx, "i3-create"), recipient_phone="020 7946 0958", caller_confirmed_readback=True),
+    ]),
+    ("[handoff del-i1]", lambda ctx: [
+        call("i-say", "say", text=f"The words are {invite_words(ctx, 'i1-create')}. Their number is 555 555 0102: plus one, five five five, five five five, zero one zero two.", delegation_id="del-i1"),
+        call("i-leak", "begin_prompt_turn", alias="Juniper", prompt="Text my friend at +1 (555) 555-0102 about the parser."),
+    ]),
+    # Bound after a claim began: the claim's confirmation must now fail.
+    ("[handoff del-i2]", lambda ctx: [
+        call("i3-bind", "set_invitation_recipient", invitation=invite_words(ctx, "i3-create"), recipient_phone="+1 555 555 0104", caller_confirmed_readback=True),
+    ]),
+    ("[handoff del-i3]", lambda ctx: [call("i-list", "list_invitations")]),
+    ("[handoff del-i3]", lambda ctx: [
+        call("i3-revoke", "revoke_invitation", invitation=invite_words(ctx, "i3-create")),
+        call("i1-hide", "revoke_invitation", invitation=invite_words(ctx, "i1-create")),
+    ]),
+    ("[handoff del-i3]", lambda ctx: [call("i-relist", "list_invitations")]),
     # Preferences and pairing are voice operations; keypad digits stand in for asking here.
     ('"key":"6"', lambda ctx: [call("k6-style", "set_earcon_style", style="tonal")]),
     ('"key":"8"', lambda ctx: [call("k8-pair", "pair_browser")]),
@@ -330,6 +367,19 @@ ORCHESTRATOR_SCRIPT = [
         "arguments": json.dumps({"name": "runtime-dramaturgy"}),
     }]),
 ]
+# Invitation fixtures (test numbers only). SEED_INVITER invited TEST_PHONE; FOREIGN is
+# SEED_INVITER's own, unbound and active; EXPIRED is TEST_PHONE's and lapsed.
+SEED_INVITER = "+15555550109"
+WELCOME_WORDS = "acme bravado cobra"
+FOREIGN_WORDS = "absurd caravan tiger"
+EXPIRED_WORDS = "adult escapade tonic"
+BOUND_PHONE = "+15555550102"
+INVITEE_PHONE = "+15555550103"
+REBOUND_PHONE = "+15555550104"
+RACE_PHONE = "+15555550105"
+LATE_PHONE = "+15555550106"
+RIVAL_PHONE = "+15555550107"
+TEST_NUMBERS = [TEST_PHONE, SEED_INVITER, BOUND_PHONE, INVITEE_PHONE, REBOUND_PHONE, RACE_PHONE, LATE_PHONE, RIVAL_PHONE]
 MEMORY_TEXT = "Caller prefers terse updates. Juniper fixes the parser; Dozer works in honeydozer."
 BOARD_PROGRAM = (
     'root = Stack([fig, pick])\nfig = Image("diagram.svg", "The parser\'s two stages", "Drawn by an agent", "small")\n'
@@ -340,7 +390,8 @@ STEP_IDS = [
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
-    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "k3-say", "k3-theme",
+    "h4-say", "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
+    "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "k3-say", "k3-theme",
     "k2-dramaturgy",
 ]
 
@@ -448,8 +499,17 @@ async def next_matching(
 
 def configure_assignment(wrangler: str, identity: str) -> None:
     sql = f"""
+INSERT INTO invite_codes (code_words, expires_at, max_uses)
+VALUES ('{WELCOME_WORDS}', unixepoch() + 86400, 1), ('{FOREIGN_WORDS}', unixepoch() + 86400, 1),
+       ('{EXPIRED_WORDS}', unixepoch() - 60, 1)
+ON CONFLICT(code_words) DO UPDATE SET expires_at = excluded.expires_at, max_uses = 1;
 INSERT INTO registrations (phone_number, invite_code, registered_at, last_seen_at)
-VALUES ('{TEST_PHONE}', 'ahead almighty apple', unixepoch(), unixepoch());
+VALUES ('{SEED_INVITER}', 'ahead almighty apple', unixepoch() - 86400, NULL),
+       ('{TEST_PHONE}', '{WELCOME_WORDS}', unixepoch(), unixepoch());
+INSERT INTO invitations (code_words, inviter_phone, redeemed_by, redeemed_at)
+VALUES ('{WELCOME_WORDS}', '{SEED_INVITER}', '{TEST_PHONE}', unixepoch()),
+       ('{FOREIGN_WORDS}', '{SEED_INVITER}', NULL, NULL),
+       ('{EXPIRED_WORDS}', '{TEST_PHONE}', NULL, NULL);
 INSERT INTO sandbox_assignments
   (phone_number, provider_id, identity_hash, state, provisioning_started_at, last_checked_at)
 VALUES ('{TEST_PHONE}', 'mock-sandbox-1', '{identity}', 'started', unixepoch(), unixepoch());
@@ -708,6 +768,7 @@ async def run_protocol(identity: str) -> None:
         # Pairing is thinking work: the Voice Frontend hands off rather than standing by.
         delegated = frontend.split("Backend tools:", 1)[1].split("\n", 1)[0]
         assert "pairing a browser" in delegated and "paired screen" in delegated and "whiteboard" in delegated, delegated
+        assert "inviting someone" in delegated and "who invited the caller" in delegated, delegated
         assert "backend" not in (
             frontend.replace("Backend tools:", "").replace("Never mention a backend", "").lower()
         )
@@ -966,6 +1027,7 @@ async def run_protocol(identity: str) -> None:
         # Other digits still reach the Orchestrator with their conversational context.
         await mocks.send_live(dtmf("7"))
         await next_matching(mocks.live_messages, appended("commentary", KEYPAD_SAY))
+        await run_invitations(mocks)
 
         # Sound style is a voice tool: it stores the preference and previews the opening sound.
         await mocks.send_live(dtmf("6"))
@@ -1201,13 +1263,16 @@ async def run_protocol(identity: str) -> None:
         handoff_rows = OrchestratorMock.user_message('"key":"7"')
         assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows
 
-        # Themes stay above ACP: no Agent prompt uses the theme's words.
+        # Themes and phone numbers stay above ACP: no Agent prompt uses the theme's words or
+        # any number Access Control knows.
         prompts = [m for m in mocks.acp_seen if m.get("method") == "session/prompt"]
         assert prompts
         for message in prompts:
             for block in message["params"]["prompt"]:
                 text = block.get("text", "").lower()
                 assert not any(word in text for word in THEME_LEXICON), text
+                digits = re.sub(r"\D", "", text)
+                assert not any(number[-10:] in digits for number in TEST_NUMBERS), text
 
         # Nothing with a URL reached the caller-facing lane.
         spoken = [m for m in mocks.seen if m.get("type") == "session.commentary.append"]
@@ -1225,8 +1290,10 @@ async def run_protocol(identity: str) -> None:
             assert {tool["name"] for tool in payload["tools"]} >= {
                 "brief", "say", "create_managed_session", "begin_prompt_turn", "end_call",
                 "discover_persisted_sessions", "load_persisted_session", "set_alias",
-                "close_managed_session", "list_workspace_projects",
+                "close_managed_session", "list_workspace_projects", "create_invitation", "list_invitations",
+                "set_invitation_recipient", "revoke_invitation", "inspect_registration",
             }
+            assert "invite-someone" in payload["instructions"]
             assert "Never create a session in home and tell it to work in another directory" in payload["instructions"]
             assert "from what I know, unverified" in payload["instructions"]
             assert not any(name in payload["instructions"] for name in ("Cedar", "Biscuit", "Kappa", "Dozer"))
@@ -1242,6 +1309,128 @@ async def run_protocol(identity: str) -> None:
             if item.get("type") == "function_call_output"
         }
         assert fed_back == set(STEP_IDS)
+
+
+def ritual(phone: str, call_sid: str, words: str, confirm: bool = True) -> str:
+    """An unregistered caller says invite words and, if they matched, confirms the readback."""
+    status, body = post(DEFAULT_LOCAL, "/voice/claim?attempts=1", {
+        "From": phone, "CallSid": call_sid, "SpeechResult": words, "Confidence": "0.9",
+    }, LOCAL_TOKEN)
+    assert status == 200, (status, body)
+    if "don't match" in body or not confirm:
+        return body
+    return confirm_claim(phone, call_sid)
+
+
+def confirm_claim(phone: str, call_sid: str) -> str:
+    status, body = post(DEFAULT_LOCAL, "/voice/confirm?attempts=1", {
+        "From": phone, "CallSid": call_sid, "SpeechResult": "yes", "Confidence": "0.9",
+    }, LOCAL_TOKEN)
+    assert status == 200, (status, body)
+    return body
+
+
+def d1(sql: str) -> list[dict]:
+    result = subprocess.run(
+        [project_wrangler(), "d1", "execute", "dogwalk", "--local", "--json", "--command", sql],
+        cwd=WORKER_DIR, check=True, capture_output=True, text=True,
+    )
+    return json.loads(result.stdout)[0]["results"]
+
+
+def outputs_back(*call_ids: str):
+    return lambda: set(call_ids) <= {
+        item.get("call_id") for _, payload in OrchestratorMock.requests for item in payload["input"]
+        if item.get("type") == "function_call_output"
+    }
+
+
+async def run_invitations(mocks: SocketMocks) -> None:
+    """Invitations end to end: tools on the inviter's call, redemption through the ritual."""
+    await mocks.send_live(transcript("input", "Invite my friend; he's listening.", 30000, 31500))
+    await mocks.send_live(delegation("del-i1", 31600))
+    await wait_for(outputs_back("i-say", "i-leak"), 15)
+    out = OrchestratorMock.tool_output
+    first = out("i1-create")["invitation"]
+    assert first["status"] == "active" and first["recipient"] is None and first["expires_in_minutes"] == 24 * 60, first
+    assert len(first["words"].split()) == 3 and first["words"].replace(" ", "").isalpha(), first
+    # The caller learns who invited them; another User's invitation is not theirs to touch.
+    assert out("i1-who") == {
+        "ok": True, "registered_days_ago": 0, "via": "invitation",
+        "invited_by": {"phone": SEED_INVITER, "spoken": "plus one, five five five, five five five, zero one zero nine"},
+    }, out("i1-who")
+    assert out("i1-foreign")["ok"] is False and "no such invitation" in out("i1-foreign")["error"]
+    # Without a confirmed readback nothing is created; the call is answered with what to read back.
+    readback = out("i2-readback")
+    assert readback["ok"] is False and "invitation" not in readback, readback
+    assert readback["readback"] == {
+        "phone": BOUND_PHONE, "spoken": "plus one, five five five, five five five, zero one zero two", "assumed_country_code": True,
+    }, readback
+    bound = out("i2-create")["invitation"]
+    assert bound["recipient"]["phone"] == BOUND_PHONE, bound
+    assert out("i3-create")["ok"] is True
+    limited = out("i4-limit")
+    assert limited["ok"] is False and "3 active invitations" in limited["error"], limited
+    abroad = out("i3-abroad")["readback"]
+    assert abroad["phone"] == "+442079460958" and abroad["spoken"] == "plus four four two, zero seven nine, four six zero, nine five eight", abroad
+    assert out("i3-bare")["ok"] is False and "country code" in out("i3-bare")["error"], out("i3-bare")
+    # Invite words and a number in digit groups may be spoken; a number never reaches an Agent.
+    assert out("i-say")["ok"] is True, out("i-say")
+    assert out("i-leak")["ok"] is False and "phone number" in out("i-leak")["error"], out("i-leak")
+    third = out("i3-create")["invitation"]["words"]
+
+    # A claim begins on an unbound invitation, then the inviter binds it elsewhere: the
+    # confirmation fails and consumes nothing.
+    assert "I heard" in await asyncio.to_thread(ritual, RACE_PHONE, "CA_INV_RACE", third, False)
+    await mocks.send_live(transcript("input", "Tie that last one to my other friend's number.", 32000, 33500))
+    await mocks.send_live(delegation("del-i2", 33600))
+    await wait_for(outputs_back("i3-bind"), 15)
+    assert out("i3-bind")["invitation"]["recipient"]["phone"] == REBOUND_PHONE
+    assert "no longer available" in await asyncio.to_thread(confirm_claim, RACE_PHONE, "CA_INV_RACE")
+
+    # Unbound: any unregistered phone redeems it, once.
+    assert "Registered" in await asyncio.to_thread(ritual, INVITEE_PHONE, "CA_INV_1", first["words"])
+    assert "don't match" in await asyncio.to_thread(ritual, LATE_PHONE, "CA_INV_2", first["words"])
+    # Bound: the wrong number cannot even claim it; the right one registers.
+    assert "don't match" in await asyncio.to_thread(ritual, REBOUND_PHONE, "CA_INV_3", bound["words"])
+    assert "Registered" in await asyncio.to_thread(ritual, BOUND_PHONE, "CA_INV_4", bound["words"])
+    assert "don't match" in await asyncio.to_thread(ritual, LATE_PHONE, "CA_INV_5", EXPIRED_WORDS)
+    # Two claims on one single-use invitation, confirmed at once: exactly one registers.
+    assert "I heard" in await asyncio.to_thread(ritual, LATE_PHONE, "CA_INV_6", FOREIGN_WORDS, False)
+    assert "I heard" in await asyncio.to_thread(ritual, RIVAL_PHONE, "CA_INV_7", FOREIGN_WORDS, False)
+    raced = await asyncio.gather(
+        asyncio.to_thread(confirm_claim, LATE_PHONE, "CA_INV_6"),
+        asyncio.to_thread(confirm_claim, RIVAL_PHONE, "CA_INV_7"),
+    )
+    assert sorted("Registered" in body for body in raced) == [False, True], raced
+    winner = LATE_PHONE if "Registered" in raced[0] else RIVAL_PHONE
+
+    await mocks.send_live(transcript("input", "Did my friends make it in?", 34000, 35500))
+    await mocks.send_live(delegation("del-i3", 35600))
+    await wait_for(outputs_back("i-relist"), 15)
+    listed = {item["words"]: item for item in out("i-list")["invitations"]}
+    assert FOREIGN_WORDS not in listed and set(listed) == {first["words"], bound["words"], third, EXPIRED_WORDS}, listed
+    assert listed[first["words"]]["status"] == "redeemed" and listed[first["words"]]["redeemed_by"]["phone"] == INVITEE_PHONE
+    assert listed[first["words"]]["matched_recipient"] is None and listed[first["words"]]["redeemed_minutes_ago"] == 0
+    assert listed[bound["words"]]["redeemed_by"]["phone"] == BOUND_PHONE and listed[bound["words"]]["matched_recipient"] is True
+    assert listed[third]["status"] == "active" and listed[third]["recipient"]["phone"] == REBOUND_PHONE
+    assert listed[EXPIRED_WORDS]["status"] == "expired"
+    assert out("i-list")["active"] == 1, out("i-list")
+    assert out("i3-revoke")["revoked"] is True and out("i1-hide") | {"note": None} == {
+        "ok": True, "words": first["words"], "was": "redeemed", "revoked": False, "note": None,
+    }, out("i1-hide")
+    assert {item["words"] for item in out("i-relist")["invitations"]} == {bound["words"], EXPIRED_WORDS}
+    assert "don't match" in await asyncio.to_thread(ritual, REBOUND_PHONE, "CA_INV_8", third)
+
+    # Hiding and revoking keep the graph: every edge, across generations.
+    edges = await asyncio.to_thread(d1, """SELECT v.inviter_phone AS inviter, r.phone_number AS invitee
+        FROM invitations v JOIN registrations r ON r.invite_code = v.code_words AND r.phone_number = v.redeemed_by
+        ORDER BY r.phone_number""")
+    assert sorted((e["inviter"], e["invitee"]) for e in edges if e["invitee"].startswith("+1555555")) == sorted([
+        (TEST_PHONE, BOUND_PHONE), (TEST_PHONE, INVITEE_PHONE), (SEED_INVITER, TEST_PHONE), (SEED_INVITER, winner),
+    ]), edges
+    unredeemed = await asyncio.to_thread(d1, f"SELECT redeemed_by, revoked_at, hidden_at FROM invitations WHERE code_words = '{third}'")
+    assert unredeemed[0]["redeemed_by"] is None and unredeemed[0]["revoked_at"] and unredeemed[0]["hidden_at"], unredeemed
 
 
 async def run_unobserved_end(restart) -> None:

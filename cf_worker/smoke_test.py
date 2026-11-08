@@ -31,6 +31,8 @@ DEFAULT_REMOTE = "https://dogwalk.tools"
 LOCAL_INVITE = "ahead almighty apple"
 TEST_PHONE = "+15555550100"
 OTHER_PHONE = "+15555550101"
+# Every phone number the local tests use (fictional 555-01xx numbers), as a LIKE pattern.
+TEST_NUMBERS = "+1555555%"
 WORKER_DIR = Path(__file__).resolve().parent
 DAYTONA_MOCK_PORT = 8790
 
@@ -566,12 +568,16 @@ def project_wrangler() -> str | None:
 
 def prepare_local_fixture(wrangler: str) -> None:
     sql = f"""
-DELETE FROM call_activity WHERE call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}'));
-DELETE FROM call_handoffs WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
-DELETE FROM voice_calls WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
-DELETE FROM sandbox_assignments WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
-DELETE FROM registrations WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
-DELETE FROM claim_attempt WHERE phone_number IN ('{TEST_PHONE}', '{OTHER_PHONE}');
+DELETE FROM call_activity WHERE call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
+DELETE FROM call_handoffs WHERE phone_number LIKE '{TEST_NUMBERS}';
+DELETE FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}';
+DELETE FROM invitations WHERE inviter_phone LIKE '{TEST_NUMBERS}' OR redeemed_by LIKE '{TEST_NUMBERS}';
+DELETE FROM sandbox_assignments WHERE phone_number LIKE '{TEST_NUMBERS}';
+DELETE FROM registrations WHERE phone_number LIKE '{TEST_NUMBERS}';
+DELETE FROM claim_attempt WHERE phone_number LIKE '{TEST_NUMBERS}';
+DELETE FROM invite_codes WHERE max_uses = 1
+  AND code_words NOT IN (SELECT invite_code FROM registrations)
+  AND code_words NOT IN (SELECT code_words FROM invitations);
 INSERT INTO invite_codes (code_words, expires_at, max_uses)
 VALUES ('{LOCAL_INVITE}', unixepoch('now', '+1 hour'), NULL)
 ON CONFLICT(code_words) DO UPDATE SET expires_at = excluded.expires_at, max_uses = NULL;
