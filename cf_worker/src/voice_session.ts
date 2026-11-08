@@ -289,6 +289,15 @@ const MEDIA_TYPES: Record<string, string> = {
   mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm", mov: "video/quicktime", ogv: "video/ogg",
 };
 
+// Images a Whiteboard may embed, and any file named as one: the bytes must be the kind the name
+// says, since an <img> trusts the type. The cap counts downloaded bytes, not the file's size metadata.
+type ImageKind = "png" | "jpeg" | "gif" | "webp" | "svg";
+const IMAGE_KINDS: Record<string, ImageKind> = { png: "png", jpg: "jpeg", jpeg: "jpeg", gif: "gif", webp: "webp", svg: "svg" };
+const IMAGE_TYPES: Record<ImageKind, string> = { png: "image/png", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+// An SVG opened on its own runs nothing and fetches nothing; on a board it is only ever an <img>.
+const SVG_CSP = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:";
+
 const UNSPEAKABLE = /https?:\/\/|\bses_[A-Za-z0-9]+|\b[0-9a-f]{12,}\b/;
 
 const TOOLS_NEEDING_ACP = new Set([
@@ -1934,37 +1943,67 @@ export class VoiceSession {
     }
   }
 
-  // A file's bytes for the page's media viewers, streamed from the toolbox. The credential
-  // arrives in a header (the page fetches into a blob URL), never in the URL.
+  // A file's bytes for the page's media viewers and Whiteboard images, streamed from the toolbox.
+  // The credential arrives in a header (the page fetches into a blob URL), never in the URL.
+  // as=image (a Whiteboard Image), or a name with an image extension, reads the file as an image:
+  // capped, sniffed, and served with the type its bytes prove.
   private async pairedFile(request: Request, url: URL): Promise<Response> {
     const secretHash = await sha256Hex(request.headers.get("x-dogwalk-secret") ?? "");
     if (!(await this.pairedBrowsers()).some((item) => item.secretHash === secretHash)) {
       return Response.json({ error: "this pairing has expired" }, { status: 401 });
     }
     try {
-      const path = this.workspacePath(url.searchParams.get("path") ?? "");
+      const requested = (url.searchParams.get("path") ?? "").trim();
+      const extension = requested.split("/").pop()?.split(".").slice(1).pop()?.toLowerCase() ?? "";
+      const named = Object.hasOwn(IMAGE_KINDS, extension) ? IMAGE_KINDS[extension] : null;
+      const image = url.searchParams.get("as") === "image" || Boolean(named);
+      // Only the Sandbox is ever read: a URL is refused rather than taken as an odd file name.
+      if (image && /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(requested)) {
+        return Response.json({ error: "an image is a Workspace path, never a URL" }, { status: 400 });
+      }
       const { toolbox, headers } = await this.workspaceToolbox();
+      const path = await this.realWorkspacePath(this.workspacePath(requested));
       const info = await fetch(`${toolbox}/files/info?path=${encodeURIComponent(path)}`, { headers, signal: AbortSignal.timeout(15_000) });
       if (!info.ok) return Response.json({ error: sandboxFileError(info.status, "find that file") }, { status: info.status === 404 ? 404 : 502 });
       const stat = await info.json<{ isDir?: boolean; size?: number }>();
       if (stat.isDir) return Response.json({ error: "that is a directory" }, { status: 400 });
-      if ((stat.size ?? 0) > MAX_MEDIA_BYTES) return Response.json({ error: `that file is too large to show (${stat.size} bytes)` }, { status: 413 });
+      const limit = image ? MAX_IMAGE_BYTES : MAX_MEDIA_BYTES;
+      if ((stat.size ?? 0) > limit) return Response.json({ error: `that file is too large to show (${stat.size} bytes; at most ${limit})` }, { status: 413 });
       const download = await fetch(`${toolbox}/files/download?path=${encodeURIComponent(path)}`, { headers });
       if (!download.ok || !download.body) return Response.json({ error: sandboxFileError(download.status, "read that file") }, { status: 502 });
-      const extension = path.split(".").pop()?.toLowerCase() ?? "";
-      const name = path.split("/").pop() ?? "file";
+      const name = requested.split("/").pop() || "file";
+      const common = {
+        "content-disposition": `inline; filename="${name.replace(/[^\w.\- ]/g, "_")}"`,
+        "x-content-type-options": "nosniff",
+        "cache-control": "private, no-store",
+      };
+      if (image) {
+        const bytes = await readCapped(download.body, MAX_IMAGE_BYTES);
+        if (!bytes) return Response.json({ error: `that image is larger than ${MAX_IMAGE_BYTES} bytes` }, { status: 413 });
+        const kind = sniffImage(bytes);
+        if (!kind) return Response.json({ error: "that file is not a PNG, JPEG, GIF, WebP, or SVG image" }, { status: 415 });
+        if (named && named !== kind) {
+          return Response.json({ error: `that file holds a ${kind.toUpperCase()} image but is named .${extension}` }, { status: 415 });
+        }
+        return new Response(bytes, {
+          headers: {
+            ...common,
+            "content-type": IMAGE_TYPES[kind],
+            "content-length": String(bytes.length),
+            "content-security-policy": kind === "svg" ? SVG_CSP : "sandbox; default-src 'none'",
+          },
+        });
+      }
       return new Response(download.body, {
         headers: {
+          ...common,
           "content-type": MEDIA_TYPES[extension] ?? "application/octet-stream",
           ...(stat.size ? { "content-length": String(stat.size) } : {}),
-          "content-disposition": `inline; filename="${name.replace(/[^\w.\- ]/g, "_")}"`,
           "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'",
-          "x-content-type-options": "nosniff",
-          "cache-control": "private, no-store",
         },
       });
     } catch (error) {
-      return Response.json({ error: errorMessage(error) }, { status: 400 });
+      return Response.json({ error: errorMessage(error) }, { status: error instanceof WorkspaceFileError ? error.status : 400 });
     }
   }
 
@@ -2106,6 +2145,17 @@ export class VoiceSession {
     return path;
   }
 
+  // The lexical check above cannot see symlinks, so the Sandbox resolves the real path, which must
+  // stay under the Workspace root too. Reads then use the resolved path; a link swapped in between
+  // the two requests is not caught (the toolbox has no open-by-descriptor read).
+  private async realWorkspacePath(path: string): Promise<string> {
+    const resolved = await this.sandboxExecute(`realpath -e -- ${shellQuote(path)}`, 10);
+    if (resolved.exitCode !== 0) throw new WorkspaceFileError(404, "could not find that file: it does not exist");
+    const real = resolved.result.trim();
+    if (!insideWorkspace(real)) throw new WorkspaceFileError(403, `that path leads outside ${WORKSPACE_ROOT}`);
+    return real;
+  }
+
   private async workspaceToolbox(): Promise<{ toolbox: string; headers: Record<string, string> }> {
     this.sandboxId ??= this.attachedSandboxId;
     try {
@@ -2130,8 +2180,8 @@ export class VoiceSession {
   }
 
   private async workspaceRead(input: string): Promise<Record<string, unknown>> {
-    const path = this.workspacePath(input);
     const { toolbox, headers } = await this.workspaceToolbox();
+    const path = await this.realWorkspacePath(this.workspacePath(input));
     const info = await fetch(`${toolbox}/files/info?path=${encodeURIComponent(path)}`, { headers, signal: AbortSignal.timeout(15_000) });
     if (!info.ok) throw new Error(sandboxFileError(info.status, "find that file"));
     const stat = await info.json<{ isDir?: boolean; size?: number }>();
@@ -3714,6 +3764,51 @@ function toHexId(bytes: number): string {
 function sandboxFileError(status: number, action: string): string {
   if (status === 404) return `could not ${action}: it does not exist`;
   return `could not ${action} (sandbox answered ${status}); a stopped sandbox wakes when you call`;
+}
+
+// A Workspace read refused for a reason the page should see as an HTTP status.
+class WorkspaceFileError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+// The whole body, or null once it passes cap bytes (the rest is never read).
+async function readCapped(body: ReadableStream<Uint8Array>, cap: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > cap) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.length;
+  }
+  return bytes;
+}
+
+// An image kind proven by the bytes themselves: raster magic numbers, or for SVG an optional
+// BOM, XML declaration, comments, and doctype (no internal subset, so no entity tricks) before an <svg root.
+function sniffImage(bytes: Uint8Array): ImageKind | null {
+  const starts = (signature: number[]) => signature.every((byte, i) => bytes[i] === byte);
+  const ascii = (from: number, to: number) => String.fromCharCode(...bytes.subarray(from, to));
+  if (starts([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "png";
+  if (starts([0xff, 0xd8, 0xff])) return "jpeg";
+  if (/^GIF8[79]a$/.test(ascii(0, 6))) return "gif";
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return "webp";
+  const head = new TextDecoder().decode(bytes.subarray(0, 4096)).replace(/^﻿/, "");
+  if (/^\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--[\s\S]*?-->\s*|<!DOCTYPE svg[^[>]*>\s*)*<svg[\s>/]/.test(head)) return "svg";
+  return null;
 }
 
 // STIR/SHAKEN, first and ultra concise: A means the carrier vouches the caller owns the number.

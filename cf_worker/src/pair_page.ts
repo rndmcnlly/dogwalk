@@ -345,6 +345,21 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
 .wb-chart text.inside{fill:#fff;font-weight:600}
 .wb-chart .grid{stroke:var(--line)}
 .wb-chart .axis{stroke:var(--rule)}
+.wb-image{margin:0;min-width:0;display:flex;flex-direction:column;gap:4px;max-width:24em}
+.wb-image.size-icon{max-width:3em}
+.wb-image.size-small{max-width:12em}
+.wb-image.size-large{max-width:40em}
+.wb-image.size-full,.wb-image.zoomed{max-width:none}
+.wb-img-frame{display:block;max-width:100%;padding:0;font:inherit;color:inherit;text-align:center;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;cursor:zoom-in;background:repeating-conic-gradient(var(--line) 0 25%,var(--card) 0 50%) 0 0/16px 16px}
+div.wb-img-frame{cursor:default}
+.size-icon .wb-img-frame{border:0;background:none}
+.wb-img-frame img{display:block;max-width:100%;height:auto;margin:0 auto}
+.wb-img-frame[aria-busy=true],.wb-image.failed .wb-img-frame{display:flex;align-items:center;justify-content:center;min-height:9em;padding:8px;cursor:default;background:var(--paper)}
+.size-icon .wb-img-frame[aria-busy=true],.size-icon.failed .wb-img-frame{min-height:3em;padding:0}
+.wb-image.failed .wb-img-frame{border-style:dashed}
+.wb-image.zoomed .wb-img-frame{overflow:auto;max-height:80vh;cursor:zoom-out}
+.wb-image.zoomed img{max-width:none}
+.wb-image figcaption{color:var(--muted)}
 .wb-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;margin-top:4px}
 .wb-key::before{content:"";display:inline-block;width:.8em;height:.8em;margin-right:6px;border-radius:3px;background:var(--c);vertical-align:-.05em}
 .wb-numbers>summary{font-size:12.5px;color:var(--muted);margin-top:4px}
@@ -1937,10 +1952,11 @@ function viewerFailed(message) {
 }
 
 // Fetches a file's bytes with the pairing token in a header. limit > 0 stops before reading a larger body.
-async function fetchFile(path, limit, controller) {
+// as "image" asks the server to prove the bytes are an image (Whiteboard images).
+async function fetchFile(path, limit, controller, as) {
   const token = sessionStorage.getItem(TOKEN_KEY);
   if (!token) throw new Error("This browser is not paired.");
-  const response = await fetch("/pair/file?path=" + encodeURIComponent(path), {
+  const response = await fetch("/pair/file?path=" + encodeURIComponent(path) + (as ? "&as=" + encodeURIComponent(as) : ""), {
     headers: { authorization: "Bearer " + token }, signal: controller.signal,
   });
   if (!response.ok) {
@@ -2589,6 +2605,7 @@ const WB_SPECS = {
   DateInput: [["name", "str", 1], ["label", "str"], ["time", "bool"], ["value", "date"]],
   Slider: [["name", "str", 1], ["min", "num", 1], ["max", "num", 1], ["label", "str"], ["step", "pos"], ["value", "num"], ["unit", "str"]],
   Button: [["label", "str", 1], ["variant", "variant"], ["value", "str"]],
+  Image: [["path", "imagepath", 1], ["alt", "str", 1], ["caption", "str"], ["size", "imagesize"]],
 };
 // What may not sit anywhere inside each container; Tabs holds only Tab, and Series sits only in a chart.
 const WB_FORBIDS = { Card: ["Card", "Tabs"], Row: ["Row", "Tabs", "Details"], Tab: ["Tabs"], Details: ["Card", "Tabs", "Details"] };
@@ -2632,6 +2649,17 @@ const WB_KINDS = {
   options: (v, p) => wbList(v, p, "options (strings or {label, description?} objects)", (x) => wbStr(x) !== undefined ? { label: wbStr(x), description: "" }
     : wbIsObject(x) && wbStr(x.label) !== undefined ? { label: wbStr(x.label), description: wbStr(x.description) || "" } : undefined),
   series: (v, p) => wbList(v, p, "Series(...) components", (x) => x instanceof WbNode && x.type === "Series" ? x : undefined),
+  // A Workspace image file, made absolute. Never a URL, data, or blob: only the Sandbox is ever read.
+  imagepath: (v, p) => {
+    const s = (wbStr(v) || "").trim();
+    if (!s) { p.push("must be a Workspace path"); return undefined; }
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(s)) { p.push("must be a Workspace path, never a URL"); return undefined; }
+    const full = resolvePath("", s);
+    if (full.indexOf(HOME + "/") !== 0) { p.push("must be a file under " + HOME); return undefined; }
+    if (!/\.(?:png|jpe?g|gif|webp|svg)$/i.test(full)) { p.push("must name a .png, .jpg, .gif, .webp, or .svg file"); return undefined; }
+    return full;
+  },
+  imagesize: wbEnum(["icon", "small", "medium", "large", "full"]),
 };
 
 function wbComponent(name, args, line, errors) {
@@ -2780,6 +2808,7 @@ function wbRender(node, ancestors, ctx) {
       el("div", null, [wbInline("div", "title", it.title), it.markdown ? wbMd(it.markdown) : null]),
     ])));
     case "BarChart": case "LineChart": return wbChart(node, ctx);
+    case "Image": return wbImage(node, ctx);
     case "Choice": {
       const group = "wb" + (++wbUid);
       const inputs = p.options.map((o) => el("input", { type: p.multiple ? "checkbox" : "radio", name: group, value: o.label }));
@@ -2963,13 +2992,113 @@ function wbChart(node, ctx) {
   return figure;
 }
 
+// ---- Images: Workspace files fetched with the pairing token into blob URLs this page owns. A program
+// carries only the path. SVG only ever sits in an <img>, where its scripts never run and it loads
+// nothing else. Each path is fetched once and shared by every board showing it (reference counted);
+// a board releases its paths when it leaves the page, and the last release aborts the fetch and
+// revokes the URL. Boards moved into the whiteboard's own tab keep using this page's URLs, which
+// stay valid because that tab closes with this page. A failed fetch is retried by the next board.
+const WB_IMAGE_MAX = 8;   // images per board; the rest are left out with an error
+const WB_IMAGE_LOADS = 3; // fetches at once
+const wbImages = new Map(); // path -> { path, refs, url, error, waiters, controller }
+const wbImageQueue = [];
+let wbImageLoads = 0;
+
+function wbImageAcquire(path, done) {
+  let entry = wbImages.get(path);
+  if (entry && entry.error) { wbImages.delete(path); entry = null; }
+  if (!entry) {
+    entry = { path, refs: 0, url: "", error: "", waiters: [], controller: null };
+    wbImages.set(path, entry);
+    wbImageQueue.push(entry);
+    wbImagePump();
+  }
+  entry.refs++;
+  if (entry.url) done(entry); else entry.waiters.push(done);
+}
+function wbImageRelease(path) {
+  const entry = wbImages.get(path);
+  if (!entry || --entry.refs > 0) return;
+  wbImages.delete(path);
+  entry.waiters = [];
+  if (entry.controller) entry.controller.abort();
+  if (entry.url) URL.revokeObjectURL(entry.url);
+}
+function wbImagePump() {
+  while (wbImageLoads < WB_IMAGE_LOADS && wbImageQueue.length) {
+    const entry = wbImageQueue.shift();
+    if (wbImages.get(entry.path) !== entry) continue; // released while it waited
+    wbImageLoads++;
+    entry.controller = new AbortController();
+    fetchFile(entry.path, 0, entry.controller, "image")
+      .then((blob) => { if (wbImages.get(entry.path) === entry) entry.url = URL.createObjectURL(blob); })
+      .catch((error) => { entry.error = error.message || "it could not be fetched"; })
+      .finally(() => {
+        wbImageLoads--;
+        entry.controller = null;
+        const waiters = entry.waiters;
+        entry.waiters = [];
+        if (wbImages.get(entry.path) === entry) for (const done of waiters) done(entry);
+        wbImagePump();
+      });
+  }
+}
+
+// A figure that holds its place while loading and, on failure, keeps its alt text and the reason
+// so the rest of the board reads and answers as usual. alt "" marks a decorative image.
+function wbImage(node, ctx) {
+  const p = node.props;
+  const size = p.size || "medium";
+  const decorative = !p.alt;
+  const zoomable = !decorative && size !== "icon";
+  const status = el("span", { class: "small muted" }, decorative ? "" : "Loading " + basename(p.path));
+  const frame = el(zoomable ? "button" : "div", { class: "wb-img-frame", type: zoomable ? "button" : null, "aria-busy": "true", title: p.path }, status);
+  const figure = el("figure", { class: "wb-image size-" + size }, [frame, p.caption ? wbInline("figcaption", "small", p.caption) : null]);
+  const fail = (reason) => {
+    figure.classList.add("failed");
+    frame.removeAttribute("aria-busy");
+    if (zoomable) frame.disabled = true;
+    status.textContent = (p.alt ? p.alt + ". " : "") + "Not shown: " + reason;
+    if (ctx.open) wbImageFailed(ctx.boardId, p.path, reason);
+  };
+  if (ctx.images.length >= WB_IMAGE_MAX) {
+    ctx.errors.push("line " + node.line + ": a board shows at most " + WB_IMAGE_MAX + " images; " + p.path + " was left out");
+    fail("too many images on this board");
+    return figure;
+  }
+  ctx.images.push(p.path);
+  wbImageAcquire(p.path, (entry) => {
+    const img = el("img", { alt: p.alt, decoding: "async" });
+    img.src = entry.url;
+    img.decode().then(() => {
+      img.width = img.naturalWidth; // with height:auto, the box keeps the image's proportions
+      img.height = img.naturalHeight;
+      frame.removeAttribute("aria-busy");
+      frame.replaceChildren(img);
+    }, () => fail("this browser could not decode it"));
+  });
+  if (zoomable) frame.addEventListener("click", () => { if (!frame.hasAttribute("aria-busy")) figure.classList.toggle("zoomed"); });
+  return figure;
+}
+// An open board's image that did not show reaches the Orchestrator once, as a whiteboard_error.
+const wbImageFailures = new Set();
+function wbImageFailed(boardId, path, reason) {
+  const key = boardId + "\u0001" + path;
+  if (wbImageFailures.has(key)) return;
+  if (send({ type: "board_error", id: boardId, error: "the image " + path + " was not shown (" + reason + "); the rest of the board is drawn" })) wbImageFailures.add(key);
+}
+function wbReleaseImages(entry) {
+  for (const path of entry.images || []) wbImageRelease(path);
+  entry.images = [];
+}
+
 // ---- One board: rendered program, errors, and the answer bar (or the answer, once given).
 // Writeback (as in OpenChamber): a board with fields gets Send and a note; a Button press sends the
 // whole form with its label and value. Buttons whose values name two or more items are decisions:
 // they collect per item and send once every item has one, or early with Send now.
 function wbBoardNode(board) {
   const ctx = {
-    errors: [], fields: [], buttons: [], items: [], controls: [],
+    errors: [], fields: [], buttons: [], items: [], controls: [], images: [], boardId: board.id, open: board.status === "open",
     field(name, line, controls, get, set) {
       this.controls.push(...controls);
       if (this.fields.some((f) => f.name === name)) { this.errors.push("line " + line + ": two fields are named " + JSON.stringify(name) + "; only the first is sent (drawn anyway)"); return; }
@@ -3021,9 +3150,9 @@ function wbBoardNode(board) {
     }
     for (const c of ctx.controls.concat(ctx.buttons.map((b) => b.node))) c.disabled = true;
     node.append(wbAnswerNode(board.answer));
-    return { node, errors: ctx.errors };
+    return { node, errors: ctx.errors, images: ctx.images };
   }
-  if (!ctx.fields.length && !ctx.buttons.length) return { node, errors: ctx.errors };
+  if (!ctx.fields.length && !ctx.buttons.length) return { node, errors: ctx.errors, images: ctx.images };
 
   let sent = false;
   const note = el("textarea", { class: "wb-input", rows: 2, placeholder: "Anything the walker should know" });
@@ -3069,7 +3198,7 @@ function wbBoardNode(board) {
   }
   refresh();
   node.append(el("div", { class: "wb-actions" }, [noteField, noteToggle, tally, status, el("span", { class: "spacer" }), sendNow, sendButton]));
-  return { node, errors: ctx.errors };
+  return { node, errors: ctx.errors, images: ctx.images };
 }
 
 function wbAnswerNode(answer) {
@@ -3105,9 +3234,9 @@ function wbUpsert(board) {
   const key = [board.status, board.note, board.program, JSON.stringify(board.answer)].join("\u0001");
   const known = wbBoards.get(board.id);
   if (known && known.key === key) { known.board = board; return false; }
-  const built = wbBoardNode(board);
-  if (known) known.node.remove();
-  const entry = { board, key, node: built.node, fold: known ? known.fold : null, errors: built.errors };
+  const built = wbBoardNode(board); // acquires its images before the old node releases them, so shared ones stay loaded
+  if (known) { known.node.remove(); wbReleaseImages(known); }
+  const entry = { board, key, node: built.node, fold: known ? known.fold : null, errors: built.errors, images: built.images };
   wbBoards.set(board.id, entry);
   wbReportErrors(entry);
   return !known;
@@ -3135,7 +3264,7 @@ function wbOnBoard(raw) {
 function wbOnBoards(list) {
   const boards = (Array.isArray(list) ? list : []).map(wbNormalize).filter(Boolean);
   const ids = new Set(boards.map((b) => b.id));
-  for (const id of [...wbBoards.keys()]) if (!ids.has(id)) { wbBoards.get(id).node.remove(); wbBoards.delete(id); }
+  for (const id of [...wbBoards.keys()]) if (!ids.has(id)) { wbBoards.get(id).node.remove(); wbReleaseImages(wbBoards.get(id)); wbBoards.delete(id); }
   for (const b of boards) {
     if (wbUpsert(b) && b.status === "open" && !wbInSight()) wbUnseen = true;
     else wbReportErrors(wbBoards.get(b.id)); // a report that could not go out before the socket dropped
@@ -3146,7 +3275,7 @@ function wbOnBoards(list) {
 // The newest board on top; older ones, newest first, each folded beneath it.
 function wbLayout() {
   const entries = [...wbBoards.values()].sort((a, b) => a.board.at - b.board.at);
-  while (entries.length > WB_KEEP) { const old = entries.shift(); old.node.remove(); wbBoards.delete(old.board.id); }
+  while (entries.length > WB_KEEP) { const old = entries.shift(); old.node.remove(); wbReleaseImages(old); wbBoards.delete(old.board.id); }
   WB.empty.hidden = entries.length > 0;
   const latest = entries.pop();
   WB.current.replaceChildren(...(latest ? [latest.node] : []));
@@ -3159,9 +3288,12 @@ function wbLayout() {
   WB.olderCount.textContent = String(older.length);
   WB.olderList.replaceChildren(...older);
 }
+// Pairing ends or the page goes away: every board's images are released, so every blob URL is revoked.
 function wbClear() {
+  for (const entry of wbBoards.values()) wbReleaseImages(entry);
   wbBoards.clear();
   wbErrorsSent.clear();
+  wbImageFailures.clear();
   wbUnseen = false;
   renderBoardCount();
   wbLayout();
@@ -3241,6 +3373,7 @@ function wbCloseTab() {
 $("handsWhiteboard").addEventListener("click", wbOpenTab);
 $("wbBack").addEventListener("click", wbCloseTab);
 addEventListener("pagehide", wbCloseTab);
+addEventListener("pagehide", (event) => { if (!event.persisted) for (const entry of wbBoards.values()) wbReleaseImages(entry); });
 // ==== WHITEBOARD END ====
 
 // ---- The walker shows the user something: {"type":"show","uri":"...","note":"..."}.

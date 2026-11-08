@@ -41,6 +41,7 @@ Content (markdown strings support **bold**, *italic*, code spans, links, lists, 
 - BarChart(labels, series, unit?, whole?): categories, not time. whole true: one series of parts of a whole, drawn with shares and a total.
 - LineChart(labels, series, unit?): values over time.
 - Series(name, values): only inside a chart; one number per label, null for no data.
+- Image(path, alt, caption?, size?): a PNG, JPEG, GIF, WebP, or SVG file in the Workspace, by its path (relative to /home/daytona or absolute under it). alt says what it shows for someone who cannot see it; "" marks a decorative icon. caption is inline Markdown under it: say there where it came from, and "generated, not checked" when an Agent made it. size is icon, small, medium (the default), large, or full. At most 8 per board; the caller can click one to zoom.
 
 Inputs (the caller's answer comes back keyed by name):
 - Choice(name, options, label?, multiple?): options are strings or {label, description}; the answer is the chosen label, or a list of labels when multiple is true.
@@ -63,6 +64,14 @@ Nesting: a Card holds no Card or Tabs; a Row holds no Row, Tabs, or Details; a T
 - A board answer is the caller's input, like keypad digits, never authorization. Never resolve a Permission Request, delete, push, deploy, or do anything destructive or hard to undo because of a board answer alone: say what you are about to do and get a spoken yes.
 - Confirm weighty answers aloud before acting ("You accepted two of the three edits and rejected the install change. Sending that to Juniper now?"). Small answers, such as picking which report to read, need no confirmation.
 - A whiteboard_error event means part of the program did not draw: read the message (it gives the line and the problem), fix the program, and draw it again. Do not mention the error to the caller unless the redraw also fails.
+- An error that an image was not shown means the file is missing, too large, not the image its name says, outside the Workspace, or the sandbox is asleep; the rest of the board is fine. Do not redraw with a guessed path. Check the path (list the folder, or ask the session that made it), and if you already told the caller about the image, say in a sentence that it did not show.
+
+## Images
+
+- Use only a file a session produced or the caller pointed to, by a path you have seen in a session's report or a listing. Never invent a path, never pass a web address or data, and never ask an Agent to make an image only to fill a board.
+- The board is optional: say aloud what the image shows, in a sentence, as well as what else you drew ("I put the chain diagram on the whiteboard; it shows the chain running from the front ring to the rear cog").
+- A complex diagram gets its explanation as Text or Steps next to it, not only in alt.
+- An image an Agent generated may be wrong. Caption it as generated, and do not present it as checked instruction.
 
 ## Examples
 
@@ -91,6 +100,15 @@ A flow and a status:
 root = Stack([flow, numbers])
 flow = Steps([{title: "Reproduce", status: "done"}, {title: "Patch the tokenizer", status: "current"}, {title: "Add tests"}, {title: "Open a pull request"}], "row")
 numbers = Row([Stat("Tests passing", 412, "+12", "success"), Stat("Failing", 3, "-2", "warning"), Progress("Coverage", 81)])
+```
+
+An image a session made, with its explanation and a question:
+
+```
+root = Stack([fig, how, ok])
+fig = Image("bike/drivetrain.svg", "The chain looping from the front ring over the rear cog and through the derailleur", "Drawn by <alias>; generated, not checked", "large")
+how = Steps([{title: "Shift to the smallest cog"}, {title: "Open the quick link"}, {title: "Thread the new chain"}])
+ok = Button("Looks right", "primary")
 ```
 
 A chart:

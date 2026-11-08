@@ -434,6 +434,8 @@ A board the Session Orchestrator draws on the Paired Browser in a small declarat
 
 A Whiteboard can be answered on the page (choices, text, buttons). A **Whiteboard Answer** is caller input, like keypad digits or the answer to an Elicitation: the Session Orchestrator takes it into account, and an earcon confirms in the call that it arrived. It is never authorization: it cannot resolve a Permission Request, and the Session Orchestrator confirms consequential answers aloud before acting on them. The User may always answer by voice instead, and that counts the same. The Voice Agent says aloud what it drew, so the call remains complete without the page.
 
+A board may show an image an ACP Agent left in the Workspace (PNG, JPEG, GIF, WebP, or SVG), named by its Workspace path: the board carries the path, never the bytes or a URL. The page reads the file live, with its pairing, each time it draws the board, so a board shows the file as it is now, nothing outlives the Workspace or the pairing, and an image whose file is gone or whose Sandbox is asleep shows its description and why it is missing while the rest of the board still works. Images are a presentation of ordinary files, outside ACP; no Agent learns that a board showed one.
+
 **Not:** A control surface for Agents, a Permission Request, or a required interface.
 
 ### Human Takeover
@@ -750,6 +752,7 @@ The following language appears in Git history and is not canonical for productio
 - Is the caller-ID clause permanent product behavior or a diagnostic to remove once STIR/SHAKEN attestation is understood across carriers?
 
 - Paired Browser: should the Session Orchestrator learn which files the User opened, so a callback can start from what they read? Should unpairing also be possible by voice? Pairing Tones decode through simulated speech codecs and reverberant rooms but are not yet verified over a real carrier. Decode Failures cannot be attributed to a call before a claim; if Dogwalk ever has more than one active User, should a page learn something per attempt (without weakening the one-press authorization) so the count stops being global?
+- Whiteboard images resolve live, so a board replayed after its file changed shows the new bytes under the old alt text and caption. Should a board instead pin a content hash (and say when the file changed), or capture its images? Export or sharing of a board with its images is not supported.
 - Human Takeover: should the Session Orchestrator learn that a takeover happened (and hand off to it, "the desktop is ready for you"), or summon one ("a dog is stuck on a CAPTCHA; pair a browser and open the desktop")? Should ACP Agents drive the same desktop through the provider's computer-use API, so human and Agent take turns on one screen? Is a one-hour desktop link the right cap, and should a terminal idle out?
 
 ## ACP References

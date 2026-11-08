@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -330,7 +331,10 @@ ORCHESTRATOR_SCRIPT = [
     }]),
 ]
 MEMORY_TEXT = "Caller prefers terse updates. Juniper fixes the parser; Dozer works in honeydozer."
-BOARD_PROGRAM = 'root = Stack([pick])\npick = Choice("approach", ["Quick fix", "Refactor"], "Which approach?")'
+BOARD_PROGRAM = (
+    'root = Stack([fig, pick])\nfig = Image("diagram.svg", "The parser\'s two stages", "Drawn by an agent", "small")\n'
+    'pick = Choice("approach", ["Quick fix", "Refactor"], "Which approach?")'
+)
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say",
@@ -621,9 +625,27 @@ async def recv_type(socket, kind: str, timeout: float = 8) -> dict:
                 return message
 
 
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(64)
+SVG_BYTES = b'<?xml version="1.0"?>\n<!-- drawn by an agent -->\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><script>alert(1)</script><rect width="10" height="10"/></svg>'
+# Workspace images: name -> (bytes, size the file info reports). huge.png understates its size,
+# so only the cap on downloaded bytes can catch it.
+IMAGE_FILES = {
+    "chart.png": (PNG_BYTES, len(PNG_BYTES)),
+    "diagram.svg": (SVG_BYTES, len(SVG_BYTES)),
+    "notes.png": (b"just some text\n", 15),
+    "huge.png": (PNG_BYTES + bytes(8 * 1024 * 1024), 1000),
+    "escape.png": (PNG_BYTES, len(PNG_BYTES)),
+}
+
+
 def sandbox_files(path: str):
-    """Toolbox file reads: home holds a report; anything else does not exist."""
+    """Toolbox file reads: home holds a report and some images; anything else does not exist."""
     prefix = "/toolbox/mock-sandbox-1/files"
+    for name, (body, size) in IMAGE_FILES.items():
+        if path == f"{prefix}/info?path=%2Fhome%2Fdaytona%2F{name}":
+            return 200, json.dumps({"name": name, "isDir": False, "size": size}).encode(), "application/json"
+        if path == f"{prefix}/download?path=%2Fhome%2Fdaytona%2F{name}":
+            return 200, body, "application/octet-stream"
     if path == f"{prefix}?path=%2Fhome%2Fdaytona":
         listing = [{"name": "REPORT.md", "isDir": False, "size": len(REPORT_TEXT), "modTime": "2026-11-08T10:00:00Z"},
                    {"name": "parser", "isDir": True, "size": 4096, "modTime": "2026-11-08T09:00:00Z"}]
@@ -1068,6 +1090,31 @@ async def run_protocol(identity: str) -> None:
             assert "sandbox" in headers.get("Content-Security-Policy", headers.get("content-security-policy", ""))
             assert (await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fetc%2Fpasswd", bearer))[0] == 400
             assert (await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fhome%2Fdaytona%2FREPORT.md", {"authorization": f"Bearer {identity}.{'0' * 48}"}))[0] == 401
+            # Whiteboard images: the type comes from the bytes, an SVG opened alone runs and loads
+            # nothing, and mismatches, oversized downloads, links out of the Workspace, and URLs are refused.
+            def image(path: str, headers: dict = bearer) -> tuple[int, dict, bytes]:
+                status, raw, body = pair_raw(f"/pair/file?as=image&path={urllib.parse.quote(path, safe='')}", headers)
+                return status, {key.lower(): value for key, value in raw.items()}, body
+            status, headers, body = await asyncio.to_thread(image, "chart.png")
+            assert status == 200 and body == PNG_BYTES and headers.get("content-type") == "image/png", (status, headers)
+            assert headers.get("x-content-type-options") == "nosniff" and "no-store" in headers.get("cache-control", "")
+            status, headers, body = await asyncio.to_thread(image, "/home/daytona/diagram.svg")
+            assert status == 200 and body == SVG_BYTES and headers.get("content-type") == "image/svg+xml", (status, headers)
+            csp = headers.get("content-security-policy", "")
+            assert "default-src 'none'" in csp and "style-src 'unsafe-inline'" in csp and "img-src data:" in csp, csp
+            status, _, body = await asyncio.to_thread(image, "notes.png")
+            assert status == 415 and b"not a PNG" in body, (status, body)
+            assert (await asyncio.to_thread(image, "huge.png"))[0] == 413, "the cap counts downloaded bytes"
+            status, _, body = await asyncio.to_thread(image, "escape.png")
+            assert status == 403 and b"outside" in body, (status, body)
+            assert (await asyncio.to_thread(image, "missing.png"))[0] == 404
+            for url in ["https://example.com/a.png", "data:image/png;base64,AAAA", "//example.com/a.png"]:
+                status, _, body = await asyncio.to_thread(image, url)
+                assert status == 400 and b"never a URL" in body, (url, status, body)
+            # A file named as an image is sniffed in the file viewer too; images still need a pairing.
+            assert (await asyncio.to_thread(pair_raw, "/pair/file?path=notes.png", bearer))[0] == 415
+            assert (await asyncio.to_thread(image, "chart.png", {"authorization": f"Bearer {identity}.{'0' * 48}"}))[0] == 401
+            assert not any("example.com" in command for command in DaytonaMock.executed)
             # Human Takeover: a terminal launch yields a one-time ticket in a URL fragment.
             await browser.send(json.dumps({"type": "launch", "kind": "terminal", "id": 7}))
             launch = await recv_type(browser, "launch")
@@ -1232,7 +1279,13 @@ async def run_unobserved_end(restart) -> None:
 
 
 def sandbox_toolbox(command: str) -> dict | None:
-    """Sandbox commands: honeydozer is the only project directory besides home."""
+    """Sandbox commands: honeydozer is the only project directory besides home; escape.png links outside it."""
+    if "realpath -e --" in command:
+        path = re.search(r"/home/daytona[^'\\]*", command).group(0)
+        if path.endswith("/escape.png"):
+            return {"result": "/etc/shadow\n", "exitCode": 0}
+        known = path.endswith("/REPORT.md") or path.rsplit("/", 1)[-1] in IMAGE_FILES
+        return {"result": f"{path}\n", "exitCode": 0} if known else {"result": "", "exitCode": 1}
     if "test -d" in command:
         return {"result": "", "exitCode": 0 if "/home/daytona/honeydozer" in command else 1}
     if "remote.origin.url" in command:
@@ -1244,7 +1297,37 @@ def sandbox_toolbox(command: str) -> dict | None:
     return None
 
 
+def whiteboard_parser_checks() -> None:
+    """The page's openui-lang parser, extracted from pair_page.ts and run in Node: Image takes a
+    Workspace path and nothing that could reach another origin."""
+    page = (WORKER_DIR / "src" / "pair_page.ts").read_text()
+    resolve = re.search(r"function resolvePath\(.*?\n}\n", page, re.S).group(0)
+    parser = page[page.index("// ---- Tokens:"):page.index("// ---- Rendering.")]
+    cases = [
+        'root = Stack([fig, t])\nfig = Image("bayleaf/diagram.svg", "Chain path", "Generated, unverified", "large")\nt = Text("hi")',
+        'root = Stack([Image("https://example.com/a.png", "x")])',
+        'root = Stack([Image("data:image/png;base64,AAAA", "x")])',
+        'root = Stack([Image("../../etc/a.png", "x")])',
+        'root = Stack([Image("notes.txt", "x")])',
+        'root = Stack([Image("/home/daytona/icon.png", "", null, "huge")])',
+    ]
+    script = (
+        'const HOME = "/home/daytona";\n' + resolve + parser
+        + f"\nconsole.log(JSON.stringify({json.dumps(cases)}.map((source) => {{ const r = wbProgram(source);"
+        + " return { errors: r.errors, children: r.root ? r.root.props.children.map((c) => c.props) : null }; })));"
+    )
+    results = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    drawn, url, data, escape, text, size = results
+    assert not drawn["errors"] and drawn["children"][0] == {
+        "path": "/home/daytona/bayleaf/diagram.svg", "alt": "Chain path", "caption": "Generated, unverified", "size": "large",
+    }, drawn
+    for refused, why in [(url, "never a URL"), (data, "never a URL"), (escape, "under /home/daytona"), (text, ".png")]:
+        assert refused["children"] == [] and any(why in error for error in refused["errors"]), refused
+    assert size["children"] == [{"path": "/home/daytona/icon.png", "alt": ""}] and "must be one of icon" in size["errors"][0], size
+
+
 def main() -> int:
+    whiteboard_parser_checks()
     wrangler = project_wrangler()
     if not wrangler:
         print("wrangler is not installed", file=sys.stderr)

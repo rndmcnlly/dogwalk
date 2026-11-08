@@ -316,7 +316,14 @@ shown, binary refused).
 
 The page also streams raw Workspace files for its viewers from
 `GET /pair/file?path=` (the credential as a bearer header; served sandboxed and
-`nosniff`, 50 MB cap) and shows a live feed of the call (`feed` messages:
+`nosniff`, 50 MB cap). Reads resolve symlinks in the Sandbox (`realpath`) and
+refuse anything that leads outside `/home/daytona`. Whiteboard `Image` components
+fetch with `&as=image`, and any `.png`, `.jpg`, `.gif`, `.webp`, or `.svg` is read
+the same way: at most 8 MB actually downloaded, typed by sniffing the bytes (a
+name that disagrees is refused), and SVG served with
+`default-src 'none'; style-src 'unsafe-inline'; img-src data:`. The page shows
+every image through an `<img>` from a blob URL it revokes when the last board
+using it leaves. It also shows a live feed of the call (`feed` messages:
 caller and Voice Frontend speech, Orchestrator briefs, says, and Agent prompts,
 Agent remarks, tool calls and Reports, harness events, keypad presses).
 
