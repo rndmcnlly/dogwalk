@@ -1,6 +1,6 @@
 // Paired Browser page (DOMAIN.md), served at GET /pair: listens for the Pairing Code the call
 // plays as keypad tones, claims it, waits for the caller to accept, then shows live Managed
-// Session status, a live feed of the call, and a read-only Workspace file viewer over /pair/ws.
+// Session status, a timeline of the call, and a read-only Workspace file viewer over /pair/ws.
 // Media files (images, PDF, audio, video, downloads) come from GET /pair/file as blob URLs.
 //
 // String.raw keeps every backslash in the page script literal, so regexes and "\n" escapes
@@ -103,7 +103,7 @@ details summary{cursor:pointer}
 .permissions h2{margin:0 0 6px;color:var(--accent)}
 .permissions ul{margin:0;padding-left:1.2em}
 
-/* Tabs; on a wide screen the Sessions and Feed tabs both show the two panels side by side */
+/* Tabs; on a wide screen the Sessions and Call timeline tabs both show the two panels side by side */
 .tabs{position:sticky;top:0;z-index:5;display:flex;gap:2px;background:var(--paper);border-bottom:1px solid var(--rule);margin:14px 0 12px;overflow-x:auto}
 .tab{border:0;border-bottom:3px solid transparent;border-radius:0;background:none;padding:10px 14px;min-height:46px;font-weight:600;color:var(--muted);white-space:nowrap}
 .tab[aria-selected=true]{color:var(--ink);border-bottom-color:var(--accent)}
@@ -117,7 +117,9 @@ details summary{cursor:pointer}
   .panes[data-tab=sessions],.panes[data-tab=feed]{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:0 28px;align-items:start}
   .panes[data-tab=sessions] #panelFeed,.panes[data-tab=feed] #panelSessions{display:block}
   .panes #panelFeed{position:sticky;top:58px}
+  .panes .see-also{display:none}
 }
+.explain{margin:-4px 0 10px}
 
 /* Sessions */
 .card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin:0 0 12px}
@@ -149,7 +151,7 @@ details summary{cursor:pointer}
 .report{margin-top:6px}
 .closed-group>summary{color:var(--muted);margin:8px 0}
 
-/* Feed: one color per role, always with a text label beside it */
+/* Call timeline: one color per role, always with a text label beside it */
 .feed-bar{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
 .filter.f-caller{--c:var(--role-caller)}.filter.f-voice{--c:var(--role-voice)}.filter.f-orchestrator{--c:var(--role-orchestrator)}
 .filter{--c:var(--role-system);display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;font:600 12.5px/1.2 var(--sans);min-height:32px}
@@ -202,9 +204,19 @@ details summary{cursor:pointer}
 .crumbs{display:flex;flex-wrap:wrap;gap:2px;align-items:center;font:13px/1.6 var(--mono)}
 .crumbs .slash{color:var(--faint)}
 .entries{list-style:none;margin:8px 0;padding:0;max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:var(--radius);background:var(--card)}
-.entries li{display:flex;justify-content:space-between;gap:10px;padding:5px 10px;border-top:1px solid var(--line);font:13px/1.5 var(--mono)}
+/* Name, size, modified: the name takes the room; on a narrow list the size drops under it and the date goes. */
+.entries{container-type:inline-size}
+.entries li{display:grid;grid-template-columns:minmax(0,1fr) 7.5ch 6.5ch;gap:0 10px;align-items:baseline;padding:5px 10px;border-top:1px solid var(--line);font:13px/1.5 var(--mono)}
+.entries li.muted{display:block}
 .entries li:first-child{border-top:0}
-.entries .meta{color:var(--faint);white-space:nowrap}
+.entries .name{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:normal}
+.entries .meta{color:var(--faint);white-space:nowrap;text-align:right;font-size:12px}
+@container (max-width:400px){
+  .entries li{grid-template-columns:minmax(0,1fr);padding:4px 10px}
+  .entries .when{display:none}
+  .entries .size{text-align:left;font-size:11px;line-height:1.3}
+  .entries .size:empty{display:none}
+}
 .viewer{margin-top:10px}
 .viewer-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px 10px;font:12.5px/1.4 var(--mono);color:var(--muted);margin-bottom:6px;word-break:break-all}
 .viewer-actions{display:flex;gap:6px;flex:none}
@@ -293,7 +305,7 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
 
   <nav id="tabs" class="tabs" role="tablist" aria-label="Views">
     <button id="tab-sessions" class="tab" role="tab" aria-controls="panelSessions">Sessions<span class="key">1</span></button>
-    <button id="tab-feed" class="tab" role="tab" aria-controls="panelFeed">Feed<span id="feedCount" class="count" hidden></span><span class="key">2</span></button>
+    <button id="tab-feed" class="tab" role="tab" aria-controls="panelFeed">Call timeline<span id="feedCount" class="count" hidden></span><span class="key">2</span></button>
     <button id="tab-files" class="tab" role="tab" aria-controls="panelFiles">Files<span class="key">3</span></button>
     <button id="tab-hands" class="tab" role="tab" aria-controls="panelHands">Hands<span class="key">4</span></button>
   </nav>
@@ -301,13 +313,15 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
   <div id="panes" class="panes" data-tab="feed">
     <section id="panelSessions" class="panel" role="tabpanel" aria-labelledby="tab-sessions">
       <h2>Sessions</h2>
+      <p class="explain small muted">Where each coding session stands right now.<span class="see-also"> For what was said, see <button class="link" data-goto="feed">Call timeline</button>.</span></p>
       <p id="sandbox" class="small muted"></p>
       <div id="sessions"></div>
       <div id="closed"></div>
     </section>
 
     <section id="panelFeed" class="panel" role="tabpanel" aria-labelledby="tab-feed">
-      <h2>Live feed</h2>
+      <h2>Call timeline</h2>
+      <p class="explain small muted">Everything said and done on the call, in order, as it happens.<span class="see-also"> For where each session stands, see <button class="link" data-goto="sessions">Sessions</button>.</span></p>
       <div id="feedFilters" class="feed-bar" role="group" aria-label="Show or hide"></div>
       <div class="feed-wrap">
         <ol id="feedList" class="feed-list" aria-live="off"></ol>
@@ -1139,7 +1153,8 @@ function unpair() {
   setStatus("Unpaired. Press Listen to pair again.");
 }
 
-// ---- Tabs: Sessions, Feed, Files, Hands. A wide screen shows Sessions and Feed side by side.
+// ---- Tabs: Sessions, Call timeline (key "feed", after the server's "feed" message), Files, Hands.
+// A wide screen shows Sessions and Call timeline side by side.
 const TABS = ["sessions", "feed", "files", "hands"];
 const TAB_KEY = "dogwalk.pair.tab";
 let currentTab = TABS.indexOf(stored(TAB_KEY, "feed")) >= 0 ? stored(TAB_KEY, "feed") : "feed";
@@ -1380,7 +1395,7 @@ function toggleWake(event) {
   else if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
 }
 
-// ---- Live feed: what was said and done in the call, newest at the bottom
+// ---- Call timeline: what was said and done in the call, newest at the bottom
 const FEED_CAP = 500;
 const FILTER_KEY = "dogwalk.pair.feedHidden";
 const ROLES = ["caller", "voice", "agent", "orchestrator", "system"];
@@ -1532,7 +1547,36 @@ function renderCrumbs(path) {
 
 function size(bytes) {
   if (bytes == null) return "";
-  return bytes < 1024 ? bytes + " B" : bytes < 1048576 ? (bytes / 1024).toFixed(1) + " KB" : (bytes / 1048576).toFixed(1) + " MB";
+  const scaled = (n, unit) => (n < 10 ? n.toFixed(1) : String(Math.round(n))) + " " + unit;
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1048576) return scaled(bytes / 1024, "KB");
+  if (bytes < 1073741824) return scaled(bytes / 1048576, "MB");
+  return scaled(bytes / 1073741824, "GB");
+}
+
+// The sandbox reports modification times as strings, possibly in Go's time.String() form
+// ("2026-11-08 10:01:02.5 +0000 UTC"); a time without a zone is read as local.
+function parseModified(text) {
+  const m = /^(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d(?::\d\d)?)(\.\d+)?\s*(Z|[+-]\d\d:?\d\d)?/.exec(String(text || ""));
+  if (!m) return Date.parse(text);
+  let zone = m[4] || "";
+  if (zone.length === 5) zone = zone.slice(0, 3) + ":" + zone.slice(3);
+  return Date.parse(m[1] + "T" + m[2] + (m[3] ? m[3].slice(0, 4) : "") + zone);
+}
+// "5 min", "3 h", "Nov 8" within this year, else the year.
+function shortWhen(ms) {
+  const seconds = (Date.now() - ms) / 1000;
+  if (seconds < 60) return "now";
+  if (seconds < 3600) return Math.floor(seconds / 60) + " min";
+  if (seconds < 86400) return Math.floor(seconds / 3600) + " h";
+  const date = new Date(ms);
+  if (date.getFullYear() === new Date().getFullYear()) return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return String(date.getFullYear());
+}
+function whenNode(text) {
+  const ms = parseModified(text);
+  if (!text || !Number.isFinite(ms)) return el("span", { class: "meta when", title: text || "" }, "");
+  return el("span", { class: "meta when", title: new Date(ms).toLocaleString() }, shortWhen(ms));
 }
 
 function renderListing(m) {
@@ -1543,9 +1587,11 @@ function renderListing(m) {
   const entries = (m.entries || []).slice().sort((a, b) => (b.dir - a.dir) || String(a.name).localeCompare(String(b.name)));
   const items = entries.map((e) => {
     const target = resolvePath(m.path, e.name);
+    const label = e.name + (e.dir ? "/" : "");
     return el("li", null, [
-      el("button", { class: "link", onclick: () => (e.dir ? listDir(target) : openFile(target, e.size)) }, e.name + (e.dir ? "/" : "")),
-      el("span", { class: "meta" }, (e.dir ? "" : size(e.size) + " ") + (e.modified || "")),
+      el("button", { class: "link name", title: label, onclick: () => (e.dir ? listDir(target) : openFile(target, e.size)) }, label),
+      el("span", { class: "meta size" }, e.dir ? "" : size(e.size)),
+      whenNode(e.modified),
     ]);
   });
   $("entries").replaceChildren(...(items.length ? items : [el("li", { class: "muted" }, "Empty directory")]));
@@ -1911,6 +1957,9 @@ $("closeViewer").addEventListener("click", closeViewer);
 $("copyPath").addEventListener("click", (event) => copyText(viewer.path, event.currentTarget));
 $("downloadFile").addEventListener("click", () => downloadFile(viewer.path));
 for (const tab of TABS) $("tab-" + tab).addEventListener("click", () => showTab(tab));
+for (const link of document.querySelectorAll("[data-goto]")) {
+  link.addEventListener("click", () => { showTab(link.dataset.goto); $("tab-" + link.dataset.goto).focus(); });
+}
 $("tabs").addEventListener("keydown", (event) => {
   // Arrow keys move between tabs, as in the ARIA tabs pattern.
   const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;

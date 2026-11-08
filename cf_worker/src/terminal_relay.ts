@@ -10,6 +10,11 @@
 import type { Env } from "./types";
 
 const PTY_ID = "human";
+// Close codes the terminal page understands: expired credential, unpaired, sandbox asleep.
+const CLOSE_EXPIRED = 4001;
+const CLOSE_ASLEEP = 4004;
+
+class SandboxAsleep extends Error {}
 const PTY_PROTOCOL = "X-Daytona-Pty-Exit-Control";
 
 interface Relay {
@@ -79,18 +84,36 @@ export class TerminalRelay {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ticket: message.ticket ?? null, token: message.token ?? null }),
     });
-    if (!redeemed.ok) return this.refuse(browser, "this terminal link has expired");
+    if (!redeemed.ok) {
+      console.log("terminal: credential refused", { ticket: Boolean(message.ticket) });
+      return this.refuse(browser, "this terminal link has expired");
+    }
     const grant = await redeemed.json<{ token: string; browserHash: string; sandboxId: string; expiresAt: number }>();
     relay.browserHash = grant.browserHash;
     browser.send(JSON.stringify({ type: "ready", token: grant.token, expires_at: grant.expiresAt }));
     const cols = clamp(Number(message.cols), 20, 400, 120);
     const rows = clamp(Number(message.rows), 5, 200, 32);
-    relay.toolbox = await this.toolbox(grant.sandboxId);
+    try {
+      relay.toolbox = await this.toolbox(grant.sandboxId);
+    } catch (error) {
+      if (!(error instanceof SandboxAsleep)) throw error;
+      console.log("terminal: sandbox asleep", { state: error.message });
+      browser.send(JSON.stringify({ type: "error", error: "The sandbox is asleep. Call Dogwalk to wake it, then retry." }));
+      browser.close(CLOSE_ASLEEP, "sandbox asleep");
+      return this.drop(browser);
+    }
     const created = await this.ensurePty(relay.toolbox, cols, rows);
     relay.upstream = await this.connect(browser, relay.toolbox);
-    // A fresh PTY starts a plain shell; hand it to tmux so later connections reattach.
-    if (created) relay.upstream.send(" command -v tmux >/dev/null && exec tmux new-session -A -s human\r");
-    else await this.resize(relay.toolbox, cols, rows);
+    console.log("terminal: attached", { created, cols, rows });
+    if (created) {
+      // A fresh PTY starts a plain shell; hand it to tmux so later connections reattach.
+      relay.upstream.send(" command -v tmux >/dev/null && exec tmux new-session -A -s human\r");
+    } else {
+      // An existing tmux repaints only on a window change, and the new tab may have the same
+      // size as the last one: change it by a row and back, so the screen is redrawn.
+      await this.resize(relay.toolbox, cols, rows - 1);
+      await this.resize(relay.toolbox, cols, rows);
+    }
   }
 
   private async toolbox(sandboxId: string): Promise<string> {
@@ -100,7 +123,7 @@ export class TerminalRelay {
     });
     if (!response.ok) throw new Error(`the sandbox is unavailable (${response.status}); a call wakes it`);
     const sandbox = await response.json<{ toolboxProxyUrl?: string; state?: string }>();
-    if (sandbox.state && sandbox.state !== "started") throw new Error(`the sandbox is ${sandbox.state}; a call wakes it`);
+    if (sandbox.state && sandbox.state !== "started") throw new SandboxAsleep(sandbox.state);
     return `${(sandbox.toolboxProxyUrl ?? "https://proxy.app.daytona.io/toolbox").replace(/\/$/, "")}/${encodeURIComponent(sandboxId)}`;
   }
 
@@ -146,6 +169,7 @@ export class TerminalRelay {
       }
     });
     upstream.addEventListener("close", (event) => {
+      console.log("terminal: upstream closed", { code: event.code, reason: event.reason.slice(0, 120) });
       if (browser.readyState !== WebSocket.OPEN) return;
       let code = 0;
       try {
@@ -173,11 +197,12 @@ export class TerminalRelay {
 
   private refuse(browser: WebSocket, error: string): void {
     browser.send(JSON.stringify({ type: "error", error }));
-    browser.close(4001, error.slice(0, 120));
+    browser.close(CLOSE_EXPIRED, error.slice(0, 120));
     this.drop(browser);
   }
 
   private fail(browser: WebSocket, error: string): void {
+    console.error("terminal: failed", error);
     if (browser.readyState !== WebSocket.OPEN) return this.drop(browser);
     browser.send(JSON.stringify({ type: "notice", text: error }));
     browser.close(1011, error.slice(0, 120));

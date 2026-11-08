@@ -9,7 +9,9 @@
 //   server text   {"type":"ready","token":...,"expires_at":ms} | {"type":"error","error":...}
 //                 | {"type":"exit","code":n,"reason":...} | {"type":"notice","text":...} | {"type":"pong"}
 //   server binary raw PTY output (UTF-8 may split across frames; xterm reassembles)
-//   close 4001    ticket or token expired or invalid; 4003 the browser was unpaired; else reconnect
+//   close 4001    ticket or token expired or invalid; 4003 the browser was unpaired;
+//         4004    the sandbox is asleep (an "error" frame first carries the text to show): keep the
+//                 token, stop reconnecting, and offer Retry; any other close reconnects with backoff
 //
 // The launch ticket arrives once in the URL fragment (#t=...) and is stripped at once; the token
 // from "ready" lives in sessionStorage so a reload of this tab reconnects without a ticket.
@@ -207,13 +209,13 @@ const TERMINAL_JS = String.raw`"use strict";
     $("ovText").textContent = text;
     $("ovBtn").hidden = !button;
     if (button) $("ovBtn").textContent = button;
-    $("ovLink").hidden = kind !== "fatal";
+    $("ovLink").hidden = kind === "exit";
     o.hidden = false;
   }
   function hideOverlay() { $("overlay").hidden = true; }
 
   // Connection
-  var ws = null, ready = false, exited = false, finished = false;
+  var ws = null, ready = false, exited = false, finished = false, asleep = false;
   var pendingError = null, backoff = 500, retryTimer = 0, pingTimer = 0, lastPong = 0;
   var enc = new TextEncoder();
 
@@ -301,13 +303,14 @@ const TERMINAL_JS = String.raw`"use strict";
       stopPing();
       if (ev.code === 4001) { fatal("expired"); return; }
       if (ev.code === 4003) { fatal("unpaired"); return; }
+      if (ev.code === 4004) { sandboxAsleep(pendingError); return; }
       if (exited) return;
       scheduleReconnect();
     };
   }
 
   function scheduleReconnect() {
-    if (finished || exited || retryTimer) return;
+    if (finished || exited || asleep || retryTimer) return;
     if (!ticket && !savedToken()) { fatal("expired"); return; }
     setState("retry", "Reconnecting...");
     banner("Reconnecting...");
@@ -340,8 +343,35 @@ const TERMINAL_JS = String.raw`"use strict";
     term.focus();
   }
 
+  // The relay refuses while the sandbox is stopped. Only a call wakes it, so retrying on a timer
+  // is pointless; the token stays so Retry can reconnect once the sandbox is up.
+  function sandboxAsleep(text) {
+    asleep = true;
+    clearTimeout(retryTimer);
+    retryTimer = 0;
+    stopPing();
+    term.options.disableStdin = true;
+    term.blur();
+    hideBanner();
+    setState("fatal", "Sandbox asleep");
+    overlay("asleep", "Sandbox asleep",
+      text || "The sandbox is asleep. Call Dogwalk to wake it, then retry.", "Retry");
+    document.body.classList.add("finished");
+  }
+  function retryAwake() {
+    if (!asleep || finished) return;
+    asleep = false;
+    document.body.classList.remove("finished");
+    term.options.disableStdin = false;
+    hideOverlay();
+    backoff = 500;
+    connect();
+    term.focus();
+  }
+
   function fatal(kind) {
     finished = true;
+    asleep = false;
     sdel(sessionStorage, TOKEN_KEY);
     ticket = null;
     clearTimeout(retryTimer);
@@ -405,7 +435,9 @@ const TERMINAL_JS = String.raw`"use strict";
       newShell();
     }
   });
-  $("ovBtn").addEventListener("click", newShell);
+  $("ovBtn").addEventListener("click", function () {
+    if (asleep) retryAwake(); else newShell();
+  });
 
   // Key bar: cursor-style keys honor application cursor mode; modifiers use xterm's CSI 1;m form.
   function cursorKey(final) {
@@ -682,10 +714,10 @@ body[data-state=retry] #banner{border-color:var(--warn)}
 #overlay{position:absolute;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;padding:24px;
   background:rgba(17,24,21,.72);backdrop-filter:blur(2px)}
 #overlay[hidden]{display:none}
-#overlay[data-kind=fatal]{background:var(--paper);backdrop-filter:none}
+#overlay[data-kind=fatal],#overlay[data-kind=asleep]{background:var(--paper);backdrop-filter:none}
 .card{max-width:440px;background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:22px 24px;text-align:center;
   box-shadow:0 10px 40px rgba(0,0,0,.45)}
-#overlay[data-kind=fatal] .card{box-shadow:none}
+#overlay[data-kind=fatal] .card,#overlay[data-kind=asleep] .card{box-shadow:none}
 #ovTitle{font:600 21px/1.3 var(--serif);color:var(--ink);margin:0 0 8px}
 #ovText{margin:0 0 16px;color:var(--muted);overflow-wrap:anywhere}
 #ovText:empty{display:none}
