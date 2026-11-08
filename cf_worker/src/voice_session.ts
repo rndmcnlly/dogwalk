@@ -129,6 +129,37 @@ interface TranscriptEntry {
   endMs: number;
 }
 
+// The live voice session's transcript, saved as it grows so a Durable Object reset mid-call
+// cannot lose it. Each call_transcripts item is { call_sid, ended_at, entries }.
+interface CurrentTranscript {
+  call_sid: string | null;
+  live_session_id: string | null;
+  entries: TranscriptEntry[];
+}
+
+// One saved transcript's text budget. Values may reach 8 MB on SQLite-backed storage, and
+// call_transcripts holds ten of these in one value (at most about 2 MB even in 3-byte UTF-8);
+// 64k characters is over half an hour of speech, and a throttled rewrite of it stays cheap.
+const TRANSCRIPT_MAX_CHARS = 64_000;
+const TRANSCRIPT_SAVE_MS = 2000;
+
+// The newest entries that fit the budget; a monologue keeps its tail.
+function boundTranscript(entries: TranscriptEntry[]): TranscriptEntry[] {
+  const kept: TranscriptEntry[] = [];
+  let size = 0;
+  for (const entry of [...entries].reverse()) {
+    const text = entry.text.slice(-TRANSCRIPT_MAX_CHARS / 8);
+    size += text.length + 80;
+    if (size > TRANSCRIPT_MAX_CHARS) break;
+    kept.unshift({ ...entry, text });
+  }
+  return kept;
+}
+
+function lastWords(entries: TranscriptEntry[]): string[] {
+  return entries.slice(-4).map((entry) => `${entry.role}: ${entry.text.trim().slice(-300)}`);
+}
+
 interface LastCall {
   call_sid: string | null;
   ended_at: number;
@@ -578,7 +609,7 @@ Generate <|SpawnThinking|> when: the caller asks for or about any of those, incl
 Do not generate <|SpawnThinking|> when: greeting, small talk, conversational repair, or repeating what you were already told.
 Generate <|SpawnThinking|> before giving an answer that depends on that work. Do not guess the result while waiting, and never answer "I don't have that detail" when a session could find out.
 
-You cannot record, play audio, start work, or change anything with your voice alone; the Session Orchestrator does that. Never say you are doing any of those, or that one is done, unless it told you it happened; think it over (hand off) instead. Sessions never perform the theme: never offer to have one stage, act out, or write the fiction. If you said something too soon, own it plainly: "I spoke before I'd thought it through: the recording never started."
+You cannot record, play audio, start work, or change anything with your voice alone; the Session Orchestrator does that. Never say you are doing any of those, or that one is done, unless it told you it happened; think it over (hand off) instead. Never say a session is starting, is working on something, or will do something unless the Session Orchestrator told you a turn began for it; while you think it over, say only that you are thinking, in the words above. Sessions never perform the theme: never offer to have one stage, act out, or write the fiction. If you said something too soon, own it plainly: "I spoke before I'd thought it through: the recording never started."
 
 Audio clips and chimes are played into the call by the system between your turns; you cannot hear them. Never sing, hum, imitate, or perform a clip, and never say one is playing unless an update says it played.
 
@@ -619,6 +650,7 @@ Rules:
 - Unattached sessions may exist from earlier work: use discover_persisted_sessions when the caller refers to earlier work you do not have, and load_persisted_session to attach one under a fresh alias. Keep about five sessions attached at most; when there are more, suggest closing idle ones with close_managed_session, which keeps their history.
 - When starting work, write the Agent a proper engineering brief: goal, constraints, what done looks like, and ask it to finish with a short summary of what changed and how it was verified. Do not mention voice, phones, the theme, or this orchestration.
 - A note the caller wants left on the sandbox, or notes they want read back, are work for a session like any other; you cannot touch files yourself.
+- When the caller asks for research or diagnosis a session could verify (facts, specs, procedures), prefer beginning a Prompt Turn over answering from your own knowledge. When you do answer from your own knowledge, say so plainly ("from what I know, unverified").
 - A started Prompt Turn is not a completed one. Report completion only from a turn event or inspection. end_turn means the Agent stopped normally, not that the work is correct; say what was verified versus merely claimed.
 - Cancelling a Prompt Turn is not closing a session, and closing is not deleting history.
 - Permission Requests: describe the supplied choices plainly, and resolve only with an option_id the application supplied, after the caller chooses.
@@ -702,6 +734,7 @@ export class VoiceSession {
   private liveError: string | null = null;
   private transcript: TranscriptEntry[] = [];
   private transcriptCutMs = 0;
+  private transcriptSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private acpMessageChain: Promise<void> = Promise.resolve();
   private liveMessageChain: Promise<void> = Promise.resolve();
 
@@ -740,6 +773,7 @@ export class VoiceSession {
         orchestrator_context: this.orchestratorContext,
         orchestrator_queue: this.orchestratorQueue,
         call_transcripts: await this.state.storage.get("call_transcripts") ?? [],
+        current_transcript: await this.state.storage.get("current_transcript") ?? null,
         call_marks: await this.state.storage.get("call_marks") ?? [],
       });
     }
@@ -795,6 +829,7 @@ export class VoiceSession {
     if (this.liveSessionId === incomingLiveSessionId && this.live?.readyState === WebSocket.OPEN) {
       return new Response(null, { status: 204 });
     }
+    await this.recoverTranscript();
     this.resetCallState(incomingLiveSessionId);
     try {
       await this.connectLive(incomingLiveSessionId);
@@ -2113,6 +2148,40 @@ export class VoiceSession {
       this.transcript.push({ role, text: delta, startMs: Number(message.start_ms ?? 0), endMs: Number(message.end_ms ?? 0) });
     }
     this.transcript = this.transcript.slice(-200);
+    this.scheduleTranscriptSave();
+  }
+
+  // Deltas arrive many times a second and each save rewrites the whole value, so save at
+  // most every couple of seconds: a reset mid-call loses only the last moments.
+  private scheduleTranscriptSave(): void {
+    if (this.transcriptSaveTimer) return;
+    this.transcriptSaveTimer = setTimeout(() => {
+      this.transcriptSaveTimer = null;
+      if (!this.liveAttached) return;
+      void this.state.storage.put("current_transcript", {
+        call_sid: this.callSid,
+        live_session_id: this.liveSessionId,
+        entries: boundTranscript(this.transcript),
+      } satisfies CurrentTranscript);
+    }, TRANSCRIPT_SAVE_MS);
+  }
+
+  private async saveTranscript(callSid: string | null, entries: TranscriptEntry[]): Promise<void> {
+    if (!entries.length) return;
+    const saved = await this.state.storage.get<unknown[]>("call_transcripts") ?? [];
+    saved.push({ call_sid: callSid, ended_at: new Date().toISOString(), entries: boundTranscript(entries) });
+    await this.state.storage.put("call_transcripts", saved.slice(-10));
+  }
+
+  // A voice session whose end was never observed (the object reset mid-call) left its saved
+  // transcript behind: file it with the others. The live voice session's own is left alone.
+  private async recoverTranscript(): Promise<CurrentTranscript | null> {
+    const orphan = await this.state.storage.get<CurrentTranscript>("current_transcript");
+    if (!orphan || (this.liveAttached && orphan.live_session_id === this.liveSessionId)) return null;
+    await this.saveTranscript(orphan.call_sid, orphan.entries);
+    await this.state.storage.delete("current_transcript");
+    await this.record("voice.transcript.recovered", { call_sid: orphan.call_sid, live_session_id: orphan.live_session_id, entries: orphan.entries.length });
+    return orphan;
   }
 
   private async receiveDelegation(delegationId: string, offsetMs: number): Promise<void> {
@@ -3334,15 +3403,17 @@ export class VoiceSession {
       await this.cleanupVoice("telephone call completed");
       return;
     }
+    const orphan = await this.recoverTranscript();
+    const recovered = orphan?.call_sid === callSid ? orphan.entries : [];
     const last = await this.state.storage.get<LastCall>("last_call");
     const marks = await this.state.storage.get<CallMark[]>("call_marks") ?? [];
-    if (last?.call_sid === callSid || !marks.some((mark) => mark.call_sid === callSid)) return;
+    if (!recovered.length && (last?.call_sid === callSid || !marks.some((mark) => mark.call_sid === callSid))) return;
     await this.state.storage.put("last_call", {
       call_sid: callSid,
       ended_at: Date.now(),
       reason: "telephone call completed; the voice session's end was not observed",
       error: null,
-      last_words: [],
+      last_words: lastWords(recovered),
     } satisfies LastCall);
     await this.orchestratorEvent(`[harness event] call_ended: ${JSON.stringify({ reason: "telephone call completed; voice end not observed" })}`);
   }
@@ -3367,17 +3438,16 @@ export class VoiceSession {
     this.liveAttached = false;
     this.liveSessionId = null;
     if (live?.readyState === WebSocket.OPEN) live.close(1000, reason);
-    if (this.transcript.length) {
-      const saved = await this.state.storage.get<unknown[]>("call_transcripts") ?? [];
-      saved.push({ call_sid: this.callSid, ended_at: new Date().toISOString(), entries: this.transcript });
-      await this.state.storage.put("call_transcripts", saved.slice(-10));
-    }
+    if (this.transcriptSaveTimer) clearTimeout(this.transcriptSaveTimer);
+    this.transcriptSaveTimer = null;
+    await this.saveTranscript(this.callSid, this.transcript);
+    await this.state.storage.delete("current_transcript");
     const ending: LastCall = {
       call_sid: this.callSid,
       ended_at: Date.now(),
       reason: this.liveCloseReason ?? reason,
       error: this.liveError,
-      last_words: this.transcript.slice(-4).map((entry) => `${entry.role}: ${entry.text.trim().slice(-300)}`),
+      last_words: lastWords(this.transcript),
     };
     await this.state.storage.put("last_call", ending);
     await this.state.storage.put("onboarded", true);

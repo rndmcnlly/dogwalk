@@ -10,6 +10,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import math
 import re
 import secrets
@@ -30,12 +31,14 @@ from http.server import BaseHTTPRequestHandler
 
 from smoke_test import (
     DAYTONA_MOCK_PORT,
+    DEFAULT_LOCAL,
     DaytonaMock,
     LOCAL_ADMIN_PASSWORD,
     LOCAL_TOKEN,
     TEST_PHONE,
     ThreadingHTTPServer,
     prepare_local_fixture,
+    post,
     project_wrangler,
     wait_port,
 )
@@ -426,7 +429,8 @@ INSERT INTO sandbox_assignments
 VALUES ('{TEST_PHONE}', 'mock-sandbox-1', '{identity}', 'started', unixepoch(), unixepoch());
 INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at)
 VALUES ('CA_VOICE_TEST', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch()),
-       ('CA_VOICE_TEST2', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch());
+       ('CA_VOICE_TEST2', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch()),
+       ('CA_VOICE_TEST3', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch());
 INSERT INTO call_activity (call_sid, ts, source, direction, event, detail)
 VALUES ('CA_VOICE_TEST2', unixepoch(), 'voice', 'inbound', 'call.attestation',
         '{{"stir_verstat":"TN-Validation-Passed-A","caller_name_present":false,"from_country":"US","parameters":[]}}');
@@ -501,6 +505,16 @@ def call_activity(call_sid: str) -> list[str]:
     with urllib.request.urlopen(request, timeout=10) as response:
         calls = json.load(response)
     return [item["event"] for call in calls if call["call_sid"] == call_sid for item in call["activity"]]
+
+
+def conversations() -> list[dict]:
+    credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
+    request = urllib.request.Request(
+        "http://127.0.0.1:8787/admin/api/conversations?verbose=1",
+        headers={"authorization": f"Basic {credentials}"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)
 
 
 def latest_user_text() -> str:
@@ -641,6 +655,8 @@ async def run_protocol(identity: str) -> None:
         assert "The session model:" in frontend and "Whatever the theme and intensity" in frontend
         assert "The walk (Park theme)" in frontend and "your head (your mind)" in frontend
         assert "Never mention a backend" in frontend
+        # Delegated work is never claimed before the Orchestrator says a turn began.
+        assert "unless the Session Orchestrator told you a turn began for it" in frontend
         # Pairing is thinking work: the Voice Frontend hands off rather than standing by.
         delegated = frontend.split("Backend tools:", 1)[1].split("\n", 1)[0]
         assert "pairing a browser" in delegated and "paired screen" in delegated and "whiteboard" in delegated, delegated
@@ -1113,6 +1129,7 @@ async def run_protocol(identity: str) -> None:
                 "close_managed_session", "list_workspace_projects",
             }
             assert "Never create a session in home and tell it to work in another directory" in payload["instructions"]
+            assert "from what I know, unverified" in payload["instructions"]
         # The Orchestrator presents the caller's theme: Park until the switch, Survey after it.
         assert "The walk (Park theme)" in requests[0][1]["instructions"]
         assert "The survey (Survey theme)" in requests[-1][1]["instructions"]
@@ -1123,6 +1140,40 @@ async def run_protocol(identity: str) -> None:
             if item.get("type") == "function_call_output"
         }
         assert fed_back == set(STEP_IDS)
+
+
+async def run_unobserved_end(restart) -> None:
+    """The Durable Object resets mid-call: the saved transcript survives and is filed at call end."""
+    mocks = SocketMocks()
+    mocks.advertise_resume = True
+    spoken = ["Is the brake noise worth worrying about?", "Let me think that over."]
+    async with serve(mocks.handler, "127.0.0.1", SOCKET_PORT):
+        body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST3", "live-test-4")
+        assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
+        await asyncio.wait_for(mocks.live_connected.wait(), 8)
+        await mocks.send_live(transcript("input", spoken[0], 0, 1500))
+        await mocks.send_live(transcript("output", spoken[1], 1600, 2400))
+        async with asyncio.timeout(10):
+            while not (await asyncio.to_thread(conversations))[0]["current_transcript"]:
+                await asyncio.sleep(0.2)
+        # Restarting wrangler resets the object with the sideband still open: no cleanup runs.
+        # The mock sockets then drop without a close frame, which is expected here.
+        logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
+        await asyncio.to_thread(restart)
+    state = (await asyncio.to_thread(conversations))[0]
+    assert state["current_transcript"]["call_sid"] == "CA_VOICE_TEST3", state["current_transcript"]
+    assert not any(item["call_sid"] == "CA_VOICE_TEST3" for item in state["call_transcripts"]), "cleanup ran"
+    status, _ = await asyncio.to_thread(post, DEFAULT_LOCAL, "/voice/status", {
+        "From": TEST_PHONE, "CallSid": "CA_VOICE_TEST3", "CallStatus": "completed", "CallDuration": "30",
+    }, LOCAL_TOKEN)
+    assert status == 204, status
+    state = (await asyncio.to_thread(conversations))[0]
+    assert state["current_transcript"] is None
+    filed = state["call_transcripts"][-1]
+    assert filed["call_sid"] == "CA_VOICE_TEST3" and [entry["text"] for entry in filed["entries"]] == spoken, filed
+    # last_call carries the recovered last words into the next call's since_last_call.
+    ended = state["orchestrator_queue"] + [json.dumps(item) for item in state["orchestrator_context"]]
+    assert any("voice end not observed" in item for item in ended), ended[-3:]
 
 
 def sandbox_toolbox(command: str) -> dict | None:
@@ -1160,6 +1211,35 @@ def main() -> int:
     thread.start()
     orchestrator = ThreadingHTTPServer(("127.0.0.1", ORCHESTRATOR_MOCK_PORT), OrchestratorMock)
     threading.Thread(target=orchestrator.serve_forever, daemon=True).start()
+    processes = [start_wrangler(wrangler)]
+
+    def restart() -> None:
+        stop_wrangler(processes[-1])
+        processes.append(start_wrangler(wrangler))
+
+    try:
+        asyncio.run(run_protocol(identity))
+        asyncio.run(run_unobserved_end(restart))
+        print("voice session delegation checks passed")
+        return 0
+    finally:
+        stop_wrangler(processes[-1])
+        daytona.shutdown()
+        daytona.server_close()
+        orchestrator.shutdown()
+        orchestrator.server_close()
+
+
+def stop_wrangler(process: subprocess.Popen) -> None:
+    process.send_signal(signal.SIGTERM)
+    process.wait(timeout=10)
+    # The port frees once workerd exits, which may lag wrangler itself.
+    deadline = time.time() + 10
+    while time.time() < deadline and wait_port("127.0.0.1", 8787, timeout=0.2):
+        time.sleep(0.2)
+
+
+def start_wrangler(wrangler: str) -> subprocess.Popen:
     process = subprocess.Popen(
         [
             wrangler,
@@ -1195,19 +1275,10 @@ def main() -> int:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    try:
-        if not wait_port("127.0.0.1", 8787, timeout=20):
-            raise RuntimeError("wrangler dev did not start")
-        asyncio.run(run_protocol(identity))
-        print("voice session delegation checks passed")
-        return 0
-    finally:
-        process.send_signal(signal.SIGTERM)
-        process.wait(timeout=10)
-        daytona.shutdown()
-        daytona.server_close()
-        orchestrator.shutdown()
-        orchestrator.server_close()
+    if not wait_port("127.0.0.1", 8787, timeout=20):
+        process.kill()
+        raise RuntimeError("wrangler dev did not start")
+    return process
 
 
 if __name__ == "__main__":
