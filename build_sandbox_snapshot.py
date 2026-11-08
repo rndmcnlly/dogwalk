@@ -33,6 +33,8 @@ DESKTOP_PACKAGES = (
     "libxext6 libxrender1 libxfixes3 libxss1 libxtst6 libxi6 "
     "chromium fonts-dejavu-core"
 )
+# The binary guard plugin detects types with file(1); its hints name these.
+BINARY_TOOLS = "file poppler-utils unzip sqlite3 xxd"
 # Chromium's own sandbox and /dev/shm sizing do not fit inside the container.
 CHROMIUM_FLAGS = (
     'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS '
@@ -51,7 +53,7 @@ def snapshot_image() -> Image:
             "apt-get update && DEBIAN_FRONTEND=noninteractive "
             "apt-get install -y --no-install-recommends "
             "bash ca-certificates curl dnsutils git iputils-ping jq netcat-openbsd "
-            f"procps ripgrep sudo tar tmux {DESKTOP_PACKAGES} && "
+            f"procps ripgrep sudo tar tmux {BINARY_TOOLS} {DESKTOP_PACKAGES} && "
             "rm -rf /var/lib/apt/lists/*",
             f"printf '%s\\n' '{CHROMIUM_FLAGS}' > /etc/chromium.d/dogwalk",
             "pip install --no-cache-dir aiohttp==3.14.2",
@@ -72,6 +74,11 @@ def snapshot_image() -> Image:
             ROOT / "sandbox_opencode.json",
             "/home/daytona/.config/opencode/opencode.json",
         )
+        # OpenCode discovers plugins in this directory without a config entry.
+        .add_local_file(
+            ROOT / "sandbox_opencode_binary_guard.ts",
+            "/home/daytona/.config/opencode/plugins/binary-guard.ts",
+        )
         .run_commands(
             "chmod 755 /opt/dogwalk/sandbox_acp_gateway.py && "
             "chmod 0700 /home/daytona/.config/dogwalk && "
@@ -80,6 +87,7 @@ def snapshot_image() -> Image:
             f'v="$(opencode --version)" && echo "$v" && '
             f'case "$v" in *"{OPENCODE_VERSION}") ;; *) exit 1 ;; esac',
             "python -c 'import aiohttp'",
+            "file --version && command -v pdftotext unzip sqlite3 xxd",
             "cd /tmp && python /opt/dogwalk/sandbox_acp_gateway.py test",
             # The Agent command must still answer ACP initialize over stdio.
             f"cd /home/daytona && ( printf '%s\\n' '{ACP_INITIALIZE}'; sleep 15 ) | "

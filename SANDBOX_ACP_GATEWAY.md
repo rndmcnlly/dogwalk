@@ -111,6 +111,27 @@ received the key in place on 2026-11-08 and an `opencode run` there completed a
 `websearch` with results. Snapshot `dogwalk-acp-20261108-v1` predates it, so a
 fresh Sandbox needs the next snapshot or the same in-place edit.
 
+### Binary guard
+
+OpenCode 2.2.5's `read` returns PNG, JPEG, GIF, WebP, and PDF files up to 20 MiB
+as base64 data URIs. On 2026-11-08 an 8.3 MiB PDF became an 11.7 MB tool event,
+over the 10 MiB SSE limit between `opencode acp` and its server; the Prompt Turn
+failed and the session history kept the payload. `sandbox_opencode_binary_guard.ts`,
+installed as `~/.config/opencode/plugins/binary-guard.ts` (discovered without a
+config entry), wraps the built-in `read` executor through `ctx.tool.transform`,
+so it decides before anything is loaded or encoded. Text files and PNG, JPEG,
+GIF, or WebP images up to 2 MiB pass through unchanged. Any other binary,
+including every PDF, returns a clue of a few KB: size, `file(1)` type, a 64-byte
+hex dump with ASCII, and commands to consume it (`pdftotext`, `pdftoppm`,
+`ffmpeg` downscaling, `unzip -l`, `tar tf`, `sqlite3`, `ffprobe`, `xxd`), each
+naming its apt package. The guard reads the path itself, so it does not consult
+OpenCode's external-directory permission; the Agent already has shell and sudo.
+The snapshot build adds `file poppler-utils unzip sqlite3 xxd`. The existing
+Sandbox received the plugin and those packages (except `xxd`, already present) in
+place on 2026-11-08; an `opencode run` there read the 8.3 MiB PDF as a 3.2 KB
+event, a small PNG as an image, and a text file unchanged. Snapshot
+`dogwalk-acp-20261108-v1` predates it.
+
 The 2026-07 free-model bootstrap (`opencode/deepseek-v4-flash-free`) ended when
 that model left the free lineup.
 
