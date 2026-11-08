@@ -247,6 +247,21 @@ details summary{cursor:pointer}
 .md code{font-family:var(--mono);font-size:.92em;background:var(--code-bg);padding:0 3px;border-radius:3px}
 .md pre code{background:none;padding:0}
 .md a{color:var(--info)}
+.md ul,.md ol{padding-left:1.5em;margin:6px 0}
+.md li{margin:2px 0}
+.md li>ul,.md li>ol{margin:2px 0}
+.md li>p{margin:4px 0}
+.md blockquote{margin:8px 0;padding:0 0 0 12px;border-left:3px solid var(--rule);color:var(--muted)}
+.md hr{border:0;border-top:1px solid var(--line);margin:12px 0}
+.md-code{position:relative}
+.md-code pre{padding-top:22px}
+.md-lang{position:absolute;top:4px;right:8px;font:500 10.5px/1.4 var(--mono);color:var(--faint);letter-spacing:.06em;text-transform:uppercase}
+.md-table{overflow-x:auto;margin:8px 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--card)}
+.md-table table{border-collapse:collapse;font-size:.92em;line-height:1.4;min-width:100%}
+.md-table th,.md-table td{padding:4px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;min-width:6ch}
+.md-table th{background:var(--code-bg);color:var(--ink);font-weight:600;white-space:nowrap}
+.md-table tbody tr:last-child td{border-bottom:0}
+.md-table td code,.md-table th code{white-space:nowrap}
 pre.code{counter-reset:line;margin:0;font:12.5px/1.5 var(--mono);background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:8px 10px 8px 4px;max-height:75vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
 pre.code .ln{display:block;padding-left:6ch;text-indent:-6ch}
 pre.code .ln::before{counter-increment:line;content:counter(line);display:inline-block;width:5ch;margin-right:1ch;text-align:right;text-indent:0;color:var(--faint);-webkit-user-select:none;user-select:none}
@@ -1111,6 +1126,8 @@ function onMessage(m) {
       clearInterval(pingTimer);
       pingTimer = setInterval(() => send({ type: "ping" }), 30000);
       if (!listedOnce) listDir(currentDir);
+      viewingSent = ""; // a new socket: the server has heard nothing yet
+      reportViewing(true);
       break;
     case "pong":
       if (pairing && m.idle_expires_at) { pairing.idle_expires_at = m.idle_expires_at; renderPairing(); }
@@ -1224,6 +1241,7 @@ function showTab(name) {
     button.tabIndex = tab === name ? 0 : -1;
   }
   onFeedShown();
+  reportViewing();
 }
 function showLiveView(view) {
   liveView = view === "sessions" ? "sessions" : "timeline";
@@ -1237,6 +1255,29 @@ function showLiveView(view) {
 function showLive(view) {
   showLiveView(view);
   showTab("live");
+}
+
+// ---- What the user is looking at, so the walker can sense it:
+// {"type":"viewing","view":"live"|"files"|"hands"|"hidden","path":"...","kind":"file"|"dir"}.
+// Sent once it has held still for a second, never twice alike, and never while the tab is hidden,
+// apart from the one "hidden" message; becoming visible or reconnecting sends the current view at once.
+const VIEWING_MS = 1000;
+let viewingFolder = ""; // the folder the file browser last navigated to; closing the viewer clears it
+let viewingSent = "";
+let viewingTimer = null;
+function currentViewing() {
+  if (document.hidden) return { type: "viewing", view: "hidden" };
+  if (currentTab !== "files") return { type: "viewing", view: currentTab };
+  if (viewer.path) return { type: "viewing", view: "files", path: viewer.path, kind: "file" };
+  if (viewingFolder) return { type: "viewing", view: "files", path: viewingFolder, kind: "dir" };
+  return { type: "viewing", view: "files" };
+}
+function reportViewing(now) {
+  clearTimeout(viewingTimer);
+  if (!now) { viewingTimer = setTimeout(() => reportViewing(true), VIEWING_MS); return; }
+  const message = currentViewing();
+  const text = JSON.stringify(message);
+  if (text !== viewingSent && send(message)) viewingSent = text;
 }
 function onFeedShown() {
   if (!feedVisible()) return;
@@ -1653,6 +1694,8 @@ function whenNode(text) {
 function renderListing(m) {
   listedOnce = true;
   currentDir = m.path;
+  viewingFolder = m.path;
+  reportViewing();
   renderCrumbs(m.path);
   $("fileNote").textContent = "";
   const entries = (m.entries || []).slice().sort((a, b) => (b.dir - a.dir) || String(a.name).localeCompare(String(b.name)));
@@ -1715,6 +1758,7 @@ function setViewerBody(node) {
 function openFile(path, knownSize) {
   showTab("files");
   resetViewer(path, knownSize);
+  reportViewing();
   $("fileNote").textContent = "";
   const kind = viewer.kind;
   if (kind === "binary") {
@@ -1737,6 +1781,8 @@ function closeViewer() {
   pendingRead = 0;
   $("viewer").hidden = true;
   $("viewerBody").replaceChildren();
+  viewingFolder = "";
+  reportViewing();
 }
 
 function viewerFailed(message) {
@@ -1959,61 +2005,217 @@ function tableBlock(text, sep) {
 }
 
 // ---- A small markdown renderer: the source is HTML-escaped first, so no raw HTML survives.
-const FENCE = /^\s*(\x60{3,}|~{3,})/;
+// Blocks: headings, fenced code (with a language label), GitHub-style pipe tables, blockquotes,
+// rules, nested lists and paragraphs. A list item's lines are rendered again as blocks, so items
+// can hold nested lists, code and quotes; a blockquote's lines likewise.
+const FENCE = /^ {0,3}(\x60{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE = /^ {0,3}(\x60{3,}|~{3,})\s*$/;
+const HEADING = /^ {0,3}(#{1,6})(?:\s+(.*?))?(?:\s+#+)?\s*$/;
+const RULE = /^ {0,3}([-*_])(\s*\1){2,}\s*$/;
+const QUOTE = /^ {0,3}&gt; ?/;
+const LIST_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])(\s+)(.*)$/;
+const TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 function escapeHtml(text) {
   return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 function inlineMarkdown(text) {
   const spans = [];
-  text = text.replace(/\x60([^\x60]+)\x60/g, (_, code) => { spans.push(code); return "\u0000" + (spans.length - 1) + "\u0000"; });
+  const hold = (html) => { spans.push(html); return "\u0000" + (spans.length - 1) + "\u0000"; };
+  // Code spans first (a run of n backticks closes on a run of exactly n), then backslash escapes.
+  text = text.replace(/(?<!\x60)(\x60+)(?!\x60)([\s\S]*?[^\x60])\1(?!\x60)/g, (_, ticks, code) =>
+    hold("<code>" + (/^ .*[^ ].* $/.test(code) ? code.slice(1, -1) : code) + "</code>"));
+  text = text.replace(/\\([\\*_\[\]()#+\-.!|~\x60{}])/g, (_, c) => hold(c));
   text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) =>
     /^(https?:\/\/|\/|#)/i.test(href) ? "<a href=\"" + href + "\" target=\"_blank\" rel=\"noopener noreferrer\">" + label + "</a>" : label);
   text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/__([^_]+)__/g, "<strong>$1</strong>");
   text = text.replace(/\*([^*\s][^*]*)\*/g, "<em>$1</em>").replace(/(^|[^\w])_([^_\s][^_]*)_(?=[^\w]|$)/g, "$1<em>$2</em>");
-  return text.replace(/\u0000(\d+)\u0000/g, (_, i) => "<code>" + spans[+i] + "</code>");
+  text = text.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  // Twice: an escaped character can sit inside a held link label.
+  return text.replace(/\u0000(\d+)\u0000/g, (_, i) => spans[+i]).replace(/\u0000(\d+)\u0000/g, (_, i) => spans[+i]);
 }
-function renderMarkdown(source) {
-  const lines = escapeHtml(source).replace(/\r\n?/g, "\n").split("\n");
+// Columns of leading whitespace, with tabs to the next multiple of four.
+function indentOf(line) {
+  let n = 0;
+  for (const c of line) { if (c === " ") n++; else if (c === "\t") n += 4 - n % 4; else break; }
+  return n;
+}
+function dedent(line, columns) {
+  let n = 0, i = 0;
+  while (i < line.length && n < columns && (line[i] === " " || line[i] === "\t")) { n += line[i] === "\t" ? 4 - n % 4 : 1; i++; }
+  return line.slice(i);
+}
+
+// ---- Pipe tables: a header row, a delimiter row (---, :--, --:, :-:), then body rows that hold a pipe.
+// \| is a literal pipe, and a pipe inside a code span does not split the cell.
+function splitTableRow(line) {
+  let text = line.trim();
+  if (text[0] === "|") text = text.slice(1);
+  if (text.endsWith("|") && !text.endsWith("\\|")) text = text.slice(0, -1);
+  const cells = [];
+  let cell = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\" && text[i + 1] === "|") { cell += "\\|"; i++; continue; }
+    if (c === "\x60") {
+      let n = 1;
+      while (text[i + n] === "\x60") n++;
+      let end = -1;
+      for (let j = i + n; j < text.length && end < 0; j++) {
+        if (text[j] !== "\x60") continue;
+        let m = 1;
+        while (text[j + m] === "\x60") m++;
+        if (m === n) end = j; else j += m - 1;
+      }
+      const stop = end < 0 ? i + n : end + n;
+      cell += text.slice(i, stop);
+      i = stop - 1;
+      continue;
+    }
+    if (c === "|") { cells.push(cell.trim()); cell = ""; continue; }
+    cell += c;
+  }
+  cells.push(cell.trim());
+  // Inside code spans the escape still means a pipe; outside, inlineMarkdown unescapes it.
+  return cells.map((cell) => cell.replace(/(\x60+)([\s\S]*?)\1/g, (span) => span.replace(/\\\|/g, "|")));
+}
+function tableAt(lines, i) {
+  const line = lines[i], next = lines[i + 1];
+  if (next == null || line.indexOf("|") < 0 || next.indexOf("|") < 0 || !TABLE_DELIMITER.test(next)) return null;
+  const head = splitTableRow(line);
+  const aligns = splitTableRow(next).map((cell) => {
+    const left = cell[0] === ":", right = cell[cell.length - 1] === ":";
+    return left && right ? "center" : right ? "right" : left ? "left" : "";
+  });
+  if (head.length !== aligns.length) return null;
+  const rows = [];
+  let j = i + 2;
+  for (; j < lines.length; j++) {
+    const row = lines[j];
+    if (!row.trim() || row.indexOf("|") < 0 || FENCE.test(row) || QUOTE.test(row) || HEADING.test(row)) break;
+    const cells = splitTableRow(row).slice(0, head.length);
+    while (cells.length < head.length) cells.push("");
+    rows.push(cells);
+  }
+  const cell = (tag, text, k) => "<" + tag + (tag === "th" ? " scope=\"col\"" : "")
+    + (aligns[k] ? " style=\"text-align:" + aligns[k] + "\"" : "") + ">" + inlineMarkdown(text) + "</" + tag + ">";
+  const html = "<div class=\"md-table\"><table><thead><tr>" + head.map((text, k) => cell("th", text, k)).join("") + "</tr></thead>"
+    + (rows.length ? "<tbody>" + rows.map((r) => "<tr>" + r.map((text, k) => cell("td", text, k)).join("") + "</tr>").join("") + "</tbody>" : "")
+    + "</table></div>";
+  return { html, next: j };
+}
+
+// ---- Lists: siblings sit within one column of the first marker; anything indented further belongs
+// to the current item (nested lists included). A blank line ends the list unless more of it follows.
+function listAt(lines, i) {
+  const first = LIST_ITEM.exec(lines[i]);
+  const ordered = /\d/.test(first[2]);
+  const base = indentOf(first[1]);
+  const items = [];
+  let item = null;
+  const sibling = (line) => {
+    const m = LIST_ITEM.exec(line);
+    return m && indentOf(m[1]) <= base + 1 && /\d/.test(m[2]) === ordered && !RULE.test(line) ? m : null;
+  };
+  let j = i;
+  for (; j < lines.length; j++) {
+    const line = lines[j];
+    const m = sibling(line);
+    if (m) { item = { lines: [m[4]] }; items.push(item); continue; }
+    if (!line.trim()) {
+      let k = j + 1;
+      while (k < lines.length && !lines[k].trim()) k++;
+      if (k < lines.length && (sibling(lines[k]) || indentOf(lines[k]) >= base + 2)) { item.lines.push(""); continue; }
+      break;
+    }
+    if (indentOf(line) >= base + 2) { item.lines.push(line); continue; }
+    // A lazy continuation of the item's paragraph, unless it starts a block of its own.
+    const previous = item.lines[item.lines.length - 1];
+    if (previous && previous.trim() && !LIST_ITEM.test(line) && !FENCE.test(line) && !HEADING.test(line) && !RULE.test(line) && !QUOTE.test(line)) {
+      item.lines.push(line.trim());
+      continue;
+    }
+    break;
+  }
+  const tag = ordered ? "ol" : "ul";
+  const start = ordered ? parseInt(first[2], 10) : 1;
+  const html = "<" + tag + (start !== 1 ? " start=\"" + start + "\"" : "") + ">" + items.map((it) => {
+    while (it.lines.length && !it.lines[it.lines.length - 1].trim()) it.lines.pop();
+    // The first line has its marker stripped; the rest share their smallest indent.
+    const rest = it.lines.slice(1).filter((line) => line.trim());
+    const shift = rest.length ? Math.min(...rest.map(indentOf)) : 0;
+    const body = [it.lines[0]].concat(it.lines.slice(1).map((line) => dedent(line, shift)));
+    // A plain first paragraph sits in the item without a paragraph margin.
+    return "<li>" + renderBlocks(body).replace(/^<p>([\s\S]*?)<\/p>\n?/, "$1") + "</li>";
+  }).join("") + "</" + tag + ">";
+  return { html, next: j };
+}
+
+function renderBlocks(lines) {
   const out = [];
-  let paragraph = [], list = null;
-  const flushParagraph = () => { if (paragraph.length) out.push("<p>" + inlineMarkdown(paragraph.join(" ")) + "</p>"); paragraph = []; };
-  const flushList = () => {
-    if (list) out.push("<" + list.tag + ">" + list.items.map((item) => "<li>" + inlineMarkdown(item) + "</li>").join("") + "</" + list.tag + ">");
-    list = null;
+  let paragraph = [];
+  const flush = () => {
+    if (!paragraph.length) return;
+    // Two trailing spaces or a trailing backslash break the line.
+    const joined = paragraph.map((line, k) => {
+      const last = k === paragraph.length - 1;
+      const text = line.trim();
+      if (!last && / {2,}$/.test(line)) return text + "\u0001";
+      if (!last && /\\$/.test(text)) return text.slice(0, -1) + "\u0001";
+      return text + (last ? "" : " ");
+    }).join("");
+    out.push("<p>" + inlineMarkdown(joined).replace(/\u0001/g, "<br>") + "</p>");
+    paragraph = [];
   };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    if (!line.trim()) { flush(); continue; }
     const fence = FENCE.exec(line);
-    if (fence) {
-      flushParagraph(); flushList();
+    if (fence && !(fence[1][0] === "\x60" && fence[2].indexOf("\x60") >= 0)) {
+      flush();
+      const marker = fence[1];
+      const language = (/^[\w+#.-]+/.exec(fence[2].trim()) || [""])[0];
       const code = [];
-      for (i++; i < lines.length && lines[i].trim().indexOf(fence[1]) !== 0; i++) code.push(lines[i]);
-      out.push("<pre><code>" + code.join("\n") + "</code></pre>");
+      for (i++; i < lines.length; i++) {
+        const close = FENCE_CLOSE.exec(lines[i]);
+        if (close && close[1][0] === marker[0] && close[1].length >= marker.length) break;
+        code.push(lines[i]);
+      }
+      const pre = "<pre><code" + (language ? " class=\"language-" + language + "\"" : "") + ">" + code.join("\n") + "</code></pre>";
+      out.push(language ? "<div class=\"md-code\"><span class=\"md-lang\">" + language + "</span>" + pre + "</div>" : pre);
       continue;
     }
-    const heading = /^(#{1,6})\s+(.*?)[\s#]*$/.exec(line);
+    const heading = HEADING.exec(line);
     if (heading) {
-      flushParagraph(); flushList();
-      out.push("<h" + heading[1].length + ">" + inlineMarkdown(heading[2]) + "</h" + heading[1].length + ">");
+      flush();
+      const level = heading[1].length;
+      out.push("<h" + level + ">" + inlineMarkdown(heading[2] || "") + "</h" + level + ">");
       continue;
     }
-    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { flushParagraph(); flushList(); out.push("<hr>"); continue; }
-    const item = /^\s*([-*+]|\d+[.)])\s+(.*)$/.exec(line);
-    if (item) {
-      flushParagraph();
-      const tag = /\d/.test(item[1]) ? "ol" : "ul";
-      if (list && list.tag !== tag) flushList();
-      if (!list) list = { tag, items: [] };
-      list.items.push(item[2]);
+    const table = tableAt(lines, i);
+    if (table) { flush(); out.push(table.html); i = table.next - 1; continue; }
+    if (RULE.test(line)) { flush(); out.push("<hr>"); continue; }
+    if (QUOTE.test(line)) {
+      flush();
+      const quoted = [];
+      for (; i < lines.length && QUOTE.test(lines[i]); i++) quoted.push(lines[i].replace(QUOTE, ""));
+      i--;
+      out.push("<blockquote>" + renderBlocks(quoted) + "</blockquote>");
       continue;
     }
-    if (!line.trim()) { flushParagraph(); flushList(); continue; }
-    if (list && /^\s{2,}/.test(line)) { list.items[list.items.length - 1] += " " + line.trim(); continue; }
-    flushList();
-    paragraph.push(line.trim());
+    if (LIST_ITEM.test(line)) {
+      flush();
+      const list = listAt(lines, i);
+      out.push(list.html);
+      i = list.next - 1;
+      continue;
+    }
+    paragraph.push(line);
   }
-  flushParagraph(); flushList();
+  flush();
   return out.join("\n");
+}
+function renderMarkdown(source) {
+  return renderBlocks(escapeHtml(source).replace(/\r\n?/g, "\n").split("\n"));
 }
 function markdownBlock(source) {
   const box = el("div", { class: "md" });
@@ -2211,6 +2413,7 @@ document.addEventListener("keydown", (event) => {
   if (index >= 0 && event.key.length === 1 && !$("pairedScreen").hidden) showTab(TABS[index]);
 });
 document.addEventListener("visibilitychange", () => {
+  reportViewing(true); // "hidden" on the way out, the current view on the way back
   if (document.visibilityState !== "visible") return;
   acquireWake();
   // Backgrounded tabs lose their sockets: reconnect at once on return instead of waiting out the backoff.

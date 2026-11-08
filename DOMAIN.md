@@ -32,6 +32,7 @@ Dogwalk presents as an agentic development environment driven by a coworker. ACP
 - A protocol entity, an application projection, and its spoken presentation are different things even when they currently have a one-to-one relationship.
 - Derived state must not be presented as ACP-defined state. Dogwalk may infer that a session is ready or that a turn needs attention, but those are Client projections.
 - Opaque protocol identifiers stay out of speech. The Voice Agent refers to work by purpose, recency, and pronounceable Alias.
+- Whatever the Voice Agent can change, it can also sense without changing it: every setter (a preference, a pairing, what a Paired Browser shows, which session is followed) has a read-only counterpart, and the state that matters at the start of a Voice Call (including a Paired Browser and what its page showed recently) arrives with the call.
 - The current process topology is an implementation choice. ACP permits one Agent connection to support multiple concurrent sessions.
 
 ## Bounded Contexts

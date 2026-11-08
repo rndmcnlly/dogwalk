@@ -278,13 +278,14 @@ ORCHESTRATOR_SCRIPT = [
     ('"key":"6"', lambda ctx: [call("k6-style", "set_earcon_style", style="tonal")]),
     ('"key":"8"', lambda ctx: [call("k8-pair", "pair_browser")]),
     ('"key":"9"', lambda ctx: [call("k9-show", "show_in_browser", uri="dogwalk:file/REPORT.md", note="the report")]),
+    ('"key":"4"', lambda ctx: [call("k4-state", "inspect_call_state")]),
 ]
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
-    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair", "k9-show",
+    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair", "k9-show", "k4-state",
 ]
 
 
@@ -911,6 +912,16 @@ async def run_protocol(identity: str) -> None:
             await mocks.send_live(dtmf("9"))
             shown = await recv_type(browser, "show", 15)
             assert shown["uri"] == "dogwalk:file//home/daytona/REPORT.md" and shown["note"] == "the report", shown
+            # What the page shows is sensed without changing anything.
+            await browser.send(json.dumps({"type": "viewing", "view": "files", "path": "/home/daytona/REPORT.md", "kind": "file"}))
+            await asyncio.sleep(0.3)
+            await mocks.send_live(dtmf("4"))
+            await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "k4-state" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
+            state = OrchestratorMock.tool_output("k4-state")
+            browser_state = state["paired_browser"]
+            assert browser_state["paired"] and browser_state["page_open"] and browser_state["device"] == "Chrome on a Mac", browser_state
+            assert browser_state["showing_now"] == {"view": "files", "path": "/home/daytona/REPORT.md"}, browser_state
+            assert state["earcon_style"] == "tonal", state
             # Media viewers fetch raw bytes with the credential in a header, never the URL.
             bearer = {"authorization": f"Bearer {token}"}
             status, headers, body = await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fhome%2Fdaytona%2FREPORT.md", bearer)
