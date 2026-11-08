@@ -12,6 +12,12 @@ type = "Text"
 globs = ["**/*.md"]
 fallthrough = true
 
+# Spoken earcons rendered by make_earcons.py are bundled as binary.
+[[rules]]
+type = "Data"
+globs = ["**/*.pcm"]
+fallthrough = true
+
 [vars]
 # Set after creating the path-scoped Cloudflare Access application.
 ACCESS_TEAM_DOMAIN = ""
@@ -20,6 +26,8 @@ OPENAI_PROJECT_ID = "proj_jignpSyHyE5k18M1EGYS9Ijx"
 OPENAI_LIVE_MODEL = "gpt-live-1"
 ORCHESTRATOR_MODEL = "gpt-6.1-sol"
 ORCHESTRATOR_REASONING_EFFORT = "low"
+# "spoken" (text-to-speech labels) or "tonal" (note patterns).
+EARCON_STYLE = "spoken"
 PUBLIC_ORIGIN = "https://dogwalk.tools"
 # Name of a pre-built Daytona snapshot containing OpenCode and the ACP Gateway.
 DAYTONA_SNAPSHOT = "dogwalk-acp-20261107-v2"

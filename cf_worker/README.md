@@ -155,6 +155,15 @@ load through `load_voice_agent_skill`. Add a skill by writing the file and
 registering it in `src/voice_agent_skills.ts`. `platform-self-knowledge` embeds
 `DOMAIN.md` and `PSTN_CLOUDFLARE.md` at build time.
 
+Audio goes to the caller as GPT-Live output fixtures. Earcons mark events
+(`EARCON_STYLE`: `spoken` labels rendered by `../make_earcons.py` with macOS
+`say`, committed under `earcons/`, or `tonal` note patterns); they queue for
+lulls. `play_audio` renders a window of any Workspace audio or video file with
+`ffmpeg` in the Sandbox. `start_recording` mutes the Voice Frontend, buffers the
+caller audio GPT-Live reflects to the sideband, and saves a WAV under
+`recordings/` when the caller presses pound (star discards), after 20 s of
+silence, or at its limit. Keypad presses arrive as `transport.dtmf.received`.
+
 Twilio adds a five-minute HMAC capability containing the existing Call SID to a
 custom SIP header. The signed OpenAI webhook validates it and resolves the User
 and current Sandbox Assignment from D1; SIP caller headers alone never authorize

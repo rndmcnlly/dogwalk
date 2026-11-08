@@ -156,6 +156,13 @@ def stats_lines(call: dict, items: list) -> list[str]:
                 if r["event"].startswith("voice.fixture.")]
     if fixtures:
         out.append("audio: " + ", ".join(f"{label} {outcome}" for outcome, label in fixtures))
+    recordings = [f"{r['event'].removeprefix('voice.recording.')} {json.dumps(detail(r))}" for r in activity
+                  if r["event"].startswith("voice.recording.")]
+    keys = "".join(detail(r).get("key", "") for r in activity if r["event"] == "voice.keypad")
+    if recordings:
+        out.append("recordings: " + "; ".join(recordings))
+    if keys:
+        out.append(f"keypad: {keys}")
     if "end_call" not in names and call.get("status") == "completed":
         out.append("note: no end_call; the caller or provider hung up")
     return out

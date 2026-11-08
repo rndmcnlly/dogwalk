@@ -1,3 +1,15 @@
+import spoken_call_started from "../earcons/call_started.pcm";
+import spoken_handoff_received from "../earcons/handoff_received.pcm";
+import spoken_session_created from "../earcons/session_created.pcm";
+import spoken_turn_started from "../earcons/turn_started.pcm";
+import spoken_turn_stopped from "../earcons/turn_stopped.pcm";
+import spoken_turn_failed from "../earcons/turn_failed.pcm";
+import spoken_permission_requested from "../earcons/permission_requested.pcm";
+import spoken_session_closed from "../earcons/session_closed.pcm";
+import spoken_recording_started from "../earcons/recording_started.pcm";
+import spoken_recording_saved from "../earcons/recording_saved.pcm";
+import spoken_recording_discarded from "../earcons/recording_discarded.pcm";
+
 // Waveform audio for GPT-Live output fixtures: raw mono PCM16LE at 24 kHz, at most 30 s,
 // base64-encoded. Earcons are synthesized here; clips come from Sandbox WAV files.
 export const SAMPLE_RATE = 24_000;
@@ -27,11 +39,86 @@ function synthesize(notes: Array<[number, number]>, gain = 0.28): Clip {
   return { base64: toBase64(new Uint8Array(samples.buffer)), seconds: total / SAMPLE_RATE };
 }
 
-export const EARCONS = {
-  // Presentation only (the walk's jingle); event names stay neutral.
+export type EarconName =
+  | "call_started"
+  | "handoff_received"
+  | "session_created"
+  | "turn_started"
+  | "turn_stopped"
+  | "turn_failed"
+  | "permission_requested"
+  | "session_closed"
+  | "recording_started"
+  | "recording_saved"
+  | "recording_discarded";
+export type EarconStyle = "spoken" | "tonal";
+
+// Tonal earcons: short note patterns, rising for arrivals and falling for departures.
+const TONAL: Record<EarconName, Clip> = {
   call_started: synthesize([[523.25, 140], [783.99, 220]]),
+  handoff_received: synthesize([[659.25, 90]]),
+  session_created: synthesize([[523.25, 90], [659.25, 90], [783.99, 140]]),
+  turn_started: synthesize([[659.25, 100], [987.77, 140]]),
   turn_stopped: synthesize([[783.99, 110], [1046.5, 170]]),
-} satisfies Record<string, Clip>;
+  turn_failed: synthesize([[493.88, 150], [349.23, 260]]),
+  permission_requested: synthesize([[880, 110], [880, 110], [1174.66, 180]]),
+  session_closed: synthesize([[783.99, 110], [523.25, 170]]),
+  recording_started: synthesize([[1046.5, 260]]),
+  recording_saved: synthesize([[1046.5, 100], [1318.51, 180]]),
+  recording_discarded: synthesize([[659.25, 120], [440, 220]]),
+};
+
+// Spoken earcons: macOS text-to-speech labels rendered by make_earcons.py (verbose and
+// diagnostic). Presentation only; the event names stay neutral.
+const SPOKEN: Record<EarconName, Clip> = {
+  call_started: pcmClip(spoken_call_started),
+  handoff_received: pcmClip(spoken_handoff_received),
+  session_created: pcmClip(spoken_session_created),
+  turn_started: pcmClip(spoken_turn_started),
+  turn_stopped: pcmClip(spoken_turn_stopped),
+  turn_failed: pcmClip(spoken_turn_failed),
+  permission_requested: pcmClip(spoken_permission_requested),
+  session_closed: pcmClip(spoken_session_closed),
+  recording_started: pcmClip(spoken_recording_started),
+  recording_saved: pcmClip(spoken_recording_saved),
+  recording_discarded: pcmClip(spoken_recording_discarded),
+};
+
+export function earcon(name: EarconName, style: EarconStyle): Clip {
+  return (style === "tonal" ? TONAL : SPOKEN)[name];
+}
+
+function pcmClip(data: ArrayBuffer): Clip {
+  return { base64: toBase64(new Uint8Array(data)), seconds: data.byteLength / (SAMPLE_RATE * 2) };
+}
+
+// A caller recording as a WAV file (mono PCM16 at 24 kHz, as reflected by GPT-Live).
+export function pcmToWav(chunks: Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const wav = new Uint8Array(44 + length);
+  const view = new DataView(wav.buffer);
+  const ascii = (at: number, text: string) => [...text].forEach((c, i) => (wav[at + i] = c.charCodeAt(0)));
+  ascii(0, "RIFF"); view.setUint32(4, 36 + length, true); ascii(8, "WAVE");
+  ascii(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, SAMPLE_RATE, true); view.setUint32(28, SAMPLE_RATE * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  ascii(36, "data"); view.setUint32(40, length, true);
+  let offset = 44;
+  for (const chunk of chunks) { wav.set(chunk, offset); offset += chunk.length; }
+  return wav;
+}
+
+export function base64ToBytes(base64: string): Uint8Array {
+  return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+}
+
+// Mean absolute amplitude of a PCM16 chunk, 0..1, for silence detection.
+export function loudness(pcm: Uint8Array): number {
+  const samples = new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.byteLength / 2));
+  let sum = 0;
+  for (const sample of samples) sum += Math.abs(sample);
+  return samples.length ? sum / samples.length / 32768 : 0;
+}
 
 // Accepts only 16-bit PCM, mono, 24 kHz WAV, which a dog can produce with
 // `ffmpeg -i input -ac 1 -ar 24000 -c:a pcm_s16le output.wav`.

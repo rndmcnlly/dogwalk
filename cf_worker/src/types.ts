@@ -15,6 +15,7 @@ export interface Env {
   ORCHESTRATOR_API_BASE?: string;
   ORCHESTRATOR_API_KEY?: string;
   ORCHESTRATOR_REASONING_EFFORT?: string;
+  EARCON_STYLE?: string;
   OPENAI_LIVE_API_BASE?: string;
   OPENAI_LIVE_ATTACH_BASE?: string;
   PUBLIC_ORIGIN?: string;

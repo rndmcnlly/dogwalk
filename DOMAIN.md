@@ -320,7 +320,13 @@ A tool Dogwalk offers an ACP Agent through ACP's Client-supplied MCP servers, st
 
 **Context:** Voice Interaction
 
-Waveform audio played into a Voice Call: a short synthesized earcon for an event (call start, a Prompt Turn stopping during a lull) or a Workspace file an ACP Agent produced, played on request. It is the eyes-free analogue of showing an image. The caller cannot interrupt a clip and the Voice Frontend does not hear it, so clips are short or announced, and the Session Orchestrator tells the Voice Frontend what was played. Telephone audio is narrowband.
+Waveform audio played into a Voice Call: a short synthesized earcon for an event (call start, a Prompt Turn stopping during a lull) or a Workspace file an ACP Agent produced, played on request. It is the eyes-free analogue of showing an image. Earcons come in two styles: tonal note patterns, and verbose spoken labels (synthesized speech naming the event, for diagnosis); they queue for lulls rather than interrupting speech. The caller cannot interrupt a clip and the Voice Frontend does not hear it, so clips are short or announced, and the Session Orchestrator tells the Voice Frontend what was played. Telephone audio is narrowband.
+
+### Voice Recording
+
+**Context:** Voice Interaction
+
+The caller's own audio captured during a Voice Call into a Workspace file, such as a voice note, a hummed melody, or a sound for an ACP Agent to work with. Recording follows voicemail conventions: pound saves, star discards, and a length limit or a long silence also ends it. The Voice Frontend hears silence while recording, so it does not answer the caller mid-note. A saved recording is an ordinary Workspace file; what happens to it next is an Assignment like any other.
 
 ### Voice Agent Skill
 

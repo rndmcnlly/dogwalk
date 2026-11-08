@@ -1,7 +1,9 @@
 import type { Env } from "./types";
 import { DOGWALK_VOICE_FLAVOR, WALK_FICTION } from "./voice_flavors";
 import { VOICE_AGENT_SKILL_INDEX, voiceAgentSkill } from "./voice_agent_skills";
-import { EARCONS, MAX_FIXTURE_SECONDS, wavToClip, type Clip } from "./audio";
+import {
+  base64ToBytes, earcon, loudness, MAX_FIXTURE_SECONDS, pcmToWav, wavToClip, type Clip, type EarconName,
+} from "./audio";
 
 const ACP_PORT = 8765;
 const WORKSPACE = "/home/daytona";
@@ -223,6 +225,17 @@ export const ORCHESTRATOR_TOOLS = [
   },
   {
     type: "function",
+    name: "start_recording",
+    description: "Record the caller's voice into a WAV file in the Workspace (a voice note, a hummed melody, a sound). The Voice Frontend is muted while recording. It ends when the caller presses pound (save) or star (discard), after 20 seconds of silence, or at max_seconds; a harness event reports the saved path.",
+    parameters: {
+      type: "object",
+      properties: { max_seconds: { type: "number", description: "Length limit, 5 to 600; 300 is typical" } },
+      required: ["max_seconds"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
     name: "inspect_call_activity",
     description: "Read-only operational history of this caller's recent calls: how each voice connection ended (including provider errors such as moderation), recovery actions like sandbox restarts, and Prompt Turn failures. Use it to explain drops or interruptions.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
@@ -294,6 +307,8 @@ Rules:
 
 Audio: play_audio plays a Workspace WAV to the caller, the way a graphical tool would show an image. Telephone audio is narrowband, so speech, tones, rhythm, and melody survive better than timbre. When a clip is ready, call say (what it is and how long) and play_audio in the same response: play_audio waits for the announcement to finish before playing. Never say a clip is playing or "here it is" without calling play_audio. Keep unrequested clips short. play_audio renders any audio or video format itself, so dogs need only produce or find the file. For long recordings such as podcasts, have a dog locate the moments that matter (for example by transcribing with timestamps), then play short samples by offset; offer further 30-second parts rather than playing long stretches. The first play in a fresh Sandbox may take longer while ffmpeg installs. After playing, brief the Voice Frontend on what the caller heard. Short chimes play automatically at call start and when a dog comes back into a quiet moment.
 
+Recording: start_recording captures the caller's voice into a Workspace WAV, following voicemail conventions. In the same response, say something like "Recording after the beep. Press pound when you're done, or star to discard." Recording also ends after 20 seconds of silence or at the limit. A recording_saved event gives the path; tell the caller it was saved and how long it was, then do what they asked with it (often a dog transcribes, files, or analyzes it). Keypad presses outside a recording arrive as keypad events; treat them as caller input.
+
 Voice Agent Skills: guidance you load on demand with load_voice_agent_skill when a request matches a description below. Load a skill once per call; it stays in your context. These are yours, not the Agents'.
 ${VOICE_AGENT_SKILL_INDEX}`;
 
@@ -325,6 +340,10 @@ export class VoiceSession {
   private fixture: { done: () => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private heldAppends: unknown[] = [];
   private lastSpeechAt = 0;
+  private earconQueue: Array<{ name: EarconName; queuedAt: number }> = [];
+  private earconPumping = false;
+  private clipPending = false;
+  private recording: { chunks: Uint8Array[]; bytes: number; startedAt: number; lastLoudAt: number; maxSeconds: number } | null = null;
   private liveError: string | null = null;
   private transcript: TranscriptEntry[] = [];
   private transcriptCutMs = 0;
@@ -384,7 +403,7 @@ export class VoiceSession {
     try {
       await Promise.all([this.connectAcp(), this.connectLive(incomingLiveSessionId)]);
       await this.record("voice.live.attached", { live_session_id: incomingLiveSessionId });
-      await this.playFixture(EARCONS.call_started, "call_started");
+      await this.playFixture(earcon("call_started", this.earconStyle), "call_started");
       await this.maybeGreet();
       // Diagnostics: where this call's slice of the cross-call Orchestrator context begins.
       const marks = await this.state.storage.get<CallMark[]>("call_marks") ?? [];
@@ -509,6 +528,12 @@ export class VoiceSession {
         this.lastSpeechAt = Date.now();
         this.appendTranscript(message.type.startsWith("session.input") ? "caller" : "voice", message);
         break;
+      case "session.input_audio.append":
+        if (this.recording && typeof message.audio === "string") await this.captureAudio(message.audio);
+        break;
+      case "transport.dtmf.received":
+        await this.receiveKeypad(String(message.event ?? ""));
+        break;
       case "session.output_audio.fixture.played":
         this.fixture?.done();
         break;
@@ -566,6 +591,7 @@ export class VoiceSession {
       .map((entry) => `${entry.role === "caller" ? "Caller" : "Voice"}: ${entry.text.trim()}`);
     this.transcriptCutMs = Math.max(this.transcriptCutMs, Math.min(offsetMs, this.transcript.at(-1)?.endMs ?? offsetMs));
     await this.record("voice.delegation.received", { delegation_id: delegationId });
+    this.queueEarcon("handoff_received");
     await this.orchestratorEvent(`[handoff ${delegationId}]\n${lines.join("\n") || "(no new transcript)"}`);
   }
 
@@ -709,6 +735,9 @@ export class VoiceSession {
           result = { ok: true, name: skill.name, guidance: skill.body, voice_guidance_applied: Boolean(skill.voiceGuidance && this.liveAttached) };
           break;
         }
+        case "start_recording":
+          result = await this.startRecording(Number(args.max_seconds ?? 300));
+          break;
         case "play_audio":
           result = await this.playAudio(requiredString(args, "path"), Number(args.start_seconds ?? 0), Number(args.duration_seconds ?? MAX_FIXTURE_SECONDS));
           break;
@@ -775,6 +804,7 @@ export class VoiceSession {
     this.sessions.set(session.id, session);
     await this.persistSessions();
     await this.record("acp.session.created", { alias });
+    this.queueEarcon("session_created");
     return { ok: true, session: this.publicSession(session) };
   }
 
@@ -801,7 +831,7 @@ export class VoiceSession {
       await this.persistSessions();
       await this.record("acp.turn.stopped", { alias: session.alias, stop_reason: session.stopReason });
       // An earcon only into a lull; mid-sentence it would cut the walker off.
-      if (this.liveAttached && Date.now() - this.lastSpeechAt > 1500) void this.playFixture(EARCONS.turn_stopped, "turn_stopped");
+      this.queueEarcon("turn_stopped");
       await this.orchestratorEvent(`[harness event] turn_stopped: ${JSON.stringify({
         alias: session.alias, stop_reason: session.stopReason, agent_message: session.report.slice(-3000),
       })}`);
@@ -812,9 +842,11 @@ export class VoiceSession {
       session.activity = session.activity.slice(-MAX_ACTIVITY);
       await this.persistSessions();
       await this.record("acp.turn.failed", { alias: session.alias, message: errorMessage(error) });
+      this.queueEarcon("turn_failed");
       await this.orchestratorEvent(`[harness event] turn_failed: ${JSON.stringify({ alias: session.alias, error: errorMessage(error) })}`);
     });
     await this.record("acp.turn.started", { alias: session.alias });
+    this.queueEarcon("turn_started");
     return { ok: true, alias: session.alias, turn_state: session.turnState, note: "Started, not completed. A harness event arrives when it stops." };
   }
 
@@ -824,9 +856,7 @@ export class VoiceSession {
     if (!path.startsWith(`${WORKSPACE}/`) || path.split("/").includes("..")) throw new Error("path must be inside the Workspace");
     const start = Math.max(0, Number.isFinite(startSeconds) ? startSeconds : 0);
     const duration = Math.min(MAX_FIXTURE_SECONDS, Math.max(0.2, Number.isFinite(durationSeconds) ? durationSeconds : MAX_FIXTURE_SECONDS));
-    const sandbox = await this.daytona<{ toolboxProxyUrl?: string }>(`/sandbox/${encodeURIComponent(this.sandboxId)}`);
-    const toolbox = `${(sandbox.toolboxProxyUrl ?? "https://proxy.app.daytona.io/toolbox").replace(/\/$/, "")}/${encodeURIComponent(this.sandboxId)}`;
-    const headers = { authorization: `Bearer ${this.env.DAYTONA_API_KEY}` };
+    const { toolbox, headers } = await this.toolbox();
 
     // Render only the requested window, from any format ffmpeg reads, inside the Sandbox:
     // a long podcast never crosses the network or the Worker's memory. ffmpeg is installed
@@ -861,13 +891,14 @@ export class VoiceSession {
     const clip = wavToClip(new Uint8Array(await response.arrayBuffer()));
     if (clip.seconds < 0.1) throw new Error(`nothing to play at ${start}s; the source is ${Number.isFinite(sourceSeconds) ? `${Math.round(sourceSeconds)}s` : "of unknown length"}`);
 
-    // A fixture interrupts the model, so let any announcement finish first (bounded wait).
-    const waitUntil = Date.now() + 8000;
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    while (Date.now() < waitUntil && Date.now() - this.lastSpeechAt < 900) {
-      await new Promise((resolve) => setTimeout(resolve, 200));
+    this.clipPending = true;
+    let played = false;
+    try {
+      await this.awaitLull();
+      played = await this.playFixture(clip, "play_audio");
+    } finally {
+      this.clipPending = false;
     }
-    const played = await this.playFixture(clip, "play_audio");
     return {
       ok: true,
       start_seconds: start,
@@ -876,6 +907,128 @@ export class VoiceSession {
       playback_confirmed: played,
       note: "The Voice Frontend did not hear this; brief it on what was played.",
     };
+  }
+
+  private get earconStyle(): "spoken" | "tonal" {
+    return this.env.EARCON_STYLE === "tonal" ? "tonal" : "spoken";
+  }
+
+  // Earcons queue rather than interrupt: each waits for a lull (fixtures cut off the model
+  // and mute the caller), plays one at a time, and is dropped once stale.
+  private queueEarcon(name: EarconName): void {
+    if (!this.liveAttached || this.recording) return;
+    this.earconQueue.push({ name, queuedAt: Date.now() });
+    void this.pumpEarcons();
+  }
+
+  private async pumpEarcons(): Promise<void> {
+    if (this.earconPumping) return;
+    this.earconPumping = true;
+    try {
+      while (this.earconQueue.length && this.liveAttached) {
+        const next = this.earconQueue[0];
+        if (Date.now() - next.queuedAt > 6000 || this.recording) {
+          this.earconQueue.shift();
+          continue;
+        }
+        if (this.fixture || this.clipPending || Date.now() - this.lastSpeechAt < 1200) {
+          await sleep(200);
+          continue;
+        }
+        this.earconQueue.shift();
+        await this.playFixture(earcon(next.name, this.earconStyle), next.name);
+      }
+    } finally {
+      this.earconPumping = false;
+    }
+  }
+
+  // Wait (bounded) for announcements to finish and other clips to drain.
+  private async awaitLull(): Promise<void> {
+    const deadline = Date.now() + 8000;
+    await sleep(700);
+    while (Date.now() < deadline && (this.fixture || Date.now() - this.lastSpeechAt < 900)) await sleep(200);
+    while (this.fixture && Date.now() < deadline + 4000) await sleep(100);
+  }
+
+  private async toolbox(): Promise<{ toolbox: string; headers: Record<string, string> }> {
+    if (!this.sandboxId) throw new Error("sandbox ID is unavailable");
+    const sandbox = await this.daytona<{ toolboxProxyUrl?: string }>(`/sandbox/${encodeURIComponent(this.sandboxId)}`);
+    return {
+      toolbox: `${(sandbox.toolboxProxyUrl ?? "https://proxy.app.daytona.io/toolbox").replace(/\/$/, "")}/${encodeURIComponent(this.sandboxId)}`,
+      headers: { authorization: `Bearer ${this.env.DAYTONA_API_KEY}` },
+    };
+  }
+
+  // Voice recordings follow voicemail conventions: pound saves, star discards; a length
+  // limit and a long silence also end them. The Voice Frontend is muted meanwhile (it hears
+  // silence) while GPT-Live keeps reflecting the caller's audio to the sideband.
+  private async startRecording(maxSecondsInput: number): Promise<Record<string, unknown>> {
+    if (this.recording) throw new Error("a recording is already in progress");
+    if (!this.liveAttached) throw new Error("no call is active");
+    const maxSeconds = Math.min(600, Math.max(5, Number.isFinite(maxSecondsInput) ? maxSecondsInput : 300));
+    this.clipPending = true;
+    try {
+      await this.awaitLull();
+      await this.playFixture(earcon("recording_started", this.earconStyle), "recording_started");
+    } finally {
+      this.clipPending = false;
+    }
+    this.sendLive({ type: "session.input_audio.mute" });
+    this.recording = { chunks: [], bytes: 0, startedAt: Date.now(), lastLoudAt: Date.now(), maxSeconds };
+    await this.record("voice.recording.started", { max_seconds: maxSeconds });
+    return { ok: true, max_seconds: maxSeconds, note: "Recording now. It ends with pound (save), star (discard), 20 seconds of silence, or the limit; a harness event reports the result." };
+  }
+
+  private async captureAudio(base64: string): Promise<void> {
+    const recording = this.recording;
+    if (!recording) return;
+    const chunk = base64ToBytes(base64);
+    recording.chunks.push(chunk);
+    recording.bytes += chunk.length;
+    if (loudness(chunk) > 0.01) recording.lastLoudAt = Date.now();
+    if (recording.bytes >= recording.maxSeconds * 48_000) await this.finishRecording(true, "length limit");
+    else if (Date.now() - recording.lastLoudAt > 20_000) await this.finishRecording(true, "silence");
+  }
+
+  private async receiveKeypad(key: string): Promise<void> {
+    await this.record("voice.keypad", { key });
+    if (this.recording && key === "#") return this.finishRecording(true, "pound key");
+    if (this.recording && key === "*") return this.finishRecording(false, "star key");
+    if (!this.recording && /^[0-9A-D*#]$/.test(key)) await this.orchestratorEvent(`[harness event] keypad: ${JSON.stringify({ key })}`);
+  }
+
+  private async finishRecording(save: boolean, endedBy: string): Promise<void> {
+    const recording = this.recording;
+    if (!recording) return;
+    this.recording = null;
+    this.sendLive({ type: "session.input_audio.unmute" });
+    const seconds = Math.round((recording.bytes / 48_000) * 10) / 10;
+    if (!save || recording.bytes === 0) {
+      await this.record("voice.recording.discarded", { seconds, ended_by: endedBy });
+      this.queueEarcon("recording_discarded");
+      await this.orchestratorEvent(`[harness event] recording_discarded: ${JSON.stringify({ seconds, ended_by: endedBy })}`);
+      return;
+    }
+    try {
+      const { toolbox, headers } = await this.toolbox();
+      const path = `${WORKSPACE}/recordings/recording-${new Date().toISOString().replace(/[:.]/g, "-")}.wav`;
+      await fetch(`${toolbox}/process/execute`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ command: `mkdir -p ${WORKSPACE}/recordings`, timeout: 10 }),
+      });
+      const form = new FormData();
+      form.append("file", new Blob([pcmToWav(recording.chunks)], { type: "audio/wav" }), path.split("/").pop());
+      const uploaded = await fetch(`${toolbox}/files/upload?path=${encodeURIComponent(path)}`, { method: "POST", headers, body: form });
+      if (!uploaded.ok) throw new Error(`upload failed (${uploaded.status})`);
+      await this.record("voice.recording.saved", { seconds, ended_by: endedBy });
+      this.queueEarcon("recording_saved");
+      await this.orchestratorEvent(`[harness event] recording_saved: ${JSON.stringify({ path, seconds, ended_by: endedBy })}`);
+    } catch (error) {
+      await this.record("voice.recording.failed", { message: errorMessage(error) });
+      await this.orchestratorEvent(`[harness event] recording_failed: ${JSON.stringify({ seconds, ended_by: endedBy, error: errorMessage(error) })}`);
+    }
   }
 
   private async sinceLastCall(): Promise<Record<string, unknown> | null> {
@@ -971,6 +1124,7 @@ export class VoiceSession {
     this.persistedRefs.delete(ref);
     await this.persistSessions();
     await this.record("acp.session.loaded", { alias });
+    this.queueEarcon("session_created");
     return { ok: true, session: this.publicSession(session) };
   }
 
@@ -1001,6 +1155,7 @@ export class VoiceSession {
     this.sessions.delete(session.id);
     await this.persistSessions();
     await this.record("acp.session.closed", { alias: session.alias });
+    this.queueEarcon("session_closed");
     return { ok: true, alias: session.alias, note: "Closed. History is kept; it can be discovered and loaded again." };
   }
 
@@ -1114,6 +1269,7 @@ export class VoiceSession {
     };
     this.permissions.set(requestId, permission);
     await this.record("acp.permission.requested", { alias: session.alias, option_count: options.length });
+    this.queueEarcon("permission_requested");
     await this.orchestratorEvent(`[harness event] permission_requested: ${JSON.stringify({
       alias: session.alias, title: permission.title, options,
     })}`);
@@ -1286,6 +1442,8 @@ export class VoiceSession {
   private async cleanupVoice(reason: string): Promise<void> {
     if (this.cleaningUpVoice) return;
     this.cleaningUpVoice = true;
+    if (this.recording) await this.finishRecording(true, "call ended");
+    this.earconQueue = [];
     await this.record("voice.live.detached", { reason, live_session_id: this.liveSessionId });
     const live = this.live;
     this.live = null;
@@ -1378,4 +1536,8 @@ function errorMessage(error: unknown): string {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
