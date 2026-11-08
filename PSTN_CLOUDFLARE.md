@@ -14,7 +14,7 @@ part of the protocol, tool, storage, or session-management vocabulary.
 
 ```text
 Phone
-  -> Twilio PSTN and deterministic access/wake-up TwiML
+  -> Twilio PSTN and deterministic access TwiML (Sandbox start requested, not awaited)
   -> OpenAI GPT-Live over secure SIP (Voice Frontend: speech, no tools)
        -> sideband WebSocket to sandbox-keyed VoiceSession Durable Object
             -> Session Orchestrator (Responses API tool loop, gpt-6.1-sol)
@@ -37,7 +37,10 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 - Validates signed OpenAI incoming-session webhooks and short-lived SIP call
   correlation capabilities.
 - Registers callers through speakable Invite Codes stored in D1.
-- Resolves, creates, starts, and reconciles durable Daytona Sandboxes.
+- Resolves, creates, starts, and reconciles durable Daytona Sandboxes, and
+  dials the caller to the Voice Agent without waiting for the Sandbox to start.
+- Prewarms the Durable Object's Agent Connection as soon as a registered call
+  arrives.
 - Accepts GPT-Live sessions with a bounded state snapshot and routes their
   sidebands to the Durable Object keyed by Sandbox assignment.
 - Provides deterministic TwiML recovery when realtime voice is unavailable.
@@ -45,7 +48,11 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 
 ### VoiceSession Durable Object
 
-- Owns the GPT-Live sideband and ACP WebSockets, but no telephone audio.
+- Owns the GPT-Live sideband and ACP WebSockets, but no telephone audio. The
+  Agent Connection is established in the background with retries; a call talks
+  while it is pending and survives losing it.
+- Speaks a deterministic Opening and runs the keypad conventions and the in-call
+  System Menu without a model.
 - Runs the Session Orchestrator: answers each GPT-Live client delegation from
   the call transcript, with neutral Managed Session and Prompt Turn tools, and
   persists its context across calls.
@@ -102,6 +109,10 @@ exists but is disabled until a path-scoped Access application is configured.
   2026-11-07 the voice layer moved to client delegation with a Session
   Orchestrator and the Sandbox to OpenCode 2. A real call has not yet been
   verified on the new design.
+- The talk-first front door, Opening, keypad conventions, and System Menu
+  (2026-11-07) are verified only against local mocks; whether GPT-Live keeps
+  delivering DTMF while input is muted, and whether a silent fixture reliably
+  cuts off speech, need a real call.
 - A completely silent Prompt Turn can outlive Cloudflare's outbound WebSocket
   retention guarantee. A sandbox-initiated connection is the hardening path.
 - Session discovery/load, explicit close/delete/config operations, and ACP

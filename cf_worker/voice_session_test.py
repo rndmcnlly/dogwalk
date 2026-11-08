@@ -53,9 +53,16 @@ class SocketMocks:
         self.live_connected = asyncio.Event()
         self.seen: list[dict] = []
         self.acp_seen: list[dict] = []
+        self.acp = None
+        self.acp_connections = 0
+        # The Agent answers initialize late, so the call starts before the dogs are ready.
+        self.init_delay = 1.5
+        self.advertise_resume = False
 
     async def handler(self, socket) -> None:
         if socket.request.path == "/acp":
+            self.acp = socket
+            self.acp_connections += 1
             self.acp_connected.set()
             async for raw in socket:
                 message = json.loads(raw)
@@ -66,7 +73,9 @@ class SocketMocks:
                 if request_id is None:
                     continue
                 if method == "initialize":
-                    result = {"protocolVersion": 1, "agentCapabilities": {}}
+                    await asyncio.sleep(self.init_delay)
+                    capabilities = {"sessionCapabilities": {"resume": {}}} if self.advertise_resume else {}
+                    result = {"protocolVersion": 1, "agentCapabilities": capabilities}
                 elif method == "session/new":
                     result = {"sessionId": "acp-session-test"}
                 elif method == "session/load":
@@ -116,16 +125,24 @@ class SocketMocks:
                 )
             return
 
-        if socket.request.path == "/live/sessions/live-test/attach":
+        path = socket.request.path
+        if path.startswith("/live/sessions/") and path.endswith("/attach"):
             self.live = socket
             self.live_connected.set()
             async for raw in socket:
                 message = json.loads(raw)
                 self.seen.append(message)
                 await self.live_messages.put(message)
+                # GPT-Live acknowledges each output fixture once its mixer drains.
+                if message.get("type") == "session.output_audio.fixture.play":
+                    asyncio.create_task(self.ack_fixture(socket))
             return
 
         await socket.close(1008, "unknown mock path")
+
+    async def ack_fixture(self, socket) -> None:
+        await asyncio.sleep(0.05)
+        await socket.send(json.dumps({"type": "session.output_audio.fixture.played"}))
 
     async def send_live(self, message: dict) -> None:
         assert self.live is not None
@@ -133,6 +150,16 @@ class SocketMocks:
 
 
 CALL_BRIEF = "Call started with no Managed Sessions."
+READY_BRIEF = "The dogs are awake."
+KEYPAD_SAY = "Seven noted."
+NEXT_GREETING = "Last time Juniper built a tiny verified artifact."
+FIRST_OPENING = (
+    "Caller ID unverified. Dogwalk. Welcome! I'm your walker; your sandbox is "
+    "being set up, which takes a minute or two."
+)
+RETURN_OPENING = (
+    f"Verified. Dogwalk. {NEXT_GREETING} Since then, Juniper asked for permission. Where to?"
+)
 WORK_BRIEF = "Starting Juniper on a tiny verified artifact."
 AGENT_PROMPT = (
     "Goal: create a tiny artifact and verify it. Finish with a short summary "
@@ -168,7 +195,13 @@ def created_alias(context: list[dict]) -> str:
 # Each step fires once its trigger appears in a user message, in order, after the
 # previous step's outputs are back. Steps that answer a handoff use its delegation id.
 ORCHESTRATOR_SCRIPT = [
-    ("call_started", lambda ctx: [call("cs-brief", "brief", text=CALL_BRIEF, delegation_id=None)]),
+    # Session tools fail fast while the Sandbox is still starting.
+    ("call_started", lambda ctx: [
+        call("cs-brief", "brief", text=CALL_BRIEF, delegation_id=None),
+        call("cs-create", "create_managed_session", alias="Early"),
+        call("cs-list", "list_managed_sessions"),
+    ]),
+    ("[harness event] dogs_ready", lambda ctx: [call("dr-brief", "brief", text=READY_BRIEF, delegation_id=None)]),
     ("[handoff del-1]", lambda ctx: [
         call("h1-brief", "brief", text=WORK_BRIEF, delegation_id="del-1"),
         call("h1-create", "create_managed_session", alias="Juniper"),
@@ -200,12 +233,14 @@ ORCHESTRATOR_SCRIPT = [
         call("h4-say", "say", text=FAREWELL_SAY, delegation_id="del-4"),
         call("h4-end", "end_call"),
     ]),
+    # Second call: digits without a system meaning still reach the Orchestrator.
+    ('"key":"7"', lambda ctx: [call("k7-say", "say", text=KEYPAD_SAY, delegation_id=None)]),
 ]
 STEP_IDS = [
-    "cs-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
+    "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
     "ts-say", "h2-inspect", "h2-say",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list", "h3-say",
-    "h4-say", "h4-end",
+    "h4-say", "h4-end", "k7-say",
 ]
 
 
@@ -213,6 +248,7 @@ class OrchestratorMock(BaseHTTPRequestHandler):
     """A scripted /v1/responses endpoint standing in for the Session Orchestrator model."""
 
     requests: list[tuple[dict[str, str], dict]] = []
+    greeting_requests: list[dict] = []
     issued: list[tuple[str, int]] = []
     lock = threading.Lock()
 
@@ -226,6 +262,14 @@ class OrchestratorMock(BaseHTTPRequestHandler):
         if self.path != "/v1/responses":
             self.send_error(404)
             return
+        if payload.get("tool_choice") == "none":
+            # The end-of-call request that writes the next call's welcome line.
+            OrchestratorMock.greeting_requests.append(payload)
+            self.respond({"output": [{
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": NEXT_GREETING}],
+            }]})
+            return
         with OrchestratorMock.lock:
             OrchestratorMock.requests.append((headers, payload))
             context = payload["input"]
@@ -237,7 +281,10 @@ class OrchestratorMock(BaseHTTPRequestHandler):
             if step < len(ORCHESTRATOR_SCRIPT) and ORCHESTRATOR_SCRIPT[step][0] in user_text:
                 output = ORCHESTRATOR_SCRIPT[step][1](context)
                 OrchestratorMock.issued.extend((item["call_id"], step) for item in output)
-        body = json.dumps({"output": output, "usage": {"input_tokens": 1, "output_tokens": 1}}).encode()
+        self.respond({"output": output, "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    def respond(self, value: dict) -> None:
+        body = json.dumps(value).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
@@ -306,7 +353,11 @@ INSERT INTO sandbox_assignments
   (phone_number, provider_id, identity_hash, state, provisioning_started_at, last_checked_at)
 VALUES ('{TEST_PHONE}', 'mock-sandbox-1', '{identity}', 'started', unixepoch(), unixepoch());
 INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at)
-VALUES ('CA_VOICE_TEST', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch());
+VALUES ('CA_VOICE_TEST', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch()),
+       ('CA_VOICE_TEST2', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch());
+INSERT INTO call_activity (call_sid, ts, source, direction, event, detail)
+VALUES ('CA_VOICE_TEST2', unixepoch(), 'voice', 'inbound', 'call.attestation',
+        '{{"stir_verstat":"TN-Validation-Passed-A","caller_name_present":false,"from_country":"US","parameters":[]}}');
 """
     subprocess.run(
         [wrangler, "d1", "execute", "dogwalk", "--local", "--command", sql],
@@ -316,62 +367,99 @@ VALUES ('CA_VOICE_TEST', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch()
     )
 
 
+def signed_webhook(call_sid: str, live_session_id: str) -> tuple[str, str, str]:
+    expires_at = int(time.time()) + 300
+    content = f"{call_sid}.{expires_at}"
+    signature = base64.urlsafe_b64encode(
+        hmac.new(
+            IDENTITY_SECRET.encode(),
+            f"sip-context-v1:{content}".encode(),
+            hashlib.sha256,
+        ).digest()
+    ).decode().rstrip("=")
+    event = {
+        "object": "event",
+        "id": f"evt_{live_session_id}",
+        "type": "live.transport.incoming",
+        "data": {
+            "type": "sip",
+            "session_id": live_session_id,
+            "sip_headers": [{"name": "X-Dogwalk-Context", "value": f"{content}.{signature}"}],
+        },
+    }
+    body = json.dumps(event, separators=(",", ":"))
+    webhook_id = f"wh_{live_session_id}"
+    timestamp = str(int(time.time()))
+    webhook_signature = base64.b64encode(
+        hmac.new(
+            OPENAI_WEBHOOK_KEY,
+            f"{webhook_id}.{timestamp}.{body}".encode(),
+            hashlib.sha256,
+        ).digest()
+    ).decode()
+    return body, f"{webhook_id}|{timestamp}", f"v1,{webhook_signature}"
+
+
+def post_webhook(body: str, identity: str, signature_header: str) -> int:
+    webhook_id, timestamp = identity.split("|")
+    request = urllib.request.Request(
+        "http://127.0.0.1:8787/openai/live",
+        data=body.encode(),
+        headers={
+            "content-type": "application/json",
+            "webhook-id": webhook_id,
+            "webhook-timestamp": timestamp,
+            "webhook-signature": signature_header,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        return error.code
+
+
+def call_activity(call_sid: str) -> list[str]:
+    credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
+    request = urllib.request.Request(
+        "http://127.0.0.1:8787/admin/api/calls?verbose=1&limit=10",
+        headers={"authorization": f"Basic {credentials}"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        calls = json.load(response)
+    return [item["event"] for call in calls if call["call_sid"] == call_sid for item in call["activity"]]
+
+
+def latest_user_text() -> str:
+    if not OrchestratorMock.requests:
+        return ""
+    return "\n".join(
+        str(item["content"]) for item in OrchestratorMock.requests[-1][1]["input"] if item.get("role") == "user"
+    )
+
+
+def dtmf(key: str) -> dict:
+    return {"type": "transport.dtmf.received", "event": key}
+
+
+def of_type(kind: str):
+    return lambda item: item.get("type") == kind
+
+
+async def wait_for(condition, timeout: float = 8) -> None:
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.05)
+
+
 async def run_protocol(identity: str) -> None:
     mocks = SocketMocks()
     async with serve(mocks.handler, "127.0.0.1", SOCKET_PORT):
-        call_sid = "CA_VOICE_TEST"
-        expires_at = int(time.time()) + 300
-        content = f"{call_sid}.{expires_at}"
-        signature = base64.urlsafe_b64encode(
-            hmac.new(
-                IDENTITY_SECRET.encode(),
-                f"sip-context-v1:{content}".encode(),
-                hashlib.sha256,
-            ).digest()
-        ).decode().rstrip("=")
-        context = f"{content}.{signature}"
-        event = {
-            "object": "event",
-            "id": "evt_live_test",
-            "type": "live.transport.incoming",
-            "data": {
-                "type": "sip",
-                "session_id": "live-test",
-                "sip_headers": [{"name": "X-Dogwalk-Context", "value": context}],
-            },
-        }
-        body = json.dumps(event, separators=(",", ":"))
-        webhook_id = "wh_live_test"
-        timestamp = str(int(time.time()))
-        webhook_signature = base64.b64encode(
-            hmac.new(
-                OPENAI_WEBHOOK_KEY,
-                f"{webhook_id}.{timestamp}.{body}".encode(),
-                hashlib.sha256,
-            ).digest()
-        ).decode()
-
-        def post_webhook(signature_header: str) -> int:
-            request = urllib.request.Request(
-                "http://127.0.0.1:8787/openai/live",
-                data=body.encode(),
-                headers={
-                    "content-type": "application/json",
-                    "webhook-id": webhook_id,
-                    "webhook-timestamp": timestamp,
-                    "webhook-signature": signature_header,
-                },
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=10) as response:
-                    return response.status
-            except urllib.error.HTTPError as error:
-                return error.code
-
-        assert await asyncio.to_thread(post_webhook, "v1,invalid") == 400
+        body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST", "live-test")
+        assert await asyncio.to_thread(post_webhook, body, webhook_identity, "v1,invalid") == 400
         assert not DaytonaMock.openai_requests
-        assert await asyncio.to_thread(post_webhook, f"v1,{webhook_signature}") == 204
+        assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
         await asyncio.wait_for(mocks.acp_connected.wait(), 8)
         await asyncio.wait_for(mocks.live_connected.wait(), 8)
         accept_path, accept_payload = next(
@@ -386,6 +474,7 @@ async def run_protocol(identity: str) -> None:
         assert "tools" not in session
         frontend = session["instructions"]
         assert "Match the caller's sophistication" in frontend
+        assert "press star for a menu" in frontend and "pound to make you stop talking" in frontend
         # The split-brain fiction: the voice defers to its head and names no backend
         # except in GPT-Live's delegation-policy label and the one sentence forbidding it.
         assert "Your head (a working fiction" in frontend
@@ -393,16 +482,22 @@ async def run_protocol(identity: str) -> None:
         assert "backend" not in (
             frontend.replace("Backend tools:", "").replace("never need to mention a backend", "").lower()
         )
-        await next_matching(
-            mocks.acp_messages, lambda item: item.get("method") == "initialize"
-        )
-        greeting = await next_matching(
-            mocks.live_messages,
-            lambda item: item.get("type") == "session.commentary.append",
-        )
-        assert greeting["content"] == "Dogwalk. Where to?"
+
+        # Talk first: the opening is spoken before the Agent has even initialized.
+        greeting = await next_matching(mocks.live_messages, of_type("session.commentary.append"))
+        assert greeting["content"] == FIRST_OPENING and greeting["delegation_id"] is None
+        await next_matching(mocks.acp_messages, lambda item: item.get("method") == "initialize")
         call_brief = await next_matching(mocks.live_messages, appended("thinking", CALL_BRIEF))
         assert call_brief["delegation_id"] is None
+        started_event = OrchestratorMock.user_message("call_started")
+        assert '"first_call":true' in started_event and FIRST_OPENING in started_event
+        assert '"caller_id":null' in started_event
+        assert "dogs_waking" in started_event
+        await next_matching(mocks.live_messages, appended("thinking", READY_BRIEF))
+        early = OrchestratorMock.tool_output("cs-create")
+        assert early["ok"] is False and "still starting" in early["error"], early
+        assert OrchestratorMock.tool_output("cs-list") == []
+        assert '"managed_session_count":0' in OrchestratorMock.user_message("[harness event] dogs_ready")
 
         # Handoff 1: the Voice Frontend delegates; the task is the transcript.
         await mocks.send_live(transcript("input", "Start a session called Juniper ", 0, 900))
@@ -486,10 +581,96 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(delegation("del-4", 10050))
         farewell = await next_matching(mocks.live_messages, appended("commentary", FAREWELL_SAY))
         assert farewell["delegation_id"] == "del-4"
-        async with asyncio.timeout(10):
-            while not any(path.endswith("/hangup") for path, _ in DaytonaMock.openai_requests):
-                await asyncio.sleep(0.05)
+        await wait_for(lambda: any(path == "/live/sessions/live-test/hangup" for path, _ in DaytonaMock.openai_requests), 10)
         assert OrchestratorMock.tool_output("h4-end")["status"] == "ending call"
+
+        # Between calls: the provider closes the sideband, which ends the voice session and
+        # writes the next welcome; the Agent asks for permission while nobody is on the line;
+        # then the Agent Connection drops.
+        await mocks.live.close()
+        await wait_for(lambda: OrchestratorMock.greeting_requests, 10)
+        greeting_request = OrchestratorMock.greeting_requests[-1]
+        assert greeting_request["tools"] and greeting_request["model"] == "gpt-6.1-sol"
+        assert "call_ended" in json.dumps(greeting_request["input"])
+        await mocks.acp.send(json.dumps({
+            "jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission",
+            "params": {
+                "sessionId": "acp-session-test",
+                "toolCall": {"title": "Run the test suite"},
+                "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}],
+            },
+        }))
+        await asyncio.sleep(0.5)
+        await mocks.acp.close()
+        await asyncio.sleep(0.3)
+
+        # Second call: a returning caller with verified caller ID. The Agent now advertises
+        # resume, so the reconnect restores Juniper without replaying its history.
+        mocks.advertise_resume = True
+        mocks.live_connected.clear()
+        body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST2", "live-test-2")
+        assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
+        await asyncio.wait_for(mocks.live_connected.wait(), 8)
+        opening = await next_matching(mocks.live_messages, appended("commentary", RETURN_OPENING))
+        assert opening["delegation_id"] is None
+        restored = await next_matching(
+            mocks.acp_messages,
+            lambda item: item.get("method") == "session/resume" and item["params"]["sessionId"] == "acp-session-test",
+        )
+        assert restored["params"] == {"sessionId": "acp-session-test", "cwd": "/home/daytona", "mcpServers": []}
+        assert not any(m.get("method") == "session/load" for m in mocks.acp_seen)
+        assert mocks.acp_connections == 2 and DaytonaMock.preview_reads == 1, (
+            "the ACP preview URL was not reused", mocks.acp_connections, DaytonaMock.preview_reads,
+        )
+        await wait_for(lambda: latest_user_text().count("[harness event] dogs_ready") >= 2, 10)
+        second_start = next(
+            str(item["content"]) for item in OrchestratorMock.requests[-1][1]["input"]
+            if item.get("role") == "user" and RETURN_OPENING in str(item["content"])
+        )
+        assert "first_call" not in second_start and "[harness event] dogs_waking" in second_start
+        assert '"stir_verstat":"TN-Validation-Passed-A"' in second_start
+
+        # Keypad conventions, all handled without the Orchestrator.
+        await mocks.send_live(dtmf("1"))
+        status = await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append" and "Juniper" in item.get("content", ""))
+        assert status["content"].startswith("Juniper is resting") and status["delegation_id"] is None, status
+        await mocks.send_live(dtmf("#"))
+        await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
+        stop = await next_matching(mocks.live_messages, of_type("session.instructions.append"))
+        assert "pressed pound" in stop["content"]
+        await mocks.send_live(transcript("output", "The parser handles nested quotes now.", 20000, 22000))
+        await mocks.send_live(dtmf("0"))
+        repeat = await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append" and "word for word" in item.get("content", ""))
+        assert "The parser handles nested quotes now." in repeat["content"]
+
+        # Star opens the system menu: muted input, a prompt clip, one key, then back.
+        await mocks.send_live(dtmf("*"))
+        await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
+        await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
+        await mocks.send_live(dtmf("1"))
+        await next_matching(mocks.live_messages, of_type("session.input_audio.unmute"))
+        await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
+        menu_status = await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append" and "Juniper" in item.get("content", ""))
+        assert menu_status["content"].startswith("Juniper is resting")
+        await mocks.send_live(dtmf("*"))
+        await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
+        await mocks.send_live(dtmf("*"))
+        await next_matching(mocks.live_messages, of_type("session.input_audio.unmute"))
+
+        # Other digits still reach the Orchestrator with their conversational context.
+        await mocks.send_live(dtmf("7"))
+        await next_matching(mocks.live_messages, appended("commentary", KEYPAD_SAY))
+
+        # Star then nine hangs up deterministically.
+        await mocks.send_live(dtmf("*"))
+        await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
+        await mocks.send_live(dtmf("9"))
+        await wait_for(lambda: any(path == "/live/sessions/live-test-2/hangup" for path, _ in DaytonaMock.openai_requests), 10)
+        events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
+        for expected in ("menu.opened", "menu.status", "menu.closed", "menu.hangup", "voice.keypad.stop", "voice.keypad.status"):
+            assert expected in events, (expected, events)
+        handoff_rows = OrchestratorMock.user_message('"key":"7"')
+        assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows
 
         # The canine fiction stays above ACP: no Agent prompt mentions dogs.
         prompts = [m for m in mocks.acp_seen if m.get("method") == "session/prompt"]
@@ -510,6 +691,7 @@ async def run_protocol(identity: str) -> None:
             assert payload["store"] is False and payload["parallel_tool_calls"] is True
             assert "Session Orchestrator" in payload["instructions"]
             assert "The walk (a working fiction)" in payload["instructions"]
+            assert "first-call-tour" in payload["instructions"]
             assert {tool["name"] for tool in payload["tools"]} >= {
                 "brief", "say", "create_managed_session", "begin_prompt_turn", "end_call",
                 "discover_persisted_sessions", "load_persisted_session", "set_alias",
@@ -537,6 +719,7 @@ def main() -> int:
     DaytonaMock.exists = True
     DaytonaMock.generation = 1
     DaytonaMock.openai_requests = []
+    DaytonaMock.preview_reads = 0
     daytona = ThreadingHTTPServer(("127.0.0.1", DAYTONA_MOCK_PORT), DaytonaMock)
     thread = threading.Thread(target=daytona.serve_forever, daemon=True)
     thread.start()

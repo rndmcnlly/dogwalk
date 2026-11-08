@@ -8,7 +8,8 @@
     uv run --script make_earcons.py --voice Zarvox  # any `say -v '?'` voice
 
 Each label becomes cf_worker/earcons/<event>.pcm: raw mono PCM16LE at 24 kHz, leveled
-a little below speech, ready for a GPT-Live output fixture. Rendering happens here
+a little below speech, ready for a GPT-Live output fixture. Keypad menu prompts render
+the same way, a little slower and louder. Rendering happens here
 because a Worker cannot run `say`; the files are committed and bundled as Data modules.
 Event names are neutral; the spoken labels are presentation and may use the walk's fiction.
 """
@@ -27,7 +28,6 @@ OUT = Path(__file__).resolve().parent / "cf_worker" / "earcons"
 
 LABELS = {
     "call_started": "Line open.",
-    "handoff_received": "Thinking.",
     "session_created": "New dog.",
     "turn_started": "Dog sent.",
     "turn_stopped": "Dog back.",
@@ -39,10 +39,20 @@ LABELS = {
     "recording_discarded": "Recording discarded.",
 }
 
+# Keypad system menu prompts: always bundled regardless of EARCON_STYLE, because they are
+# instructions the caller must understand rather than event markers. Slower and louder.
+PROMPTS = {
+    "menu": "Menu. One, status. Two, restart the sandbox. Three, recovery options. Nine, hang up. Star, back.",
+    "menu_restart_confirm": "Restarting stops running work. Press two again to confirm.",
+    "menu_restarting": "Restarting the sandbox.",
+    "menu_back": "Back.",
+}
+
 TARGET_RMS = 0.06  # about -24 dBFS: audible, but quieter than the walker's voice
+PROMPT_RMS = 0.09  # about -21 dBFS: closer to speech, since the caller must follow it
 
 
-def render(text: str, voice: str, rate: int) -> bytes:
+def render(text: str, voice: str, rate: int, target_rms: float = TARGET_RMS) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         aiff, wav = Path(tmp) / "label.aiff", Path(tmp) / "label.wav"
         subprocess.run(["say", "-v", voice, "-r", str(rate), "-o", str(aiff), text], check=True)
@@ -55,7 +65,7 @@ def render(text: str, voice: str, rate: int) -> bytes:
     end = len(samples) - next((i for i, s in enumerate(reversed(samples)) if abs(s) > threshold), 0)
     samples = samples[max(0, start - 240): min(len(samples), end + 1200)]
     rms = math.sqrt(sum(s * s for s in samples) / max(1, len(samples))) / 32768
-    gain = min(TARGET_RMS / rms if rms else 1, 0.6 * 32767 / max(1, max(abs(s) for s in samples)))
+    gain = min(target_rms / rms if rms else 1, 0.6 * 32767 / max(1, max(abs(s) for s in samples)))
     return array.array("h", (max(-32768, min(32767, round(s * gain))) for s in samples)).tobytes()
 
 
@@ -69,6 +79,10 @@ def main() -> None:
         pcm = render(text, args.voice, args.rate)
         (OUT / f"{event}.pcm").write_bytes(pcm)
         print(f"{event:22} {len(pcm) / 48000:4.2f}s  {text}")
+    for name, text in PROMPTS.items():
+        pcm = render(text, args.voice, args.rate - 40, PROMPT_RMS)
+        (OUT / f"{name}.pcm").write_bytes(pcm)
+        print(f"{name:22} {len(pcm) / 48000:4.2f}s  {text}")
 
 
 if __name__ == "__main__":

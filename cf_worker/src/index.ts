@@ -267,7 +267,6 @@ async function usableInviteCodes(env: Env): Promise<{ code_words: string }[]> {
 
 const DAYTONA_LABEL_MANAGED = "dogwalk.dev/managed-by";
 const DAYTONA_LABEL_IDENTITY = "dogwalk.dev/identity";
-const MAX_WAKE_POLLS = 6;
 
 interface DaytonaSandbox {
   id: string;
@@ -431,16 +430,6 @@ async function executeInSandbox(
   });
   if (!response.ok) throw new Error(`Daytona toolbox ${response.status}`);
   return response.json<{ result: string; exitCode: number }>();
-}
-
-async function sandboxReady(env: Env, sandbox: DaytonaSandbox): Promise<boolean> {
-  if (sandbox.state !== "started") return false;
-  try {
-    const probe = await executeInSandbox(env, sandbox, "printf ready", 5);
-    return probe.exitCode === 0 && probe.result === "ready";
-  } catch {
-    return false;
-  }
 }
 
 async function resolveSandbox(
@@ -699,7 +688,7 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
 // --- /voice routing -----------------------------------------------------
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
     if (url.pathname === "/" && req.method === "GET") {
@@ -718,7 +707,7 @@ export default {
     }
 
     if (url.pathname === "/voice" && req.method === "POST") {
-      return handleVoice(req, env);
+      return handleVoice(req, env, ctx);
     }
     if (url.pathname === "/openai/live" && req.method === "POST") {
       return handleOpenAiLiveWebhook(req, env);
@@ -750,7 +739,7 @@ export default {
 
 // --- main /voice entrypoint --------------------------------------------
 
-async function handleVoice(req: Request, env: Env): Promise<Response> {
+async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   // Twilio signature check. We clone the body because formData() consumes it.
   const sig = await twilioSignatureValid(req, env);
   if (!sig.valid) {
@@ -768,52 +757,43 @@ async function handleVoice(req: Request, env: Env): Promise<Response> {
   // Caller-ID attestation (STIR/SHAKEN) is the only evidence that From is genuine, since
   // the Twilio signature proves only that Twilio sent this request. Record it once per call
   // with which parameters the carrier supplied (keys only, plus non-identifying values).
-  if (!new URL(req.url).searchParams.has("wake")) {
-    const keys = Array.from(new Set(Array.from(form.keys()))).sort();
-    await audit(env, "call.attestation", from, callSid, {
-      stir_verstat: form.get("StirVerstat") ? String(form.get("StirVerstat")) : null,
-      caller_name_present: Boolean(form.get("CallerName")),
-      from_country: form.get("FromCountry") ? String(form.get("FromCountry")) : null,
-      parameters: keys,
-    });
-  }
+  const keys = Array.from(new Set(Array.from(form.keys()))).sort();
+  await audit(env, "call.attestation", from, callSid, {
+    stir_verstat: form.get("StirVerstat") ? String(form.get("StirVerstat")) : null,
+    caller_name_present: Boolean(form.get("CallerName")),
+    from_country: form.get("FromCountry") ? String(form.get("FromCountry")) : null,
+    parameters: keys,
+  });
 
   if (await isRegistered(env, from)) {
     await env.DB.prepare("UPDATE registrations SET last_seen_at = ? WHERE phone_number = ?")
       .bind(Math.floor(Date.now() / 1000), from)
       .run();
     await audit(env, "caller.registered", from, callSid, {});
-    const wakePoll = Math.max(0, Number(new URL(req.url).searchParams.get("wake") ?? "0") || 0);
+    // Talk first: the caller reaches the Voice Agent at once while the Sandbox wakes in
+    // parallel. Only a Sandbox the provider reports broken goes to deterministic recovery.
     try {
       const { assignment, sandbox } = await resolveSandbox(env, from);
-      if (sandbox && await sandboxReady(env, sandbox)) {
-        await audit(env, "sandbox.ready", from, callSid, { state: sandbox.state });
-        if (!env.OPENAI_PROJECT_ID) throw new Error("OPENAI_PROJECT_ID is not configured");
-        const context = await sipContextCapability(env, callSid);
-        const sipUri = `sip:${env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls;secure=true?x-dogwalk-context=${encodeURIComponent(context)}`;
-        return twiml(DialSip(sipUri));
-      }
-
-      if (sandbox && ["stopped", "archived", "paused"].includes(sandbox.state)) {
-        const started = await daytonaFetch<DaytonaSandbox>(env, `/sandbox/${encodeURIComponent(sandbox.id)}/start`, { method: "POST" });
-        await updateAssignment(env, from, started);
-        await audit(env, "sandbox.start.requested", from, callSid, { state: sandbox.state });
-      }
-
       if (sandbox && ["error", "build_failed", "destroyed"].includes(sandbox.state)) {
         await audit(env, "sandbox.unavailable", from, callSid, { state: sandbox.state });
         return recoveryMenu("Workspace unavailable. ");
       }
-
-      if (wakePoll >= MAX_WAKE_POLLS) {
-        await audit(env, "sandbox.wake.timeout", from, callSid, { state: sandbox?.state ?? assignment.state });
-        return twiml(Say("Your workspace is taking longer than expected. Try again in a few minutes. Goodbye.") + Hangup());
+      if (sandbox && ["stopped", "archived", "paused"].includes(sandbox.state)) {
+        const started = await daytonaFetch<DaytonaSandbox>(env, `/sandbox/${encodeURIComponent(sandbox.id)}/start`, { method: "POST" });
+        await updateAssignment(env, from, started);
+        await audit(env, "sandbox.start.requested", from, callSid, { state: sandbox.state });
+      } else {
+        const state = sandbox?.state ?? assignment.state;
+        await audit(env, state === "started" ? "sandbox.ready" : "sandbox.waking", from, callSid, { state });
       }
-      return twiml(
-        Say("Welcome back. Waking your workspace, one moment.") +
-        Pause(8) +
-        Redirect(`/voice?wake=${wakePoll + 1}`),
-      );
+      // The VoiceSession starts reaching the Agent while Twilio and GPT-Live set up the call.
+      if (assignment.provider_id) {
+        ctx.waitUntil(prewarmVoiceSession(env, assignment.identity_hash, from, assignment.provider_id));
+      }
+      if (!env.OPENAI_PROJECT_ID) throw new Error("OPENAI_PROJECT_ID is not configured");
+      const context = await sipContextCapability(env, callSid);
+      const sipUri = `sip:${env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls;secure=true?x-dogwalk-context=${encodeURIComponent(context)}`;
+      return twiml(DialSip(sipUri));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await audit(env, "sandbox.error", from, callSid, { message: message.slice(0, 200) });
@@ -824,7 +804,22 @@ async function handleVoice(req: Request, env: Env): Promise<Response> {
   // Unregistered caller: begin the registration ritual.
   await audit(env, "claim.ritual.start", from, callSid, {});
   const invites = await usableInviteCodes(env);
-  return twiml(GatherSpeech("Dogwalk. Say your invite words.", "/voice/claim", 1, invites.map((i) => i.code_words)));
+  return twiml(GatherSpeech(
+    "This is Dogwalk, a voice line for supervising coding agents. If you have an invite, say your three invite words now.",
+    "/voice/claim", 1, invites.map((i) => i.code_words),
+  ));
+}
+
+async function prewarmVoiceSession(env: Env, identity: string, phone: string, sandboxId: string): Promise<void> {
+  try {
+    const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(identity));
+    await object.fetch("https://voice-session/prewarm", {
+      method: "POST",
+      headers: { "x-dogwalk-phone": phone, "x-dogwalk-sandbox-id": sandboxId },
+    });
+  } catch (error) {
+    console.error("voice session prewarm failed", error);
+  }
 }
 
 async function handleAfterLive(req: Request, env: Env): Promise<Response> {
@@ -838,7 +833,8 @@ async function handleAfterLive(req: Request, env: Env): Promise<Response> {
     "SELECT action FROM call_handoffs WHERE call_sid = ? AND phone_number = ?",
   ).bind(callSid, from).first<{ action: string }>();
   await env.DB.prepare("DELETE FROM call_handoffs WHERE call_sid = ?").bind(callSid).run();
-  return handoff?.action === "hangup" ? twiml(Hangup()) : recoveryMenu("Voice dropped. ");
+  if (handoff?.action === "hangup") return twiml(Hangup());
+  return recoveryMenu(handoff?.action === "recovery" ? "Recovery options. " : "Voice dropped. ");
 }
 
 function recoveryMenu(prefix = ""): Response {
@@ -936,13 +932,23 @@ async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response
     return new Response(null, { status: 204 });
   }
 
+  // Any assigned Sandbox will do, started or not: the Durable Object waits for the Agent
+  // in the background while the caller talks.
   const assignment = await env.DB.prepare(
     `SELECT s.phone_number, s.provider_id, s.identity_hash
        FROM voice_calls c
        JOIN sandbox_assignments s ON s.phone_number = c.phone_number
        JOIN registrations r ON r.phone_number = s.phone_number
-      WHERE c.call_sid = ? AND s.state = 'started'`,
+      WHERE c.call_sid = ?`,
   ).bind(context.callSid).first<{ phone_number: string; provider_id: string | null; identity_hash: string }>();
+  if (assignment && !assignment.provider_id) {
+    // Another request may have been provisioning when /voice ran; it has had a few seconds.
+    try {
+      assignment.provider_id = (await resolveSandbox(env, assignment.phone_number)).assignment.provider_id;
+    } catch (error) {
+      console.error("sandbox resolution at accept failed", error);
+    }
+  }
   if (!assignment?.provider_id) {
     await decideLiveCall(env, liveSessionId, "reject", { status_code: 486 });
     return new Response(null, { status: 204 });

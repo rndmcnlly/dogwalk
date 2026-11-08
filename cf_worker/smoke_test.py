@@ -42,6 +42,10 @@ class DaytonaMock(BaseHTTPRequestHandler):
     create_count = 0
     last_create_payload: dict = {}
     openai_requests: list[tuple[str, dict]] = []
+    # A provider state to report instead of the normal creating-then-started sequence.
+    force_state: str | None = None
+    start_count = 0
+    preview_reads = 0
 
     def sandbox(self, state: str = "started") -> dict:
         return {
@@ -66,6 +70,7 @@ class DaytonaMock(BaseHTTPRequestHandler):
             self.path
             == f"/api/sandbox/mock-sandbox-{self.generation}/ports/8765/preview-url"
         ):
+            DaytonaMock.preview_reads += 1
             self.reply(
                 {
                     "url": "http://127.0.0.1:8791",
@@ -83,6 +88,9 @@ class DaytonaMock(BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
             DaytonaMock.detail_reads += 1
+            if self.force_state:
+                self.reply(self.sandbox(self.force_state))
+                return
             self.reply(
                 self.sandbox("creating" if self.detail_reads == 1 else "started")
             )
@@ -110,6 +118,7 @@ class DaytonaMock(BaseHTTPRequestHandler):
             self.reply(self.sandbox("creating"))
             return
         if self.path == f"/api/sandbox/mock-sandbox-{self.generation}/start":
+            DaytonaMock.start_count += 1
             self.reply(self.sandbox("starting"))
             return
         if self.path == f"/api/sandbox/mock-sandbox-{self.generation}/stop":
@@ -255,6 +264,10 @@ def run_tests(
         f"registration gather: {status} {body}",
     )
     require('actionOnEmptyResult="true"' in body, "gather does not callback on silence")
+    require(
+        "a voice line for supervising coding agents" in body and "three invite words" in body,
+        f"unregistered greeting: {body}",
+    )
 
     status, body = post(
         base_url,
@@ -318,12 +331,19 @@ def run_tests(
     )
     require(status == 200 and "Registered" in body, f"confirmation: {status} {body}")
 
+    # Talk first: a registered caller is dialed straight to the Voice Agent while the new
+    # Sandbox is still being created; there is no wake-up loop.
     status, body = post(
         base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_TEST2"}, token
     )
     require(
-        status == 200 and "Waking your workspace" in body and "/voice?wake=1" in body,
-        f"sandbox create: {status} {body}",
+        status == 200
+        and '<Dial action="/voice/after-live"' in body
+        and "sip:proj_test@sip.api.openai.com;transport=tls;secure=true" in body
+        and "x-dogwalk-context=" in body
+        and "wake" not in body
+        and "<Say" not in body,
+        f"immediate dial while provisioning: {status} {body}",
     )
     if mock_daytona:
         require(
@@ -338,24 +358,35 @@ def run_tests(
             DaytonaMock.last_create_payload.get("secrets") == [{"OPENAI_API_KEY": "dogwalk-test-agent-secret"}],
             "Agent inference secret was not mapped by name",
         )
+        # The prewarm reaches the VoiceSession, which asks Daytona for the ACP preview URL.
+        deadline = time.time() + 10
+        while DaytonaMock.preview_reads == 0 and time.time() < deadline:
+            time.sleep(0.2)
+        require(DaytonaMock.preview_reads > 0, "prewarm did not reach the VoiceSession")
 
-    for wake in (1, 2):
+        # A stopped Sandbox is started without waiting, and the call is dialed at once.
         time.sleep(3.1)
+        DaytonaMock.force_state = "stopped"
         status, body = post(
-            base_url,
-            f"/voice?wake={wake}",
-            {"From": TEST_PHONE, "CallSid": "CA_TEST2"},
-            token,
+            base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_STOPPED"}, token
         )
-        if "<Dial" in body:
-            break
-    require(
-        status == 200
-        and '<Dial action="/voice/after-live"' in body
-        and "sip:proj_test@sip.api.openai.com;transport=tls;secure=true" in body
-        and "x-dogwalk-context=" in body,
-        f"sandbox ready: {status} {body}",
-    )
+        DaytonaMock.force_state = None
+        require(
+            status == 200 and "<Dial" in body and DaytonaMock.start_count == 1,
+            f"stopped sandbox not started and dialed: {status} {body}",
+        )
+
+        # A broken Sandbox still goes to deterministic recovery.
+        time.sleep(3.1)
+        DaytonaMock.force_state = "error"
+        status, body = post(
+            base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_BROKEN"}, token
+        )
+        DaytonaMock.force_state = None
+        require(
+            status == 200 and "Workspace unavailable" in body and "<Dial" not in body,
+            f"broken sandbox did not offer recovery: {status} {body}",
+        )
 
     status, body = post(
         base_url,
@@ -406,26 +437,12 @@ def run_tests(
             base_url, "/voice", {"From": TEST_PHONE, "CallSid": replacement_call}, token
         )
         require(
-            status == 200 and "Waking your workspace" in body,
+            status == 200 and "<Dial" in body and "sip:proj_test@sip.api.openai.com" in body,
             f"deleted sandbox recovery: {status} {body}",
         )
         require(
             DaytonaMock.create_count == 2 and DaytonaMock.generation == 2,
             "deleted sandbox was not replaced exactly once",
-        )
-        for wake in (1, 2):
-            time.sleep(3.1)
-            status, body = post(
-                base_url,
-                f"/voice?wake={wake}",
-                {"From": TEST_PHONE, "CallSid": replacement_call},
-                token,
-            )
-            if "<Dial" in body:
-                break
-        require(
-            status == 200 and "<Dial" in body and "sip:proj_test@sip.api.openai.com" in body,
-            f"replacement sandbox not ready: {status} {body}",
         )
 
     status, _ = get(base_url, "/admin")
@@ -464,7 +481,7 @@ def run_tests(
         f"SSE state missing registration: {state}",
     )
     live_calls = state.get("live_calls", [])
-    expected_live_calls = 3 if replacement_call else 2
+    expected_live_calls = 5 if replacement_call else 2
     require(
         len(live_calls) == expected_live_calls,
         f"SSE state missing live calls: {live_calls}",
@@ -478,7 +495,7 @@ def run_tests(
 
     call_sids = ["CA_TEST1", "CA_TEST2"]
     if replacement_call:
-        call_sids.append(replacement_call)
+        call_sids += ["CA_STOPPED", "CA_BROKEN", replacement_call]
     for call_sid in call_sids:
         status, body = post(
             base_url,
@@ -504,7 +521,7 @@ def run_tests(
         f"completed calls remain live: {closed_state.get('live_calls')}",
     )
 
-    print("24 checks passed" if mock_daytona else "20 checks passed")
+    print("29 checks passed" if mock_daytona else "20 checks passed")
     return 0
 
 
@@ -568,6 +585,9 @@ def main() -> int:
     DaytonaMock.generation = 0
     DaytonaMock.create_count = 0
     DaytonaMock.last_create_payload = {}
+    DaytonaMock.force_state = None
+    DaytonaMock.start_count = 0
+    DaytonaMock.preview_reads = 0
     daytona = ThreadingHTTPServer(("127.0.0.1", DAYTONA_MOCK_PORT), DaytonaMock)
     thread = threading.Thread(target=daytona.serve_forever, daemon=True)
     thread.start()

@@ -84,7 +84,8 @@ From the repository root, `uv run --script deploy.py` deploys with the `cf`
 Object keeps running its starting code while it holds the outbound ACP
 WebSocket, so a plain `wrangler deploy` leaves calls on the old version. The
 script waits until no call is in progress, then stops the Sandbox so the object
-reloads; stopping it mid-call would hang up the caller. `--no-deploy` performs
+reloads; stopping it mid-call would leave the caller without dogs while the
+object, still on old code, reconnects. `--no-deploy` performs
 only the refresh.
 
 ## Invite Codes
@@ -108,21 +109,84 @@ uv run --script voice_session_test.py
 uv run --script ../sandbox_acp_gateway.py test
 ```
 
-It checks registration, retry limits, snapshot and credential-free configuration,
-sandbox creation, deletion recovery, readiness, status execution, identity
-isolation, webhook signatures, and fail-closed admin access.
+It checks registration, retry limits, the unregistered greeting, snapshot and
+credential-free configuration, sandbox creation, immediate dialing while a
+Sandbox is provisioning or stopped (with a start request), recovery for a broken
+Sandbox, deletion recovery, the prewarm reaching the Durable Object, status
+execution, identity isolation, webhook signatures, and fail-closed admin access.
 
 `voice_session_test.py` runs mock OpenAI GPT-Live control, Daytona preview, and
-ACP endpoints around a local Worker. It checks signed incoming-call correlation,
-client delegation, the Session Orchestrator loop against a mock Responses
-endpoint, ACP initialization, Managed
-Session creation, asynchronous Prompt Turns, session inspection, and call
-termination without consuming provider traffic.
+ACP endpoints around a local Worker, over two calls. It checks signed
+incoming-call correlation, client delegation, the first-call Opening, ACP
+connecting in the background (`dogs_waking`, fail-fast session tools,
+`dogs_ready`), the Session Orchestrator loop against a mock Responses endpoint,
+Managed Session creation, asynchronous Prompt Turns, session inspection, the
+end-of-call welcome, a returning caller's composed Opening with caller-ID and
+since-last-call clauses, `session/resume` on reconnect with a cached preview
+URL, the keypad conventions and System Menu, and call termination without
+consuming provider traffic.
+
+## Front Door
+
+A registered caller talks first. `/voice` resolves the Sandbox once: a stopped,
+archived, or paused Sandbox gets a start request (not awaited); one being
+provisioned or replaced is left to provisioning; only `error`, `build_failed`,
+or `destroyed` goes to the TwiML recovery menu. Every other case dials the
+GPT-Live SIP URI immediately; there is no wake-up loop. Meanwhile `/voice`
+fires a `/prewarm` at the sandbox-keyed Durable Object (`ctx.waitUntil`), which
+starts connecting ACP before GPT-Live has even answered. Prewarm is idempotent
+and harmless beside an attached call.
+
+The Durable Object never makes the call wait for the Agent. On attach it plays
+the call-start earcon, speaks the Opening, and keeps connecting ACP in the
+background with backoff for about three minutes (the preview URL fetch or the
+WebSocket upgrade fail until the Sandbox's gateway listens). The Daytona preview
+URL and token for the ACP port are cached in memory and Durable Object storage
+per Sandbox and refetched once whenever a connection through them fails. The
+Orchestrator gets `dogs_waking` with `call_started`, then `dogs_ready` (with the
+session count) or `dogs_unavailable`. Session tools that need the Agent fail
+fast with "the sandbox is still starting; try again after dogs_ready", while
+`list_managed_sessions` and `inspect_managed_session` answer from the persisted
+projection. A dropped Agent Connection mid-call reconnects in the background
+instead of hanging up. On reconnect, Managed Sessions are restored with
+`session/resume` when the Agent advertises `sessionCapabilities.resume` in
+`initialize`, otherwise `session/load`.
+
+The Opening is deterministic and costs no model call at connection:
+`<caller-ID clause> Dogwalk. <welcome line> Where to?` The caller-ID clause is
+"Verified." (STIR/SHAKEN A), "Partly verified." (B or C), "Caller ID failed
+verification.", or "Caller ID unverified." (missing or `No-TN-Validation`). The
+welcome line is `next_greeting`, written by one short Orchestrator-model call
+(`tool_choice: none`) when the previous call ended, plus "Since then, ..."
+clauses for Prompt Turns that stopped or failed, Permission Requests, and saved
+recordings while no call was attached, plus a few words if the last call ended
+abnormally; "Welcome back." is the fallback. A first call after Registration
+says "Dogwalk. Welcome! I'm your walker; your sandbox is being set up, which
+takes a minute or two." and the Orchestrator loads the `first-call-tour` skill.
+
+## Keypad
+
+| Mode | Key | Effect |
+|---|---|---|
+| Conversation | `*` | System Menu (below) |
+| Conversation | `#` | Stop talking: a 0.1 s silent fixture cuts speech off, then an instruction to listen |
+| Conversation | `1` | Instant status from the persisted projection, as commentary; bypasses the Orchestrator |
+| Conversation | `0` | Repeat the Voice Frontend's last utterance verbatim |
+| Conversation | other | `keypad` harness event to the Orchestrator with the conversation since the last handoff |
+| Recording | `#` / `*` | Save / discard |
+
+The System Menu is a deterministic state machine in the Durable Object: it
+mutes the Voice Frontend's input (`session.input_audio.mute`), holds
+Orchestrator speech and earcons, and plays pre-rendered prompts from
+`../make_earcons.py` (bundled regardless of `EARCON_STYLE`). `1` status, `2`
+restart (a second `2` confirms; the Daytona Sandbox is stopped, then started,
+and the Orchestrator gets `sandbox_restart_requested`), `3` the TwiML recovery
+menu (as `open_recovery_menu`), `9` hang up, `*` or 15 s back. Leaving unmutes
+and plays "Back." Actions are recorded as `menu.*` Call Activity.
 
 ## Voice Sessions
 
-Warm calls retain Twilio's deterministic registration and Sandbox wake-up front
-door, then use secure SIP (`TLS` signaling and `SRTP` media) to hand the active
+Calls use secure SIP (`TLS` signaling and `SRTP` media) to hand the active
 audio leg directly to OpenAI GPT-Live. A sandbox-keyed SQLite Durable Object owns
 the Agent Connection and persisted Managed Session projection; it attaches one
 GPT-Live sideband WebSocket. Ending the call detaches that sideband but does not
@@ -162,7 +226,8 @@ lulls. `play_audio` renders a window of any Workspace audio or video file with
 `ffmpeg` in the Sandbox. `start_recording` mutes the Voice Frontend, buffers the
 caller audio GPT-Live reflects to the sideband, and saves a WAV under
 `recordings/` when the caller presses pound (star discards), after 20 s of
-silence, or at its limit. Keypad presses arrive as `transport.dtmf.received`.
+silence, or at its limit. Keypad presses arrive as `transport.dtmf.received`
+(see Keypad).
 
 Recording deliberately does not use `session.input_audio.mute`. The docs say
 muting preserves sideband reflection, but over SIP (verified 2026-11-07) the
@@ -176,7 +241,8 @@ Twilio adds a five-minute HMAC capability containing the existing Call SID to a
 custom SIP header. The signed OpenAI webhook validates it and resolves the User
 and current Sandbox Assignment from D1; SIP caller headers alone never authorize
 a call. On attach, the Durable Object gives the Orchestrator a bounded call-start
-snapshot of aliases and recent state as a harness event; tools remain
+snapshot of aliases and recent state, the Opening's exact words, the caller-ID
+attestation, and a since-last-call summary as a harness event; tools remain
 authoritative for current reads and all actions.
 
 The Voice Frontend normally speaks one short sentence, then listens. Dog-walking

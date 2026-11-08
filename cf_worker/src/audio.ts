@@ -1,5 +1,4 @@
 import spoken_call_started from "../earcons/call_started.pcm";
-import spoken_handoff_received from "../earcons/handoff_received.pcm";
 import spoken_session_created from "../earcons/session_created.pcm";
 import spoken_turn_started from "../earcons/turn_started.pcm";
 import spoken_turn_stopped from "../earcons/turn_stopped.pcm";
@@ -9,6 +8,10 @@ import spoken_session_closed from "../earcons/session_closed.pcm";
 import spoken_recording_started from "../earcons/recording_started.pcm";
 import spoken_recording_saved from "../earcons/recording_saved.pcm";
 import spoken_recording_discarded from "../earcons/recording_discarded.pcm";
+import prompt_menu from "../earcons/menu.pcm";
+import prompt_menu_restart_confirm from "../earcons/menu_restart_confirm.pcm";
+import prompt_menu_restarting from "../earcons/menu_restarting.pcm";
+import prompt_menu_back from "../earcons/menu_back.pcm";
 
 // Waveform audio for GPT-Live output fixtures: raw mono PCM16LE at 24 kHz, at most 30 s,
 // base64-encoded. Earcons are synthesized here; clips come from Sandbox WAV files.
@@ -41,7 +44,6 @@ function synthesize(notes: Array<[number, number]>, gain = 0.28): Clip {
 
 export type EarconName =
   | "call_started"
-  | "handoff_received"
   | "session_created"
   | "turn_started"
   | "turn_stopped"
@@ -56,7 +58,6 @@ export type EarconStyle = "spoken" | "tonal";
 // Tonal earcons: short note patterns, rising for arrivals and falling for departures.
 const TONAL: Record<EarconName, Clip> = {
   call_started: synthesize([[523.25, 140], [783.99, 220]]),
-  handoff_received: synthesize([[659.25, 90]]),
   session_created: synthesize([[523.25, 90], [659.25, 90], [783.99, 140]]),
   turn_started: synthesize([[659.25, 100], [987.77, 140]]),
   turn_stopped: synthesize([[783.99, 110], [1046.5, 170]]),
@@ -72,7 +73,6 @@ const TONAL: Record<EarconName, Clip> = {
 // diagnostic). Presentation only; the event names stay neutral.
 const SPOKEN: Record<EarconName, Clip> = {
   call_started: pcmClip(spoken_call_started),
-  handoff_received: pcmClip(spoken_handoff_received),
   session_created: pcmClip(spoken_session_created),
   turn_started: pcmClip(spoken_turn_started),
   turn_stopped: pcmClip(spoken_turn_stopped),
@@ -87,6 +87,24 @@ const SPOKEN: Record<EarconName, Clip> = {
 export function earcon(name: EarconName, style: EarconStyle): Clip {
   return (style === "tonal" ? TONAL : SPOKEN)[name];
 }
+
+// Keypad system menu prompts, also rendered by make_earcons.py. They are instructions the
+// caller must follow, so they are spoken whatever the earcon style.
+export type PromptName = "menu" | "menu_restart_confirm" | "menu_restarting" | "menu_back";
+
+const PROMPTS: Record<PromptName, Clip> = {
+  menu: pcmClip(prompt_menu),
+  menu_restart_confirm: pcmClip(prompt_menu_restart_confirm),
+  menu_restarting: pcmClip(prompt_menu_restarting),
+  menu_back: pcmClip(prompt_menu_back),
+};
+
+export function prompt(name: PromptName): Clip {
+  return PROMPTS[name];
+}
+
+// A tenth of a second of silence: playing any fixture cuts off the model's speech.
+export const SILENCE: Clip = { base64: toBase64(new Uint8Array(SAMPLE_RATE / 5)), seconds: 0.1 };
 
 function pcmClip(data: ArrayBuffer): Clip {
   return { base64: toBase64(new Uint8Array(data)), seconds: data.byteLength / (SAMPLE_RATE * 2) };

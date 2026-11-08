@@ -198,7 +198,40 @@ not belong inline in Call Activity when they are large; store bounded diagnostic
 details or references. The Diagnostics Surface presents a redacted projection by
 default and requires an explicit, session-only opt-in to reveal verbose details.
 
-The Session Orchestrator may read the current User's recent Call Activity to explain interruptions, and each call begins with a since-last-call summary (how the previous call ended, including provider errors such as moderation, recovery actions, failed Prompt Turns, and its last words) so the Voice Agent can reorient the User after a drop. A provider ending the voice connection is not a User hanging up, and neither cancels Prompt Turns; only a Sandbox restart or replacement interrupts Agent work. A Voice Call may contain several voice sessions (after a drop, the recovery path can start another). A voice session ends at the first of the provider's close event or the loss of the control sideband; the Voice Call ends only when the telephony provider reports it complete, and that report also closes out any voice session whose end was never observed.
+The Session Orchestrator may read the current User's recent Call Activity to explain interruptions, and each call begins with a since-last-call summary (how the previous call ended, including provider errors such as moderation, recovery actions, failed Prompt Turns, and its last words) as context for the Opening.
+
+A registered caller talks first: the Voice Call connects to the Voice Agent at once while the Sandbox is started in parallel, and the Agent Connection is established in the background. Until it is ready, Session Management answers inspection and listing from its persisted projection, operations that need the ACP Agent fail fast with a neutral "still starting" error rather than waiting, and the Session Orchestrator keeps conversing and acts on held requests once the connection is ready. Losing the Agent Connection mid-call makes Managed Sessions unavailable but does not end the Voice Call. Only a Sandbox the provider reports broken sends the caller to deterministic recovery before the Voice Agent. A provider ending the voice connection is not a User hanging up, and neither cancels Prompt Turns; only a Sandbox restart or replacement interrupts Agent work. A Voice Call may contain several voice sessions (after a drop, the recovery path can start another). A voice session ends at the first of the provider's close event or the loss of the control sideband; the Voice Call ends only when the telephony provider reports it complete, and that report also closes out any voice session whose end was never observed.
+
+### Opening
+
+**Context:** Voice Interaction
+
+The first words of a Voice Call, composed deterministically by Dogwalk with no model call on the critical path: a terse caller-ID verification clause (from the carrier's STIR/SHAKEN attestation), the product name, a welcome line, and an invitation to speak. The welcome line was written by one short Session Orchestrator model call when the previous Voice Call ended; deterministic clauses about Managed Session changes since then (a Prompt Turn stopped or failed, a Permission Request arrived, a recording was saved) and about an abnormal previous ending are added at connection. A User's first call after Registration gets a fixed welcome instead, and the Session Orchestrator follows it with a short spoken tour while the new Sandbox is created. The Session Orchestrator is told the Opening's exact words and does not repeat them.
+
+### Keypad Conventions
+
+**Context:** Voice Interaction
+
+Telephone keypad presses have fixed meanings that depend on the mode of the Voice Call, and the fixed meanings bypass the Session Orchestrator:
+
+| Mode | Key | Meaning |
+|---|---|---|
+| Conversation | star | Open the System Menu |
+| Conversation | pound | Stop talking: the Voice Frontend stops speaking and listens |
+| Conversation | one | Instant status: a deterministic readout of Managed Sessions from the persisted projection |
+| Conversation | zero | Repeat the Voice Frontend's last utterance |
+| Conversation | other digits | Caller input, sent to the Session Orchestrator with the conversation around it |
+| Voice Recording | pound | Save the recording |
+| Voice Recording | star | Discard the recording |
+| System Menu | see below | Menu choices |
+
+### System Menu
+
+**Context:** Voice Interaction, with Agent Hosting actions
+
+A deterministic in-call menu opened with star: no model interprets it, the Voice Frontend does not hear the caller while it is open, and pre-rendered prompts speak it. One reads Managed Session status; two restarts the Sandbox after a second press confirms that running work stops; three hands the call to the deterministic recovery menu; nine hangs up; star, or fifteen seconds without a key, returns to the conversation. The Session Orchestrator learns of a restart through a harness event. Menu actions are recorded as Call Activity.
+
+**Not:** The recovery menu outside the Voice Agent, which is reached when realtime voice is unavailable.
 
 ### Agent Implementation
 
@@ -426,7 +459,7 @@ An Agent-reported execution strategy whose entries and status can change during 
 
 ### Connection Lifecycle
 
-Dogwalk connects to an Agent, initializes ACP, negotiates protocol version and capabilities, uses the connection for zero or more sessions, and eventually disconnects. Connection failure can make associated sessions unavailable without changing their conceptual identity.
+Dogwalk connects to an Agent, initializes ACP, negotiates protocol version and capabilities, uses the connection for zero or more sessions, and eventually disconnects. Connection failure can make associated sessions unavailable without changing their conceptual identity. On reconnecting, Dogwalk restores its Managed Sessions with `session/resume` when the Agent advertises it, which restores context without replaying history, and falls back to `session/load` otherwise.
 
 ### Managed Session Lifecycle
 
@@ -500,6 +533,8 @@ These canonical terms name Voice Agent tools as well as core methods. Narration 
 - A Workspace is not a Sandbox.
 - A voice call is not an Agent Connection.
 - A Handoff is not a Prompt Turn.
+- The System Menu is not the recovery menu, and neither is the Session Orchestrator.
+- A Voice Call connecting is not the Agent Connection being ready.
 - The Session Orchestrator is not the Session Manager; its memory is not a store of record.
 - Client-provided tools bind to an attachment, not to an ACP Session.
 
@@ -566,6 +601,11 @@ The following language appears in Git history and is not canonical for productio
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
 
 - Should the Voice Frontend also receive recent conversation directly (as provider session history at call start), rather than only through the Session Orchestrator's reorienting speech?
+
+- Pound now means stop talking in conversation, so a caller who presses pound to end a recording that the Voice Frontend only claimed to start no longer signals the Session Orchestrator. Should a pound press shortly after recording talk also reach it?
+- Should a System Menu restart wait for or inform in-flight Prompt Turns beyond the harness event, and should a restart be refused while a Permission Request is pending?
+- The Opening's welcome line is written when a call ends; how stale may it become (for example after days, or after work that changed what is unfinished) before Dogwalk prefers the neutral fallback?
+- Is the caller-ID clause permanent product behavior or a diagnostic to remove once STIR/SHAKEN attestation is understood across carriers?
 
 ## ACP References
 
