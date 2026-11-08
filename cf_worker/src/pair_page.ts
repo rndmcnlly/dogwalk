@@ -11,8 +11,13 @@
 // 10 data bytes, 6 parity bytes, 32 symbols back to back with no gap, one copy, at a symbol rate
 // the Voice Agent picks from BAUD_RATES. The page is not told the rate: it tries each one whose
 // frame length fits the heard frame and keeps the one that Reed-Solomon confirms.
+//
+// The page's build identity is a hash of this source, stamped into the page where it says
+// __PAIR_BUILD__. The page sends it when it connects; a tab loaded before a deploy learns it is
+// stale from the hello and reloads itself at a safe moment (its pairing lives in sessionStorage,
+// so a reload keeps it).
 
-export const PAIR_HTML = String.raw`<!doctype html>
+const PAIR_TEMPLATE = String.raw`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -929,6 +934,8 @@ const WORKLET_SRC = "const ROWS = " + JSON.stringify(ROWS) + ", COLS = " + JSON.
 const $ = (id) => document.getElementById(id);
 const HOME = "/home/daytona";
 const TOKEN_KEY = "dogwalk.pair.token";
+const PAIR_BUILD = "__PAIR_BUILD__";
+const RELOADED_KEY = "dogwalk.pair.reloadedFor"; // the server build this tab last reloaded to reach
 
 // Builds an element; string children become text nodes, so server strings are never parsed as HTML.
 function el(tag, props, children) {
@@ -1233,7 +1240,7 @@ function connect() {
   const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host
     + "/pair/ws?for=" + encodeURIComponent(identity));
   socket = ws;
-  ws.onopen = () => ws.send(JSON.stringify({ type: "auth", token }));
+  ws.onopen = () => ws.send(JSON.stringify({ type: "auth", token, build: PAIR_BUILD }));
   ws.onmessage = (event) => {
     let message;
     try { message = JSON.parse(event.data); } catch (error) { return; }
@@ -1282,6 +1289,7 @@ function onMessage(m) {
       if (!listedOnce) listDir(currentDir);
       viewingSent = ""; // a new socket: the server has heard nothing yet
       reportViewing(true);
+      if (m.stale) staleBuild(String(m.build || ""));
       break;
     case "pong":
       if (pairing && m.idle_expires_at) { pairing.idle_expires_at = m.idle_expires_at; renderPairing(); }
@@ -1307,6 +1315,28 @@ function onMessage(m) {
 }
 
 function setConnection(text) { $("conn").textContent = text; }
+
+// A deploy since this tab loaded: reload when nothing would be lost (no field in use, no
+// half-answered board, no whiteboard tab, which only a click reopens). Once per server build,
+// so a page that still comes back stale asks the user instead of looping.
+let staleTimer = null;
+function staleBuild(build) {
+  let reloaded = "";
+  try { reloaded = sessionStorage.getItem(RELOADED_KEY) || ""; } catch (error) { /* storage off */ }
+  if (reloaded === build) { setStatus("This page is out of date. Reload it to update.", "bad"); return; }
+  setStatus("This page is out of date; it reloads itself when you are not using it.", "bad");
+  clearInterval(staleTimer);
+  const attempt = () => {
+    const active = document.activeElement;
+    const typing = active && (/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) || active.isContentEditable);
+    if (typing || wbEdited || wbTabOpen()) return;
+    clearInterval(staleTimer);
+    try { sessionStorage.setItem(RELOADED_KEY, build); } catch (error) { /* storage off */ }
+    location.reload();
+  };
+  staleTimer = setInterval(attempt, 2000);
+  attempt();
+}
 
 function clock(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -3221,6 +3251,9 @@ let wbUnseen = false;   // an open board arrived while the whiteboard was out of
 let wbOnScreen = false; // the whiteboard is in this page's viewport, for the viewing report
 // Held by reference, not looked up by id: the section moves into the whiteboard's own tab and back.
 const WB = { root: $("whiteboard"), empty: $("wbEmpty"), current: $("wbCurrent"), older: $("wbOlder"), olderCount: $("wbOlderCount"), olderList: $("wbOlderList") };
+let wbEdited = false;   // a board has input not yet sent, so a stale page waits to reload
+WB.root.addEventListener("input", () => { wbEdited = true; });
+WB.root.addEventListener("change", () => { wbEdited = true; });
 
 function wbNormalize(raw) {
   if (!raw || typeof raw !== "object" || raw.id == null) return null;
@@ -3252,6 +3285,7 @@ function wbOnBoard(raw) {
   const board = wbNormalize(raw);
   if (!board) return;
   const fresh = wbUpsert(board);
+  if (board.status !== "open") wbEdited = false;
   wbLayout();
   if (!fresh || board.status !== "open") return;
   log("whiteboard: " + (board.note || board.id));
@@ -3574,3 +3608,16 @@ else { showScreen("pair"); setStatus("Press Listen to start"); }
 </body>
 </html>
 `;
+
+// FNV-1a, 32 bits: enough to tell one deployed page from another.
+function fnv1a(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+export const PAIR_BUILD = fnv1a(PAIR_TEMPLATE);
+export const PAIR_HTML = PAIR_TEMPLATE.replace("__PAIR_BUILD__", PAIR_BUILD);

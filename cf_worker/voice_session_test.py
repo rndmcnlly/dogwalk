@@ -119,6 +119,17 @@ class SocketMocks:
                     result = {"sessions": entries[start:start + 2]}
                     if start + 2 < len(entries):
                         result["nextCursor"] = str(start + 2)
+                elif method == "session/prompt" and params["prompt"][0]["text"] == FAIL_PROMPT:
+                    for update in FAIL_UPDATES:
+                        if "pause" in update:
+                            await asyncio.sleep(update["pause"])
+                            continue
+                        await socket.send(json.dumps({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {"sessionId": "acp-session-test", "update": update},
+                        }))
+                    error = {"code": -32603, "message": "SseError: the event stream ended"}
                 elif method == "session/prompt":
                     await asyncio.sleep(0.2)
                     for update in PROMPT_UPDATES:
@@ -199,6 +210,17 @@ PROMPT_UPDATES = [
     {"sessionUpdate": "tool_call", "toolCallId": "t4", "title": "bash", "kind": "execute", "status": "in_progress"},
     {"sessionUpdate": "tool_call_update", "toolCallId": "t4", "status": "completed"},
     message_chunk("Bridge report complete."),
+]
+
+FAIL_PROMPT = "Check the repository's state and summarize it."
+SHELL_COMMAND = "git status --short --branch && git log --oneline -3"
+# A command starts and never finishes; three steps fail in a burst; then the turn itself fails.
+FAIL_UPDATES = [
+    SETTLE,
+    {"sessionUpdate": "tool_call", "toolCallId": "g1", "title": SHELL_COMMAND, "kind": "execute", "status": "in_progress"},
+    SETTLE,
+    *({"sessionUpdate": "tool_call", "toolCallId": f"gf{index}", "title": "websearch", "kind": "fetch", "status": "failed"} for index in range(3)),
+    {"pause": 3.0},
 ]
 
 CALL_BRIEF = "Call started with no Managed Sessions."
@@ -312,6 +334,9 @@ ORCHESTRATOR_SCRIPT = [
         call("h4-say", "say", text=FAREWELL_SAY, delegation_id="del-4"),
         call("h4-end", "end_call"),
     ]),
+    # Second call: a turn that fails mid-command: its running command ends with it.
+    ("[handoff del-f]", lambda ctx: [call("f-begin", "begin_prompt_turn", alias="Juniper", prompt=FAIL_PROMPT)]),
+    ("turn_failed", lambda ctx: [call("f-inspect", "inspect_managed_session", alias="Juniper")]),
     # Second call: digits without a system meaning still reach the Orchestrator.
     ('"key":"7"', lambda ctx: [call("k7-say", "say", text=KEYPAD_SAY, delegation_id=None)]),
     # Invitations: the caller (invited by SEED_INVITER) invites friends, by voice alone.
@@ -387,7 +412,7 @@ BOARD_PROGRAM = (
 )
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
-    "ts-say", "h2-inspect", "h2-unfollow", "h2-say",
+    "ts-say", "h2-inspect", "h2-unfollow", "h2-say", "f-begin", "f-inspect",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
     "h4-say", "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
@@ -762,6 +787,7 @@ async def run_protocol(identity: str) -> None:
         assert "<alias>" in frontend and not any(name in frontend for name in ("Cedar", "Biscuit", "Kappa", "Dozer")), frontend
         assert "name only aliases the Session Orchestrator" in frontend
         assert "An intention or estimate is not an action or a limit" in frontend
+        assert "A failed step is not a failed turn" in frontend
         assert "Never mention a backend" in frontend
         # Delegated work is never claimed before the Orchestrator says a turn began.
         assert "unless the Session Orchestrator told you a turn began for it" in frontend
@@ -842,14 +868,14 @@ async def run_protocol(identity: str) -> None:
         # tool of no known kind made none, so its name never reached the Voice Frontend.
         assert "running a command" not in beats() and "websearch" not in beats(), beats()
         assert "using" not in beats(), beats()
-        # Tool calls failing in a burst (parallel web searches) make one beat with the streak.
+        # Tool calls failing after the turn ended make no beat: the turn event already spoke.
         for index in range(3):
             await mocks.acp.send(json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {
                 "sessionId": "acp-session-test",
                 "update": {"sessionUpdate": "tool_call", "toolCallId": f"f{index}", "title": "websearch", "kind": "fetch", "status": "failed"},
             }}))
-        await wait_for(lambda: "A step failed for Juniper, 3 in a row." in beats(), 10)
-        assert beats().count("A step failed for Juniper") == 1, beats()
+        await asyncio.sleep(4)
+        assert "failed for Juniper" not in beats(), beats()
 
         # Handoff 2: a follow-up question answered from session inspection.
         await mocks.send_live(transcript("input", "What did it report?", 5000, 6200))
@@ -1010,6 +1036,23 @@ async def run_protocol(identity: str) -> None:
         repeat = await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append" and "word for word" in item.get("content", ""))
         assert "The parser handles nested quotes now." in repeat["content"]
 
+        # A turn that fails mid-command. Its command is named by phase, never by its text; steps
+        # failing in a burst make one beat that says the turn goes on; and once the turn has
+        # failed its command is closed, so nothing about it is still running.
+        await mocks.send_live(transcript("input", "Have Juniper check the repository.", 22500, 23100))
+        await mocks.send_live(delegation("del-f", 23150))
+        await wait_for(lambda: "Juniper is working with Git." in beats(), 10)
+        await wait_for(lambda: "3 steps in a row failed for Juniper; its turn is still going." in beats(), 10)
+        await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "f-inspect" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
+        failed_at = len(beats())
+        assert "git status" not in beats() and "--short" not in beats() and "(" not in beats(), beats()
+        assert '"followed":true' in OrchestratorMock.user_message("turn_failed")
+        failed = OrchestratorMock.tool_output("f-inspect")
+        assert failed["turn_state"] == "failed" and "SseError" in failed["failure"], failed
+        assert [(c["kind"], c["status"]) for c in failed["recent_tool_calls"]] == [("execute", "failed")] + [("fetch", "failed")] * 3, failed
+        await asyncio.sleep(4)
+        assert not re.search(r"running|working with|still|failed for", beats()[failed_at:]), beats()[failed_at:]
+
         # Star opens the System Menu: muted input, a prompt clip, star goes back. Status and
         # sound style are no longer in it.
         await mocks.send_live(dtmf("*"))
@@ -1078,10 +1121,15 @@ async def run_protocol(identity: str) -> None:
         assert accepted["state"] == "accepted" and accepted["token"].startswith(identity + ".")
         assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1] == {"state": "accepted"}, "the token is handed out once"
         token = accepted["token"]
+        # The page carries its build identity and sends it when it connects.
+        page = await asyncio.to_thread(lambda: urllib.request.urlopen("http://127.0.0.1:8787/pair", timeout=10).read().decode())
+        build = re.search(r'const PAIR_BUILD = "([0-9a-f]{8})";', page).group(1)
+        assert "__PAIR_BUILD__" not in page
         async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as browser:
-            await browser.send(json.dumps({"type": "auth", "token": token}))
+            await browser.send(json.dumps({"type": "auth", "token": token, "build": build}))
             hello = await recv_type(browser, "hello")
             assert hello["device"] == "Chrome on a Mac" and hello["idle_expires_at"] > time.time() * 1000
+            assert hello["build"] == build and hello["stale"] is False, hello
             snapshot = await recv_type(browser, "status")
             assert any(item["alias"] == "Juniper" for item in snapshot["sessions"]) and snapshot["sandbox"]["call_attached"]
             # The live feed starts with a snapshot of what the call has said and done so far.
@@ -1108,18 +1156,36 @@ async def run_protocol(identity: str) -> None:
             # What the page shows is sensed without changing anything.
             await browser.send(json.dumps({"type": "viewing", "view": "files", "path": "/home/daytona/REPORT.md", "kind": "file"}))
             await asyncio.sleep(0.3)
+            # A tab loaded before a deploy: one with another build is told to reload itself; one
+            # from before builds existed cannot, so the Orchestrator hears it must ask the caller.
+            async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as newer:
+                await newer.send(json.dumps({"type": "auth", "token": token, "build": "00000000"}))
+                told = await recv_type(newer, "hello")
+                assert told["stale"] is True and told["build"] == build, told
+            await wait_for(lambda: any('browser_page_stale: {"reloads_itself":true}' in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
+            stale = await connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}")
+            await stale.send(json.dumps({"type": "auth", "token": token}))
+            assert (await recv_type(stale, "hello"))["stale"] is True
+            await wait_for(lambda: any('browser_page_stale: {"reloads_itself":false}' in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
             await mocks.send_live(dtmf("4"))
             await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "k4-state" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
             state = OrchestratorMock.tool_output("k4-state")
             browser_state = state["paired_browser"]
             assert browser_state["paired"] and browser_state["page_open"] and browser_state["device"] == "Chrome on a Mac", browser_state
             assert browser_state["showing_now"] == {"view": "files", "path": "/home/daytona/REPORT.md"}, browser_state
+            assert browser_state["page_stale"] is True, browser_state
             assert state["earcon_style"] == "tonal", state
             assert state["context_tokens"] == 1 and state["memory"] is None, state
             # The Orchestrator draws a board; the caller answers it on the page; it hears the answer.
             await mocks.send_live(dtmf("5"))
             board = (await recv_type(browser, "board", 15))["board"]
             assert board["program"] == BOARD_PROGRAM and board["status"] == "open" and board["note"] == "pick one", board
+            await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "k5-board" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
+            assert "page_stale" in OrchestratorMock.tool_output("k5-board"), "draw_on_whiteboard warns of the stale page"
+            # The stale page cannot render Image; its error says the page is out of date.
+            await stale.send(json.dumps({"type": "board_error", "id": board["id"], "error": "line 2: unknown component Image (left out)"}))
+            await wait_for(lambda: any("whiteboard_error" in str(item.get("content")) and "out of date" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
+            await stale.close()
             await browser.send(json.dumps({"type": "board_answer", "id": board["id"], "answer": {"button": "Send", "values": {"approach": "Refactor"}, "note": ""}}))
             answered = (await recv_type(browser, "board"))["board"]
             assert answered["status"] == "answered" and answered["answer"]["values"] == {"approach": "Refactor"}, answered
@@ -1258,7 +1324,7 @@ async def run_protocol(identity: str) -> None:
         await wait_for(lambda: any(path == "/live/sessions/live-test-3/hangup" for path, _ in DaytonaMock.openai_requests), 10)
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
         for expected in ("menu.opened", "menu.closed", "menu.restart.requested", "menu.recovery", "voice.keypad.stop", "voice.keypad.status",
-                         "voice.earcons", "voice.theme", "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted"):
+                         "voice.earcons", "voice.theme", "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted", "pairing.page_stale"):
             assert expected in events, (expected, events)
         handoff_rows = OrchestratorMock.user_message('"key":"7"')
         assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows
@@ -1296,6 +1362,8 @@ async def run_protocol(identity: str) -> None:
             assert "invite-someone" in payload["instructions"]
             assert "Never create a session in home and tell it to work in another directory" in payload["instructions"]
             assert "from what I know, unverified" in payload["instructions"]
+            assert "unless its Prompt Turn is already running or you begin it in the same response" in payload["instructions"]
+            assert "browser_page_stale" in payload["instructions"]
             assert not any(name in payload["instructions"] for name in ("Cedar", "Biscuit", "Kappa", "Dozer"))
             assert "rename an existing session only when the caller asks" in payload["instructions"]
             assert "where something is written down, update the Memory" in payload["instructions"]
