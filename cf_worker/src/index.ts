@@ -757,13 +757,20 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
   // Caller-ID attestation (STIR/SHAKEN) is the only evidence that From is genuine, since
   // the Twilio signature proves only that Twilio sent this request. Record it once per call
   // with which parameters the carrier supplied (keys only, plus non-identifying values).
-  const keys = Array.from(new Set(Array.from(form.keys()))).sort();
-  await audit(env, "call.attestation", from, callSid, {
-    stir_verstat: form.get("StirVerstat") ? String(form.get("StirVerstat")) : null,
-    caller_name_present: Boolean(form.get("CallerName")),
-    from_country: form.get("FromCountry") ? String(form.get("FromCountry")) : null,
-    parameters: keys,
-  });
+  // Re-entering /voice in the same call (after the in-call menu) omits StirVerstat, so only
+  // the first entry is evidence.
+  const attested = callSid ? await env.DB.prepare(
+    "SELECT 1 FROM call_activity WHERE call_sid = ? AND event = 'call.attestation' LIMIT 1",
+  ).bind(callSid).first() : null;
+  if (!attested) {
+    const keys = Array.from(new Set(Array.from(form.keys()))).sort();
+    await audit(env, "call.attestation", from, callSid, {
+      stir_verstat: form.get("StirVerstat") ? String(form.get("StirVerstat")) : null,
+      caller_name_present: Boolean(form.get("CallerName")),
+      from_country: form.get("FromCountry") ? String(form.get("FromCountry")) : null,
+      parameters: keys,
+    });
+  }
 
   if (await isRegistered(env, from)) {
     await env.DB.prepare("UPDATE registrations SET last_seen_at = ? WHERE phone_number = ?")

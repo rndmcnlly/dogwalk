@@ -263,6 +263,8 @@ Dogwalk's application record for one ACP Session. It projects protocol updates i
 
 **Maps to:** Exactly one ACP Session while attached.
 
+A Managed Session is rooted in one Workspace directory chosen when it is created, and keeps it for life: loading or resuming its ACP Session must reuse that directory, because the Agent binds the session (and the project instructions, skills, and configuration it applies) to it. When the recorded directory is missing or the Agent reports a different one, Session Management repairs the record from the Agent's session listing rather than leaving the session unavailable. The Session Orchestrator roots a Managed Session in the project directory the work concerns, never in home with instructions to work elsewhere; a project that must first be cloned is cloned by one Managed Session and worked on by a new one rooted in the clone.
+
 **Not:** An Agent process, Prompt Turn, or long-running task.
 
 ### Alias
@@ -500,7 +502,8 @@ An Attention Request is received from the Agent, queued for the appropriate inte
 
 | Neutral operation | Meaning |
 |---|---|
-| Create Managed Session | Establish a new ACP Session and local projection |
+| Create Managed Session | Establish a new ACP Session, rooted in one existing Workspace directory, and its local projection |
+| List Workspace Projects | Read which directories in the Workspace are projects (repositories or directories with Agent instructions), to choose where to root a Managed Session |
 | Begin Prompt Turn | Send prompt content to a Managed Session |
 | Inspect Managed Session | Read projected state without starting another turn |
 | List Managed Sessions | Discover sessions currently known to Dogwalk |
@@ -605,6 +608,8 @@ The following language appears in Git history and is not canonical for productio
 - Pound now means stop talking in conversation, so a caller who presses pound to end a recording that the Voice Frontend only claimed to start no longer signals the Session Orchestrator. Should a pound press shortly after recording talk also reach it?
 - Should a System Menu restart wait for or inform in-flight Prompt Turns beyond the harness event, and should a restart be refused while a Permission Request is pending?
 - The Opening's welcome line is written when a call ends; how stale may it become (for example after days, or after work that changed what is unfinished) before Dogwalk prefers the neutral fallback?
+- A Managed Session's directory is fixed at creation and Dogwalk does not yet negotiate additional directories, so work spanning two projects needs two Managed Sessions or a shared parent directory. Should Create Managed Session accept additional directories when the Agent advertises them?
+- Is a project an Agent Hosting fact (a directory found in the Sandbox) or a Session Management concept with its own identity, for example so a Managed Session survives a clone being moved or re-cloned?
 - Is the caller-ID clause permanent product behavior or a diagnostic to remove once STIR/SHAKEN attestation is understood across carriers?
 
 ## ACP References

@@ -15,6 +15,8 @@ const MAX_ACTIVITY = 20;
 const ACP_CONNECT_WINDOW_MS = 3 * 60 * 1000;
 const MENU_TIMEOUT_MS = 15_000;
 const MAX_SINCE_GREETING = 4;
+const MAX_SESSION_LIST_PAGES = 10;
+const MAX_WORKSPACE_PROJECTS = 60;
 const ACP_STARTING_ERROR = "the sandbox is still starting; try again after dogs_ready";
 const ACP_UNAVAILABLE_ERROR = "the sandbox could not be reached; another attempt has started, and open_recovery_menu offers a restart";
 
@@ -33,6 +35,9 @@ interface ManagedSession {
   stopReason: string | null;
   title: string | null;
   usage: unknown;
+  // The Workspace directory chosen at creation; ACP requires it again on load and resume.
+  // Absent in older projections, which were all created in WORKSPACE.
+  cwd?: string;
   // Epoch milliseconds, for spoken "how long" readouts; absent in older projections.
   turnStartedAt?: number | null;
   turnEndedAt?: number | null;
@@ -91,7 +96,7 @@ const UNSPEAKABLE = /https?:\/\/|\bses_[A-Za-z0-9]+|\b[0-9a-f]{12,}\b/;
 const TOOLS_NEEDING_ACP = new Set([
   "create_managed_session", "begin_prompt_turn", "cancel_prompt_turn", "resolve_permission",
   "discover_persisted_sessions", "load_persisted_session", "close_managed_session",
-  "play_audio", "start_recording",
+  "play_audio", "start_recording", "list_workspace_projects",
 ]);
 
 interface PendingRpc {
@@ -126,11 +131,14 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "create_managed_session",
-    description: "Create a coding session with a short pronounceable alias. This does not begin work.",
+    description: "Create a coding session with a short pronounceable alias, rooted in one Workspace directory for its whole life. This does not begin work.",
     parameters: {
       type: "object",
-      properties: { alias: { type: "string", description: "Short spoken alias for the session" } },
-      required: ["alias"],
+      properties: {
+        alias: { type: "string", description: "Short spoken alias for the session" },
+        directory: { type: "string", description: "Existing directory the session works in, relative to the home directory (for example a project from list_workspace_projects), or \".\" for home" },
+      },
+      required: ["alias", "directory"],
       additionalProperties: false,
     },
   },
@@ -189,8 +197,14 @@ export const ORCHESTRATOR_TOOLS = [
   },
   {
     type: "function",
+    name: "list_workspace_projects",
+    description: "Lightweight, read-only list of project directories in the Workspace (git repositories or directories with AGENTS.md), with their git remote. Invoke freely to choose where to root a session.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    type: "function",
     name: "discover_persisted_sessions",
-    description: "List sessions from earlier work that exist in the Agent's history but are not attached (not on the leash). Returns short refs and Agent-generated titles; read-only.",
+    description: "List sessions from earlier work that exist in the Agent's history but are not attached (not on the leash). Returns short refs, directories, and Agent-generated titles; read-only.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -328,6 +342,7 @@ Use the delegation_id of the handoff you are answering, or null for unsolicited 
 
 Rules:
 - Refer to sessions only by alias (their tags). Choose short, distinct, pronounceable aliases.
+- Each dog is rooted in one Workspace directory for its whole life, and its Agent applies that directory's AGENTS.md, skills, and configuration. When work concerns a repository or project, create the dog in that project's directory (list_workspace_projects finds them). Never create a dog in home and tell it to work in another directory. If the project must be cloned first, have a dog in home clone it, then create a new dog rooted in the clone. Mention the directory when it helps the caller ("Dozer, in honeydozer").
 - Sessions not on the leash may exist from earlier work: use discover_persisted_sessions when the caller refers to earlier work you do not have, and load_persisted_session to leash one with a fresh alias. Keep the leash short, about five dogs at most; when it grows, suggest letting idle ones go with close_managed_session, which keeps their history.
 - When starting work, write the Agent a proper engineering brief: goal, constraints, what done looks like, and ask it to finish with a short summary of what changed and how it was verified. Do not mention voice, phones, dogs, or this orchestration.
 - A note the caller wants left on the sandbox, or notes they want read back, are errands for a dog like any other work; you cannot touch files yourself.
@@ -382,7 +397,7 @@ export class VoiceSession {
   private orchestratorQueue: string[] = [];
   private orchestrating = false;
   private delegations = new Set<string>();
-  private persistedRefs = new Map<string, string>();
+  private persistedRefs = new Map<string, { acpSessionId: string; cwd: string }>();
   private liveCloseReason: string | null = null;
   // Output fixtures interrupt the model and reject appends, so appends wait for playback.
   private fixture: { done: () => void; timer: ReturnType<typeof setTimeout> } | null = null;
@@ -665,14 +680,37 @@ export class VoiceSession {
     // Resume restores the Agent's context without replaying history as session/update
     // notifications; load (which replays) is the fallback for Agents without resume.
     const method = this.agentCapabilities.sessionCapabilities?.resume ? "session/resume" : "session/load";
+    const restore = (session: ManagedSession, cwd: string) => this.acpRequest(method, {
+      sessionId: session.acpSessionId, cwd, mcpServers: [],
+    });
+    // The Agent rejects a reload from any directory but the session's own, so a legacy record
+    // without one, or one the Agent has since associated elsewhere, is repaired from
+    // session/list, fetched at most once per restore.
+    let listed: Map<string, string> | null = null;
+    const agentCwd = async (acpSessionId: string) => {
+      listed ??= await this.listAgentSessions()
+        .then((items) => new Map(items.map((item) => [item.sessionId, item.cwd])))
+        .catch(() => new Map<string, string>());
+      return listed.get(acpSessionId) ?? null;
+    };
     for (const session of this.sessions.values()) {
       if (session.sessionState === "closed") continue;
       try {
-        await this.acpRequest(method, {
-          sessionId: session.acpSessionId,
-          cwd: WORKSPACE,
-          mcpServers: [],
-        });
+        let cwd = session.cwd ?? await agentCwd(session.acpSessionId) ?? WORKSPACE;
+        try {
+          await restore(session, cwd);
+        } catch (error) {
+          const actual = await agentCwd(session.acpSessionId);
+          if (!actual || actual === cwd) throw error;
+          await restore(session, actual);
+          cwd = actual;
+        }
+        if (session.cwd !== cwd) {
+          await this.record("acp.session.directory_repaired", {
+            alias: session.alias, from: session.cwd ? relativeDirectory(session.cwd) : null, to: relativeDirectory(cwd),
+          });
+          session.cwd = cwd;
+        }
         session.sessionState = "ready";
         if (session.turnState === "in_progress" || session.turnState === "queued") {
           session.turnState = "failed";
@@ -1156,7 +1194,7 @@ export class VoiceSession {
           return spoken;
         }
         case "create_managed_session":
-          result = await this.createManagedSession(requiredString(args, "alias"));
+          result = await this.createManagedSession(requiredString(args, "alias"), requiredString(args, "directory"));
           break;
         case "begin_prompt_turn":
           result = await this.beginPromptTurn(requiredString(args, "alias"), requiredString(args, "prompt"));
@@ -1189,6 +1227,9 @@ export class VoiceSession {
           break;
         case "inspect_call_activity":
           result = await this.inspectCallActivity();
+          break;
+        case "list_workspace_projects":
+          result = await this.listWorkspaceProjects();
           break;
         case "discover_persisted_sessions":
           result = await this.discoverPersistedSessions();
@@ -1225,13 +1266,18 @@ export class VoiceSession {
     return result;
   }
 
-  private async createManagedSession(aliasInput: string): Promise<Record<string, unknown>> {
+  private async createManagedSession(aliasInput: string, directoryInput: string): Promise<Record<string, unknown>> {
     if (!this.acpReady) throw new Error("ACP Agent is unavailable");
     const alias = normalizeAlias(aliasInput);
     if (Array.from(this.sessions.values()).some((item) => item.sessionState !== "closed" && item.alias.toLowerCase() === alias.toLowerCase())) {
       throw new Error(`alias ${alias} is already in use`);
     }
-    const result = await this.acpRequest("session/new", { cwd: WORKSPACE, mcpServers: [] });
+    const cwd = workspaceDirectory(directoryInput);
+    if (cwd !== WORKSPACE) {
+      const check = await this.sandboxExecute(`test -d ${shellQuote(cwd)}`, 15);
+      if (check.exitCode !== 0) throw new Error(`directory ${relativeDirectory(cwd)} does not exist in the Workspace`);
+    }
+    const result = await this.acpRequest("session/new", { cwd, mcpServers: [] });
     const acpSessionId = String(result.sessionId ?? "");
     if (!acpSessionId) throw new Error("ACP Agent returned no session ID");
     const session: ManagedSession = {
@@ -1246,10 +1292,11 @@ export class VoiceSession {
       stopReason: null,
       title: null,
       usage: null,
+      cwd,
     };
     this.sessions.set(session.id, session);
     await this.persistSessions();
-    await this.record("acp.session.created", { alias });
+    await this.record("acp.session.created", { alias, directory: relativeDirectory(cwd) });
     this.queueEarcon("session_created");
     return { ok: true, session: this.publicSession(session) };
   }
@@ -1414,6 +1461,49 @@ export class VoiceSession {
     };
   }
 
+  private async sandboxExecute(command: string, timeoutSeconds: number): Promise<{ result: string; exitCode: number }> {
+    const { toolbox, headers } = await this.toolbox();
+    const response = await fetch(`${toolbox}/process/execute`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ command: `bash -c ${shellQuote(command)}`, timeout: timeoutSeconds, envs: { LC_ALL: "C" } }),
+      signal: AbortSignal.timeout((timeoutSeconds + 5) * 1000),
+    });
+    if (!response.ok) throw new Error(`the sandbox could not run a command (${response.status})`);
+    return response.json<{ result: string; exitCode: number }>();
+  }
+
+  // Candidate roots for Managed Sessions: directories holding a git repository or Agent
+  // instructions, at most three levels below home, skipping caches and hidden directories.
+  private async listWorkspaceProjects(): Promise<Record<string, unknown>> {
+    const script = [
+      `cd ${shellQuote(WORKSPACE)} || exit 1`,
+      "find . -maxdepth 4 \\( -name node_modules -o -name .cache -o -name .local -o -name .config -o -name .npm -o -name recordings \\) -prune"
+        + " -o -name .git -prune -print -o \\( -name '.*' ! -name . \\) -prune -o \\( -name AGENTS.md -o -name AGENT.md \\) -print 2>/dev/null"
+        + ` | sed 's|/[^/]*$||' | sort -u | head -n ${MAX_WORKSPACE_PROJECTS + 1}`
+        + " | while IFS= read -r d; do g=0; a=0; o=;"
+        + ` [ -e "$d/.git" ] && g=1 && o=$(git -C "$d" config --get remote.origin.url 2>/dev/null);`
+        + ` { [ -e "$d/AGENTS.md" ] || [ -e "$d/AGENT.md" ]; } && a=1;`
+        + ` printf '%s\\t%s\\t%s\\t%s\\n' "$d" "$g" "$a" "$o"; done`,
+    ].join("\n");
+    const execution = await this.sandboxExecute(script, 30);
+    if (execution.exitCode !== 0) throw new Error("could not list Workspace projects");
+    const rows = execution.result.split("\n").filter((line) => line.includes("\t"));
+    return {
+      ok: true,
+      projects: rows.slice(0, MAX_WORKSPACE_PROJECTS).map((line) => {
+        const [path, git, agents, origin] = line.split("\t");
+        return {
+          directory: path === "." ? "." : path.replace(/^\.\//, ""),
+          has_agents_md: agents === "1",
+          has_git: git === "1",
+          origin: origin ? withoutCredentials(origin) : null,
+        };
+      }),
+      truncated: rows.length > MAX_WORKSPACE_PROJECTS,
+    };
+  }
+
   // Voice recordings follow voicemail conventions: pound saves, star discards; a length
   // limit and a long silence also end them. The Voice Frontend is muted meanwhile (it hears
   // silence) while GPT-Live keeps reflecting the caller's audio to the sideband.
@@ -1564,38 +1654,57 @@ export class VoiceSession {
 
   private async discoverPersistedSessions(): Promise<Record<string, unknown>> {
     if (!this.acpReady) throw new Error("ACP Agent is unavailable");
-    // Without cwd, OpenCode lists every session on the host; the Workspace bounds discovery.
-    const result = await this.acpRequest("session/list", { cwd: WORKSPACE });
+    // Without a cwd filter OpenCode lists sessions in every directory. The Sandbox holds only
+    // this User's sessions, and the Workspace bounds discovery.
     const attached = new Set(Array.from(this.sessions.values(), (item) => item.acpSessionId));
-    const found = (Array.isArray(result.sessions) ? result.sessions : [])
-      .filter((item: any) => item?.sessionId && !attached.has(String(item.sessionId)))
+    const found = (await this.listAgentSessions())
+      .filter((item) => insideWorkspace(item.cwd) && !attached.has(item.sessionId))
       .slice(0, 12);
     // Refs keep opaque ACP Session IDs out of model context.
-    this.persistedRefs = new Map(found.map((item: any, index: number) => [`r${index + 1}`, String(item.sessionId)]));
+    this.persistedRefs = new Map(found.map((item, index) => [`r${index + 1}`, { acpSessionId: item.sessionId, cwd: item.cwd }]));
     return {
       ok: true,
-      sessions: found.map((item: any, index: number) => ({
-        ref: `r${index + 1}`, title: item.title ?? null, updated_at: item.updatedAt ?? null,
+      sessions: found.map((item, index) => ({
+        ref: `r${index + 1}`, title: item.title, updated_at: item.updatedAt, directory: relativeDirectory(item.cwd),
       })),
     };
   }
 
+  private async listAgentSessions(): Promise<Array<{ sessionId: string; cwd: string; title: string | null; updatedAt: string | null }>> {
+    const sessions: Array<{ sessionId: string; cwd: string; title: string | null; updatedAt: string | null }> = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_SESSION_LIST_PAGES; page++) {
+      const result = await this.acpRequest("session/list", cursor ? { cursor } : {});
+      for (const item of Array.isArray(result.sessions) ? result.sessions : []) {
+        if (!item?.sessionId || typeof item.cwd !== "string") continue;
+        sessions.push({
+          sessionId: String(item.sessionId), cwd: item.cwd, title: item.title ?? null, updatedAt: item.updatedAt ?? null,
+        });
+      }
+      cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : null;
+      if (!cursor) break;
+    }
+    return sessions;
+  }
+
   private async loadPersistedSession(ref: string, aliasInput: string): Promise<Record<string, unknown>> {
     if (!this.acpReady) throw new Error("ACP Agent is unavailable");
-    const acpSessionId = this.persistedRefs.get(ref);
-    if (!acpSessionId) throw new Error(`unknown ref ${ref}; call discover_persisted_sessions first`);
+    const persisted = this.persistedRefs.get(ref);
+    if (!persisted) throw new Error(`unknown ref ${ref}; call discover_persisted_sessions first`);
+    const { acpSessionId, cwd } = persisted;
     const alias = normalizeAlias(aliasInput);
     this.assertAliasFree(alias);
-    // session/resume restores context without replaying history into this projection.
-    await this.acpRequest("session/resume", { sessionId: acpSessionId, cwd: WORKSPACE, mcpServers: [] });
+    // session/resume restores context without replaying history into this projection, and
+    // only from the directory the session was created in.
+    await this.acpRequest("session/resume", { sessionId: acpSessionId, cwd, mcpServers: [] });
     const session: ManagedSession = {
       id: crypto.randomUUID(), alias, acpSessionId, sessionState: "ready", turnState: "idle",
-      assignment: null, report: "", activity: [], stopReason: null, title: null, usage: null,
+      assignment: null, report: "", activity: [], stopReason: null, title: null, usage: null, cwd,
     };
     this.sessions.set(session.id, session);
     this.persistedRefs.delete(ref);
     await this.persistSessions();
-    await this.record("acp.session.loaded", { alias });
+    await this.record("acp.session.loaded", { alias, directory: relativeDirectory(cwd) });
     this.queueEarcon("session_created");
     return { ok: true, session: this.publicSession(session) };
   }
@@ -1815,6 +1924,7 @@ export class VoiceSession {
   private publicSession(session: ManagedSession): Record<string, unknown> {
     return {
       alias: session.alias,
+      directory: relativeDirectory(session.cwd ?? WORKSPACE),
       session_state: session.sessionState,
       turn_state: session.turnState,
       stop_reason: session.stopReason,
@@ -1830,6 +1940,7 @@ export class VoiceSession {
     return {
       managed_sessions: Array.from(this.sessions.values()).slice(-20).map((session) => ({
         alias: session.alias,
+        directory: relativeDirectory(session.cwd ?? WORKSPACE),
         session_state: session.sessionState,
         turn_state: session.turnState,
         stop_reason: session.stopReason,
@@ -2060,6 +2171,28 @@ function normalizeAlias(value: string): string {
   const alias = value.trim().replace(/\s+/g, " ");
   if (!alias || alias.length > 40) throw new Error("alias must contain 1 to 40 characters");
   return alias;
+}
+
+// A Managed Session's directory: absolute inside the Workspace, or relative to it.
+function workspaceDirectory(input: string): string {
+  const raw = input.trim();
+  const segments = (raw.startsWith("/") ? raw : `${WORKSPACE}/${raw}`).split("/").filter((part) => part && part !== ".");
+  const path = `/${segments.join("/")}`;
+  if (segments.includes("..") || !insideWorkspace(path)) throw new Error("directory must be inside the Workspace");
+  return path;
+}
+
+function insideWorkspace(path: string): boolean {
+  return path === WORKSPACE || path.startsWith(`${WORKSPACE}/`);
+}
+
+function relativeDirectory(cwd: string): string {
+  return cwd === WORKSPACE ? "." : cwd.startsWith(`${WORKSPACE}/`) ? cwd.slice(WORKSPACE.length + 1) : cwd;
+}
+
+// Remote URLs may embed access tokens (https://user:token@host/...); never return them.
+function withoutCredentials(url: string): string {
+  return url.trim().replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, "$1").replace(/[?#].*$/, "");
 }
 
 function errorMessage(error: unknown): string {

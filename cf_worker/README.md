@@ -150,7 +150,11 @@ fast with "the sandbox is still starting; try again after dogs_ready", while
 projection. A dropped Agent Connection mid-call reconnects in the background
 instead of hanging up. On reconnect, Managed Sessions are restored with
 `session/resume` when the Agent advertises `sessionCapabilities.resume` in
-`initialize`, otherwise `session/load`.
+`initialize`, otherwise `session/load`, always from the session's recorded
+directory (OpenCode rejects a reload from any other). A record without a
+directory, or one whose reload fails, is repaired from the session's `cwd` in
+`session/list` and retried once; the audit records
+`acp.session.directory_repaired`.
 
 The Opening is deterministic and costs no model call at connection:
 `<caller-ID clause> Dogwalk. <welcome line> Where to?` The caller-ID clause is
@@ -198,12 +202,17 @@ delegation (a Handoff) when the caller asks about work. The Session Orchestrator
 runs inside the Durable Object as a Responses API tool loop on
 `ORCHESTRATOR_MODEL` (default `gpt-6.1-sol`, `low` reasoning effort). It reads the
 call transcript up to each delegation, operates Managed Sessions through the
-neutral operations (`create_managed_session`, `begin_prompt_turn`,
-`inspect_managed_session`, `list_managed_sessions`, `cancel_prompt_turn`,
-`resolve_permission`, `discover_persisted_sessions` (ACP `session/list` bounded
-to the Workspace), `load_persisted_session` (`session/resume` with a fresh
-Alias), `set_alias`, `close_managed_session` (`session/close`; history is kept),
-plus call control), and answers through `brief`
+neutral operations (`create_managed_session` (`session/new` rooted in an
+existing directory under `/home/daytona`, checked with `test -d` through the
+Daytona toolbox), `begin_prompt_turn`, `inspect_managed_session`,
+`list_managed_sessions`, `cancel_prompt_turn`, `resolve_permission`,
+`list_workspace_projects` (git repositories and `AGENTS.md` directories up to
+three levels below home, with credential-free origin URLs),
+`discover_persisted_sessions` (ACP `session/list` across all directories,
+following `nextCursor`, keeping those inside `/home/daytona`),
+`load_persisted_session` (`session/resume` from the session's own directory,
+with a fresh Alias), `set_alias`, `close_managed_session` (`session/close`;
+history is kept), plus call control), and answers through `brief`
 (`session.thinking.append`) and `say` (`session.commentary.append`). Events that
 arrive mid-loop are injected before its next model call, so corrections steer
 work in flight. Its context persists in Durable Object storage across calls;

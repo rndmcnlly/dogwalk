@@ -46,6 +46,9 @@ class DaytonaMock(BaseHTTPRequestHandler):
     force_state: str | None = None
     start_count = 0
     preview_reads = 0
+    # Toolbox commands seen, and optional handlers that answer some of them.
+    executed: list[str] = []
+    execute_hooks: list = []
 
     def sandbox(self, state: str = "started") -> dict:
         return {
@@ -125,6 +128,13 @@ class DaytonaMock(BaseHTTPRequestHandler):
             self.reply(self.sandbox("stopping"))
             return
         if self.path == f"/toolbox/mock-sandbox-{self.generation}/process/execute":
+            command = str(payload.get("command", ""))
+            DaytonaMock.executed.append(command)
+            for hook in DaytonaMock.execute_hooks:
+                answer = hook(command)
+                if answer is not None:
+                    self.reply(answer)
+                    return
             result = (
                 "ready"
                 if payload.get("command") == "printf ready"
@@ -364,6 +374,13 @@ def run_tests(
             time.sleep(0.2)
         require(DaytonaMock.preview_reads > 0, "prewarm did not reach the VoiceSession")
 
+        # Re-entering /voice in the same call (as the in-call menu does) keeps the first
+        # caller-ID attestation rather than recording one without StirVerstat.
+        status, body = post(
+            base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_TEST2"}, token
+        )
+        require(status == 200 and "<Dial" in body, f"voice re-entry: {status} {body}")
+
         # A stopped Sandbox is started without waiting, and the call is dialed at once.
         time.sleep(3.1)
         DaytonaMock.force_state = "stopped"
@@ -492,6 +509,11 @@ def run_tests(
         {"voice", "hosting", "menu"}.issubset(sources),
         f"call activity sources incomplete: {sources}",
     )
+    attestations = [a for a in test2["activity"] if a["event"] == "call.attestation"]
+    require(
+        len(attestations) == 1,
+        f"caller-ID attestation not recorded exactly once per call: {len(attestations)}",
+    )
 
     call_sids = ["CA_TEST1", "CA_TEST2"]
     if replacement_call:
@@ -521,7 +543,7 @@ def run_tests(
         f"completed calls remain live: {closed_state.get('live_calls')}",
     )
 
-    print("29 checks passed" if mock_daytona else "20 checks passed")
+    print("31 checks passed" if mock_daytona else "21 checks passed")
     return 0
 
 

@@ -58,6 +58,22 @@ class SocketMocks:
         # The Agent answers initialize late, so the call starts before the dogs are ready.
         self.init_delay = 1.5
         self.advertise_resume = False
+        # Like OpenCode, the Agent reloads a session only from the directory it belongs to.
+        self.session_cwds = {
+            PERSISTED_SESSION_ID: "/home/daytona/parser",
+            "ses_elsewhere0outside": "/tmp/elsewhere",
+        }
+
+    def session_entries(self) -> list[dict]:
+        return [
+            {
+                "sessionId": session_id,
+                "cwd": cwd,
+                "title": PERSISTED_TITLE if session_id == PERSISTED_SESSION_ID else "Other work",
+                "updatedAt": "2026-11-06T18:30:00Z",
+            }
+            for session_id, cwd in self.session_cwds.items()
+        ]
 
     async def handler(self, socket) -> None:
         if socket.request.path == "/acp":
@@ -72,31 +88,29 @@ class SocketMocks:
                 method = message.get("method")
                 if request_id is None:
                     continue
+                params = message.get("params") or {}
+                error = None
                 if method == "initialize":
                     await asyncio.sleep(self.init_delay)
                     capabilities = {"sessionCapabilities": {"resume": {}}} if self.advertise_resume else {}
                     result = {"protocolVersion": 1, "agentCapabilities": capabilities}
                 elif method == "session/new":
-                    result = {"sessionId": "acp-session-test"}
-                elif method == "session/load":
+                    cwd = params["cwd"]
+                    session_id = "acp-session-test" if cwd == "/home/daytona" else f"acp-session-{Path(cwd).name}"
+                    self.session_cwds[session_id] = cwd
+                    result = {"sessionId": session_id}
+                elif method in ("session/load", "session/resume"):
                     result = {}
+                    expected = self.session_cwds.get(params["sessionId"], params["cwd"])
+                    if params["cwd"] != expected:
+                        error = {"code": -32603, "message": "persisted session belongs to another directory"}
                 elif method == "session/list":
-                    result = {
-                        "sessions": [
-                            {
-                                "sessionId": "acp-session-test",
-                                "cwd": "/home/daytona",
-                                "title": "Tiny verified artifact",
-                                "updatedAt": "2026-11-07T10:00:00Z",
-                            },
-                            {
-                                "sessionId": PERSISTED_SESSION_ID,
-                                "cwd": "/home/daytona",
-                                "title": PERSISTED_TITLE,
-                                "updatedAt": "2026-11-06T18:30:00Z",
-                            },
-                        ]
-                    }
+                    # Two entries per page, so discovery must follow nextCursor.
+                    start = int(params.get("cursor") or 0)
+                    entries = self.session_entries()
+                    result = {"sessions": entries[start:start + 2]}
+                    if start + 2 < len(entries):
+                        result["nextCursor"] = str(start + 2)
                 elif method == "session/prompt":
                     await asyncio.sleep(0.2)
                     await socket.send(
@@ -120,8 +134,9 @@ class SocketMocks:
                     result = {"stopReason": "end_turn"}
                 else:
                     result = {}
+                outcome = {"error": error} if error else {"result": result}
                 await socket.send(
-                    json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result})
+                    json.dumps({"jsonrpc": "2.0", "id": request_id, **outcome})
                 )
             return
 
@@ -198,13 +213,13 @@ ORCHESTRATOR_SCRIPT = [
     # Session tools fail fast while the Sandbox is still starting.
     ("call_started", lambda ctx: [
         call("cs-brief", "brief", text=CALL_BRIEF, delegation_id=None),
-        call("cs-create", "create_managed_session", alias="Early"),
+        call("cs-create", "create_managed_session", alias="Early", directory="."),
         call("cs-list", "list_managed_sessions"),
     ]),
     ("[harness event] dogs_ready", lambda ctx: [call("dr-brief", "brief", text=READY_BRIEF, delegation_id=None)]),
     ("[handoff del-1]", lambda ctx: [
         call("h1-brief", "brief", text=WORK_BRIEF, delegation_id="del-1"),
-        call("h1-create", "create_managed_session", alias="Juniper"),
+        call("h1-create", "create_managed_session", alias="Juniper", directory="."),
     ]),
     ("[handoff del-1]", lambda ctx: [
         call("h1-begin", "begin_prompt_turn", alias=created_alias(ctx), prompt=AGENT_PROMPT),
@@ -228,6 +243,15 @@ ORCHESTRATOR_SCRIPT = [
     ]),
     ("[handoff del-3]", lambda ctx: [call("h3-close", "close_managed_session", alias="Rowan")]),
     ("[handoff del-3]", lambda ctx: [call("h3-list", "list_managed_sessions")]),
+    # Sessions are rooted in project directories, which must exist inside the Workspace.
+    ("[handoff del-3]", lambda ctx: [call("h3-projects", "list_workspace_projects")]),
+    ("[handoff del-3]", lambda ctx: [
+        call("h3-dozer", "create_managed_session", alias="Dozer", directory="honeydozer"),
+    ]),
+    ("[handoff del-3]", lambda ctx: [
+        call("h3-ghost", "create_managed_session", alias="Ghost", directory="missing"),
+        call("h3-escape", "create_managed_session", alias="Escape", directory="../etc"),
+    ]),
     ("[handoff del-3]", lambda ctx: [call("h3-say", "say", text=LEASH_SAY, delegation_id="del-3")]),
     ("[handoff del-4]", lambda ctx: [
         call("h4-say", "say", text=FAREWELL_SAY, delegation_id="del-4"),
@@ -239,7 +263,8 @@ ORCHESTRATOR_SCRIPT = [
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
     "ts-say", "h2-inspect", "h2-say",
-    "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list", "h3-say",
+    "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
+    "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
     "h4-say", "h4-end", "k7-say",
 ]
 
@@ -506,9 +531,10 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(delegation("del-1", 2150))
         work_brief = await next_matching(mocks.live_messages, appended("thinking", WORK_BRIEF))
         assert work_brief["delegation_id"] == "del-1"
-        await next_matching(
+        created = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/new"
         )
+        assert created["params"] == {"cwd": "/home/daytona", "mcpServers": []}
         prompt_request = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/prompt"
         )
@@ -525,7 +551,8 @@ async def run_protocol(identity: str) -> None:
         assert '"stop_reason":"end_turn"' in stopped and "Bridge report complete." in stopped
         rejected = OrchestratorMock.tool_output("h1-say-url")
         assert rejected["ok"] is False and "URL" in rejected["error"]
-        assert OrchestratorMock.tool_output("h1-create")["session"]["alias"] == "Juniper"
+        juniper = OrchestratorMock.tool_output("h1-create")["session"]
+        assert juniper["alias"] == "Juniper" and juniper["directory"] == "."
         assert OrchestratorMock.tool_output("h1-begin")["turn_state"] == "in_progress"
 
         # Handoff 2: a follow-up question answered from session inspection.
@@ -542,15 +569,21 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(transcript("input", "Pick up that parser work from yesterday ", 7000, 8000))
         await mocks.send_live(transcript("input", "as Birch, call it Rowan, then let it go.", 8000, 8800))
         await mocks.send_live(delegation("del-3", 8850))
+        # Discovery lists every directory (following nextCursor) and resumes from the
+        # session's own directory.
         listed = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/list"
         )
-        assert listed["params"] == {"cwd": "/home/daytona"}
+        assert listed["params"] == {}
+        listed = await next_matching(
+            mocks.acp_messages, lambda item: item.get("method") == "session/list"
+        )
+        assert listed["params"] == {"cursor": "2"}
         resumed = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/resume"
         )
         assert resumed["params"] == {
-            "sessionId": PERSISTED_SESSION_ID, "cwd": "/home/daytona", "mcpServers": [],
+            "sessionId": PERSISTED_SESSION_ID, "cwd": "/home/daytona/parser", "mcpServers": [],
         }
         closed = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/close"
@@ -561,7 +594,7 @@ async def run_protocol(identity: str) -> None:
         discovered = OrchestratorMock.tool_output("h3-discover")
         assert discovered["ok"] is True
         assert discovered["sessions"] == [
-            {"ref": "r1", "title": PERSISTED_TITLE, "updated_at": "2026-11-06T18:30:00Z"}
+            {"ref": "r1", "title": PERSISTED_TITLE, "updated_at": "2026-11-06T18:30:00Z", "directory": "parser"}
         ]
         discovered_raw = json.dumps(discovered)
         assert "sessionId" not in discovered_raw and "ses_" not in discovered_raw
@@ -575,6 +608,24 @@ async def run_protocol(identity: str) -> None:
         remaining = OrchestratorMock.tool_output("h3-list")
         assert [item["alias"] for item in remaining] == ["Juniper"]
         assert "Rowan" not in json.dumps(remaining)
+        projects = OrchestratorMock.tool_output("h3-projects")
+        assert projects["ok"] is True and projects["projects"] == [
+            {"directory": ".", "has_agents_md": True, "has_git": False, "origin": None},
+            {
+                "directory": "honeydozer", "has_agents_md": True, "has_git": True,
+                "origin": "https://github.com/rndmcnlly/honeydozer.git",
+            },
+        ], projects
+        assert "ghp_" not in json.dumps(projects)
+        dozer = OrchestratorMock.tool_output("h3-dozer")
+        assert dozer["ok"] is True and dozer["session"]["directory"] == "honeydozer", dozer
+        news = [m["params"]["cwd"] for m in mocks.acp_seen if m.get("method") == "session/new"]
+        assert news == ["/home/daytona", "/home/daytona/honeydozer"], news
+        ghost = OrchestratorMock.tool_output("h3-ghost")
+        assert ghost["ok"] is False and "does not exist" in ghost["error"], ghost
+        escape = OrchestratorMock.tool_output("h3-escape")
+        assert escape["ok"] is False and "inside the Workspace" in escape["error"], escape
+        assert any("test -d" in command and "honeydozer" in command for command in DaytonaMock.executed)
 
         # Handoff 4: farewell and end_call in one response; hangup follows the farewell.
         await mocks.send_live(transcript("input", "Thanks, hang up now.", 9000, 10000))
@@ -601,6 +652,9 @@ async def run_protocol(identity: str) -> None:
             },
         }))
         await asyncio.sleep(0.5)
+        # As in production, the Agent has since associated Juniper with a project directory,
+        # so resuming from the recorded home directory fails until Dogwalk repairs it.
+        mocks.session_cwds["acp-session-test"] = "/home/daytona/honeydozer"
         await mocks.acp.close()
         await asyncio.sleep(0.3)
 
@@ -613,11 +667,18 @@ async def run_protocol(identity: str) -> None:
         await asyncio.wait_for(mocks.live_connected.wait(), 8)
         opening = await next_matching(mocks.live_messages, appended("commentary", RETURN_OPENING))
         assert opening["delegation_id"] is None
-        restored = await next_matching(
-            mocks.acp_messages,
-            lambda item: item.get("method") == "session/resume" and item["params"]["sessionId"] == "acp-session-test",
-        )
+        def resume_of(session_id: str):
+            return lambda item: item.get("method") == "session/resume" and item["params"]["sessionId"] == session_id
+
+        restored = await next_matching(mocks.acp_messages, resume_of("acp-session-test"))
         assert restored["params"] == {"sessionId": "acp-session-test", "cwd": "/home/daytona", "mcpServers": []}
+        await next_matching(mocks.acp_messages, lambda item: item.get("method") == "session/list")
+        repaired = await next_matching(mocks.acp_messages, resume_of("acp-session-test"))
+        assert repaired["params"]["cwd"] == "/home/daytona/honeydozer", repaired
+        dozer_restored = await next_matching(mocks.acp_messages, resume_of("acp-session-honeydozer"))
+        assert dozer_restored["params"] == {
+            "sessionId": "acp-session-honeydozer", "cwd": "/home/daytona/honeydozer", "mcpServers": [],
+        }
         assert not any(m.get("method") == "session/load" for m in mocks.acp_seen)
         assert mocks.acp_connections == 2 and DaytonaMock.preview_reads == 1, (
             "the ACP preview URL was not reused", mocks.acp_connections, DaytonaMock.preview_reads,
@@ -695,8 +756,9 @@ async def run_protocol(identity: str) -> None:
             assert {tool["name"] for tool in payload["tools"]} >= {
                 "brief", "say", "create_managed_session", "begin_prompt_turn", "end_call",
                 "discover_persisted_sessions", "load_persisted_session", "set_alias",
-                "close_managed_session",
+                "close_managed_session", "list_workspace_projects",
             }
+            assert "Never create a dog in home and tell it to work in another directory" in payload["instructions"]
         fed_back = {
             item["call_id"]
             for _, payload in requests
@@ -704,6 +766,19 @@ async def run_protocol(identity: str) -> None:
             if item.get("type") == "function_call_output"
         }
         assert fed_back == set(STEP_IDS)
+
+
+def sandbox_toolbox(command: str) -> dict | None:
+    """Sandbox commands: honeydozer is the only project directory besides home."""
+    if "test -d" in command:
+        return {"result": "", "exitCode": 0 if "/home/daytona/honeydozer" in command else 1}
+    if "remote.origin.url" in command:
+        rows = [
+            ".\t0\t1\t",
+            "./honeydozer\t1\t1\thttps://x-access-token:ghp_mocksecret@github.com/rndmcnlly/honeydozer.git",
+        ]
+        return {"result": "\n".join(rows) + "\n", "exitCode": 0}
+    return None
 
 
 def main() -> int:
@@ -720,6 +795,8 @@ def main() -> int:
     DaytonaMock.generation = 1
     DaytonaMock.openai_requests = []
     DaytonaMock.preview_reads = 0
+    DaytonaMock.executed = []
+    DaytonaMock.execute_hooks = [sandbox_toolbox]
     daytona = ThreadingHTTPServer(("127.0.0.1", DAYTONA_MOCK_PORT), DaytonaMock)
     thread = threading.Thread(target=daytona.serve_forever, daemon=True)
     thread.start()
