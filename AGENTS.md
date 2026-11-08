@@ -6,6 +6,8 @@ The production path is Twilio PSTN -> Cloudflare Worker access and Sandbox wake-
 
 This is a public repository for one operator-managed deployment. It is acceptable to document public hostnames, provider resource IDs, local Keychain service names, and commands that retrieve secrets on Adam's laptop. Never commit secret values, local `.env` or `.dev.vars` files, private keys, capability tokens, signed preview URLs, or production request payloads containing them.
 
+Adam is the only user. Prefer destructive back-patches of D1 and Durable Object storage (a migration file, a one-time fix, or letting state be recreated) over backwards-compatibility code paths; when a schema or stored shape changes, migrate the data and delete the compatibility branch. Pending cleanup: once the next call has repaired the legacy `Dozer` record through `restoreSessions`, make `ManagedSession.cwd` required and drop the `?? WORKSPACE` fallbacks.
+
 A Managed Session wraps one retained ACP Session. Its mutable Alias is pronounceable, while the ACP Session ID remains an opaque implementation identifier.
 
 ## Domain Language
