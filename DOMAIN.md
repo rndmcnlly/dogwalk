@@ -123,7 +123,19 @@ The reasoning component of the Voice Agent. It reads Handoffs and harness events
 
 It is a client of Session Management, never a replacement for it: Managed Session and Prompt Turn projections remain authoritative, and the Orchestrator reports completion only from them.
 
+Its context is bounded by its own judgment: it compacts by rewriting its Memory, which drops earlier conversation from its context (see Memory).
+
 **Not:** An ACP Agent, the Session Manager, or a store of record.
+
+### Memory
+
+**Context:** Voice Interaction
+
+The Session Orchestrator's curated, bounded note of what matters across Voice Calls: the User's preferences, ongoing projects, what each Managed Session is for, commitments, and loose ends. The Orchestrator alone writes it, and rewrites it whole rather than appending: a **Compaction** replaces the Memory and removes the conversation before a safe point (the start of the current Voice Call, or a recent stretch when the call is long) from the Orchestrator's context, archiving it for diagnostics. Compaction is voluntary; the Orchestrator senses its context size and decides when, typically as a chapter of work closes, and does not mention it to the User unless asked. The Memory is pinned at the head of every Orchestrator model call and informs the Opening's welcome line. A backstop drops the oldest context when the Orchestrator neglects to compact and its context grows near the model's limit, and records that it happened.
+
+The User does not edit the Memory directly; they may ask the Voice Agent to remember or forget something, which the Orchestrator honors at its next Compaction. It is readable, read-only, on the Diagnostics Surface and on a Paired Browser.
+
+**Not:** The Orchestrator's conversation history, an ACP Session's history, a Voice Agent Skill, or a note in the Workspace.
 
 ### ACP Client
 
@@ -406,7 +418,7 @@ Pairing is acoustic and confirmed by keypad. On request the Session Orchestrator
 
 A pairing attempt never ends in silence. When the tones have played and no browser claims the code within ten seconds, the Session Orchestrator receives a `pairing_unclaimed` harness event and answers the User at once: offering slower tones when pages reported **Decode Failures**, otherwise suggesting speakerphone, volume, and distance, then offering to play them again. A Decode Failure is a pairing page's anonymous report that it heard Pairing Tones but could not decode them (coarse counts: the stage that failed, symbols heard, erasures, the closest symbol rate, never code bits). Before a claim nothing ties a page to a call, so the event's count covers every report since the attempt began: advisory, and adequate while Dogwalk has one operator. Reports are kept only while some Pairing Code is outstanding and trimmed to the newest few hundred.
 
-At most one browser is paired at a time: accepting a new one unpairs the previous one and ends what it launched. The Session Orchestrator knows when the paired page is open and can show the User something on it: a Workspace file or folder, a Managed Session, the call timeline, or a web page, or offer a Human Takeover. Files, folders, and views open on the page at once; anything that needs a new tab (a takeover, a web page) waits for the User's click. HTML files render isolated: scripts run at an opaque origin with no network access, so reports meant for the page are self-contained.
+At most one browser is paired at a time: accepting a new one unpairs the previous one and ends what it launched. The Session Orchestrator knows when the paired page is open and can show the User something on it: a Workspace file or folder, a Managed Session, the call timeline, its Memory, or a web page, or offer a Human Takeover. Files, folders, and views open on the page at once; anything that needs a new tab (a takeover, a web page) waits for the User's click. HTML files render isolated: scripts run at an opaque origin with no network access, so reports meant for the page are self-contained.
 
 An accepted browser holds a credential that names its Sandbox Assignment's Voice Session and a secret checked only there, kept in that browser tab's session storage. It outlasts the Voice Call and lapses after an hour without use, twelve hours in all, when the User unpairs it from the page, or when the Sandbox is replaced. Its connection never keeps Agent work or the Sandbox awake.
 
@@ -721,7 +733,7 @@ The following language appears in Git history and is not canonical for productio
 - Which parts of Assignment history belong to Dogwalk versus the ACP Agent's retained session context?
 
 - Should the Session Orchestrator ever act without a live User utterance, for example starting a follow-up Prompt Turn after a failure? That is an authorization question first, and the current answer is no.
-- How should the Session Orchestrator's persistent context be compacted, and which parts of it, if any, should become User-visible notes in the Workspace, the way a coworker's notebook would be?
+- Resolved: the Session Orchestrator's persistent context is compacted voluntarily into its Memory (see Memory), readable on a Paired Browser. Still open: should parts of the Memory also become notes in the Workspace, the way a coworker's notebook would be, and should a Sandbox replacement reset it?
 - When a newer Handoff arrives while work for an older one is in flight, which supersession rules belong in deterministic code rather than Orchestrator judgment?
 
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.

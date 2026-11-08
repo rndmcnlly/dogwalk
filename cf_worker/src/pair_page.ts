@@ -137,7 +137,9 @@ details summary{cursor:pointer}
 .banner .text{flex:1 1 16em;min-width:0}
 .banner .note{display:block;font-size:13px;color:var(--body)}
 .banner .host{display:block;font:700 19px/1.3 var(--mono);color:var(--ink);overflow-wrap:anywhere}
-.card.flash{animation:flash 2.4s ease-out}
+.card.flash,.memory.flash{animation:flash 2.4s ease-out}
+.memory{margin:18px 0 0;border-radius:var(--radius)}
+.memory-text{white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.45 var(--mono);background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;margin:0;max-height:24em;overflow:auto}
 @keyframes flash{0%,40%{box-shadow:0 0 0 4px var(--accent);background:var(--highlight)}100%{box-shadow:0 0 0 0 transparent}}
 
 /* Sessions */
@@ -468,6 +470,13 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
           <p id="sandbox" class="small muted"></p>
           <div id="sessions"></div>
           <div id="closed"></div>
+          <section id="memory" class="memory" aria-labelledby="memoryHeading">
+            <h2 id="memoryHeading">Memory</h2>
+            <p class="explain small muted">What the walker keeps in mind across calls, in its own words. Read-only; ask aloud if something should change.</p>
+            <p id="memoryEmpty" class="small muted">Nothing noted yet.</p>
+            <pre id="memoryText" class="memory-text" hidden></pre>
+            <p id="memoryWhen" class="small muted"></p>
+          </section>
         </div>
         <div id="liveFeed" class="live-col">
           <h2>Call timeline</h2>
@@ -1270,6 +1279,7 @@ function onMessage(m) {
     case "show": onShow(m); break;
     case "board": wbOnBoard(m.board); break;
     case "boards": wbOnBoards(m.boards); break;
+    case "memory": renderMemory(m.memory); break;
     case "error":
       if (m.id != null) {
         if (m.id === pendingList) $("fileNote").textContent = "Error: " + m.error;
@@ -3234,7 +3244,7 @@ addEventListener("pagehide", wbCloseTab);
 // ==== WHITEBOARD END ====
 
 // ---- The walker shows the user something: {"type":"show","uri":"...","note":"..."}.
-// dogwalk:file/<path>, dogwalk:dir/<path>, dogwalk:session/<Alias>, dogwalk:timeline and dogwalk:whiteboard navigate
+// dogwalk:file/<path>, dogwalk:dir/<path>, dogwalk:session/<Alias>, dogwalk:timeline, dogwalk:whiteboard and dogwalk:memory navigate
 // this page at once, with a toast. dogwalk:terminal, dogwalk:desktop and http(s) URLs need a new tab,
 // which a browser opens only from a click, so they raise a banner with a button instead.
 const BANNER_MS = 120000;
@@ -3284,6 +3294,15 @@ function onShow(m) {
     wbReveal();
     return walkerShowed(wbBoards.size ? "The walker pointed you to the whiteboard" : "The walker opened the whiteboard, but nothing is drawn on it yet", note);
   }
+  if (uri === "dogwalk:memory") {
+    showLive("sessions");
+    const section = $("memory");
+    section.classList.remove("flash");
+    void section.offsetWidth; // restart the animation
+    section.classList.add("flash");
+    section.scrollIntoView({ block: "start", behavior: REDUCED_MOTION.matches ? "auto" : "smooth" });
+    return walkerShowed("The walker showed you what it keeps in mind", note);
+  }
   if (uri === "dogwalk:terminal" || uri === "dogwalk:desktop") {
     const kind = uri.slice("dogwalk:".length);
     return showBanner("The walker wants to show you the " + kind, "", note, "Open " + kind, () => launch(kind));
@@ -3300,6 +3319,16 @@ function onShow(m) {
       () => window.open(href, "_blank", "noopener,noreferrer"));
   }
   console.warn("show: ignoring an unknown URI: " + uri);
+}
+
+// ---- Memory: {"type":"memory","memory":{"ts":...,"text":"..."}|null}, the Session Orchestrator's own
+// note, sent after the feed snapshot and whenever it is rewritten. Shown as text, never as markup.
+function renderMemory(memory) {
+  const text = memory && typeof memory.text === "string" ? memory.text : "";
+  $("memoryEmpty").hidden = Boolean(text);
+  $("memoryText").hidden = !text;
+  $("memoryText").textContent = text;
+  $("memoryWhen").textContent = text && memory.ts ? "Last rewritten " + new Date(memory.ts).toLocaleString() : "";
 }
 
 // A navigation already happened: say so briefly, and notify if the tab is hidden.

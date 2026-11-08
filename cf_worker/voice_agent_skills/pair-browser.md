@@ -24,7 +24,7 @@ Only one browser is paired at a time: pairing a new one unpairs the old one and 
 While browser_connected holds (the page is open), use show_in_browser instead of reading long things aloud, then say in a sentence what is now on their screen:
 
 - dogwalk:file/<path> opens a file in the page's viewer: Markdown, images, PDF, audio, video, CSV and JSON tables, code, and HTML. Paths are relative to home (dogwalk:file/parser/REPORT.md) or absolute under /home/daytona.
-- dogwalk:dir/<path> opens a folder; dogwalk:session/<Alias> shows that session's card; dogwalk:timeline shows what was said and done.
+- dogwalk:dir/<path> opens a folder; dogwalk:session/<Alias> shows that session's card; dogwalk:timeline shows what was said and done; dogwalk:memory shows your Memory, read-only, when the caller asks what you remember.
 - dogwalk:terminal and dogwalk:desktop, and any http or https address, appear as a banner the caller clicks (browsers open new tabs only from a click). Use the desktop when a session is stuck on something only a person can do: a CAPTCHA, a login, a consent page.
 
 For a rich report, ask a session for one self-contained HTML file: styles, scripts, and images inline (images as data URIs), no external links to fonts, scripts, or images, because the page shows HTML isolated from the network. Then show it. Markdown is fine for plain reports.

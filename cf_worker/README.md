@@ -325,7 +325,7 @@ are revoked, its page closes with 4003). The Orchestrator gets
 `browser_connected` and `browser_disconnected` harness events and
 `paired_browser` in its call-start snapshot, and `show_in_browser` sends the
 page `{type: "show", uri, note}` for `dogwalk:file/<path>`, `dogwalk:dir/<path>`,
-`dogwalk:session/<Alias>`, `dogwalk:timeline`, `dogwalk:terminal`,
+`dogwalk:session/<Alias>`, `dogwalk:timeline`, `dogwalk:whiteboard`, `dogwalk:memory`, `dogwalk:terminal`,
 `dogwalk:desktop`, or an http(s) address. Files and views open directly;
 takeovers and web pages show a banner the User clicks. HTML renders in an
 `<iframe sandbox="allow-scripts">` from `srcdoc` with a prepended CSP of

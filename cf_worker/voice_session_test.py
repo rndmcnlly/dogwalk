@@ -298,6 +298,9 @@ ORCHESTRATOR_SCRIPT = [
     ('"key":"9"', lambda ctx: [call("k9-show", "show_in_browser", uri="dogwalk:file/REPORT.md", note="the report")]),
     ('"key":"4"', lambda ctx: [call("k4-state", "inspect_call_state")]),
     ('"key":"5"', lambda ctx: [call("k5-board", "draw_on_whiteboard", program=BOARD_PROGRAM, note="pick one")]),
+    # A chapter closes: the Orchestrator compacts. An over-long Memory is refused first.
+    ("[harness event] whiteboard_answer", lambda ctx: [call("cc-long", "compact_context", memory="x" * 12_001)]),
+    ("[harness event] whiteboard_answer", lambda ctx: [call("cc-memory", "compact_context", memory=MEMORY_TEXT)]),
     ('"key":"3"', lambda ctx: [
         call("k3-say", "say", text=SWITCH_SAY, delegation_id=None),
         call("k3-theme", "set_theme", theme="survey", register="high"),
@@ -308,13 +311,14 @@ ORCHESTRATOR_SCRIPT = [
         "arguments": json.dumps({"name": "runtime-dramaturgy"}),
     }]),
 ]
+MEMORY_TEXT = "Caller prefers terse updates. Juniper fixes the parser; Dozer works in honeydozer."
 BOARD_PROGRAM = 'root = Stack([pick])\npick = Choice("approach", ["Quick fix", "Refactor"], "Which approach?")'
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
-    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "k3-say", "k3-theme",
+    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "k3-say", "k3-theme",
     "k2-dramaturgy",
 ]
 
@@ -999,6 +1003,7 @@ async def run_protocol(identity: str) -> None:
             assert browser_state["paired"] and browser_state["page_open"] and browser_state["device"] == "Chrome on a Mac", browser_state
             assert browser_state["showing_now"] == {"view": "files", "path": "/home/daytona/REPORT.md"}, browser_state
             assert state["earcon_style"] == "tonal", state
+            assert state["context_tokens"] == 1 and state["memory"] is None, state
             # The Orchestrator draws a board; the caller answers it on the page; it hears the answer.
             await mocks.send_live(dtmf("5"))
             board = (await recv_type(browser, "board", 15))["board"]
@@ -1007,6 +1012,24 @@ async def run_protocol(identity: str) -> None:
             answered = (await recv_type(browser, "board"))["board"]
             assert answered["status"] == "answered" and answered["answer"]["values"] == {"approach": "Refactor"}, answered
             await wait_for(lambda: any("whiteboard_answer" in str(item.get("content")) and "Refactor" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
+            # The Orchestrator compacts after the answer: an over-long Memory is refused, then the
+            # next request leads with the pinned Memory and has shed the first call, with every
+            # function call still paired with its output.
+            await wait_for(lambda: any(item.get("call_id") == "cc-memory" and item.get("type") == "function_call_output" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
+            refused_memory = OrchestratorMock.tool_output("cc-long")
+            assert refused_memory["ok"] is False and "condense" in refused_memory["error"], refused_memory
+            compacted = next(payload["input"] for _, payload in OrchestratorMock.requests if any(item.get("call_id") == "cc-memory" and item.get("type") == "function_call_output" for item in payload["input"]))
+            assert compacted[0] == {"role": "developer", "content": f"[memory] {MEMORY_TEXT}"}, compacted[0]
+            assert not any(item.get("call_id") == "h1-create" for item in compacted), "the first call survived compaction"
+            assert compacted[1].get("role") == "user", compacted[1]
+            calls_in = {item["call_id"] for item in compacted if item.get("type") == "function_call"}
+            outputs_in = {item["call_id"] for item in compacted if item.get("type") == "function_call_output"}
+            assert calls_in == outputs_in and "cc-memory" in calls_in, (calls_in ^ outputs_in)
+            assert (await recv_type(browser, "memory"))["memory"]["text"] == MEMORY_TEXT
+            diagnostics = next(item for item in await asyncio.to_thread(conversations) if item.get("memory"))
+            assert diagnostics["memory"]["text"] == MEMORY_TEXT and diagnostics["memory_versions"][-1]["chars"] == len(MEMORY_TEXT), diagnostics["memory_versions"]
+            assert diagnostics["context_archives"][-1]["reason"] == "compaction", diagnostics["context_archives"]
+            assert not any(item.get("call_id") == "h1-create" for item in diagnostics["orchestrator_context"])
             # A second answer to the same board is ignored.
             await browser.send(json.dumps({"type": "board_answer", "id": board["id"], "answer": {"values": {"approach": "Quick fix"}}}))
             # Media viewers fetch raw bytes with the credential in a header, never the URL.
@@ -1072,6 +1095,7 @@ async def run_protocol(identity: str) -> None:
         switch_instructions = OrchestratorMock.greeting_requests[-1]["instructions"]
         assert "The survey (Survey theme)" in switch_instructions and "switched to this theme mid-call" in switch_instructions
         assert "at the high rung" in switch_instructions, switch_instructions
+        assert OrchestratorMock.greeting_requests[-1]["input"][0]["content"] == f"[memory] {MEMORY_TEXT}"
         await wait_for(lambda: any(path == "/live/sessions/live-test-2/hangup" for path, _ in DaytonaMock.openai_requests), 10)
         assert OrchestratorMock.tool_output("k3-theme")["bouncing"] is True
         await mocks.live.close()
