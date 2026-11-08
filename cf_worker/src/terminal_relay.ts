@@ -21,6 +21,10 @@ interface Relay {
   browserHash: string | null;
   upstream: WebSocket | null;
   toolbox: string | null;
+  // Diagnostics for Workers Logs: when it attached and how much flowed each way.
+  attachedAt: number;
+  bytesOut: number;  // terminal output sent to the browser
+  bytesIn: number;   // keystrokes sent to the terminal
 }
 
 export class TerminalRelay {
@@ -35,12 +39,12 @@ export class TerminalRelay {
       const pair = new WebSocketPair();
       const browser = pair[1];
       browser.accept();
-      this.relays.set(browser, { browserHash: null, upstream: null, toolbox: null });
+      this.relays.set(browser, { browserHash: null, upstream: null, toolbox: null, attachedAt: 0, bytesOut: 0, bytesIn: 0 });
       browser.addEventListener("message", (event) => {
         void this.fromBrowser(browser, identity, event.data).catch((error) => this.fail(browser, String(error?.message ?? error)));
       });
-      browser.addEventListener("close", () => this.drop(browser));
-      browser.addEventListener("error", () => this.drop(browser));
+      browser.addEventListener("close", (event) => this.drop(browser, `browser closed (${event.code})`));
+      browser.addEventListener("error", () => this.drop(browser, "browser error"));
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
     if (url.pathname === "/revoke" && request.method === "POST") {
@@ -49,7 +53,7 @@ export class TerminalRelay {
       for (const [browser, relay] of this.relays) {
         if (relay.browserHash && browserHashes.includes(relay.browserHash)) {
           browser.close(4003, "pairing ended");
-          this.drop(browser);
+          this.drop(browser, "pairing ended");
         }
       }
       return new Response(null, { status: 204 });
@@ -62,7 +66,10 @@ export class TerminalRelay {
     if (!relay) return;
     if (typeof data !== "string") {
       // Keystrokes.
-      if (relay.upstream?.readyState === WebSocket.OPEN) relay.upstream.send(data);
+      if (relay.upstream?.readyState === WebSocket.OPEN) {
+        relay.upstream.send(data);
+        relay.bytesIn += data.byteLength;
+      }
       return;
     }
     const message = JSON.parse(data) as Record<string, unknown>;
@@ -100,10 +107,20 @@ export class TerminalRelay {
       console.log("terminal: sandbox asleep", { state: error.message });
       browser.send(JSON.stringify({ type: "error", error: "The sandbox is asleep. Call Dogwalk to wake it, then retry." }));
       browser.close(CLOSE_ASLEEP, "sandbox asleep");
-      return this.drop(browser);
+      return this.drop(browser, "sandbox asleep");
     }
-    const created = await this.ensurePty(relay.toolbox, cols, rows);
-    relay.upstream = await this.connect(browser, relay.toolbox);
+    let created = await this.ensurePty(relay.toolbox, cols, rows);
+    try {
+      relay.upstream = await this.connect(browser, relay, relay.toolbox);
+    } catch (error) {
+      if (created) throw error;
+      // The listed PTY would not take a connection: replace it.
+      console.log("terminal: existing PTY refused a connection; recreating", { message: String((error as Error).message) });
+      await fetch(`${relay.toolbox}/process/pty/${PTY_ID}`, { method: "DELETE", headers: this.auth() });
+      created = await this.ensurePty(relay.toolbox, cols, rows);
+      relay.upstream = await this.connect(browser, relay, relay.toolbox);
+    }
+    relay.attachedAt = Date.now();
     console.log("terminal: attached", { created, cols, rows });
     if (created) {
       // A fresh PTY starts a plain shell; hand it to tmux so later connections reattach.
@@ -127,15 +144,19 @@ export class TerminalRelay {
     return `${(sandbox.toolboxProxyUrl ?? "https://proxy.app.daytona.io/toolbox").replace(/\/$/, "")}/${encodeURIComponent(sandboxId)}`;
   }
 
-  // Reuse the running PTY when there is one; returns whether a new one was created.
+  // Reuse the PTY when there is one; returns whether a new one was created. Daytona reports a
+  // PTY with no client connected as active: false even though its processes (and tmux) live
+  // on, so inactive is not dead: deleting it would kill the session a closed tab left behind.
   private async ensurePty(toolbox: string, cols: number, rows: number): Promise<boolean> {
     const listed = await fetch(`${toolbox}/process/pty`, { headers: this.auth(), signal: AbortSignal.timeout(10_000) });
     if (listed.ok) {
       const body = await listed.json<unknown>();
       const sessions = (Array.isArray(body) ? body : (body as { sessions?: unknown[] }).sessions ?? []) as Array<{ id?: string; active?: boolean }>;
       const existing = sessions.find((item) => item.id === PTY_ID);
-      if (existing && existing.active !== false) return false;
-      if (existing) await fetch(`${toolbox}/process/pty/${PTY_ID}`, { method: "DELETE", headers: this.auth() });
+      if (existing) {
+        console.log("terminal: reusing PTY", { active: existing.active ?? null });
+        return false;
+      }
     }
     const created = await fetch(`${toolbox}/process/pty`, {
       method: "POST",
@@ -150,7 +171,7 @@ export class TerminalRelay {
     return true;
   }
 
-  private async connect(browser: WebSocket, toolbox: string): Promise<WebSocket> {
+  private async connect(browser: WebSocket, relay: Relay, toolbox: string): Promise<WebSocket> {
     const response = await fetch(`${toolbox}/process/pty/${PTY_ID}/connect`, {
       headers: { ...this.auth(), Upgrade: "websocket", "Sec-WebSocket-Protocol": PTY_PROTOCOL },
     });
@@ -159,7 +180,10 @@ export class TerminalRelay {
     upstream.accept();
     upstream.addEventListener("message", (event) => {
       if (browser.readyState !== WebSocket.OPEN) return;
-      if (typeof event.data !== "string") return browser.send(event.data);
+      if (typeof event.data !== "string") {
+        relay.bytesOut += event.data.byteLength;
+        return browser.send(event.data);
+      }
       // Text frames are Daytona control messages: connected, or the shell exiting.
       try {
         const control = JSON.parse(event.data) as { type?: string; status?: string; exitCode?: number; exitReason?: string };
@@ -169,7 +193,10 @@ export class TerminalRelay {
       }
     });
     upstream.addEventListener("close", (event) => {
-      console.log("terminal: upstream closed", { code: event.code, reason: event.reason.slice(0, 120) });
+      console.log("terminal: upstream closed", {
+        code: event.code, reason: event.reason.slice(0, 120), browserOpen: browser.readyState === WebSocket.OPEN,
+        seconds: relay.attachedAt ? Math.round((Date.now() - relay.attachedAt) / 1000) : null, bytesOut: relay.bytesOut, bytesIn: relay.bytesIn,
+      });
       if (browser.readyState !== WebSocket.OPEN) return;
       let code = 0;
       try {
@@ -198,22 +225,26 @@ export class TerminalRelay {
   private refuse(browser: WebSocket, error: string): void {
     browser.send(JSON.stringify({ type: "error", error }));
     browser.close(CLOSE_EXPIRED, error.slice(0, 120));
-    this.drop(browser);
+    this.drop(browser, "refused");
   }
 
   private fail(browser: WebSocket, error: string): void {
     console.error("terminal: failed", error);
-    if (browser.readyState !== WebSocket.OPEN) return this.drop(browser);
+    if (browser.readyState !== WebSocket.OPEN) return this.drop(browser, "failed after the browser left");
     browser.send(JSON.stringify({ type: "notice", text: error }));
     browser.close(1011, error.slice(0, 120));
-    this.drop(browser);
+    this.drop(browser, "failed");
   }
 
   // The tmux session (and the PTY) outlive the tab; only this connection ends.
-  private drop(browser: WebSocket): void {
+  private drop(browser: WebSocket, why: string): void {
     const relay = this.relays.get(browser);
     if (!relay) return;
     this.relays.delete(browser);
+    console.log("terminal: dropped", {
+      why, seconds: relay.attachedAt ? Math.round((Date.now() - relay.attachedAt) / 1000) : null,
+      bytesOut: relay.bytesOut, bytesIn: relay.bytesIn,
+    });
     if (relay.upstream?.readyState === WebSocket.OPEN) relay.upstream.close(1000, "browser closed");
   }
 }
