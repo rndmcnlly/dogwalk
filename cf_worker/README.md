@@ -164,6 +164,14 @@ caller audio GPT-Live reflects to the sideband, and saves a WAV under
 `recordings/` when the caller presses pound (star discards), after 20 s of
 silence, or at its limit. Keypad presses arrive as `transport.dtmf.received`.
 
+Recording deliberately does not use `session.input_audio.mute`. The docs say
+muting preserves sideband reflection, but over SIP (verified 2026-11-07) the
+reflected caller audio becomes exact zeros while muted; unmuted it carries the
+caller (peaks around 15–21k, about two thirds of 200 ms chunks non-silent).
+Instead the Voice Frontend is instructed to stay silent and its handoffs are
+ignored until the recording ends. `RECORDING_MUTE=true` restores muting for
+re-testing provider behavior.
+
 Twilio adds a five-minute HMAC capability containing the existing Call SID to a
 custom SIP header. The signed OpenAI webhook validates it and resolves the User
 and current Sandbox Assignment from D1; SIP caller headers alone never authorize
