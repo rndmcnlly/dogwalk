@@ -160,6 +160,11 @@ const EVENTS: Record<EarconName, EventInfo> = {
     meaning: "The voice note was thrown away; nothing was written.",
     label: "Recording discarded.",
   },
+  whiteboard_answer: {
+    title: "Whiteboard answer received",
+    meaning: "Something you chose, typed, or decided on the paired browser's whiteboard reached the walker, which is now taking it into account.",
+    label: "Answer received.",
+  },
 };
 
 interface Group {
@@ -199,6 +204,12 @@ const GROUPS: Group[] = [
     title: "Recording",
     intro: "Voice notes, recorded like voicemail into the Workspace.",
     names: ["recording_started", "recording_saved", "recording_discarded"],
+  },
+  {
+    id: "whiteboard",
+    title: "Whiteboard",
+    intro: "Confirmation, in the call, of what you do on the paired browser's whiteboard.",
+    names: ["whiteboard_answer"],
   },
 ];
 

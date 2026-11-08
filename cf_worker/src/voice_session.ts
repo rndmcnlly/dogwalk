@@ -173,6 +173,19 @@ const TAKEOVER_TICKET_MS = 60_000;
 const DESKTOP_LINK_MAX_SECONDS = 3600;
 const DESKTOP_PORT = 6080;
 
+// Whiteboard (DOMAIN.md): an openui-lang board the Session Orchestrator draws on the paired page;
+// its answers come back as caller input, never as authorization.
+interface Board {
+  id: string;
+  at: number;
+  program: string;
+  note: string;
+  status: "open" | "answered";
+  answer: Record<string, unknown> | null;
+}
+const MAX_BOARDS = 5;
+const MAX_BOARD_PROGRAM = 20_000;
+
 // What the paired page reported showing, so the Voice Agent can sense it (inspect_call_state).
 interface BrowserView { at: number; browserHash: string; view: string; path?: string; kind?: string }
 const MAX_BROWSER_VIEWS = 30;
@@ -408,8 +421,22 @@ export const ORCHESTRATOR_TOOLS = [
   },
   {
     type: "function",
+    name: "draw_on_whiteboard",
+    description: "Draw an openui-lang board (a quick diagram, table, chart, comparison, form, or a set of decisions such as before/after edits to accept or reject) on the caller's paired page while it is connected. Load the whiteboard skill first for the grammar and components. Say aloud what you drew. Answers arrive as a whiteboard_answer event (the caller may answer aloud instead); they are caller input, never authorization. A whiteboard_error event means the page could not render it: fix and redraw.",
+    parameters: {
+      type: "object",
+      properties: {
+        program: { type: "string", description: "openui-lang, starting with root = Stack([...])" },
+        note: { type: "string", description: "A few words shown with the board" },
+      },
+      required: ["program"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
     name: "show_in_browser",
-    description: "Put something on the caller's Paired Browser while it is connected (browser_connected; paired_browser in the call_started snapshot). uri: dogwalk:file/<path> opens a file in the page's viewer (Markdown, images, PDF, audio, video, tables, code, and HTML reports rendered isolated, which must be self-contained); dogwalk:dir/<path> opens a folder (paths relative to home, or absolute under /home/daytona); dogwalk:session/<Alias> shows a session's card; dogwalk:timeline shows the call timeline; dogwalk:terminal or dogwalk:desktop shows a banner the caller clicks to open that takeover tab; an http or https address shows a banner naming the site, opening in a new tab when clicked. note: a few words shown with it. Then tell the caller what is on their screen.",
+    description: "Put something on the caller's Paired Browser while it is connected (browser_connected; paired_browser in the call_started snapshot). uri: dogwalk:file/<path> opens a file in the page's viewer (Markdown, images, PDF, audio, video, tables, code, and HTML reports rendered isolated, which must be self-contained); dogwalk:dir/<path> opens a folder (paths relative to home, or absolute under /home/daytona); dogwalk:session/<Alias> shows a session's card; dogwalk:timeline shows the call timeline; dogwalk:whiteboard shows the whiteboard; dogwalk:terminal or dogwalk:desktop shows a banner the caller clicks to open that takeover tab; an http or https address shows a banner naming the site, opening in a new tab when clicked. note: a few words shown with it. Then tell the caller what is on their screen.",
     parameters: {
       type: "object",
       properties: {
@@ -465,7 +492,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "inspect_call_state",
-    description: "Read-only: the settings and surfaces you can change, as they are now. earcon_style (what set_earcon_style last chose); paired_browser (whether a browser is paired, its device and place, whether its page is open, what it shows now and showed recently, whether a terminal or desktop was launched); followed_session; recording; agents_ready and sandbox_waking. Changes nothing; use it before changing a setting or when the caller asks what is set or on their screen.",
+    description: "Read-only: the settings and surfaces you can change, as they are now. earcon_style (what set_earcon_style last chose); whiteboard (the latest board, whether it was answered, and the answer); paired_browser (whether a browser is paired, its device and place, whether its page is open, what it shows now and showed recently, whether a terminal or desktop was launched); followed_session; recording; agents_ready and sandbox_waking. Changes nothing; use it before changing a setting or when the caller asks what is set or on their screen.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -1438,10 +1465,60 @@ export class VoiceSession {
       earcon_style: this.earconPreference,
       paired_browser: await this.pairedBrowserState(),
       followed_session: followed,
+      whiteboard: ((boards) => boards.length ? {
+        boards: boards.length,
+        latest: { board_id: boards.at(-1)!.id, note: boards.at(-1)!.note, status: boards.at(-1)!.status, answer: boards.at(-1)!.answer },
+      } : null)(await this.state.storage.get<Board[]>("whiteboard_boards") ?? []),
       recording: Boolean(this.recording),
       agents_ready: this.acpReady,
       sandbox_waking: this.dogsWaking,
     };
+  }
+
+  // The draw_on_whiteboard tool. The page parses and renders the openui-lang program; a
+  // program it cannot render comes back as a whiteboard_error event for the walker to fix.
+  private async drawOnWhiteboard(programInput: string, noteInput: unknown): Promise<Record<string, unknown>> {
+    if (!this.connectedBrowsers().length) {
+      throw new Error("no paired browser is connected; offer to pair one (pair-browser skill)");
+    }
+    const program = programInput.trim();
+    if (!/^root\s*=/.test(program)) throw new Error("an openui-lang program starts with root = ...; see the whiteboard skill");
+    if (program.length > MAX_BOARD_PROGRAM) throw new Error(`the program is too long (${program.length} characters; at most ${MAX_BOARD_PROGRAM})`);
+    const board: Board = {
+      id: `b${toHexId(4)}`, at: Date.now(), program,
+      note: typeof noteInput === "string" ? noteInput.slice(0, 200) : "", status: "open", answer: null,
+    };
+    const boards = await this.state.storage.get<Board[]>("whiteboard_boards") ?? [];
+    boards.push(board);
+    await this.state.storage.put("whiteboard_boards", boards.slice(-MAX_BOARDS));
+    this.broadcastBrowsers({ type: "board", board });
+    this.feedPush("system", `drew on the whiteboard${board.note ? `: ${board.note}` : ""}`, { lane: "event" });
+    await this.record("whiteboard.drawn", { board_id: board.id, characters: program.length });
+    return { ok: true, board_id: board.id, shown_on: this.connectedBrowsers().length, answers: "arrive as a whiteboard_answer event; the caller may also answer aloud" };
+  }
+
+  // A board answers once. It is caller input for the Session Orchestrator, like keypad digits.
+  private async receiveBoardAnswer(id: string, answerInput: unknown): Promise<void> {
+    const boards = await this.state.storage.get<Board[]>("whiteboard_boards") ?? [];
+    const board = boards.find((item) => item.id === id);
+    if (!board || board.status !== "open" || typeof answerInput !== "object" || !answerInput) return;
+    const serialized = JSON.stringify(answerInput);
+    board.answer = serialized.length > 8000 ? { truncated: serialized.slice(0, 8000) } : answerInput as Record<string, unknown>;
+    board.status = "answered";
+    await this.state.storage.put("whiteboard_boards", boards);
+    this.broadcastBrowsers({ type: "board", board });
+    // The call confirms, in sound, that the walker has the answer.
+    this.queueEarcon("whiteboard_answer");
+    this.feedPush("caller", `answered on the whiteboard: ${serialized.slice(0, 600)}`, { lane: "board" });
+    await this.record("whiteboard.answered", { board_id: id });
+    await this.orchestratorEvent(`[harness event] whiteboard_answer: ${JSON.stringify({ board_id: id, note: board.note, answer: board.answer })}`);
+  }
+
+  private async receiveBoardError(id: string, error: string): Promise<void> {
+    const boards = await this.state.storage.get<Board[]>("whiteboard_boards") ?? [];
+    if (!boards.some((item) => item.id === id)) return;
+    await this.record("whiteboard.error", { board_id: id });
+    await this.orchestratorEvent(`[harness event] whiteboard_error: ${JSON.stringify({ board_id: id, error: error.slice(0, 500) })}`);
   }
 
   // The show_in_browser tool: put a file, folder, session, the timeline, or a takeover launcher
@@ -1465,7 +1542,7 @@ export class VoiceSession {
       await this.record("pairing.show", { kind: "web" });
       return { ok: true, uri: web.href, shown_on: this.connectedBrowsers().length, opens: "after the caller clicks the banner" };
     }
-    const match = /^dogwalk:(file|dir|session|timeline|terminal|desktop)(?:\/(.*))?$/.exec(uriInput.trim());
+    const match = /^dogwalk:(file|dir|session|timeline|whiteboard|terminal|desktop)(?:\/(.*))?$/.exec(uriInput.trim());
     if (!match) throw new Error("uri must be dogwalk:file/<path>, dogwalk:dir/<path>, dogwalk:session/<alias>, dogwalk:timeline, dogwalk:terminal, dogwalk:desktop, or an http(s) address");
     const [, kind, rest = ""] = match;
     let uri = `dogwalk:${kind}`;
@@ -1520,6 +1597,7 @@ export class VoiceSession {
       });
       send(this.pairedStatus());
       send({ type: "feed", entries: this.feed.slice(-150), snapshot: true });
+      send({ type: "boards", boards: await this.state.storage.get<Board[]>("whiteboard_boards") ?? [] });
       return;
     }
     const browser = browsers.find((item) => item.secretHash === attached);
@@ -1530,6 +1608,10 @@ export class VoiceSession {
       switch (message.type) {
         case "ping":
           return send({ type: "pong", idle_expires_at: browser.lastSeen + PAIRED_IDLE_MS });
+        case "board_answer":
+          return this.receiveBoardAnswer(String(message.id ?? ""), message.answer);
+        case "board_error":
+          return this.receiveBoardError(String(message.id ?? ""), String(message.error ?? ""));
         case "viewing": {
           const views = await this.state.storage.get<BrowserView[]>("browser_views") ?? [];
           const path = typeof message.path === "string" && message.path.startsWith(`${WORKSPACE_ROOT}/`) ? message.path.slice(0, 500) : undefined;
@@ -2086,6 +2168,9 @@ export class VoiceSession {
         }
         case "start_recording":
           result = await this.startRecording(Number(args.max_seconds ?? 300));
+          break;
+        case "draw_on_whiteboard":
+          result = await this.drawOnWhiteboard(requiredString(args, "program"), args.note);
           break;
         case "show_in_browser":
           result = await this.showInBrowser(requiredString(args, "uri"), args.note);
@@ -3056,7 +3141,7 @@ export class VoiceSession {
     this.orchestratorContext = [];
     const browsers = await this.state.storage.get<PairedBrowser[]>("paired_browsers") ?? [];
     await this.revokeTakeovers(browsers.map((item) => item.secretHash)).catch(() => undefined);
-    await this.state.storage.delete(["managed_sessions", "orchestrator_queue", "orchestrator_context", "paired_browsers"]);
+    await this.state.storage.delete(["managed_sessions", "orchestrator_queue", "orchestrator_context", "paired_browsers", "whiteboard_boards", "browser_views"]);
     // A replaced Sandbox is a different Workspace: browsers paired to the old one are revoked.
     for (const ws of this.state.getWebSockets("browser")) ws.close(4001, "sandbox replaced");
   }
@@ -3212,6 +3297,10 @@ export class VoiceSession {
       console.error("voice session audit failed", error);
     }
   }
+}
+
+function toHexId(bytes: number): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function sandboxFileError(status: number, action: string): string {

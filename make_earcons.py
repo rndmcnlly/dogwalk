@@ -45,6 +45,7 @@ LABELS = {
     "session_closed": "Dog home.",
     "recording_started": "Recording.",
     "recording_saved": "Recording saved.",
+    "whiteboard_answer": "Answer received.",
     "recording_discarded": "Recording discarded.",
     "follow_started": "Following.",
     "follow_stopped": "Ranging.",
@@ -107,6 +108,7 @@ GROUPS = [
     ("Progress Beats", ["progress_looking", "progress_changing", "progress_running", "progress_still_running",
                         "progress_failed", "progress_remark", "progress_step", "progress_plan_done", "progress_tiring"]),
     ("Recording", ["recording_started", "recording_saved", "recording_discarded"]),
+    ("Whiteboard", ["whiteboard_answer"]),
 ]
 NEW = {"pull", "follow_started", "follow_stopped"} | {name for name in LABELS if name.startswith("progress_")}
 # [earcon, seconds after the previous one]
@@ -125,8 +127,14 @@ SCENES = {
 
 
 def tonal_notes() -> dict[str, dict]:
-    """Parse `name: synthesize([[hz, ms], ...], gain)` lines out of audio.ts's TONAL table."""
+    """Parse `name: synthesize([[hz, ms], ...], gain)` lines out of audio.ts's TONAL table.
+
+    The plain note set was retired on 2026-11-08 (tonal now means the FM designs), so this is
+    empty unless an older audio.ts is checked out; callers fall back to other renderings.
+    """
     source = AUDIO_TS.read_text()
+    if "const TONAL" not in source:
+        return {}
     table = source[source.index("const TONAL"):source.index("const SPOKEN")]
     notes = {}
     for match in re.finditer(r"^\s+(\w+): synthesize\((\[\[.*?\]\])(?:,\s*([\d.]+))?\),", table, re.M):

@@ -63,6 +63,7 @@ CODES = {
     "recording_started":     ("caller", "onset",  "mid", "routine",  "none",     "caller", "take",    None),
     "recording_saved":       ("caller", "offset", "mid", "routine",  "none",     "caller", "take",    None),
     "recording_discarded":   ("caller", "offset", "mid", "abnormal", "none",     "caller", "take",    None),
+    "whiteboard_answer":     ("caller", "state",  "mid", "routine",  "none",     "caller", "take",    None),
     "progress_looking":      ("dog",    "state",  "bg",  "routine",  "none",     "news",   "step",    "read"),
     "progress_changing":     ("dog",    "state",  "bg",  "routine",  "none",     "news",   "step",    "edit"),
     "progress_running":      ("dog",    "state",  "bg",  "routine",  "none",     "news",   "step",    "execute"),
@@ -247,7 +248,8 @@ function render({ notes, gain }) {
 }
 
 function earconSamples(name, which) {
-  if (which === "current") { const t = TONAL[name]; return renderTonal(t.notes, t.gain); }
+  // "Current" was the retired plain note set; without it, both sides render the design.
+  if (which === "current" && TONAL[name]) { const t = TONAL[name]; return renderTonal(t.notes, t.gain); }
   return render(design(name));
 }
 
@@ -428,7 +430,8 @@ def page_script() -> str:
 
 
 def validate() -> None:
-    missing = set(LABELS) - set(CODES) | set(CODES) - set(LABELS) | set(tonal_notes()) ^ set(CODES)
+    tonal = tonal_notes()  # empty since the plain note set was retired
+    missing = set(LABELS) - set(CODES) | set(CODES) - set(LABELS) | (set(tonal) ^ set(CODES) if tonal else set())
     if missing:
         raise SystemExit(f"CODES, LABELS and audio.ts disagree on: {sorted(missing)}")
     for name, override in OVERRIDES.items():

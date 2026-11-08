@@ -13,6 +13,7 @@ import spoken_permission_requested from "../earcons/permission_requested.pcm";
 import spoken_session_closed from "../earcons/session_closed.pcm";
 import spoken_recording_started from "../earcons/recording_started.pcm";
 import spoken_recording_saved from "../earcons/recording_saved.pcm";
+import spoken_whiteboard_answer from "../earcons/whiteboard_answer.pcm";
 import spoken_recording_discarded from "../earcons/recording_discarded.pcm";
 import spoken_follow_started from "../earcons/follow_started.pcm";
 import spoken_follow_stopped from "../earcons/follow_stopped.pcm";
@@ -57,6 +58,7 @@ export type EarconName =
   | "session_closed"
   | "recording_started"
   | "recording_saved"
+  | "whiteboard_answer"
   | "recording_discarded"
   | "follow_started"
   | "follow_stopped"
@@ -93,6 +95,7 @@ const SPOKEN: Record<EarconName, Clip> = {
   session_closed: pcmClip(spoken_session_closed),
   recording_started: pcmClip(spoken_recording_started),
   recording_saved: pcmClip(spoken_recording_saved),
+  whiteboard_answer: pcmClip(spoken_whiteboard_answer),
   recording_discarded: pcmClip(spoken_recording_discarded),
   follow_started: pcmClip(spoken_follow_started),
   follow_stopped: pcmClip(spoken_follow_stopped),

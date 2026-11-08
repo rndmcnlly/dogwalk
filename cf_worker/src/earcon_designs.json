@@ -969,6 +969,33 @@
   ],
   "gain": 0.066
  },
+ "whiteboard_answer": {
+  "notes": [
+   {
+    "c": 1,
+    "m": 1,
+    "i0": 0.1875,
+    "i1": 0.1875,
+    "tau": 1,
+    "attack": 5,
+    "k": 0,
+    "glide": 1,
+    "rough": 0,
+    "roughRate": 75,
+    "cut": false,
+    "at": 0,
+    "ms": 120,
+    "f": 1046.5,
+    "voices": [
+     [
+      1,
+      1
+     ]
+    ]
+   }
+  ],
+  "gain": 0.066
+ },
  "progress_looking": {
   "notes": [
    {

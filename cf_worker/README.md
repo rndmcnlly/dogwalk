@@ -330,6 +330,18 @@ takeovers and web pages show a banner the User clicks. HTML renders in an
 `<iframe sandbox="allow-scripts">` from `srcdoc` with a prepended CSP of
 `default-src 'none'` (inline scripts, styles, and data: images only).
 
+### Whiteboard
+
+`draw_on_whiteboard(program, note)` puts an openui-lang board on the paired
+page (the Hands tab, or a tab of its own): diagrams, tables, charts, forms, or
+per-item decisions such as before/after edit review. The page parses and renders
+it (`src/pair_page.ts`; the dialect and examples are in
+`voice_agent_skills/whiteboard.md`) and answers with `board_answer`, accepted
+once per board, which reaches the Orchestrator as a `whiteboard_answer` harness
+event, plays the `whiteboard_answer` earcon, and appears in the timeline. A
+board the page cannot render returns `whiteboard_error`. The last five boards
+are kept in `whiteboard_boards`; answers are caller input, never authorization.
+
 ### Human Takeover
 
 The page's Hands tab launches a terminal or a desktop in a new full-screen tab

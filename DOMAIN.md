@@ -368,7 +368,17 @@ An accepted browser holds a credential that names its Sandbox Assignment's Voice
 
 The page shows the files' content as it is (rendered Markdown, images, PDF, audio, video, tables, code) and a live feed of the Voice Call: the caller's and the Voice Frontend's words, the Session Orchestrator's briefs and the prompts it sends to ACP Agents, Agent remarks, tool calls and Reports, and harness events, so the User can see how the page relates to the call.
 
-**Not:** The Diagnostics Surface (operator-only, all Users and calls), a control surface, a required interface, or a terminal. Hands-on work launched from it is a Human Takeover. It succeeds the retired Scoped Diagnostic View, with the call itself replacing SMS as the channel that proves the User is present.
+**Not:** The Diagnostics Surface (operator-only, all Users and calls), a control surface, a required interface, or a terminal. Hands-on work launched from it is a Human Takeover; answers it collects are Whiteboard Answers. It succeeds the retired Scoped Diagnostic View, with the call itself replacing SMS as the channel that proves the User is present.
+
+### Whiteboard
+
+**Context:** Voice Interaction, shown on a Paired Browser
+
+A board the Session Orchestrator draws on the Paired Browser in a small declarative UI language (openui-lang): a quick diagram, table, chart, comparison, or form, or a set of small decisions such as proposed edits shown as before and after, each to accept or reject. It is the escape hatch for moments that outgrow voice, so the User can keep moving until they reach a full computer.
+
+A Whiteboard can be answered on the page (choices, text, buttons). A **Whiteboard Answer** is caller input, like keypad digits or the answer to an Elicitation: the Session Orchestrator takes it into account, and an earcon confirms in the call that it arrived. It is never authorization: it cannot resolve a Permission Request, and the Session Orchestrator confirms consequential answers aloud before acting on them. The User may always answer by voice instead, and that counts the same. The Voice Agent says aloud what it drew, so the call remains complete without the page.
+
+**Not:** A control surface for Agents, a Permission Request, or a required interface.
 
 ### Human Takeover
 

@@ -1,6 +1,7 @@
 // Paired Browser page (DOMAIN.md), served at GET /pair: listens for the Pairing Code the call
 // plays as keypad tones, claims it, waits for the caller to accept, then shows live Managed
-// Session status, a timeline of the call, and a read-only Workspace file viewer over /pair/ws.
+// Session status, a timeline of the call, a read-only Workspace file viewer, Human Takeover
+// launchers, and the Whiteboard (boards the walker draws for the caller to read or answer) over /pair/ws.
 // Media files (images, PDF, audio, video, downloads) come from GET /pair/file as blob URLs.
 //
 // String.raw keeps every backslash in the page script literal, so regexes and "\n" escapes
@@ -285,6 +286,104 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
 .html-stage:-webkit-full-screen{width:100%;height:100%;border:0;border-radius:0}
 .html-stage:-webkit-full-screen iframe{height:100%}
 
+/* Whiteboard (on Hands, or in a tab of its own): boards the walker draws in openui-lang. Tones and chart series take the page's palette. */
+.whiteboard{margin:18px 0 0;--wb-1:var(--info);--wb-2:var(--leash);--wb-3:var(--grass);--wb-4:var(--role-orchestrator);--wb-5:var(--warn);--wb-6:var(--bad)}
+#wbAway{margin-top:18px}
+.wb-board{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:var(--radius);padding:12px 14px;min-width:0}
+.wb-board.answered{border-left-color:var(--ok)}
+.wb-board.flash{animation:flash 2.4s ease-out}
+.wb-head{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;margin:0 0 10px}
+.wb-head .wb-note{font:600 18px/1.3 var(--serif)}
+.wb-head time{margin-left:auto;font:11px/1.4 var(--mono);color:var(--faint)}
+.wb-stack{display:flex;flex-direction:column;gap:12px;min-width:0}
+.wb-row{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-start}
+.wb-row>*{flex:1 1 12em;min-width:0}
+.wb-row>button,.wb-row>.wb-badge{flex:0 0 auto}
+.wb-card{display:flex;flex-direction:column;gap:10px;min-width:0;border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;background:var(--paper)}
+.wb-card[data-decision]{border-color:var(--accent)}
+.wb-card-head{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline}
+.wb-card-head:has(>.wb-decision[hidden]:only-child){display:none}
+.wb-card-head h3{margin:0;font:600 15.5px/1.35 var(--sans)}
+.wb-decision{font:600 11px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;padding:4px 7px;border-radius:999px;background:var(--accent);color:var(--accent-ink)}
+.md.wb-md{border:0;background:none;padding:0;max-height:none;overflow:visible}
+.wb-md>:first-child{margin-top:0}
+.wb-md>:last-child{margin-bottom:0}
+.tone-neutral{--t:var(--muted)}.tone-info{--t:var(--info)}.tone-success{--t:var(--ok)}.tone-warning{--t:var(--warn)}.tone-error{--t:var(--bad)}
+.wb-badge{display:inline-block;align-self:flex-start;font:600 11px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;padding:4px 8px;border-radius:999px;border:1px solid var(--t);color:var(--t)}
+.wb-callout{border-left:4px solid var(--t);background:color-mix(in srgb,var(--t) 10%,var(--card));border-radius:6px;padding:8px 12px}
+.wb-callout>strong{display:block;margin-bottom:2px}
+.wb-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px;margin:0}
+.wb-kv dt{color:var(--muted)}
+.wb-kv dd{margin:0;overflow-wrap:anywhere}
+.wb-board .md-table{margin:0}
+.wb-board .num{text-align:right;font-variant-numeric:tabular-nums}
+.wb-stat{display:flex;flex-direction:column;gap:2px;padding:8px 12px;border:1px solid var(--line);border-radius:var(--radius);background:var(--card)}
+.wb-stat .label{font-size:13px;color:var(--muted)}
+.wb-stat .value{font:600 26px/1.15 var(--serif);font-variant-numeric:tabular-nums}
+.wb-stat .delta{font-size:13px;font-weight:600;color:var(--t)}
+.wb-progress .top{display:flex;justify-content:space-between;gap:10px;font-size:14px;margin-bottom:4px}
+.wb-progress .bar{height:10px;border-radius:5px;background:var(--line);overflow:hidden}
+.wb-progress .bar>div{height:100%;background:var(--accent)}
+.wb-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.wb-steps li{display:flex;gap:8px;align-items:flex-start;min-width:0}
+.wb-steps li>div{min-width:0;flex:1}
+.wb-steps .title{font-weight:600}
+.wb-steps .mark{flex:none;width:1.05em;height:1.05em;margin-top:.22em;border-radius:50%;border:2px solid var(--muted)}
+.wb-steps .done .mark{background:var(--ok);border-color:var(--ok)}
+.wb-steps .current .mark{border-color:var(--info);background:radial-gradient(var(--info) 38%,transparent 44%)}
+.wb-steps .blocked .mark{border-color:var(--bad);border-radius:3px;background:repeating-linear-gradient(45deg,var(--bad) 0 2px,transparent 2px 5px)}
+.wb-steps .done .title{color:var(--muted)}
+.wb-steps.row{flex-direction:row;flex-wrap:wrap;gap:8px 6px}
+.wb-steps.row li{flex:1 1 10em}
+.wb-steps.row li+li::before{content:"\2192";flex:none;color:var(--faint);font-size:18px;line-height:1.2}
+.wb-chart{margin:0;min-width:0}
+.wb-chart svg{display:block;width:100%;height:auto}
+.wb-chart text{font:11px var(--sans);fill:var(--muted)}
+.wb-chart text.val{fill:var(--ink);font-weight:600}
+.wb-chart text.inside{fill:#fff;font-weight:600}
+.wb-chart .grid{stroke:var(--line)}
+.wb-chart .axis{stroke:var(--rule)}
+.wb-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;margin-top:4px}
+.wb-key::before{content:"";display:inline-block;width:.8em;height:.8em;margin-right:6px;border-radius:3px;background:var(--c);vertical-align:-.05em}
+.wb-numbers>summary{font-size:12.5px;color:var(--muted);margin-top:4px}
+.wb-numbers .md-table{margin-top:4px}
+.wb-choice{border:0;margin:0;padding:0;min-width:0}
+.wb-choice legend{font-weight:600;padding:0;margin-bottom:6px}
+.wb-options{display:flex;flex-direction:column;gap:6px}
+.wb-option{display:flex;gap:10px;align-items:flex-start;min-height:44px;padding:8px 10px;border:1px solid var(--line);border-radius:var(--radius);background:var(--card);cursor:pointer}
+.wb-option:has(input:checked){border-color:var(--accent);background:var(--highlight)}
+.wb-option input{flex:none;width:18px;height:18px;margin:2px 0 0;accent-color:var(--accent)}
+.wb-opt-desc{display:block;font-size:13px;color:var(--muted)}
+.wb-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.wb-field>span:first-child{font-weight:600}
+.wb-input{width:100%;min-height:40px;padding:8px 10px;font:inherit;color:var(--ink);background:var(--card);border:1px solid var(--rule);border-radius:var(--radius)}
+textarea.wb-input{resize:vertical;min-height:4.5em}
+.wb-input:focus-visible,.wb-option input:focus-visible,.wb-slider input:focus-visible{outline:3px solid var(--accent);outline-offset:1px}
+.wb-slider{display:flex;gap:10px;align-items:center}
+.wb-slider input{flex:1;min-width:0;accent-color:var(--accent)}
+.wb-slider output{min-width:5ch;text-align:right;font:600 14px/1 var(--mono)}
+.wb-button{min-height:40px}
+.wb-button[aria-pressed=true]{box-shadow:0 0 0 2px var(--card),0 0 0 4px var(--ink)}
+.wb-button.dim{opacity:.55}
+.wb-actions{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin-top:12px;padding-top:10px;border-top:1px dashed var(--line)}
+.wb-actions .wb-field{flex-basis:100%}
+.wb-actions .spacer{flex:1}
+.wb-answered{margin-top:12px;padding:8px 12px;border-left:4px solid var(--ok);border-radius:6px;background:color-mix(in srgb,var(--ok) 10%,var(--card))}
+.wb-answered>strong{display:block;margin-bottom:4px}
+.wb-errors ul{margin:4px 0;padding-left:1.2em;font:12.5px/1.45 var(--mono);overflow-wrap:anywhere}
+.wb-errors p{margin:4px 0 0}
+.wb-board>.wb-errors{margin-bottom:12px}
+.wb-tabs .segmented{margin-bottom:8px;max-width:100%;overflow-x:auto}
+.wb-details>summary{font-weight:600}
+.wb-details>.wb-stack{margin-top:8px}
+.wb-older{margin-top:10px}
+.wb-older>summary{color:var(--muted)}
+.wb-past{margin:6px 0 0 12px}
+.wb-past>summary{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+.wb-past>summary time{font:11px/1.4 var(--mono);color:var(--faint)}
+.wb-past .wb-head{display:none}
+.wb-past>.wb-board{margin-top:6px}
+
 /* Hands */
 .launchers{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));max-width:720px}
 .launchers .box p{margin:6px 0 10px}
@@ -353,7 +452,7 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
   <nav id="tabs" class="tabs" role="tablist" aria-label="Views">
     <button id="tab-live" class="tab" role="tab" aria-controls="panelLive">Live<span id="feedCount" class="count" hidden></span><span class="key">1</span></button>
     <button id="tab-files" class="tab" role="tab" aria-controls="panelFiles">Files<span class="key">2</span></button>
-    <button id="tab-hands" class="tab" role="tab" aria-controls="panelHands">Hands<span class="key">3</span></button>
+    <button id="tab-hands" class="tab" role="tab" aria-controls="panelHands">Hands<span id="boardCount" class="count" title="A new whiteboard" hidden>board</span><span class="key">3</span></button>
   </nav>
 
   <div id="panes" class="panes" data-tab="live">
@@ -421,8 +520,21 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
           <button id="handsDesktop">Open desktop</button>
           <p class="small muted">The sandbox's graphical desktop with a browser, for a laptop or tablet. The link lasts up to an hour.</p>
         </div>
+        <div class="box">
+          <button id="handsWhiteboard">Open whiteboard</button>
+          <p class="small muted">What the walker draws for you to read or answer (choices, edit reviews, charts), in a tab of its own. It is also below.</p>
+        </div>
       </div>
       <p id="handsNote" class="small muted" role="status"></p>
+      <div id="wbHome">
+        <section id="whiteboard" class="whiteboard" aria-labelledby="wbHeading">
+          <h2 id="wbHeading">Whiteboard</h2>
+          <p id="wbEmpty" class="small muted">Nothing drawn yet. When something is easier to see or decide on a screen, the walker draws it here, and you can answer here or aloud.</p>
+          <div id="wbCurrent"></div>
+          <details id="wbOlder" class="wb-older" hidden><summary>Earlier boards (<span id="wbOlderCount">0</span>)</summary><div id="wbOlderList"></div></details>
+        </section>
+      </div>
+      <p id="wbAway" class="box small" hidden>The whiteboard is open in its own tab. <button id="wbBack" class="mini">Bring it back here</button></p>
     </section>
     <!-- ==== HANDS END ==== -->
   </div>
@@ -1138,6 +1250,8 @@ function onMessage(m) {
     case "file": if (m.id === pendingRead) renderTextFile(m); break;
     case "launch": settleLaunch(m); break;
     case "show": onShow(m); break;
+    case "board": wbOnBoard(m.board); break;
+    case "boards": wbOnBoards(m.boards); break;
     case "error":
       if (m.id != null) {
         if (m.id === pendingList) $("fileNote").textContent = "Error: " + m.error;
@@ -1200,6 +1314,7 @@ function forgetPairing() {
   prevPermissions = null;
   closeViewer();
   clearFeed();
+  wbClear();
   hideBanner();
   renderChips();
   showScreen("pair");
@@ -1241,6 +1356,7 @@ function showTab(name) {
     button.tabIndex = tab === name ? 0 : -1;
   }
   onFeedShown();
+  wbSeen();
   reportViewing();
 }
 function showLiveView(view) {
@@ -1258,7 +1374,8 @@ function showLive(view) {
 }
 
 // ---- What the user is looking at, so the walker can sense it:
-// {"type":"viewing","view":"live"|"files"|"hands"|"hidden","path":"...","kind":"file"|"dir"}.
+// {"type":"viewing","view":"live"|"files"|"hands"|"whiteboard"|"hidden","path":"...","kind":"file"|"dir"},
+// where "whiteboard" is the Hands tab with the whiteboard in view, or the whiteboard's own tab while it is visible.
 // Sent once it has held still for a second, never twice alike, and never while the tab is hidden,
 // apart from the one "hidden" message; becoming visible or reconnecting sends the current view at once.
 const VIEWING_MS = 1000;
@@ -1266,7 +1383,9 @@ let viewingFolder = ""; // the folder the file browser last navigated to; closin
 let viewingSent = "";
 let viewingTimer = null;
 function currentViewing() {
+  if (wbTabVisible()) return { type: "viewing", view: "whiteboard" };
   if (document.hidden) return { type: "viewing", view: "hidden" };
+  if (currentTab === "hands" && wbOnScreen) return { type: "viewing", view: "whiteboard" };
   if (currentTab !== "files") return { type: "viewing", view: currentTab };
   if (viewer.path) return { type: "viewing", view: "files", path: viewer.path, kind: "file" };
   if (viewingFolder) return { type: "viewing", view: "files", path: viewingFolder, kind: "dir" };
@@ -2263,8 +2382,841 @@ $("handsTerminal").addEventListener("click", launchTerminal);
 $("handsDesktop").addEventListener("click", launchDesktop);
 // ==== HANDS END ====
 
+// ==== WHITEBOARD START: boards the walker draws in openui-lang, answered on this page ====
+// Protocol: the server sends {"type":"board","board":{"id","at","program","note","status":"open"|"answered","answer"}}
+// for a new or updated board, and {"type":"boards","boards":[...]} (newest last) after the feed snapshot.
+// The page answers {"type":"board_answer","id","answer":{"button","value","values","decisions","note"}}
+// and reports, once per board, a program it could not fully draw: {"type":"board_error","id","error"}.
+// An answer is the caller's input to the walker, like keypad digits; it never authorizes anything.
+// The dialect is OpenChamber's openui-lang (voice_agent_skills/whiteboard.md): one "name = Component(args)"
+// statement per line, positional arguments, root = Stack([...]). Upstream extras kept because they are
+// cheap: null skips an optional argument, the last definition of a name wins, a call may sit inline,
+// and // starts a comment. Not supported: $state, @functions, Query, Mutation, operators.
+
+// Boards kept on the page. 1: each new board replaces the last. More: older boards stack, collapsed, beneath the newest.
+const WB_KEEP = 5;
+
+// ---- Tokens: a newline ends a statement only outside brackets, so a long call may wrap, unless the
+// next line starts a new statement ("name ="): then an unclosed bracket or string above is the error.
+const WB_IDENT = /[A-Za-z_][A-Za-z0-9_]*/y;
+const WB_NUMBER = /-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/y;
+const WB_STATEMENT = /[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*=/y;
+function wbTokens(source) {
+  const tokens = [];
+  let i = 0, line = 1, depth = 0;
+  const push = (t, v) => tokens.push({ t, v, line });
+  while (i < source.length) {
+    const c = source[i];
+    if (c === "\n") {
+      WB_STATEMENT.lastIndex = i + 1;
+      if (depth && WB_STATEMENT.test(source)) { push("bad", "a bracket that was never closed"); depth = 0; }
+      if (!depth) push("nl");
+      line++;
+      i++;
+      continue;
+    }
+    if (c === " " || c === "\t" || c === "\r" || c === " ") { i++; continue; }
+    if (c === "/" && source[i + 1] === "/") { while (i < source.length && source[i] !== "\n") i++; continue; }
+    if (c === "\"" || c === "'") {
+      let j = i + 1, text = "", closed = false;
+      while (j < source.length && source[j] !== "\n") {
+        const d = source[j];
+        if (d === c) { closed = true; j++; break; }
+        if (d === "\\" && j + 1 < source.length) {
+          const e = source[j + 1], hex = source.slice(j + 2, j + 6);
+          if (e === "u" && /^[0-9a-fA-F]{4}$/.test(hex)) { text += String.fromCharCode(parseInt(hex, 16)); j += 6; continue; }
+          text += e === "n" ? "\n" : e === "t" ? "\t" : e === "r" ? "" : e; // \" \\ \' and the rest stand for themselves
+          j += 2;
+          continue;
+        }
+        text += d;
+        j++;
+      }
+      push(closed ? "str" : "bad", closed ? text : "a string with no closing quote (write a line break inside a string as \\n)");
+      i = j;
+      continue;
+    }
+    if (/[0-9.]/.test(c) || (c === "-" && /[0-9.]/.test(source[i + 1] || ""))) {
+      WB_NUMBER.lastIndex = i;
+      const m = WB_NUMBER.exec(source);
+      if (m) { push("num", Number(m[0])); i += m[0].length; continue; }
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      WB_IDENT.lastIndex = i;
+      const m = WB_IDENT.exec(source);
+      push("id", m[0]);
+      i += m[0].length;
+      continue;
+    }
+    if ("([{".indexOf(c) >= 0) depth++;
+    if (")]}".indexOf(c) >= 0) depth = Math.max(0, depth - 1);
+    push("([{}]),:=".indexOf(c) >= 0 ? c : "bad", "the character " + JSON.stringify(c)
+      + (c === "$" || c === "@" ? " (state and functions are not supported)" : ""));
+    i++;
+  }
+  push("eof");
+  return tokens;
+}
+
+// A program may arrive wrapped in a Markdown fence or <openui-lang> tags; drop the wrapper.
+function wbUnfence(source) {
+  const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
+  const wrapper = /^\s*(\x60{3,}|~{3,}|<\/?openui-lang>)/;
+  while (lines.length && !lines[0].trim()) lines.shift();
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  if (lines.length && wrapper.test(lines[0])) lines[0] = "";
+  if (lines.length && wrapper.test(lines[lines.length - 1])) lines[lines.length - 1] = "";
+  return lines.join("\n");
+}
+
+// ---- Statements: name = Expression, one per line. A broken statement is reported and skipped.
+function wbParse(source) {
+  const tokens = wbTokens(wbUnfence(source));
+  const statements = new Map(); // name -> { expr, line }; the last definition wins
+  const order = [];
+  const errors = [];
+  let k = 0;
+  const peek = () => tokens[k];
+  const describe = (tok) => tok.t === "nl" ? "the end of the line" : tok.t === "eof" ? "the end of the program"
+    : tok.t === "bad" ? tok.v : tok.t === "str" ? "the string " + JSON.stringify(tok.v.slice(0, 30))
+    : tok.t === "num" ? "the number " + tok.v : tok.t === "id" ? tok.v : JSON.stringify(tok.t);
+  const fail = (message) => { throw new Error("line " + peek().line + ": " + message); };
+  const expect = (t, what) => { if (peek().t !== t) fail("expected " + what + " but found " + describe(peek())); return tokens[k++]; };
+  function list(close) {
+    const items = [];
+    while (peek().t !== close) {
+      items.push(expr());
+      if (peek().t === ",") k++;
+      else if (peek().t !== close) fail("expected a comma or " + close + " but found " + describe(peek()));
+    }
+    k++;
+    return items;
+  }
+  function expr() {
+    const tok = peek();
+    if (tok.t === "str" || tok.t === "num") { k++; return { k: "lit", v: tok.v }; }
+    if (tok.t === "[") { k++; return { k: "arr", items: list("]") }; }
+    if (tok.t === "{") {
+      k++;
+      const entries = [];
+      while (peek().t !== "}") {
+        const key = peek();
+        if (key.t !== "id" && key.t !== "str") fail("expected a key but found " + describe(key));
+        k++;
+        expect(":", "a colon after the key " + key.v);
+        entries.push([key.v, expr()]);
+        if (peek().t === ",") k++;
+        else if (peek().t !== "}") fail("expected a comma or } but found " + describe(peek()));
+      }
+      k++;
+      return { k: "obj", entries };
+    }
+    if (tok.t === "id") {
+      k++;
+      if (tok.v === "true" || tok.v === "false") return { k: "lit", v: tok.v === "true" };
+      if (tok.v === "null") return { k: "lit", v: null };
+      if (peek().t === "(") { k++; return { k: "call", name: tok.v, args: list(")"), line: tok.line }; }
+      return { k: "ref", name: tok.v, line: tok.line };
+    }
+    fail("expected a value but found " + describe(tok));
+  }
+  while (peek().t !== "eof") {
+    if (peek().t === "nl") { k++; continue; }
+    try {
+      const name = expect("id", "a statement such as root = Stack([...])");
+      expect("=", "= after " + name.v);
+      const value = expr();
+      if (peek().t !== "nl" && peek().t !== "eof") fail("expected the end of the statement " + name.v + " but found " + describe(peek()) + " (one statement per line)");
+      if (!statements.has(name.v)) order.push(name.v);
+      statements.set(name.v, { expr: value, line: name.line });
+    } catch (error) {
+      errors.push(error.message);
+      while (peek().t !== "nl" && peek().t !== "eof") k++;
+    }
+  }
+  return { statements, order, errors };
+}
+
+// ---- Components: positional arguments in this order; [prop, kind, required].
+const WB_SPECS = {
+  Stack: [["children", "nodes", 1]],
+  Row: [["children", "nodes", 1]],
+  Card: [["title", "str", 1], ["children", "nodes", 1]],
+  Tabs: [["tabs", "nodes", 1]],
+  Tab: [["label", "str", 1], ["children", "nodes", 1]],
+  Details: [["title", "str", 1], ["children", "nodes", 1]],
+  Text: [["markdown", "str", 1]],
+  Badge: [["label", "str", 1], ["tone", "tone"]],
+  Callout: [["markdown", "str", 1], ["tone", "tone"], ["title", "str"]],
+  KeyValue: [["items", "pairs", 1]],
+  Table: [["columns", "strs", 1], ["rows", "rows", 1]],
+  Stat: [["label", "str", 1], ["value", "strnum", 1], ["delta", "str"], ["tone", "tone"]],
+  Progress: [["label", "str", 1], ["value", "num", 1], ["max", "pos"]],
+  Steps: [["items", "steps", 1], ["direction", "direction"]],
+  BarChart: [["labels", "strs", 1], ["series", "series", 1], ["unit", "str"], ["whole", "bool"]],
+  LineChart: [["labels", "strs", 1], ["series", "series", 1], ["unit", "str"]],
+  Series: [["name", "str", 1], ["values", "nums", 1]],
+  Choice: [["name", "str", 1], ["options", "options", 1], ["label", "str"], ["multiple", "bool"]],
+  Input: [["name", "str", 1], ["label", "str"], ["placeholder", "str"], ["multiline", "bool"]],
+  DateInput: [["name", "str", 1], ["label", "str"], ["time", "bool"], ["value", "date"]],
+  Slider: [["name", "str", 1], ["min", "num", 1], ["max", "num", 1], ["label", "str"], ["step", "pos"], ["value", "num"], ["unit", "str"]],
+  Button: [["label", "str", 1], ["variant", "variant"], ["value", "str"]],
+};
+// What may not sit anywhere inside each container; Tabs holds only Tab, and Series sits only in a chart.
+const WB_FORBIDS = { Card: ["Card", "Tabs"], Row: ["Row", "Tabs", "Details"], Tab: ["Tabs"], Details: ["Card", "Tabs", "Details"] };
+class WbNode {
+  constructor(type, props, line) { this.type = type; this.props = props; this.line = line; }
+}
+const wbEnum = (choices) => (v, problems) => choices.indexOf(v) >= 0 ? v : (problems.push("must be one of " + choices.join(", ")), undefined);
+const wbStr = (v) => typeof v === "string" ? v : typeof v === "number" ? String(v) : undefined;
+const wbNum = (v) => typeof v === "number" && isFinite(v) ? v : typeof v === "string" && v.trim() && isFinite(+v) ? +v : undefined;
+const wbIsObject = (v) => v != null && typeof v === "object" && !Array.isArray(v) && !(v instanceof WbNode);
+// Each kind returns the cleaned value, or undefined when it is unusable; problems collects what to report.
+function wbList(v, problems, what, item) {
+  if (!Array.isArray(v)) { problems.push("must be a list of " + what); return undefined; }
+  const out = [];
+  for (const x of v) {
+    const y = item(x);
+    if (y === undefined) problems.push("has an entry that is not " + what.replace(/s$/, "") + " (left out)");
+    else out.push(y);
+  }
+  return out;
+}
+const WB_KINDS = {
+  str: (v, p) => { const s = wbStr(v); if (s === undefined) p.push("must be a string"); return s; },
+  num: (v, p) => { const n = wbNum(v); if (n === undefined) p.push("must be a number"); return n; },
+  pos: (v, p) => { const n = wbNum(v); if (!(n > 0)) { p.push("must be a positive number"); return undefined; } return n; },
+  bool: (v, p) => typeof v === "boolean" ? v : (p.push("must be true or false"), undefined),
+  strnum: (v, p) => typeof v === "string" || typeof v === "number" ? v : (p.push("must be a string or a number"), undefined),
+  tone: wbEnum(["neutral", "info", "success", "warning", "error"]),
+  direction: wbEnum(["column", "row"]),
+  variant: wbEnum(["primary", "secondary"]),
+  date: (v, p) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(v) ? v : (p.push("must look like 2026-11-08 or 2026-11-08T14:30"), undefined),
+  nodes: (v, p) => wbList(v, p, "components", (x) => x instanceof WbNode ? x : undefined),
+  strs: (v, p) => wbList(v, p, "strings", wbStr),
+  nums: (v, p) => wbList(v, p, "numbers or nulls", (x) => x === null ? null : wbNum(x)),
+  rows: (v, p) => wbList(v, p, "rows (lists of strings or numbers)", (row) => Array.isArray(row) && row.every((c) => typeof c === "string" || typeof c === "number") ? row : undefined),
+  pairs: (v, p) => wbList(v, p, "{label, value} objects", (x) => wbIsObject(x) && wbStr(x.label) !== undefined && (typeof x.value === "string" || typeof x.value === "number")
+    ? { label: wbStr(x.label), value: x.value } : undefined),
+  steps: (v, p) => wbList(v, p, "{title, markdown?, status?} objects", (x) => wbIsObject(x) && wbStr(x.title) !== undefined
+    && (x.markdown == null || typeof x.markdown === "string") && (x.status == null || ["done", "current", "todo", "blocked"].indexOf(x.status) >= 0)
+    ? { title: wbStr(x.title), markdown: x.markdown || "", status: x.status || "todo" } : undefined),
+  options: (v, p) => wbList(v, p, "options (strings or {label, description?} objects)", (x) => wbStr(x) !== undefined ? { label: wbStr(x), description: "" }
+    : wbIsObject(x) && wbStr(x.label) !== undefined ? { label: wbStr(x.label), description: wbStr(x.description) || "" } : undefined),
+  series: (v, p) => wbList(v, p, "Series(...) components", (x) => x instanceof WbNode && x.type === "Series" ? x : undefined),
+};
+
+function wbComponent(name, args, line, errors) {
+  const at = "line " + line + ": ";
+  if (!Object.prototype.hasOwnProperty.call(WB_SPECS, name)) {
+    errors.push(at + "unknown component " + name + " (left out; the components are " + Object.keys(WB_SPECS).join(", ") + ")");
+    return undefined;
+  }
+  const spec = WB_SPECS[name];
+  if (args.length > spec.length) {
+    errors.push(at + name + " takes at most " + spec.length + " arguments (" + spec.map((s) => s[0]).join(", ") + "); the extra ones were left out");
+  }
+  const props = {};
+  for (let i = 0; i < spec.length; i++) {
+    const [prop, kind, required] = spec[i];
+    const raw = args[i];
+    if (raw == null) {
+      if (required) { errors.push(at + name + " needs " + prop + " as argument " + (i + 1) + " (left out)"); return undefined; }
+      continue;
+    }
+    const problems = [];
+    const value = WB_KINDS[kind](raw, problems);
+    for (const problem of problems) errors.push(at + name + " " + prop + " " + problem);
+    if (value === undefined) {
+      if (required) return undefined;
+      continue;
+    }
+    props[prop] = value;
+  }
+  if (name === "Slider" && !(props.max > props.min)) { errors.push(at + "Slider max must be greater than min (left out)"); return undefined; }
+  return new WbNode(name, props, line);
+}
+
+// ---- A program: statements resolved from root, with references, cycles and unused names reported.
+function wbProgram(source) {
+  const parsed = wbParse(source);
+  const errors = parsed.errors.slice();
+  const values = new Map(), visiting = new Set();
+  function resolve(name, line) {
+    if (values.has(name)) return values.get(name);
+    const statement = parsed.statements.get(name);
+    if (!statement) { errors.push("line " + line + ": " + name + " is not defined"); return undefined; }
+    if (visiting.has(name)) { errors.push("line " + statement.line + ": " + name + " contains itself"); return undefined; }
+    visiting.add(name);
+    const value = evaluate(statement.expr);
+    visiting.delete(name);
+    values.set(name, value);
+    return value;
+  }
+  function evaluate(e) {
+    if (e.k === "lit") return e.v;
+    if (e.k === "arr") return e.items.map(evaluate).filter((v) => v !== undefined);
+    if (e.k === "ref") return resolve(e.name, e.line);
+    if (e.k === "call") return wbComponent(e.name, e.args.map(evaluate), e.line, errors);
+    const o = Object.create(null);
+    for (const [key, v] of e.entries) o[key] = evaluate(v);
+    return o;
+  }
+  // Without a root statement, the first Stack is the root (as upstream does).
+  const rootName = parsed.statements.has("root") ? "root"
+    : parsed.order.find((n) => parsed.statements.get(n).expr.k === "call" && parsed.statements.get(n).expr.name === "Stack");
+  if (!rootName) {
+    errors.push(parsed.statements.size ? "no root: the first line should be root = Stack([...])" : "the program has no statements");
+    return { root: null, errors };
+  }
+  const root = resolve(rootName, parsed.statements.get(rootName).line);
+  if (root !== undefined && !(root instanceof WbNode)) errors.push("root must be a component, such as root = Stack([...])");
+  for (const name of parsed.order) {
+    if (!values.has(name) && name !== rootName) errors.push("line " + parsed.statements.get(name).line + ": " + name + " is defined but root never reaches it, so it was not drawn");
+  }
+  return { root: root instanceof WbNode ? root : null, errors };
+}
+
+// ---- Rendering. Markdown goes through the page's escaping renderer; every other string becomes a text node.
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svg(tag, attrs, children) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const key in attrs || {}) if (attrs[key] != null) node.setAttribute(key, String(attrs[key]));
+  for (const child of [].concat(children == null ? [] : children)) if (child != null) node.append(child instanceof Node ? child : String(child));
+  return node;
+}
+function wbInline(tag, cls, text) {
+  const node = el(tag, cls ? { class: cls } : null);
+  node.innerHTML = inlineMarkdown(escapeHtml(text)); // escaped first: only the renderer's own tags are HTML
+  return node;
+}
+function wbMd(source) {
+  const box = markdownBlock(source);
+  box.classList.add("wb-md");
+  return box;
+}
+let wbUid = 0;
+
+function wbRender(node, ancestors, ctx) {
+  if (!(node instanceof WbNode)) return null;
+  const parent = ancestors[ancestors.length - 1];
+  const misplaced = (node.type === "Tab" && parent !== "Tabs") || (parent === "Tabs" && node.type !== "Tab") || node.type === "Series"
+    ? (parent || "the root") + " cannot hold " + node.type
+    : ancestors.filter((a) => (WB_FORBIDS[a] || []).indexOf(node.type) >= 0).map((a) => a + " cannot hold " + node.type)[0];
+  if (misplaced) ctx.errors.push("line " + node.line + ": " + misplaced + " (drawn anyway)");
+  const inner = ancestors.concat([node.type]);
+  const kids = (list) => list.map((child) => wbRender(child, inner, ctx));
+  const p = node.props;
+  switch (node.type) {
+    case "Stack": return el("div", { class: "wb-stack" }, kids(p.children));
+    case "Row": return el("div", { class: "wb-row" }, kids(p.children));
+    case "Card": {
+      const head = el("div", { class: "wb-card-head" }, [p.title ? wbInline("h3", "", p.title) : null, el("span", { class: "wb-decision", hidden: true })]);
+      return el("section", { class: "wb-card" }, [head].concat(kids(p.children)));
+    }
+    case "Tab": return el("div", { class: "wb-stack", role: "tabpanel" }, kids(p.children));
+    case "Tabs": {
+      const panels = kids(p.tabs);
+      const buttons = p.tabs.map((tab, i) => el("button", { type: "button", role: "tab", onclick: () => pick(i) }, tab.props.label || tab.type));
+      const pick = (i) => {
+        buttons.forEach((b, j) => { b.setAttribute("aria-selected", String(i === j)); b.setAttribute("aria-pressed", String(i === j)); });
+        panels.forEach((panel, j) => { if (panel) panel.hidden = i !== j; });
+      };
+      pick(0);
+      return el("div", { class: "wb-tabs" }, [el("div", { class: "segmented", role: "tablist" }, buttons)].concat(panels));
+    }
+    case "Details": return el("details", { class: "wb-details" }, [wbInline("summary", "", p.title), el("div", { class: "wb-stack" }, kids(p.children))]);
+    case "Text": return wbMd(p.markdown);
+    case "Badge": return el("span", { class: "wb-badge tone-" + (p.tone || "neutral") }, p.label);
+    case "Callout": return el("div", { class: "wb-callout tone-" + (p.tone || "info") }, [p.title ? el("strong", null, p.title) : null, wbMd(p.markdown)]);
+    case "KeyValue": return el("dl", { class: "wb-kv" }, [].concat(...p.items.map((it) => [el("dt", null, it.label), wbInline("dd", "", String(it.value))])));
+    case "Table": return el("div", { class: "md-table" }, el("table", null, [
+      el("thead", null, el("tr", null, p.columns.map((c) => wbInline("th", "", c)))),
+      el("tbody", null, p.rows.map((row) => el("tr", null, p.columns.map((_, i) => {
+        const cell = row[i] == null ? "" : row[i];
+        return wbInline("td", typeof cell === "number" ? "num" : "", String(cell));
+      })))),
+    ]));
+    case "Stat": return el("div", { class: "wb-stat tone-" + (p.tone || "neutral") }, [
+      el("span", { class: "label" }, p.label), el("span", { class: "value" }, String(p.value)), p.delta ? el("span", { class: "delta" }, p.delta) : null]);
+    case "Progress": {
+      const max = p.max || 100;
+      const pct = Math.max(0, Math.min(100, p.value / max * 100));
+      return el("div", { class: "wb-progress" }, [
+        el("div", { class: "top" }, [el("span", null, p.label), el("span", { class: "small muted mono" }, (p.max ? p.value + " of " + p.max + ", " : "") + Math.round(pct) + "%")]),
+        el("div", { class: "bar", role: "progressbar", "aria-label": p.label, "aria-valuemin": 0, "aria-valuemax": max, "aria-valuenow": p.value }, el("div", { style: "width:" + pct + "%" })),
+      ]);
+    }
+    case "Steps": return el("ol", { class: "wb-steps " + (p.direction === "row" ? "row" : "column") }, p.items.map((it) => el("li", { class: it.status }, [
+      el("span", { class: "mark", title: it.status }), el("span", { class: "offscreen" }, it.status + ": "),
+      el("div", null, [wbInline("div", "title", it.title), it.markdown ? wbMd(it.markdown) : null]),
+    ])));
+    case "BarChart": case "LineChart": return wbChart(node, ctx);
+    case "Choice": {
+      const group = "wb" + (++wbUid);
+      const inputs = p.options.map((o) => el("input", { type: p.multiple ? "checkbox" : "radio", name: group, value: o.label }));
+      ctx.field(p.name, node.line, inputs,
+        () => p.multiple ? inputs.filter((x) => x.checked).map((x) => x.value) : (inputs.find((x) => x.checked) || { value: null }).value,
+        (v) => { const want = [].concat(v == null ? [] : v); for (const x of inputs) x.checked = want.indexOf(x.value) >= 0; });
+      return el("fieldset", { class: "wb-choice" }, [
+        el("legend", null, p.label || p.name),
+        el("div", { class: "wb-options" }, p.options.map((o, i) => el("label", { class: "wb-option" }, [
+          inputs[i], el("span", null, [el("span", null, o.label), o.description ? el("span", { class: "wb-opt-desc" }, o.description) : null])]))),
+      ]);
+    }
+    case "Input": {
+      const input = el(p.multiline ? "textarea" : "input", { class: "wb-input", type: p.multiline ? null : "text", rows: p.multiline ? 4 : null, placeholder: p.placeholder || null });
+      ctx.field(p.name, node.line, [input], () => input.value, (v) => { input.value = v == null ? "" : String(v); });
+      return el("label", { class: "wb-field" }, [el("span", null, p.label || p.name), input]);
+    }
+    case "DateInput": {
+      const input = el("input", { class: "wb-input", type: p.time ? "datetime-local" : "date" });
+      if (p.value) input.value = p.time || p.value.length <= 10 ? p.value : p.value.slice(0, 10);
+      ctx.field(p.name, node.line, [input], () => input.value || null, (v) => { input.value = v == null ? "" : String(v); });
+      return el("label", { class: "wb-field" }, [el("span", null, p.label || p.name), input]);
+    }
+    case "Slider": {
+      const input = el("input", { type: "range", min: p.min, max: p.max, step: p.step || "any", "aria-label": p.label || p.name });
+      input.value = String(p.value != null ? p.value : p.min);
+      const output = el("output");
+      const show = () => { output.textContent = wbFormat(Number(input.value), p.unit); };
+      input.addEventListener("input", show);
+      show();
+      ctx.field(p.name, node.line, [input], () => Number(input.value), (v) => { if (v != null) input.value = String(v); show(); });
+      return el("div", { class: "wb-field" }, [el("span", null, p.label || p.name), el("div", { class: "wb-slider" }, [input, output])]);
+    }
+    case "Button": {
+      const button = el("button", { type: "button", class: "wb-button" + (p.variant === "primary" ? " primary" : "") }, p.label);
+      const value = p.value ? p.value : null;
+      ctx.buttons.push({ node: button, label: p.label, value });
+      if (value != null && ctx.items.indexOf(value) < 0) ctx.items.push(value);
+      return button;
+    }
+  }
+  return el("span");
+}
+
+// ---- Charts: inline SVG drawn at the width it gets, with a legend and the numbers as a table.
+function wbFormat(v, unit) {
+  if (v == null) return "no data";
+  const n = Number(v.toPrecision(12));
+  const text = Math.abs(n) >= 10000 ? n.toLocaleString() : String(Math.round(n * 100) / 100);
+  if (!unit) return text;
+  if (/^[$£€¥]$/.test(unit)) return unit + text;
+  return text + (unit === "%" ? "" : " ") + unit;
+}
+function wbScale(values, zero) {
+  let lo = values.length ? Math.min(...values) : 0, hi = values.length ? Math.max(...values) : 1;
+  if (zero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  if (hi === lo) { const pad = Math.abs(hi) / 10 || 1; hi += pad; if (!zero || lo !== 0) lo -= pad; }
+  const raw = (hi - lo) / 4, mag = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / mag;
+  const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * mag;
+  const scale = { lo: Math.floor(lo / step + 1e-9) * step, hi: Math.ceil(hi / step - 1e-9) * step, ticks: [] };
+  for (let v = scale.lo; v <= scale.hi + step / 2; v += step) scale.ticks.push(Number(v.toPrecision(12)));
+  return scale;
+}
+const wbColor = (i) => "var(--wb-" + (i % 6 + 1) + ")";
+function wbClip(text, chars) { return text.length > chars ? text.slice(0, Math.max(1, chars - 1)) + "…" : text; }
+// On the axis and bars, % and currency stay beside each number; a word unit is said once, above the axis.
+const wbShortUnit = (unit) => /^[%$£€¥]$/.test(unit || "") ? unit : "";
+// The y axis and its gridlines, and the plot margins its labels need.
+function wbFrame(W, H, values, zero, unit) {
+  const scale = wbScale(values, zero), short = wbShortUnit(unit);
+  const m = { l: 10 + 6.5 * Math.max(...scale.ticks.map((t) => wbFormat(t, short).length)), r: 12, t: unit && !short ? 22 : 16, b: 34 };
+  const y = (v) => m.t + (H - m.t - m.b) * (1 - (v - scale.lo) / (scale.hi - scale.lo));
+  const parts = unit && !short ? [svg("text", { x: 2, y: 11 }, unit)] : [];
+  for (const t of scale.ticks) {
+    parts.push(svg("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y(t), y2: y(t) }));
+    parts.push(svg("text", { x: m.l - 6, y: y(t) + 4, "text-anchor": "end" }, wbFormat(t, short)));
+  }
+  return { m, y, parts, scale };
+}
+function wbXLabels(labels, xAt, yPos, slot) {
+  const every = Math.max(1, Math.ceil(36 / Math.max(1, slot)));
+  const chars = Math.max(3, Math.floor(slot * every / 6.5));
+  return labels.map((label, i) => i % every ? null
+    : svg("text", { x: xAt(i), y: yPos, "text-anchor": "middle" }, [wbClip(label, chars), svg("title", null, label)]));
+}
+function wbBarSvg(labels, series, unit, W, at) {
+  const H = 240;
+  const values = [];
+  series.forEach((s) => labels.forEach((_, i) => { if (at(s, i) != null) values.push(at(s, i)); }));
+  const f = wbFrame(W, H, values, true, unit), m = f.m, y = f.y, parts = f.parts;
+  const n = Math.max(1, labels.length), gw = (W - m.l - m.r) / n, bw = Math.min(44, gw * 0.8 / Math.max(1, series.length));
+  labels.forEach((label, i) => {
+    const x0 = m.l + gw * i + (gw - bw * series.length) / 2;
+    series.forEach((s, k) => {
+      const v = at(s, i);
+      if (v == null) return;
+      const top = y(Math.max(v, 0)), bottom = y(Math.min(v, 0));
+      parts.push(svg("rect", { x: x0 + k * bw + 1, y: top, width: Math.max(1, bw - 2), height: Math.max(1, bottom - top), rx: 2, style: "fill:" + wbColor(k) },
+        svg("title", null, label + ", " + s.props.name + ": " + wbFormat(v, unit))));
+      if (bw >= 22 && n * series.length <= 16) parts.push(svg("text", { class: "val", x: x0 + k * bw + bw / 2, y: v >= 0 ? top - 4 : bottom + 12, "text-anchor": "middle" }, wbFormat(v, wbShortUnit(unit))));
+    });
+  });
+  parts.push(svg("line", { class: "axis", x1: m.l, x2: W - m.r, y1: y(0), y2: y(0) }));
+  return { H, parts: parts.concat(wbXLabels(labels, (i) => m.l + gw * (i + 0.5), H - m.b + 18, gw)) };
+}
+function wbLineSvg(labels, series, unit, W, at) {
+  const H = 240;
+  const values = [];
+  series.forEach((s) => labels.forEach((_, i) => { if (at(s, i) != null) values.push(at(s, i)); }));
+  const f = wbFrame(W, H, values, false, unit), m = f.m, y = f.y, parts = f.parts;
+  m.l += 8; m.r += 8;
+  const n = labels.length, slot = (W - m.l - m.r) / Math.max(1, n - 1);
+  const x = (i) => n <= 1 ? (m.l + W - m.r) / 2 : m.l + slot * i;
+  series.forEach((s, k) => {
+    // A null breaks the line; one series also fills the area beneath it.
+    const runs = [[]];
+    labels.forEach((_, i) => { const v = at(s, i); if (v == null) runs.push([]); else runs[runs.length - 1].push([x(i), y(v)]); });
+    for (const run of runs.filter((r) => r.length)) {
+      const path = run.map((pt, j) => (j ? "L" : "M") + pt[0].toFixed(1) + " " + pt[1].toFixed(1)).join(" ");
+      if (series.length === 1) parts.push(svg("path", { d: path + " L" + run[run.length - 1][0].toFixed(1) + " " + y(f.scale.lo) + " L" + run[0][0].toFixed(1) + " " + y(f.scale.lo) + " Z", style: "fill:" + wbColor(k) + ";opacity:.15" }));
+      parts.push(svg("path", { d: path, style: "fill:none;stroke-width:2.5;stroke-linejoin:round;stroke:" + wbColor(k) }));
+    }
+    labels.forEach((label, i) => {
+      const v = at(s, i);
+      if (v != null) parts.push(svg("circle", { cx: x(i), cy: y(v), r: n > 40 ? 2 : 3.5, style: "fill:" + wbColor(k) }, svg("title", null, label + ", " + s.props.name + ": " + wbFormat(v, unit))));
+    });
+  });
+  return { H, parts: parts.concat(wbXLabels(labels, x, H - m.b + 18, n <= 1 ? W : slot)) };
+}
+// whole: one series of parts adding up to a whole, as one stacked bar with shares.
+function wbWholeSvg(labels, s, unit, W, at) {
+  const H = 44;
+  const values = labels.map((_, i) => Math.max(0, at(s, i) || 0));
+  const total = values.reduce((a, b) => a + b, 0) || 1;
+  const parts = [];
+  let x = 0;
+  values.forEach((v, i) => {
+    const w = W * v / total, share = Math.round(v / total * 100) + "%";
+    parts.push(svg("rect", { x, y: 4, width: Math.max(0, w - 2), height: 36, rx: 3, style: "fill:" + wbColor(i) }, svg("title", null, labels[i] + ": " + wbFormat(v, unit) + " (" + share + ")")));
+    if (w > 44) parts.push(svg("text", { class: "inside", x: x + w / 2 - 1, y: 26, "text-anchor": "middle" }, share));
+    x += w;
+  });
+  return { H, parts };
+}
+function wbChart(node, ctx) {
+  const p = node.props, line = node.type === "LineChart";
+  const labels = p.labels, series = p.series;
+  for (const s of series) {
+    if (s.props.values.length !== labels.length) ctx.errors.push("line " + s.line + ": Series " + JSON.stringify(s.props.name) + " has " + s.props.values.length + " values for " + labels.length + " labels (drawn anyway)");
+  }
+  const whole = !line && p.whole;
+  if (whole && series.length !== 1) ctx.errors.push("line " + node.line + ": BarChart with whole takes exactly one series (drew the first)");
+  const at = (s, i) => { const v = s.props.values[i]; return typeof v === "number" && isFinite(v) ? v : null; };
+  const kind = line ? "Line chart" : whole ? "Parts of a whole" : "Bar chart";
+  const label = kind + ": " + series.map((s) => s.props.name + ": " + labels.map((l, i) => l + " " + wbFormat(at(s, i), p.unit)).join(", ")).join("; ");
+  const figure = el("figure", { class: "wb-chart" });
+  let drawn = 0;
+  const draw = (width) => {
+    width = Math.max(280, Math.round(width));
+    if (width === drawn || !series.length) return;
+    drawn = width;
+    const g = line ? wbLineSvg(labels, series, p.unit, width, at) : whole ? wbWholeSvg(labels, series[0], p.unit, width, at) : wbBarSvg(labels, series, p.unit, width, at);
+    const graphic = svg("svg", { viewBox: "0 0 " + width + " " + g.H, width, height: g.H, role: "img", "aria-label": wbClip(label, 1200) }, g.parts);
+    if (figure.firstChild && figure.firstChild.nodeName === "svg") figure.firstChild.replaceWith(graphic); else figure.prepend(graphic);
+  };
+  draw(640);
+  if (window.ResizeObserver) new ResizeObserver((entries) => { const w = entries[0].contentRect.width; if (w > 0) draw(w); }).observe(figure);
+  if (whole && series.length) {
+    const values = labels.map((_, i) => Math.max(0, at(series[0], i) || 0));
+    const total = values.reduce((a, b) => a + b, 0);
+    figure.append(el("figcaption", { class: "wb-legend" }, labels.map((l, i) => el("span", { class: "wb-key", style: "--c:" + wbColor(i) },
+      l + ": " + wbFormat(values[i], p.unit) + " (" + (total ? Math.round(values[i] / total * 100) : 0) + "%)")).concat([el("b", null, "Total " + wbFormat(total, p.unit))])));
+  } else if (series.length > 1) {
+    figure.append(el("figcaption", { class: "wb-legend" }, series.map((s, k) => el("span", { class: "wb-key", style: "--c:" + wbColor(k) }, s.props.name))));
+  }
+  const shown = whole ? series.slice(0, 1) : series;
+  figure.append(el("details", { class: "wb-numbers" }, [el("summary", null, "Numbers"), el("div", { class: "md-table" }, el("table", null, [
+    el("thead", null, el("tr", null, [el("th", null, "")].concat(shown.map((s) => el("th", { scope: "col" }, s.props.name))))),
+    el("tbody", null, labels.map((l, i) => el("tr", null, [el("th", { scope: "row" }, l)].concat(shown.map((s) => el("td", { class: "num" }, wbFormat(at(s, i), p.unit))))))),
+  ]))]));
+  return figure;
+}
+
+// ---- One board: rendered program, errors, and the answer bar (or the answer, once given).
+// Writeback (as in OpenChamber): a board with fields gets Send and a note; a Button press sends the
+// whole form with its label and value. Buttons whose values name two or more items are decisions:
+// they collect per item and send once every item has one, or early with Send now.
+function wbBoardNode(board) {
+  const ctx = {
+    errors: [], fields: [], buttons: [], items: [], controls: [],
+    field(name, line, controls, get, set) {
+      this.controls.push(...controls);
+      if (this.fields.some((f) => f.name === name)) { this.errors.push("line " + line + ": two fields are named " + JSON.stringify(name) + "; only the first is sent (drawn anyway)"); return; }
+      this.fields.push({ name, get, set });
+    },
+  };
+  let body = null;
+  try {
+    const program = wbProgram(board.program);
+    ctx.errors.push(...program.errors);
+    if (program.root) body = wbRender(program.root, [], ctx);
+  } catch (error) {
+    ctx.errors.push("could not draw the board: " + error.message);
+  }
+  const answered = board.status === "answered";
+  const node = el("article", { class: "wb-board" + (answered ? " answered" : ""), "data-board": board.id }, [
+    el("header", { class: "wb-head" }, [el("span", { class: "wb-note" }, board.note || "Whiteboard"), answered ? badge("answered", "stopped") : null, timeNode(board.at)]),
+    ctx.errors.length ? el("div", { class: "wb-callout tone-error wb-errors", role: "note" }, [
+      el("strong", null, body ? "Part of this board could not be drawn" : "This board could not be drawn"),
+      el("ul", null, ctx.errors.slice(0, 12).map((e) => el("li", null, e))),
+      el("p", { class: "small" }, "The walker has been told and may draw it again."),
+    ]) : null,
+    body,
+  ]);
+
+  const chosen = new Map(); // item -> the label of the button chosen for it
+  const decisions = ctx.items.length >= 2;
+  const markChoices = () => {
+    for (const b of ctx.buttons) {
+      if (b.value == null || !chosen.has(b.value)) continue;
+      const mine = chosen.get(b.value) === b.label;
+      b.node.setAttribute("aria-pressed", String(mine));
+      b.node.classList.toggle("dim", !mine);
+      const card = b.node.closest(".wb-card");
+      const tag = card && card.querySelector(":scope > .wb-card-head > .wb-decision");
+      if (mine && tag) { tag.textContent = b.label; tag.hidden = false; card.dataset.decision = b.label; }
+    }
+  };
+  if (answered) {
+    const answer = board.answer || {};
+    const values = answer.values && typeof answer.values === "object" ? answer.values : {};
+    for (const f of ctx.fields) if (Object.prototype.hasOwnProperty.call(values, f.name)) f.set(values[f.name]);
+    for (const d of Array.isArray(answer.decisions) ? answer.decisions : []) if (d && d.item != null) chosen.set(String(d.item), String(d.choice));
+    if (answer.button != null && answer.value != null) chosen.set(String(answer.value), String(answer.button));
+    markChoices();
+    if (answer.button != null && answer.value == null) {
+      const pressed = ctx.buttons.find((b) => b.label === answer.button && b.value == null);
+      if (pressed) pressed.node.setAttribute("aria-pressed", "true");
+    }
+    for (const c of ctx.controls.concat(ctx.buttons.map((b) => b.node))) c.disabled = true;
+    node.append(wbAnswerNode(board.answer));
+    return { node, errors: ctx.errors };
+  }
+  if (!ctx.fields.length && !ctx.buttons.length) return { node, errors: ctx.errors };
+
+  let sent = false;
+  const note = el("textarea", { class: "wb-input", rows: 2, placeholder: "Anything the walker should know" });
+  const noteField = el("label", { class: "wb-field", hidden: true }, [el("span", null, "Note (optional)"), note]);
+  const noteToggle = el("button", { type: "button", class: "link small", onclick: () => { noteField.hidden = false; noteToggle.hidden = true; note.focus(); } }, "Add a note");
+  const tally = el("span", { class: "small muted" });
+  const status = el("span", { class: "small", role: "status" });
+  const sendButton = ctx.fields.length ? el("button", { type: "button", class: "primary", onclick: () => submit(null) }, "Send") : null;
+  const sendNow = decisions && !ctx.fields.length ? el("button", { type: "button", disabled: true, onclick: () => submit(null) }, "Send now") : null;
+  const decided = () => ctx.items.filter((i) => chosen.has(i)).length;
+  const refresh = () => {
+    markChoices();
+    if (decisions) tally.textContent = decided() + " of " + ctx.items.length + " decided";
+    if (sendNow) sendNow.disabled = !decided();
+  };
+  function submit(pressed) {
+    if (sent) return;
+    const values = {};
+    for (const f of ctx.fields) values[f.name] = f.get();
+    const answer = {
+      button: pressed ? pressed.label : null,
+      value: pressed ? pressed.value : null,
+      values,
+      decisions: ctx.items.filter((i) => chosen.has(i)).map((item) => ({ item, choice: chosen.get(item) })),
+      note: note.value.trim(),
+    };
+    if (!send({ type: "board_answer", id: board.id, answer })) { status.textContent = "Not connected. Try again in a moment."; return; }
+    sent = true;
+    log("whiteboard: answered " + board.id);
+    wbOnBoard(Object.assign({}, board, { status: "answered", answer }));
+  }
+  for (const b of ctx.buttons) {
+    b.node.addEventListener("click", () => {
+      if (sent) return;
+      if (b.value != null) chosen.set(b.value, b.label);
+      if (decisions && b.value != null) {
+        refresh();
+        if (!ctx.fields.length && decided() === ctx.items.length) submit(null);
+        return;
+      }
+      submit(b);
+    });
+  }
+  refresh();
+  node.append(el("div", { class: "wb-actions" }, [noteField, noteToggle, tally, status, el("span", { class: "spacer" }), sendNow, sendButton]));
+  return { node, errors: ctx.errors };
+}
+
+function wbAnswerNode(answer) {
+  const rows = [];
+  const shown = (v) => v == null || v === "" ? "(blank)" : Array.isArray(v) ? (v.join(", ") || "(none)") : typeof v === "object" ? JSON.stringify(v) : String(v);
+  if (answer && typeof answer === "object") {
+    for (const d of Array.isArray(answer.decisions) ? answer.decisions : []) if (d) rows.push([String(d.item), shown(d.choice)]);
+    if (answer.values && typeof answer.values === "object") for (const key of Object.keys(answer.values)) rows.push([key, shown(answer.values[key])]);
+    if (answer.button) rows.push(["Pressed", String(answer.button)]);
+    if (answer.note) rows.push(["Note", String(answer.note)]);
+  }
+  return el("div", { class: "wb-answered" }, [el("strong", null, "Answered"),
+    rows.length ? el("dl", { class: "wb-kv" }, [].concat(...rows.map((r) => [el("dt", null, r[0]), el("dd", null, r[1])]))) : null]);
+}
+
+// ---- The boards on this page: id -> { board, key, node, fold, errors }
+const wbBoards = new Map();
+const wbErrorsSent = new Set();
+let wbUnseen = false;   // an open board arrived while the whiteboard was out of sight
+let wbOnScreen = false; // the whiteboard is in this page's viewport, for the viewing report
+// Held by reference, not looked up by id: the section moves into the whiteboard's own tab and back.
+const WB = { root: $("whiteboard"), empty: $("wbEmpty"), current: $("wbCurrent"), older: $("wbOlder"), olderCount: $("wbOlderCount"), olderList: $("wbOlderList") };
+
+function wbNormalize(raw) {
+  if (!raw || typeof raw !== "object" || raw.id == null) return null;
+  return {
+    id: String(raw.id), at: Number(raw.at) || Date.now(), program: String(raw.program || ""), note: String(raw.note || "").slice(0, 300),
+    status: raw.status === "answered" ? "answered" : "open", answer: raw.answer && typeof raw.answer === "object" ? raw.answer : null,
+  };
+}
+// Rebuilds a board only when what it shows changed, so an update never wipes half-entered input.
+function wbUpsert(board) {
+  const key = [board.status, board.note, board.program, JSON.stringify(board.answer)].join("\u0001");
+  const known = wbBoards.get(board.id);
+  if (known && known.key === key) { known.board = board; return false; }
+  const built = wbBoardNode(board);
+  if (known) known.node.remove();
+  const entry = { board, key, node: built.node, fold: known ? known.fold : null, errors: built.errors };
+  wbBoards.set(board.id, entry);
+  wbReportErrors(entry);
+  return !known;
+}
+function wbReportErrors(entry) {
+  const b = entry.board;
+  if (!entry.errors.length || b.status !== "open" || wbErrorsSent.has(b.id)) return;
+  if (send({ type: "board_error", id: b.id, error: entry.errors.slice(0, 12).join("\n").slice(0, 2000) })) wbErrorsSent.add(b.id);
+}
+// In sight: the whiteboard's own tab is visible, or this page is visible on the Hands tab.
+const wbInSight = () => wbTabVisible() || (currentTab === "hands" && !document.hidden && !wbTabOpen());
+function wbOnBoard(raw) {
+  const board = wbNormalize(raw);
+  if (!board) return;
+  const fresh = wbUpsert(board);
+  wbLayout();
+  if (!fresh || board.status !== "open") return;
+  log("whiteboard: " + (board.note || board.id));
+  if (wbInSight()) return;
+  wbUnseen = true;
+  renderBoardCount();
+  notifyHidden("The walker drew on the whiteboard", board.note);
+}
+// After the feed snapshot: the server's boards replace this page's.
+function wbOnBoards(list) {
+  const boards = (Array.isArray(list) ? list : []).map(wbNormalize).filter(Boolean);
+  const ids = new Set(boards.map((b) => b.id));
+  for (const id of [...wbBoards.keys()]) if (!ids.has(id)) { wbBoards.get(id).node.remove(); wbBoards.delete(id); }
+  for (const b of boards) {
+    if (wbUpsert(b) && b.status === "open" && !wbInSight()) wbUnseen = true;
+    else wbReportErrors(wbBoards.get(b.id)); // a report that could not go out before the socket dropped
+  }
+  renderBoardCount();
+  wbLayout();
+}
+// The newest board on top; older ones, newest first, each folded beneath it.
+function wbLayout() {
+  const entries = [...wbBoards.values()].sort((a, b) => a.board.at - b.board.at);
+  while (entries.length > WB_KEEP) { const old = entries.shift(); old.node.remove(); wbBoards.delete(old.board.id); }
+  WB.empty.hidden = entries.length > 0;
+  const latest = entries.pop();
+  WB.current.replaceChildren(...(latest ? [latest.node] : []));
+  const older = entries.reverse().map((e) => {
+    if (!e.fold) e.fold = el("details", { class: "wb-past" });
+    e.fold.replaceChildren(el("summary", null, [e.board.note || "Whiteboard", e.board.status === "answered" ? badge("answered", "stopped") : badge("open"), timeNode(e.board.at)]), e.node);
+    return e.fold;
+  });
+  WB.older.hidden = !older.length;
+  WB.olderCount.textContent = String(older.length);
+  WB.olderList.replaceChildren(...older);
+}
+function wbClear() {
+  wbBoards.clear();
+  wbErrorsSent.clear();
+  wbUnseen = false;
+  renderBoardCount();
+  wbLayout();
+  wbCloseTab();
+}
+function renderBoardCount() { $("boardCount").hidden = !wbUnseen; }
+function wbSeen() {
+  if (!wbUnseen || !wbInSight()) return;
+  wbUnseen = false;
+  renderBoardCount();
+}
+// Flashes the newest board and brings the whiteboard into view, here or in its own tab.
+function wbReveal() {
+  const board = WB.current.firstElementChild;
+  if (board) {
+    board.classList.remove("flash");
+    void board.offsetWidth; // restart the animation
+    board.classList.add("flash");
+  }
+  if (wbTabOpen()) { wbTab.focus(); return; }
+  showTab("hands");
+  WB.root.scrollIntoView({ block: "start", behavior: REDUCED_MOTION.matches ? "auto" : "smooth" });
+}
+if (window.IntersectionObserver) {
+  new IntersectionObserver((entries) => {
+    const e = entries[entries.length - 1];
+    wbOnScreen = e.isIntersecting && (e.intersectionRatio >= 0.25 || e.intersectionRect.height >= innerHeight * 0.4);
+    reportViewing();
+  }, { threshold: [0, 0.25, 0.5, 1] }).observe(WB.root);
+}
+
+// ---- The whiteboard in its own tab: a blank tab this page fills and keeps driving, so the one paired
+// socket stays here and the server sees nothing new. The section's nodes move there with their listeners;
+// closing that tab (or Bring it back) moves them home to Hands, and leaving this page closes it.
+let wbTab = null;
+let wbTabTimer = null;
+const wbTabOpen = () => !!wbTab && !wbTab.closed;
+const wbTabVisible = () => wbTabOpen() && wbTab.document.visibilityState === "visible";
+// Must run inside the click: browsers open new tabs only from one.
+function wbOpenTab() {
+  if (wbTabOpen()) { wbTab.focus(); return; }
+  const tab = window.open("", "_blank");
+  if (!tab) { $("handsNote").textContent = "The browser blocked the new tab. Allow pop-ups for this site and try again."; return; }
+  const doc = tab.document;
+  doc.open();
+  doc.write("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Dogwalk: Whiteboard</title></head><body></body></html>");
+  doc.close();
+  doc.head.append(document.querySelector("style").cloneNode(true));
+  doc.body.append(el("div", { class: "page" }, [
+    el("header", { class: "top" }, [el("span", { class: "mark" }, [el("b", null, "dog"), "walk.tools"]), el("span", { class: "crumb" }, "Whiteboard")]),
+    el("p", { class: "small muted" }, "Drawn by the walker on your call. This tab follows your Paired Browser tab, so keep that one open; answer here or aloud."),
+    WB.root,
+  ]));
+  wbTab = tab;
+  $("wbAway").hidden = false;
+  $("handsNote").textContent = "";
+  tab.addEventListener("pagehide", wbTabClosed);
+  doc.addEventListener("visibilitychange", () => { wbSeen(); reportViewing(true); });
+  clearInterval(wbTabTimer);
+  wbTabTimer = setInterval(() => { if (!wbTabOpen()) wbTabClosed(); }, 1000);
+  wbSeen();
+  reportViewing(true);
+}
+function wbTabClosed() {
+  if (!wbTab) return;
+  wbTab = null;
+  clearInterval(wbTabTimer);
+  $("wbHome").append(WB.root);
+  $("wbAway").hidden = true;
+  reportViewing(true);
+}
+function wbCloseTab() {
+  const tab = wbTab;
+  wbTabClosed();
+  if (tab && !tab.closed) tab.close();
+}
+$("handsWhiteboard").addEventListener("click", wbOpenTab);
+$("wbBack").addEventListener("click", wbCloseTab);
+addEventListener("pagehide", wbCloseTab);
+// ==== WHITEBOARD END ====
+
 // ---- The walker shows the user something: {"type":"show","uri":"...","note":"..."}.
-// dogwalk:file/<path>, dogwalk:dir/<path>, dogwalk:session/<Alias> and dogwalk:timeline navigate
+// dogwalk:file/<path>, dogwalk:dir/<path>, dogwalk:session/<Alias>, dogwalk:timeline and dogwalk:whiteboard navigate
 // this page at once, with a toast. dogwalk:terminal, dogwalk:desktop and http(s) URLs need a new tab,
 // which a browser opens only from a click, so they raise a banner with a button instead.
 const BANNER_MS = 120000;
@@ -2309,6 +3261,10 @@ function onShow(m) {
     const last = $("feedList").lastElementChild;
     if (last) last.scrollIntoView({ block: "nearest", behavior: REDUCED_MOTION.matches ? "auto" : "smooth" });
     return walkerShowed("The walker opened the call timeline", note);
+  }
+  if (uri === "dogwalk:whiteboard") {
+    wbReveal();
+    return walkerShowed(wbBoards.size ? "The walker pointed you to the whiteboard" : "The walker opened the whiteboard, but nothing is drawn on it yet", note);
   }
   if (uri === "dogwalk:terminal" || uri === "dogwalk:desktop") {
     const kind = uri.slice("dogwalk:".length);
@@ -2415,6 +3371,7 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("visibilitychange", () => {
   reportViewing(true); // "hidden" on the way out, the current view on the way back
   if (document.visibilityState !== "visible") return;
+  wbSeen();
   acquireWake();
   // Backgrounded tabs lose their sockets: reconnect at once on return instead of waiting out the backoff.
   if (!socket && sessionStorage.getItem(TOKEN_KEY)) { backoff = 1000; connect(); }
