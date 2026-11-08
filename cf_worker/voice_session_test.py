@@ -10,6 +10,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import signal
 import subprocess
@@ -20,7 +21,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosed
 
 from http.server import BaseHTTPRequestHandler
 
@@ -271,13 +274,16 @@ ORCHESTRATOR_SCRIPT = [
     ]),
     # Second call: digits without a system meaning still reach the Orchestrator.
     ('"key":"7"', lambda ctx: [call("k7-say", "say", text=KEYPAD_SAY, delegation_id=None)]),
+    # Preferences and pairing are voice operations; keypad digits stand in for asking here.
+    ('"key":"6"', lambda ctx: [call("k6-style", "set_earcon_style", style="tonal")]),
+    ('"key":"8"', lambda ctx: [call("k8-pair", "pair_browser")]),
 ]
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
-    "h4-say", "h4-end", "k7-say",
+    "h4-say", "h4-end", "k7-say", "k6-style", "k8-pair",
 ]
 
 
@@ -474,6 +480,84 @@ def latest_user_text() -> str:
     return "\n".join(
         str(item["content"]) for item in OrchestratorMock.requests[-1][1]["input"] if item.get("role") == "user"
     )
+
+
+# --- Paired Browser helpers ----------------------------------------------------
+
+CHROME_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+DTMF_ROWS = [697, 770, 852, 941]
+DTMF_COLS = [1209, 1336, 1477, 1633]
+DTMF_KEYPAD = ["123A", "456B", "789C", "*0#D"]
+PAIRING_ALPHABET = "0123456789ABCD*#"
+REPORT_TEXT = "# Parser report\n\nAll green.\n"
+
+
+def decode_pairing_tones(audio_b64: str) -> str | None:
+    """Read the Pairing Code from a played fixture, as a browser would; None if it is not tones.
+
+    The fixture is exactly clocked (24 kHz, 0.3 s lead, 62.5 ms symbols), so a Goertzel
+    window in the middle of each slot suffices; real browsers need the symbol clock and ECC.
+    """
+    raw = base64.b64decode(audio_b64)
+    samples = [int.from_bytes(raw[i:i + 2], "little", signed=True) / 32768 for i in range(0, len(raw) - 1, 2)]
+    lead, slot, window = 7200, 1500, 1000
+    if len(samples) < lead + 32 * slot:
+        return None
+    symbols = []
+    for index in range(32):
+        x = samples[lead + index * slot + 250: lead + index * slot + 250 + window]
+        energy = sum(v * v for v in x) / window
+        powers = []
+        for frequency in DTMF_ROWS + DTMF_COLS:
+            c = 2 * math.cos(2 * math.pi * frequency / 24000)
+            s1 = s2 = 0.0
+            for v in x:
+                s1, s2 = v + c * s1 - s2, s1
+            powers.append(2 * (s1 * s1 + s2 * s2 - c * s1 * s2) / (window * window))
+        row = max(range(4), key=lambda i: powers[i])
+        col = max(range(4), key=lambda i: powers[4 + i])
+        if not energy or powers[row] + powers[4 + col] < 0.8 * energy:
+            return None
+        symbols.append(DTMF_KEYPAD[row][col])
+    nibbles = [PAIRING_ALPHABET.index(symbol) for symbol in symbols[:20]]
+    return bytes(nibbles[i] << 4 | nibbles[i + 1] for i in range(0, 20, 2)).hex()
+
+
+def pair_http(method: str, path: str, body: dict | None = None, headers: dict | None = None) -> tuple[int, dict]:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:8787{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"content-type": "application/json", **(headers or {})},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read() or b"{}")
+
+
+async def recv_type(socket, kind: str, timeout: float = 8) -> dict:
+    """The next message of a kind, skipping the status pushes that may arrive in between."""
+    async with asyncio.timeout(timeout):
+        while True:
+            message = json.loads(await socket.recv())
+            if message.get("type") == kind:
+                return message
+
+
+def sandbox_files(path: str):
+    """Toolbox file reads: home holds a report; anything else does not exist."""
+    prefix = "/toolbox/mock-sandbox-1/files"
+    if path == f"{prefix}?path=%2Fhome%2Fdaytona":
+        listing = [{"name": "REPORT.md", "isDir": False, "size": len(REPORT_TEXT), "modTime": "2026-11-08T10:00:00Z"},
+                   {"name": "parser", "isDir": True, "size": 4096, "modTime": "2026-11-08T09:00:00Z"}]
+        return 200, json.dumps(listing).encode(), "application/json"
+    if path == f"{prefix}/info?path=%2Fhome%2Fdaytona%2FREPORT.md":
+        return 200, json.dumps({"name": "REPORT.md", "isDir": False, "size": len(REPORT_TEXT)}).encode(), "application/json"
+    if path == f"{prefix}/download?path=%2Fhome%2Fdaytona%2FREPORT.md":
+        return 200, REPORT_TEXT.encode(), "application/octet-stream"
+    return None
 
 
 def dtmf(key: str) -> dict:
@@ -741,40 +825,98 @@ async def run_protocol(identity: str) -> None:
         repeat = await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append" and "word for word" in item.get("content", ""))
         assert "The parser handles nested quotes now." in repeat["content"]
 
-        # Star opens the system menu: muted input, a prompt clip, one key, then back.
+        # Star opens the System Menu: muted input, a prompt clip, star goes back. Status and
+        # sound style are no longer in it.
         await mocks.send_live(dtmf("*"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
         await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
+        await mocks.send_live(dtmf("*"))
+        await next_matching(mocks.live_messages, of_type("session.input_audio.unmute"))
+        # Menu one asks for a second press before restarting; anything else backs out.
+        await mocks.send_live(dtmf("*"))
+        await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
         await mocks.send_live(dtmf("1"))
-        await next_matching(mocks.live_messages, of_type("session.input_audio.unmute"))
-        await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
-        menu_status = await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append" and "Juniper" in item.get("content", ""))
-        assert menu_status["content"].startswith("Juniper is resting")
-        await mocks.send_live(dtmf("*"))
-        await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
-        await mocks.send_live(dtmf("*"))
-        await next_matching(mocks.live_messages, of_type("session.input_audio.unmute"))
-
-        # Star, four chooses the Earcon Style: a preview plays, then the voice confirms.
-        await mocks.send_live(dtmf("*"))
-        await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
-        await mocks.send_live(dtmf("4"))
-        await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
         await mocks.send_live(dtmf("2"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.unmute"))
-        await next_matching(mocks.live_messages, appended("commentary", "Sounds are now simple tones."))
 
         # Other digits still reach the Orchestrator with their conversational context.
         await mocks.send_live(dtmf("7"))
         await next_matching(mocks.live_messages, appended("commentary", KEYPAD_SAY))
 
-        # Star then nine hangs up deterministically.
+        # Sound style is a voice tool: it stores the preference and previews the opening sound.
+        await mocks.send_live(dtmf("6"))
+        await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"), 15)
+        await wait_for(lambda: "k6-style" in {item.get("call_id") for _, payload in OrchestratorMock.requests for item in payload["input"] if item.get("type") == "function_call_output"}, 10)
+
+        # Pairing a browser (pair_browser, asked for by voice): the tones carry a Pairing Code, a
+        # browser claims it, the Voice Frontend names the browser, and a press of one accepts.
+        # Then the browser reads status and files.
+        await mocks.send_live(dtmf("8"))
+        code = None
+        async with asyncio.timeout(20):
+            while code is None:
+                played = await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
+                code = decode_pairing_tones(played["audio"])
+        status, claim = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": code}, {"user-agent": CHROME_MAC})
+        assert status == 200 and claim["ticket"].startswith(identity + "."), (status, claim)
+        named = await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "pairing tones" in m.get("content", ""))
+        assert "Chrome on a Mac" in named["content"] and "press one" in named["content"]
+        status, _ = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": code})
+        assert status == 404, "a Pairing Code works once"
+        ticket = {"authorization": f"Bearer {claim['ticket']}"}
+        assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1] == {"state": "waiting"}
+        # Keys count again only once echoes of the tones have cleared (half a second).
+        await asyncio.sleep(0.6)
+        await mocks.send_live(dtmf("1"))
+        await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "browser is paired" in m.get("content", ""))
+        accepted = (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1]
+        assert accepted["state"] == "accepted" and accepted["token"].startswith(identity + ".")
+        assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1] == {"state": "accepted"}, "the token is handed out once"
+        token = accepted["token"]
+        async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as browser:
+            await browser.send(json.dumps({"type": "auth", "token": token}))
+            hello = await recv_type(browser, "hello")
+            assert hello["device"] == "Chrome on a Mac" and hello["idle_expires_at"] > time.time() * 1000
+            snapshot = await recv_type(browser, "status")
+            assert any(item["alias"] == "Juniper" for item in snapshot["sessions"]) and snapshot["sandbox"]["call_attached"]
+            await browser.send(json.dumps({"type": "list", "id": 1, "path": ""}))
+            listing = await recv_type(browser, "list")
+            assert listing["id"] == 1 and listing["path"] == "/home/daytona"
+            assert [entry["name"] for entry in listing["entries"]] == ["parser", "REPORT.md"], "directories first"
+            await browser.send(json.dumps({"type": "read", "id": 2, "path": "REPORT.md"}))
+            report = await recv_type(browser, "file")
+            assert report["text"] == REPORT_TEXT and not report["truncated"]
+            await browser.send(json.dumps({"type": "read", "id": 3, "path": "../../etc/passwd"}))
+            escaped = await recv_type(browser, "error")
+            assert escaped["id"] == 3 and "/home/daytona" in escaped["error"]
+            await browser.send(json.dumps({"type": "ping"}))
+            await recv_type(browser, "pong")
+        # A wrong secret for the right identity is refused and closed with 4001.
+        async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as stranger:
+            await stranger.send(json.dumps({"type": "auth", "token": identity + "." + "0" * 48}))
+            await recv_type(stranger, "error")
+            try:
+                await stranger.recv()
+            except ConnectionClosed as closed:
+                assert closed.rcvd and closed.rcvd.code == 4001
+        # Unpairing ends the credential: the next connection is refused.
+        async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as browser:
+            await browser.send(json.dumps({"type": "auth", "token": token}))
+            await recv_type(browser, "hello")
+            await browser.send(json.dumps({"type": "unpair"}))
+            await recv_type(browser, "unpaired")
+        async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as browser:
+            await browser.send(json.dumps({"type": "auth", "token": token}))
+            await recv_type(browser, "error")
+
+        # Star then two hands the call to the recovery menu, which ends the GPT-Live leg.
         await mocks.send_live(dtmf("*"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
-        await mocks.send_live(dtmf("9"))
+        await mocks.send_live(dtmf("2"))
         await wait_for(lambda: any(path == "/live/sessions/live-test-2/hangup" for path, _ in DaytonaMock.openai_requests), 10)
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
-        for expected in ("menu.opened", "menu.status", "menu.earcons", "menu.closed", "menu.hangup", "voice.keypad.stop", "voice.keypad.status"):
+        for expected in ("menu.opened", "menu.closed", "menu.restart.requested", "menu.recovery", "voice.keypad.stop", "voice.keypad.status",
+                         "voice.earcons", "pairing.started", "pairing.claimed", "pairing.accepted"):
             assert expected in events, (expected, events)
         handoff_rows = OrchestratorMock.user_message('"key":"7"')
         assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows
@@ -843,6 +985,7 @@ def main() -> int:
     DaytonaMock.preview_reads = 0
     DaytonaMock.executed = []
     DaytonaMock.execute_hooks = [sandbox_toolbox]
+    DaytonaMock.get_hooks = [sandbox_files]
     daytona = ThreadingHTTPServer(("127.0.0.1", DAYTONA_MOCK_PORT), DaytonaMock)
     thread = threading.Thread(target=daytona.serve_forever, daemon=True)
     thread.start()

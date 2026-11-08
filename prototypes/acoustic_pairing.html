@@ -1,0 +1,715 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dogwalk acoustic pairing prototype</title>
+<!--
+  Prototype: can a browser pair by hearing a DTMF code played into a phone call?
+
+  One file, three parts sharing one DTMF core:
+    Listen    the browser being paired: microphone -> AudioWorklet Goertzel -> slot clock -> Reed-Solomon
+    Transmit  stand-in for the Voice Call: plays the code, or downloads an 8 kHz WAV
+              to play through a real call with the play_audio tool
+    Self-test the same decoder over a simulated telephone channel (mu-law, noise, burst packet loss)
+
+  Frame: 10 random bytes (80 bits) + P Reed-Solomon parity bytes over GF(256), each byte sent as
+  two DTMF symbols (4 bits each), back to back with no gaps. The code is systematic, so the first
+  20 symbols are the data itself: the "raw" decode reads them as heard, the ECC decode corrects them.
+
+  Tones touch with no gap, so symbol boundaries are not audible when a symbol repeats ("77").
+  The receiver therefore runs a symbol clock: it slices the tone stream into fixed slots, takes a
+  majority vote of the Goertzel windows inside each slot, and marks a slot with no clear winner as
+  an erasure, which Reed-Solomon corrects at half the cost of an unknown error.
+
+  Serve over localhost or HTTPS (getUserMedia needs a secure context):
+    python3 -m http.server -d prototypes 8000   ->   http://localhost:8000/acoustic_pairing.html
+-->
+<style>
+  :root { color-scheme: light dark; --mut: #888; --ok: #2a9d58; --bad: #c0392b; --acc: #3b7dd8; --fix: #d68910; }
+  body { font: 15px/1.45 system-ui, sans-serif; max-width: 760px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; }
+  h2 { font-size: 1.05rem; margin: 0 0 8px; }
+  section { border: 1px solid #8884; border-radius: 10px; padding: 14px; margin: 14px 0; }
+  .mut { color: var(--mut); font-size: .88rem; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid #8886; cursor: pointer; background: #8881; }
+  button.primary { background: var(--acc); color: white; border-color: var(--acc); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+  .mono { font-family: ui-monospace, Menlo, monospace; }
+  .code { font-size: 1.05rem; letter-spacing: .03em; word-break: break-all; }
+  .bars { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; height: 60px; align-items: end; }
+  .bar { background: var(--acc); border-radius: 3px 3px 0 0; min-height: 2px; transition: height 60ms linear; }
+  .bar.hit { background: var(--ok); }
+  .barlabels { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; font-size: .7rem; color: var(--mut); text-align: center; }
+  .meter { height: 8px; background: #8882; border-radius: 4px; overflow: hidden; }
+  .meter > div { height: 100%; width: 0; background: var(--acc); }
+  .stream { font-family: ui-monospace, Menlo, monospace; font-size: 1.05rem; letter-spacing: .12em; word-break: break-all; min-height: 1.5em; }
+  .frame { border-top: 1px solid #8884; padding: 8px 0; }
+  .frame .lbl { display: inline-block; width: 3.5em; color: var(--mut); font-size: .8rem; letter-spacing: 0; }
+  .sym { display: inline-block; width: 1ch; text-align: center; }
+  .sym.erased { color: var(--bad); }
+  .sym.wrong { background: color-mix(in srgb, var(--bad) 30%, transparent); }
+  .sym.fixed { background: color-mix(in srgb, var(--fix) 35%, transparent); }
+  .sep { display: inline-block; width: 1.2ch; color: var(--mut); text-align: center; }
+  .verdict { font-size: .9rem; margin-top: 2px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  details { margin-top: 8px; }
+  label.k { display: inline-flex; gap: 6px; align-items: center; margin: 4px 12px 4px 0; font-size: .9rem; }
+  input[type=number] { width: 5.5em; font: inherit; }
+  table { border-collapse: collapse; font-size: .85rem; margin-top: 8px; }
+  td, th { border: 1px solid #8884; padding: 4px 7px; text-align: center; }
+  #log { max-height: 160px; overflow: auto; font-size: .8rem; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Acoustic pairing prototype</h1>
+<p class="mut">Put the phone on speaker near this device. The listening browser must be a <em>different</em> device from the phone in the call: Android and iOS give an ordinary browser silence while a call holds the microphone.</p>
+
+<section>
+  <h2>1. Listen (the browser being paired)</h2>
+  <div class="row">
+    <button id="listen" class="primary">Listen</button>
+    <button id="stop" disabled>Stop</button>
+    <span id="status" class="mut">idle</span>
+  </div>
+  <div class="meter"><div id="level"></div></div>
+  <div class="mut mono" id="levelText">&nbsp;</div>
+  <div class="bars" id="bars"></div>
+  <div class="barlabels" id="barlabels"></div>
+  <p class="mut" style="margin:10px 0 2px">Raw symbols, slot by slot as heard (<span class="bad">&middot;</span> = erasure):</p>
+  <div id="live" class="stream"></div>
+  <div id="frames"></div>
+  <details>
+    <summary>Detector settings and log</summary>
+    <label class="k">min RMS <input id="minRms" type="number" step="0.001" value="0.003"></label>
+    <label class="k">purity <input id="purity" type="number" step="0.05" value="0.5"></label>
+    <label class="k">dominance <input id="dominance" type="number" step="0.5" value="4"></label>
+    <label class="k">twist dB <input id="twist" type="number" step="1" value="10"></label>
+    <p class="mut">Purity: share of the window's power in the two detected tones. Dominance: power ratio of each tone over the runner-up in its group. Twist: allowed loudness difference between the row and column tones. Timing and parity must match the Transmit settings below.</p>
+    <div id="log" class="mono mut"></div>
+  </details>
+</section>
+
+<section>
+  <h2>2. Transmit (stand-in for the call)</h2>
+  <div class="row">
+    <button id="newCode">New code</button>
+    <button id="play" class="primary">Play</button>
+    <button id="wav">Download 8 kHz WAV</button>
+  </div>
+  <div class="code mono" id="txCode"></div>
+  <div class="mono mut" id="txSymbols"></div>
+  <div>
+    <label class="k">tone ms <input id="toneMs" type="number" step="0.5" value="62.5"></label>
+    <label class="k">gap ms <input id="gapMs" type="number" value="0"></label>
+    <label class="k">parity bytes <input id="parity" type="number" value="6" min="0" max="20"></label>
+    <label class="k">repeats <input id="repeats" type="number" value="1" min="1" max="4"></label>
+    <label class="k">amplitude <input id="amp" type="number" step="0.05" value="0.3"></label>
+  </div>
+  <p class="mut" id="txDuration"></p>
+</section>
+
+<section>
+  <h2>3. Self-test over a simulated phone line</h2>
+  <p class="mut">The same decoder over mu-law at 8 kHz with white noise and burst packet loss: each 20 ms packet starts a burst with the given probability, and a burst drops 1&ndash;3 packets (20&ndash;60 ms, zeroed, no concealment). Uses the transmit settings above. Each cell is raw / ECC decodes out of 20 random codes; "wrong" counts ECC outputs that were confidently incorrect.</p>
+  <div class="row"><button id="sweep">Run sweep</button><span id="sweepStatus" class="mut"></span></div>
+  <div id="sweepTable"></div>
+</section>
+
+<script>
+"use strict";
+// ==== CORE START: shared by the page, the AudioWorklet (via toString), and offline tests ====
+const ROWS = [697, 770, 852, 941];
+const COLS = [1209, 1336, 1477, 1633];
+const KEYPAD = ["123A", "456B", "789C", "*0#D"];
+const ALPHABET = "0123456789ABCD*#"; // nibble value -> keypad symbol
+const CODE_BYTES = 10;               // 80 random bits
+
+// Goertzel classifier: each hop labels the latest 25.6 ms window with a keypad symbol or null.
+// Rectangular window, as in classic DTMF receivers: its 39 Hz resolution keeps the nearest
+// neighbors (73 Hz apart) out of the main lobe. Hops are a quarter window, so a 62.5 ms slot
+// holds about six windows that lie entirely inside it.
+class Classifier {
+  constructor(sampleRate, opts) {
+    opts = opts || {};
+    this.win = Math.round(0.0256 * sampleRate);
+    this.hop = Math.round(this.win / 4);
+    this.buf = new Float32Array(this.win);
+    this.pos = 0;
+    this.count = 0;
+    this.coef = ROWS.concat(COLS).map((f) => 2 * Math.cos(2 * Math.PI * f / sampleRate));
+    this.minRms = opts.minRms ?? 0.003;
+    this.purity = opts.purity ?? 0.5;
+    this.dominance = opts.dominance ?? 4;
+    this.twist = opts.twist ?? 10;
+  }
+  push(samples, onResult) {
+    for (let i = 0; i < samples.length; i++) {
+      this.buf[this.pos] = samples[i];
+      this.pos = (this.pos + 1) % this.win;
+      this.count++;
+      if (this.count >= this.win && (this.count - this.win) % this.hop === 0) onResult(this.classify());
+    }
+  }
+  classify() {
+    const N = this.win;
+    const s1 = new Float64Array(8), s2 = new Float64Array(8);
+    let energy = 0;
+    for (let j = 0; j < N; j++) {
+      const x = this.buf[(this.pos + j) % N];
+      energy += x * x;
+      for (let k = 0; k < 8; k++) {
+        const s0 = x + this.coef[k] * s1[k] - s2[k];
+        s2[k] = s1[k];
+        s1[k] = s0;
+      }
+    }
+    // Normalized so a sinusoid of amplitude A reports A^2/2, its mean power.
+    const P = new Array(8);
+    for (let k = 0; k < 8; k++) P[k] = 2 * (s1[k] * s1[k] + s2[k] * s2[k] - this.coef[k] * s1[k] * s2[k]) / (N * N);
+    const mean = energy / N;
+    const rms = Math.sqrt(mean);
+    const best = (from) => {
+      const group = P.slice(from, from + 4);
+      const order = group.map((p, i) => [p, i]).sort((a, b) => b[0] - a[0]);
+      return { index: order[0][1], power: order[0][0], runnerUp: order[1][0] };
+    };
+    const r = best(0), c = best(4);
+    const twistDb = Math.abs(10 * Math.log10((r.power + 1e-12) / (c.power + 1e-12)));
+    const ok = rms >= this.minRms
+      && r.power + c.power >= this.purity * mean
+      && r.power >= this.dominance * r.runnerUp
+      && c.power >= this.dominance * c.runnerUp
+      && twistDb <= this.twist;
+    return { sym: ok ? KEYPAD[r.index][c.index] : null, rms, db: P.map((p) => 10 * Math.log10((p + 1e-12) / (mean + 1e-12))) };
+  }
+}
+
+// ---- Reed-Solomon over GF(256), errors and erasures (after Wikiversity's "Reed-Solomon codes for coders").
+// Polynomials are arrays, highest degree first.
+const GF_EXP = new Uint8Array(512), GF_LOG = new Uint8Array(256);
+(() => {
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    GF_EXP[i] = x; GF_LOG[x] = i;
+    x <<= 1; if (x & 0x100) x ^= 0x11d;
+  }
+  for (let i = 255; i < 512; i++) GF_EXP[i] = GF_EXP[i - 255];
+})();
+const gfMul = (a, b) => (a && b ? GF_EXP[GF_LOG[a] + GF_LOG[b]] : 0);
+const gfDiv = (a, b) => (a ? GF_EXP[(GF_LOG[a] + 255 - GF_LOG[b]) % 255] : 0);
+const gfPow = (x, p) => GF_EXP[(((GF_LOG[x] * p) % 255) + 255) % 255];
+const gfInv = (x) => GF_EXP[255 - GF_LOG[x]];
+const polyScale = (p, x) => p.map((c) => gfMul(c, x));
+function polyAdd(p, q) {
+  const r = new Array(Math.max(p.length, q.length)).fill(0);
+  p.forEach((c, i) => { r[i + r.length - p.length] = c; });
+  q.forEach((c, i) => { r[i + r.length - q.length] ^= c; });
+  return r;
+}
+function polyMul(p, q) {
+  const r = new Array(p.length + q.length - 1).fill(0);
+  for (let j = 0; j < q.length; j++) for (let i = 0; i < p.length; i++) r[i + j] ^= gfMul(p[i], q[j]);
+  return r;
+}
+function polyEval(p, x) {
+  let y = p[0];
+  for (let i = 1; i < p.length; i++) y = gfMul(y, x) ^ p[i];
+  return y;
+}
+
+function rsEncode(msg, nsym) {
+  let gen = [1];
+  for (let i = 0; i < nsym; i++) gen = polyMul(gen, [1, gfPow(2, i)]);
+  const out = [...msg, ...new Array(nsym).fill(0)];
+  for (let i = 0; i < msg.length; i++) {
+    const coef = out[i];
+    if (coef) for (let j = 1; j < gen.length; j++) out[i + j] ^= gfMul(gen[j], coef);
+  }
+  return [...msg, ...out.slice(msg.length)];
+}
+const rsSyndromes = (msg, nsym) => [0, ...Array.from({ length: nsym }, (_, i) => polyEval(msg, gfPow(2, i)))];
+
+function rsCorrectErrata(msg, synd, errPos) {
+  const coefPos = errPos.map((p) => msg.length - 1 - p);
+  let errLoc = [1];
+  for (const i of coefPos) errLoc = polyMul(errLoc, polyAdd([1], [gfPow(2, i), 0]));
+  const product = polyMul([...synd].reverse(), errLoc);
+  const errEval = product.slice(product.length - errLoc.length).reverse();
+  const X = coefPos.map((p) => gfPow(2, -(255 - p)));
+  const E = new Array(msg.length).fill(0);
+  X.forEach((Xi, i) => {
+    const XiInv = gfInv(Xi);
+    let locPrime = 1;
+    X.forEach((Xj, j) => { if (j !== i) locPrime = gfMul(locPrime, 1 ^ gfMul(XiInv, Xj)); });
+    if (locPrime === 0) throw new Error("could not find error magnitude");
+    const y = gfMul(Xi, polyEval([...errEval].reverse(), XiInv));
+    E[errPos[i]] = gfDiv(y, locPrime);
+  });
+  return polyAdd(msg, E);
+}
+
+function rsErrorLocator(synd, nsym, eraseCount) {
+  let errLoc = [1], oldLoc = [1];
+  const shift = synd.length > nsym ? synd.length - nsym : 0;
+  for (let i = 0; i < nsym - eraseCount; i++) {
+    const K = i + shift;
+    let delta = synd[K];
+    for (let j = 1; j < errLoc.length; j++) delta ^= gfMul(errLoc[errLoc.length - 1 - j], synd[K - j]);
+    oldLoc = [...oldLoc, 0];
+    if (delta) {
+      if (oldLoc.length > errLoc.length) {
+        const newLoc = polyScale(oldLoc, delta);
+        oldLoc = polyScale(errLoc, gfInv(delta));
+        errLoc = newLoc;
+      }
+      errLoc = polyAdd(errLoc, polyScale(oldLoc, delta));
+    }
+  }
+  while (errLoc.length && errLoc[0] === 0) errLoc.shift();
+  const errs = errLoc.length - 1;
+  if ((errs - eraseCount) * 2 + eraseCount > nsym) throw new Error("too many errors");
+  return errLoc;
+}
+
+function rsForneySyndromes(synd, pos, n) {
+  const fsynd = synd.slice(1);
+  for (const p of pos) {
+    const x = gfPow(2, n - 1 - p);
+    for (let j = 0; j < fsynd.length - 1; j++) fsynd[j] = gfMul(fsynd[j], x) ^ fsynd[j + 1];
+  }
+  return fsynd;
+}
+
+// Returns { data, errata: corrected byte positions } or throws when the frame is beyond repair.
+function rsDecode(received, nsym, erasePos) {
+  const msg = [...received];
+  for (const p of erasePos) msg[p] = 0;
+  if (erasePos.length > nsym) throw new Error("too many erasures");
+  const synd = rsSyndromes(msg, nsym);
+  if (Math.max(...synd) === 0) return { data: msg.slice(0, msg.length - nsym), errata: [...erasePos] };
+  const fsynd = rsForneySyndromes(synd, erasePos, msg.length);
+  const errLoc = rsErrorLocator(fsynd, nsym, erasePos.length);
+  const reversed = [...errLoc].reverse();
+  const errPos = [];
+  for (let i = 0; i < msg.length; i++) if (polyEval(reversed, gfPow(2, i)) === 0) errPos.push(msg.length - 1 - i);
+  if (errPos.length !== errLoc.length - 1) throw new Error("Chien search found the wrong number of errors");
+  const fixed = rsCorrectErrata(msg, synd, [...erasePos, ...errPos]);
+  if (Math.max(...rsSyndromes(fixed, nsym)) > 0) throw new Error("could not correct");
+  return { data: fixed.slice(0, fixed.length - nsym), errata: [...erasePos, ...errPos] };
+}
+
+// ---- Framing
+const bytesToSymbols = (bytes) => bytes.map((b) => ALPHABET[b >> 4] + ALPHABET[b & 15]).join("");
+const encodeFrame = (code, nsym) => bytesToSymbols(rsEncode([...code], nsym));
+const toHex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+// Symbol clock: votes of the windows lying entirely inside each slot. start and slot are in
+// samples; labels[i] is the label of the window starting at (firstHop + i) * hop.
+function slotVotes(labels, firstHop, hop, win, start, slot, nSlots) {
+  const votes = Array.from({ length: nSlots }, () => ({}));
+  labels.forEach((sym, i) => {
+    if (!sym) return;
+    const a = (firstHop + i) * hop;
+    const k = Math.floor((a - start) / slot);
+    if (k < 0 || k >= nSlots || a + win > start + (k + 1) * slot) return;
+    votes[k][sym] = (votes[k][sym] || 0) + 1;
+  });
+  return votes;
+}
+// A slot with no votes, or no clear majority, is an erasure.
+function slotSymbols(votes) {
+  return votes.map((v) => {
+    const order = Object.entries(v).sort((a, b) => b[1] - a[1]);
+    if (!order.length || (order[1] && order[0][1] < 2 * order[1][1])) return null;
+    return order[0][0];
+  });
+}
+// Fit the clock: search the frame's start offset and a small rate error, maximizing agreement.
+function alignSlots(labels, firstHop, hop, win, slot, nSlots) {
+  const guess = firstHop * hop + 0.4 * win;
+  let best = null;
+  for (let scale = 0.99; scale <= 1.0101; scale += 0.005) {
+    for (let d = -slot / 2; d <= slot / 2; d += hop / 2) {
+      const votes = slotVotes(labels, firstHop, hop, win, guess + d, slot * scale, nSlots);
+      let score = 0;
+      for (const v of votes) {
+        const counts = Object.values(v).sort((a, b) => b - a);
+        if (counts.length) score += counts[0] - counts.slice(1).reduce((s, c) => s + c, 0);
+      }
+      if (!best || score > best.score) best = { score, votes };
+    }
+  }
+  return slotSymbols(best.votes);
+}
+
+// Streaming frame assembler: hop labels in, live slot symbols and finished frames out.
+class FrameReceiver {
+  constructor(sampleRate, hop, win, opts, onLive, onFrame) {
+    Object.assign(this, { sampleRate, hop, win, onLive, onFrame });
+    this.configure(opts);
+    this.hopIndex = 0;
+    this.frame = null;
+    this.silent = 0;
+  }
+  configure({ toneMs, gapMs, parity }) {
+    this.slot = (toneMs + gapMs) / 1000 * this.sampleRate;
+    this.parity = parity;
+    this.nSlots = (CODE_BYTES + parity) * 2;
+  }
+  feed(sym) {
+    const i = this.hopIndex++;
+    if (!this.frame) {
+      if (!sym) return;
+      this.frame = { firstHop: i, labels: [], shown: 0 };
+      this.silent = 0;
+    }
+    const f = this.frame;
+    f.labels.push(sym);
+    this.silent = sym ? 0 : this.silent + 1;
+    // Live view: slot with the naive clock as each slot completes.
+    const start = f.firstHop * this.hop + 0.4 * this.win;
+    const done = Math.min(this.nSlots, Math.floor((i * this.hop - start) / this.slot));
+    if (done > f.shown) {
+      const live = slotSymbols(slotVotes(f.labels, f.firstHop, this.hop, this.win, start, this.slot, this.nSlots));
+      for (let k = f.shown; k < done; k++) this.onLive(live[k], k);
+      f.shown = done;
+    }
+    const silenceOver = this.silent * this.hop > 0.25 * this.sampleRate;
+    const pastEnd = (i - f.firstHop) * this.hop > (this.nSlots + 2) * this.slot;
+    if (silenceOver || pastEnd) this.finish();
+  }
+  finish() {
+    const f = this.frame;
+    this.frame = null;
+    if (!f || f.labels.filter(Boolean).length < this.nSlots) return; // a blip, not a frame
+    this.onFrame(decodeSlots(alignSlots(f.labels, f.firstHop, this.hop, this.win, this.slot, this.nSlots), this.parity));
+  }
+}
+
+// Raw: read the data slots as heard. ECC: Reed-Solomon with erased slots as erasures.
+function decodeSlots(symbols, parity) {
+  const bytes = [], erased = [];
+  for (let b = 0; b < symbols.length / 2; b++) {
+    const hi = symbols[2 * b], lo = symbols[2 * b + 1];
+    if (hi === null || lo === null) { erased.push(b); bytes.push(0); }
+    else bytes.push((ALPHABET.indexOf(hi) << 4) | ALPHABET.indexOf(lo));
+  }
+  const raw = erased.some((b) => b < CODE_BYTES) ? null : toHex(bytes.slice(0, CODE_BYTES));
+  let ecc = null, errata = [], error = null;
+  try {
+    const result = rsDecode(bytes, parity, erased);
+    ecc = toHex(result.data);
+    errata = result.errata;
+  } catch (e) { error = e.message; }
+  return { symbols, erased, raw, ecc, errata, error };
+}
+
+function synthesize(sampleRate, symbols, opts) {
+  const { toneMs = 62.5, gapMs = 0, repeats = 1, amp = 0.3 } = opts || {};
+  const slot = (toneMs + gapMs) / 1000 * sampleRate;
+  const tone = Math.round(toneMs / 1000 * sampleRate);
+  const lead = Math.round(0.3 * sampleRate);
+  const between = Math.round(0.7 * sampleRate);
+  const ramp = Math.round(0.004 * sampleRate); // raised-cosine edges keep clicks from splattering
+  const copy = Math.ceil(symbols.length * slot);
+  const out = new Float32Array(2 * lead + repeats * copy + (repeats - 1) * between);
+  for (let r = 0; r < repeats; r++) {
+    const base = lead + r * (copy + between);
+    [...symbols].forEach((ch, s) => {
+      const row = KEYPAD.findIndex((line) => line.includes(ch));
+      const fr = ROWS[row], fc = COLS[KEYPAD[row].indexOf(ch)];
+      const t = base + Math.round(s * slot); // fractional slots stay on an exact clock
+      for (let n = 0; n < tone; n++) {
+        const edge = Math.min(n, tone - 1 - n);
+        const env = edge < ramp ? 0.5 - 0.5 * Math.cos(Math.PI * edge / ramp) : 1;
+        out[t + n] = amp * env * (Math.sin(2 * Math.PI * fr * n / sampleRate) + Math.sin(2 * Math.PI * fc * n / sampleRate));
+      }
+    });
+  }
+  return out;
+}
+
+function mulberry32(seed) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let x = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Narrowband phone line: mu-law (G.711) quantization, white noise, burst loss of 20 ms packets.
+function telephone(x, { snrDb, burstRate, rng }) {
+  const mu = (v) => {
+    const y = Math.sign(v) * Math.log1p(255 * Math.min(1, Math.abs(v))) / Math.log(256);
+    const q = Math.round(y * 127) / 127;
+    return Math.sign(q) * (Math.pow(256, Math.abs(q)) - 1) / 255;
+  };
+  let power = 0, n = 0;
+  for (const v of x) if (v !== 0) { power += v * v; n++; }
+  const sigma = Math.sqrt(power / n / Math.pow(10, snrDb / 10));
+  const y = new Float32Array(x.length);
+  for (let i = 0; i < x.length; i++) {
+    const g = Math.sqrt(-2 * Math.log(rng() + 1e-12)) * Math.cos(2 * Math.PI * rng());
+    y[i] = mu(x[i]) + sigma * g;
+  }
+  for (let f = 0; f < y.length; f += 160) {
+    if (rng() < burstRate) {
+      const packets = 1 + Math.floor(rng() * 3);
+      y.fill(0, f, f + 160 * packets);
+      f += 160 * (packets - 1);
+    }
+  }
+  return y;
+}
+
+function runTrial(seed, channel, settings) {
+  const rng = mulberry32(seed);
+  const code = new Uint8Array(CODE_BYTES).map(() => Math.floor(rng() * 256));
+  const sr = 8000;
+  const line = telephone(synthesize(sr, encodeFrame(code, settings.parity), settings), { ...channel, rng });
+  const classifier = new Classifier(sr);
+  const frames = [];
+  const rx = new FrameReceiver(sr, classifier.hop, classifier.win, settings, () => {}, (f) => frames.push(f));
+  classifier.push(line, (r) => rx.feed(r.sym));
+  rx.finish();
+  const want = toHex(code);
+  return {
+    raw: frames.some((f) => f.raw === want),
+    ecc: frames.some((f) => f.ecc === want),
+    wrong: frames.filter((f) => f.ecc && f.ecc !== want).length,
+  };
+}
+// ==== CORE END ====
+
+const $ = (id) => document.getElementById(id);
+const WORKLET_SRC = `
+const ROWS=${JSON.stringify(ROWS)}, COLS=${JSON.stringify(COLS)}, KEYPAD=${JSON.stringify(KEYPAD)};
+${Classifier.toString()}
+class PairingProcessor extends AudioWorkletProcessor {
+  constructor() { super(); this.c = new Classifier(sampleRate); this.port.onmessage = (e) => Object.assign(this.c, e.data); }
+  process(inputs) { const ch = inputs[0] && inputs[0][0]; if (ch) this.c.push(ch, (r) => this.port.postMessage(r)); return true; }
+}
+registerProcessor("pairing-dtmf", PairingProcessor);`;
+
+const settings = () => ({
+  toneMs: +$("toneMs").value, gapMs: +$("gapMs").value, parity: +$("parity").value,
+  repeats: +$("repeats").value, amp: +$("amp").value,
+});
+
+// ---- Listen ----
+for (const f of ROWS.concat(COLS)) {
+  const bar = document.createElement("div"); bar.className = "bar"; $("bars").append(bar);
+  const label = document.createElement("div"); label.textContent = f; $("barlabels").append(label);
+}
+let listener = null;
+let latest = null;
+
+function log(line) {
+  const el = $("log");
+  el.textContent = `${new Date().toLocaleTimeString()} ${line}\n` + el.textContent.slice(0, 4000);
+}
+
+function detectorOptions() {
+  return { minRms: +$("minRms").value, purity: +$("purity").value, dominance: +$("dominance").value, twist: +$("twist").value };
+}
+for (const id of ["minRms", "purity", "dominance", "twist"]) {
+  $(id).addEventListener("change", () => listener?.configure(detectorOptions()));
+}
+
+function symbolRow(label, symbols, classFor) {
+  const row = document.createElement("div");
+  row.className = "stream";
+  row.innerHTML = `<span class="lbl">${label}</span>`;
+  symbols.forEach((s, k) => {
+    if (k === CODE_BYTES * 2) row.insertAdjacentHTML("beforeend", '<span class="sep">|</span>');
+    const span = document.createElement("span");
+    span.className = "sym " + (classFor(k) || "");
+    span.textContent = s ?? "·";
+    row.append(span);
+  });
+  return row;
+}
+
+function showFrame(frame) {
+  const parity = settings().parity;
+  const expected = $("txCode").dataset.hex; // the Transmit code, when this device also sent it
+  const correctedSymbols = frame.ecc ? [...bytesToSymbols(rsEncode([...hexToBytes(frame.ecc)], parity))] : null;
+  const fixedBytes = new Set(frame.errata);
+  const el = document.createElement("div");
+  el.className = "frame";
+  el.append(symbolRow("raw", frame.symbols, (k) => {
+    if (frame.symbols[k] === null) return "erased";
+    if (correctedSymbols && correctedSymbols[k] !== frame.symbols[k]) return "wrong";
+  }));
+  if (correctedSymbols) el.append(symbolRow("ecc", correctedSymbols, (k) => (fixedBytes.has(k >> 1) ? "fixed" : "")));
+  const nErased = frame.erased.length;
+  const nErrors = frame.errata.length - nErased;
+  const rawVerdict = frame.raw === null ? '<span class="bad">raw: data slots erased</span>'
+    : frame.ecc && frame.raw !== frame.ecc ? '<span class="bad">raw: wrong</span>'
+    : frame.ecc ? '<span class="ok">raw: correct</span>' : "raw: unverified";
+  const eccVerdict = frame.ecc
+    ? `<span class="ok">ECC: ${frame.ecc.match(/.{1,4}/g).join(" ")}</span> (repaired ${nErased} erased and ${Math.max(0, nErrors)} wrong byte${nErrors === 1 ? "" : "s"} of ${parity} parity)`
+    : `<span class="bad">ECC failed: ${frame.error}</span>`;
+  const match = expected && frame.ecc ? (frame.ecc === expected ? ' <span class="ok">matches Transmit</span>' : ' <span class="bad">differs from Transmit</span>') : "";
+  el.insertAdjacentHTML("beforeend", `<div class="verdict">${rawVerdict} &nbsp; ${eccVerdict}${match}</div>`);
+  $("frames").prepend(el);
+  log(`frame: ${frame.erased.length} erased bytes, raw ${frame.raw ?? "-"}, ecc ${frame.ecc ?? frame.error}`);
+}
+
+function hexToBytes(hex) { return hex.match(/../g).map((h) => parseInt(h, 16)); }
+
+async function startListening() {
+  $("listen").disabled = true;
+  $("live").textContent = "";
+  try {
+    const ctx = new AudioContext();
+    await ctx.resume();
+    // Speech processing would treat steady tones as noise and remove them.
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+    });
+    const track = stream.getAudioTracks()[0].getSettings();
+    log(`mic ${track.sampleRate ?? ctx.sampleRate} Hz, echoCancellation=${track.echoCancellation}, noiseSuppression=${track.noiseSuppression}, autoGainControl=${track.autoGainControl}`);
+    const source = ctx.createMediaStreamSource(stream);
+    const sink = ctx.createGain(); sink.gain.value = 0; sink.connect(ctx.destination);
+    const probe = new Classifier(ctx.sampleRate); // same window and hop as the worklet's
+    const rx = new FrameReceiver(ctx.sampleRate, probe.hop, probe.win, settings(),
+      (sym, k) => { if (k === 0) $("live").textContent = ""; if (k === CODE_BYTES * 2) $("live").textContent += "|"; $("live").textContent += sym ?? "·"; },
+      showFrame);
+    for (const id of ["toneMs", "gapMs", "parity"]) $(id).addEventListener("change", () => rx.configure(settings()));
+    const onHop = (r) => { rx.feed(r.sym); latest = r; };
+    let node, configure;
+    try {
+      await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" })));
+      node = new AudioWorkletNode(ctx, "pairing-dtmf");
+      node.port.onmessage = (e) => onHop(e.data);
+      configure = (o) => node.port.postMessage(o);
+      log("decoding in an AudioWorklet");
+    } catch (error) {
+      // Fallback for browsers without blob-module worklets.
+      const classifier = new Classifier(ctx.sampleRate);
+      node = ctx.createScriptProcessor(2048, 1, 1);
+      node.onaudioprocess = (e) => classifier.push(e.inputBuffer.getChannelData(0), onHop);
+      configure = (o) => Object.assign(classifier, o);
+      log(`AudioWorklet unavailable (${error.message}); using ScriptProcessor`);
+    }
+    configure(detectorOptions());
+    source.connect(node);
+    node.connect(sink);
+    listener = { configure, stop: () => { stream.getTracks().forEach((t) => t.stop()); ctx.close(); } };
+    $("status").textContent = `listening at ${ctx.sampleRate} Hz`;
+    $("stop").disabled = false;
+    requestAnimationFrame(draw);
+  } catch (error) {
+    $("status").textContent = `failed: ${error.message}`;
+    $("listen").disabled = false;
+  }
+}
+
+function draw() {
+  if (!listener) return;
+  if (latest) {
+    const dbfs = 20 * Math.log10(latest.rms + 1e-9);
+    $("level").style.width = `${Math.max(0, Math.min(100, (dbfs + 70) / 70 * 100))}%`;
+    $("levelText").textContent = `${dbfs.toFixed(0)} dBFS${latest.sym ? "   tone " + latest.sym : ""}`;
+    const row = latest.sym ? KEYPAD.findIndex((l) => l.includes(latest.sym)) : -1;
+    const col = row >= 0 ? KEYPAD[row].indexOf(latest.sym) + 4 : -1;
+    [...$("bars").children].forEach((bar, k) => {
+      bar.style.height = `${Math.max(2, Math.min(100, (latest.db[k] + 30) / 30 * 100))}%`;
+      bar.classList.toggle("hit", k === row || k === col);
+    });
+  }
+  requestAnimationFrame(draw);
+}
+
+$("listen").onclick = startListening;
+$("stop").onclick = () => {
+  listener?.stop();
+  listener = null;
+  $("listen").disabled = false;
+  $("stop").disabled = true;
+  $("status").textContent = "idle";
+};
+
+// ---- Transmit ----
+let txCode = null;
+
+function newCode() {
+  txCode = crypto.getRandomValues(new Uint8Array(CODE_BYTES));
+  $("txCode").dataset.hex = toHex(txCode);
+  $("txCode").textContent = toHex(txCode).match(/.{1,4}/g).join(" ");
+  updateTransmit();
+}
+function updateTransmit() {
+  const s = settings();
+  const symbols = encodeFrame(txCode, s.parity);
+  $("txSymbols").textContent = `${symbols.slice(0, CODE_BYTES * 2)} | ${symbols.slice(CODE_BYTES * 2)}`;
+  const seconds = synthesize(8000, symbols, s).length / 8000;
+  const tone = (symbols.length * (s.toneMs + s.gapMs) / 1000).toFixed(2);
+  $("txDuration").textContent = `${symbols.length} symbols (${CODE_BYTES * 2} data, ${s.parity * 2} parity), ${tone} s of tones per copy, ${seconds.toFixed(1)} s including silences. Corrects up to ${s.parity} erased or ${Math.floor(s.parity / 2)} wrong bytes.`;
+}
+for (const id of ["toneMs", "gapMs", "parity", "repeats", "amp"]) $(id).addEventListener("change", updateTransmit);
+
+$("newCode").onclick = newCode;
+$("play").onclick = async () => {
+  const ctx = new AudioContext();
+  await ctx.resume();
+  const samples = synthesize(ctx.sampleRate, encodeFrame(txCode, settings().parity), settings());
+  const buffer = ctx.createBuffer(1, samples.length, ctx.sampleRate);
+  buffer.copyToChannel(samples, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(ctx.destination);
+  src.onended = () => ctx.close();
+  src.start();
+};
+$("wav").onclick = () => {
+  const samples = synthesize(8000, encodeFrame(txCode, settings().parity), settings());
+  const view = new DataView(new ArrayBuffer(44 + samples.length * 2));
+  const ascii = (o, s) => [...s].forEach((c, i) => view.setUint8(o + i, c.charCodeAt(0)));
+  ascii(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true); ascii(8, "WAVEfmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true); view.setUint32(28, 16000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  ascii(36, "data"); view.setUint32(40, samples.length * 2, true);
+  samples.forEach((v, i) => view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, v)) * 32767, true));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([view], { type: "audio/wav" }));
+  a.download = `pairing-${toHex(txCode).slice(0, 8)}.wav`;
+  a.click();
+};
+newCode();
+
+// ---- Self-test ----
+$("sweep").onclick = async () => {
+  const snrs = [20, 10, 5, 0];
+  const bursts = [0, 0.02, 0.05, 0.1];
+  const trials = 20;
+  const s = settings();
+  $("sweep").disabled = true;
+  let html = "<table><tr><th>SNR dB \\ burst rate</th>" + bursts.map((b) => `<th>${b * 100}%</th>`).join("") + "</tr>";
+  let wrong = 0;
+  for (const snrDb of snrs) {
+    html += `<tr><th>${snrDb}</th>`;
+    for (const burstRate of bursts) {
+      $("sweepStatus").textContent = `SNR ${snrDb} dB, burst ${burstRate * 100}%...`;
+      await new Promise((r) => setTimeout(r)); // let the page repaint
+      let raw = 0, ecc = 0;
+      for (let i = 0; i < trials; i++) {
+        const r = runTrial(snrDb * 1000 + burstRate * 1e6 + i, { snrDb, burstRate }, s);
+        raw += r.raw; ecc += r.ecc; wrong += r.wrong;
+      }
+      const tone = (n) => (n === trials ? "ok" : n === 0 ? "bad" : "");
+      html += `<td><span class="${tone(raw)}">${raw}</span> / <span class="${tone(ecc)}">${ecc}</span></td>`;
+    }
+    html += "</tr>";
+  }
+  $("sweepTable").innerHTML = html + "</table>";
+  $("sweepStatus").textContent = `done (raw / ECC of ${trials}); ECC confidently wrong: ${wrong}`;
+  $("sweep").disabled = false;
+};
+</script>
+</body>
+</html>

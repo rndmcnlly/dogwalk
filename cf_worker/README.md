@@ -123,7 +123,10 @@ connecting in the background (`dogs_waking`, fail-fast session tools,
 Managed Session creation, asynchronous Prompt Turns, session inspection, the
 end-of-call welcome, a returning caller's composed Opening with caller-ID and
 since-last-call clauses, `session/resume` on reconnect with a cached preview
-URL, the keypad conventions and System Menu, and call termination without
+URL, the keypad conventions and System Menu, voice-set Earcon Style, browser
+pairing end to end (Pairing Tones decoded from the played fixture, claim, single
+use, keypad acceptance, status and file reads over the browser socket, path
+confinement, refusal, and unpairing), and call termination without
 consuming provider traffic.
 
 ## Front Door
@@ -178,17 +181,20 @@ takes a minute or two." and the Orchestrator loads the `first-call-tour` skill.
 | Conversation | `0` | Repeat the Voice Frontend's last utterance verbatim |
 | Conversation | other | `keypad` harness event to the Orchestrator with the conversation since the last handoff |
 | Recording | `#` / `*` | Save / discard |
+| Pairing confirmation | `1` / `*` | Accept / refuse the browser that claimed the Pairing Code |
+| Pairing Tones playing | any | Ignored (until 0.5 s after), so echoes read back as presses cannot act |
 
-The System Menu is a deterministic state machine in the Durable Object: it
-mutes the Voice Frontend's input (`session.input_audio.mute`), holds
-Orchestrator speech and earcons, and plays pre-rendered prompts from
-`../make_earcons.py` (always spoken, whatever the earcon style). `1` status, `2`
-restart (a second `2` confirms; the Daytona Sandbox is stopped, then started,
-and the Orchestrator gets `sandbox_restart_requested`), `3` the TwiML recovery
-menu (as `open_recovery_menu`), `4` sound style (`1` default, `2` tones, `3`
-spoken words; stored per Durable Object as `earcon_preference`, previewed with
-the opening earcon), `9` hang up, `*` or 15 s back. Leaving unmutes
-and plays "Back." Actions are recorded as `menu.*` Call Activity.
+The System Menu is a deterministic state machine in the Durable Object, kept for
+what must work when the Voice Agent cannot hear or think straight: it mutes the
+Voice Frontend's input (`session.input_audio.mute`), holds Orchestrator speech
+and earcons, and plays pre-rendered prompts from `../make_earcons.py` (always
+spoken, whatever the earcon style). `1` restart (a second `1` confirms; the
+Daytona Sandbox is stopped, then started, and the Orchestrator gets
+`sandbox_restart_requested`), `2` the TwiML recovery menu (as
+`open_recovery_menu`), `*` or 15 s after the prompt back. Leaving unmutes and
+plays "Back." Actions are recorded as `menu.*` Call Activity. Status, hanging
+up, sound style, pairing, and a voice-confirmed restart are voice operations
+(below).
 
 ## Voice Sessions
 
@@ -214,7 +220,10 @@ three levels below home, with credential-free origin URLs),
 following `nextCursor`, keeping those inside `/home/daytona`),
 `load_persisted_session` (`session/resume` from the session's own directory,
 with a fresh Alias), `set_alias`, `close_managed_session` (`session/close`;
-history is kept), plus call control), and answers through `brief`
+history is kept), `restart_sandbox` (after the caller confirms aloud; shares
+the menu's restart), `set_earcon_style` (`default`, `tonal`, or `spoken`; stored
+as `earcon_preference` and previewed with the opening earcon), `pair_browser`
+(see Paired Browser), plus call control), and answers through `brief`
 (`session.thinking.append`) and `say` (`session.commentary.append`). Events that
 arrive mid-loop are injected before its next model call, so corrections steer
 work in flight. Its context persists in Durable Object storage across calls;
@@ -270,6 +279,38 @@ eviction for 15 minutes. Agent updates generally keep active turns alive beyond
 that window, but a completely silent long Prompt Turn could still lose its Agent
 Connection. A sandbox-initiated inbound ACP connection is the hardening path for
 strictly durable unattended turns.
+
+## Paired Browser
+
+An optional, read-only second surface (`../DOMAIN.md`, Paired Browser). The
+caller asks to pair; the `pair-browser` Voice Agent Skill walks them through
+opening `https://dogwalk.tools/pair` on another device and pressing Listen, then
+the Orchestrator calls `pair_browser`. The Durable Object stores a fresh Pairing
+Code's hash in D1 `pairing_codes` (90 s, single use), waits for a lull, and
+plays it as Pairing Tones (`src/pairing.ts`: 10 random bytes plus 6
+Reed-Solomon parity bytes over GF(256), 32 DTMF symbols of 62.5 ms, no gaps,
+2 s). The page (`src/pair_page.ts`) decodes with a Goertzel AudioWorklet, a
+symbol clock that marks unclear slots as erasures, and Reed-Solomon, claiming
+only frames with parity to spare. `POST /pair/claim` consumes the code row and
+forwards the browser's description (user agent) and place (Cloudflare `cf`
+city and region) to the Durable Object, which has the Voice Frontend name them;
+`1` accepts, `*` refuses, 30 s lapses. The page polls
+`GET /pair/claim/status` with its ticket and receives its credential once.
+
+Credentials are `<identity>.<secret>`: the identity half routes to the
+sandbox-keyed Durable Object (and must have a Sandbox Assignment), and only the
+secret's hash is stored there, in `paired_browsers` (at most three; an hour idle,
+twelve hours in all; cleared on Sandbox replacement). The browser keeps it in
+`sessionStorage` and opens `wss://dogwalk.tools/pair/ws?for=<identity>`,
+authenticating in its first message. The socket uses the Hibernation API, so a
+paired tab never keeps the object or its Agent Connection in memory. It receives
+the `publicSession` projection on connect and (throttled) on changes, and can
+list and read files under `/home/daytona` through the Daytona toolbox (512 KiB
+shown, binary refused).
+
+The prototype that settled the signal design is
+`../prototypes/acoustic_pairing.html`: a transmitter, a live raw versus ECC
+decoder view, and a simulated phone line (mu-law, noise, burst loss).
 
 ## Diagnostics
 

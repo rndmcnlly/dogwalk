@@ -49,6 +49,8 @@ class DaytonaMock(BaseHTTPRequestHandler):
     # Toolbox commands seen, and optional handlers that answer some of them.
     executed: list[str] = []
     execute_hooks: list = []
+    # Optional handlers for other GETs (toolbox file reads): path -> (status, body, content type).
+    get_hooks: list = []
 
     def sandbox(self, state: str = "started") -> dict:
         return {
@@ -98,6 +100,16 @@ class DaytonaMock(BaseHTTPRequestHandler):
                 self.sandbox("creating" if self.detail_reads == 1 else "started")
             )
             return
+        for hook in DaytonaMock.get_hooks:
+            answer = hook(self.path)
+            if answer is not None:
+                status, body, kind = answer
+                self.send_response(status)
+                self.send_header("content-type", kind)
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
         self.send_error(404)
 
     def do_POST(self) -> None:

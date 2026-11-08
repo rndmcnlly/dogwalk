@@ -63,9 +63,8 @@ LABELS = {
 # Keypad system menu prompts: always spoken whatever the caller's earcon style, because they are
 # instructions the caller must understand rather than event markers. Slower and louder.
 PROMPTS = {
-    "menu": "Menu. One, status. Two, restart the sandbox. Three, recovery options. Four, sound style. Nine, hang up. Star, back.",
-    "menu_earcons": "Sound style. One, default. Two, tones. Three, spoken words. Star, back.",
-    "menu_restart_confirm": "Restarting stops running work. Press two again to confirm.",
+    "menu": "Menu. One, restart the sandbox. Two, recovery options. Star, back.",
+    "menu_restart_confirm": "Restarting stops running work. Press one again to confirm.",
     "menu_restarting": "Restarting the sandbox.",
     "menu_back": "Back.",
 }

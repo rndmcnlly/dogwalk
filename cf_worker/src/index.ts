@@ -9,6 +9,9 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { ADMIN_HTML } from "./admin";
 import { LANDING_HTML } from "./landing";
+import { PAIR_HTML } from "./pair_page";
+import { handleSounds } from "./sounds_page";
+import { describeBrowser, describePlace, sha256Hex, splitCredential } from "./pairing";
 import type { Env } from "./types";
 import { FRONTEND_INSTRUCTIONS, VoiceSession } from "./voice_session";
 export { VoiceSession };
@@ -685,6 +688,66 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
   return new Response("not found", { status: 404 });
 }
 
+// --- Paired Browser -----------------------------------------------------
+//
+// A browser claims a Pairing Code it heard in a call, waits for the caller to accept, then
+// holds a credential `<identity>.<secret>`: the identity half routes to the sandbox-keyed
+// VoiceSession, which alone checks the secret. No secret travels in a URL.
+
+async function handlePair(req: Request, env: Env, url: URL): Promise<Response> {
+  if (url.pathname === "/pair" && req.method === "GET") {
+    return new Response(PAIR_HTML, {
+      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+    });
+  }
+  if (url.pathname === "/pair/claim" && req.method === "POST") {
+    const body = await req.json<{ code?: unknown }>().catch(() => ({ code: null }));
+    const code = typeof body.code === "string" ? body.code.toLowerCase() : "";
+    if (!/^[0-9a-f]{20}$/.test(code)) return jsonResponse({ error: "malformed pairing code" }, 400);
+    const codeHash = await sha256Hex(code);
+    // Single use: the claim consumes the row whether or not the caller accepts.
+    const row = await env.DB.prepare(
+      "DELETE FROM pairing_codes WHERE code_hash = ? AND expires_at > unixepoch() RETURNING identity_hash",
+    ).bind(codeHash).first<{ identity_hash: string }>();
+    if (!row) return jsonResponse({ error: "unknown or expired pairing code" }, 404);
+    const cf = (req as Request & { cf?: { city?: unknown; region?: unknown; country?: unknown } }).cf;
+    return voiceSessionFor(env, row.identity_hash).fetch("https://voice-session/pair/claim", {
+      method: "POST",
+      headers: {
+        "x-dogwalk-code-hash": codeHash,
+        "x-dogwalk-browser": describeBrowser(req.headers.get("user-agent") ?? ""),
+        "x-dogwalk-place": describePlace(cf),
+      },
+    });
+  }
+  if (url.pathname === "/pair/claim/status" && req.method === "GET") {
+    const ticket = splitCredential(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null);
+    if (!ticket || !(await knownIdentity(env, ticket.identity))) return jsonResponse({ state: "expired" });
+    return voiceSessionFor(env, ticket.identity).fetch("https://voice-session/pair/claim/status", {
+      headers: { "x-dogwalk-secret": ticket.secret },
+    });
+  }
+  if (url.pathname === "/pair/ws") {
+    if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("expected a WebSocket", { status: 426 });
+    const identity = url.searchParams.get("for") ?? "";
+    if (!/^[0-9a-f]{16,128}$/.test(identity) || !(await knownIdentity(env, identity))) {
+      return new Response("unknown pairing", { status: 404 });
+    }
+    return voiceSessionFor(env, identity).fetch("https://voice-session/pair/ws", { headers: req.headers });
+  }
+  return new Response("not found", { status: 404 });
+}
+
+// Only identities with a Sandbox Assignment get a VoiceSession; random ones never create objects.
+async function knownIdentity(env: Env, identity: string): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT 1 AS ok FROM sandbox_assignments WHERE identity_hash = ?").bind(identity).first();
+  return Boolean(row);
+}
+
+function voiceSessionFor(env: Env, identity: string): DurableObjectStub {
+  return env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(identity));
+}
+
 // --- /voice routing -----------------------------------------------------
 
 export default {
@@ -704,6 +767,15 @@ export default {
 
     if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
       return handleAdmin(req, env, url.pathname);
+    }
+
+    if (url.pathname === "/pair" || url.pathname.startsWith("/pair/")) {
+      return handlePair(req, env, url);
+    }
+
+    if (url.pathname === "/sounds" || url.pathname.startsWith("/sounds/")) {
+      const sounds = await handleSounds(req, url);
+      if (sounds) return sounds;
     }
 
     if (url.pathname === "/voice" && req.method === "POST") {
@@ -822,7 +894,7 @@ async function prewarmVoiceSession(env: Env, identity: string, phone: string, sa
     const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(identity));
     await object.fetch("https://voice-session/prewarm", {
       method: "POST",
-      headers: { "x-dogwalk-phone": phone, "x-dogwalk-sandbox-id": sandboxId },
+      headers: { "x-dogwalk-phone": phone, "x-dogwalk-sandbox-id": sandboxId, "x-dogwalk-identity": identity },
     });
   } catch (error) {
     console.error("voice session prewarm failed", error);
@@ -967,6 +1039,7 @@ async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response
     "x-dogwalk-sandbox-id": assignment.provider_id,
     "x-dogwalk-call-sid": context.callSid,
     "x-dogwalk-live-session-id": liveSessionId,
+    "x-dogwalk-identity": assignment.identity_hash,
   });
   const prepare = await object.fetch("https://voice-session/prepare", { method: "POST", headers });
   if (!prepare.ok) {

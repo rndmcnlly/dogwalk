@@ -6,6 +6,7 @@
 import preciseTranscription from "../voice_agent_skills/precise-transcription.md";
 import platformSelfKnowledge from "../voice_agent_skills/platform-self-knowledge.md";
 import firstCallTour from "../voice_agent_skills/first-call-tour.md";
+import pairBrowser from "../voice_agent_skills/pair-browser.md";
 import domainDoc from "../../DOMAIN.md";
 import architectureDoc from "../../PSTN_CLOUDFLARE.md";
 
@@ -36,6 +37,7 @@ export const VOICE_AGENT_SKILLS: VoiceAgentSkill[] = [
   // Self-knowledge flows from the repository's own docs, so it cannot drift from them.
   parse(platformSelfKnowledge, `\n\n# DOMAIN.md\n\n${domainDoc}\n\n# PSTN_CLOUDFLARE.md\n\n${architectureDoc}`),
   parse(firstCallTour),
+  parse(pairBrowser),
 ];
 
 export const VOICE_AGENT_SKILL_INDEX = VOICE_AGENT_SKILLS

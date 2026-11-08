@@ -44,7 +44,9 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 - Accepts GPT-Live sessions with a bounded state snapshot and routes their
   sidebands to the Durable Object keyed by Sandbox assignment.
 - Provides deterministic TwiML recovery when realtime voice is unavailable.
-- Serves the read-only Diagnostics surface.
+- Serves the read-only Diagnostics surface, the public landing page and
+  earcon soundboard (`/sounds`), and the Paired Browser page (`/pair`); consumes
+  claimed Pairing Codes and routes browser sockets by credential identity.
 
 ### VoiceSession Durable Object
 
@@ -52,7 +54,9 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
   Agent Connection is established in the background with retries; a call talks
   while it is pending and survives losing it.
 - Speaks a deterministic Opening and runs the keypad conventions and the in-call
-  System Menu without a model.
+  System Menu (restart and recovery only) without a model.
+- Plays Pairing Tones on request, takes the caller's keypad acceptance, and
+  serves Paired Browsers read-only over hibernatable WebSockets.
 - Runs the Session Orchestrator: answers each GPT-Live client delegation from
   the call transcript, with neutral Managed Session and Prompt Turn tools, and
   persists its context across calls.
@@ -80,7 +84,7 @@ semantics.
 ## Persistence
 
 D1 stores phone Registration, Invite Codes, Sandbox Assignments, audit and call
-activity, and call handoffs. A provider
+activity, call handoffs, and unclaimed Pairing Code hashes. A provider
 ID is a cached hosting reference rather than durable identity. Confirmed provider
 deletion clears the stale assignment and permits replacement while retaining the
 phone Registration.
@@ -115,6 +119,9 @@ exists but is disabled until a path-scoped Access application is configured.
   cuts off speech, need a real call.
 - A completely silent Prompt Turn can outlive Cloudflare's outbound WebSocket
   retention guarantee. A sandbox-initiated connection is the hardening path.
+- Pairing Tones are verified only against local mocks and a simulated phone
+  line; real carriers (AMR or EVS speech codecs), room acoustics, and a phone's
+  own echo of the tones are untested.
 - Session discovery/load, explicit close/delete/config operations, and ACP
   Elicitation are not yet exposed through the Voice Agent.
 - The Diagnostics surface is read-only infrastructure, not a required user interface.

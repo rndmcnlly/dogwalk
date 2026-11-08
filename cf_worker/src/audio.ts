@@ -1,6 +1,5 @@
 import spoken_call_started from "../earcons/call_started.pcm";
 import spoken_call_started_ready from "../earcons/call_started_ready.pcm";
-import prompt_menu_earcons from "../earcons/menu_earcons.pcm";
 import FM_DESIGNS from "./earcon_designs.json";
 import spoken_session_created from "../earcons/session_created.pcm";
 import spoken_turn_started from "../earcons/turn_started.pcm";
@@ -211,11 +210,10 @@ export function earcon(name: EarconName, style: EarconStyle): Clip {
 
 // Keypad system menu prompts, also rendered by make_earcons.py. They are instructions the
 // caller must follow, so they are spoken whatever the earcon style.
-export type PromptName = "menu" | "menu_earcons" | "menu_restart_confirm" | "menu_restarting" | "menu_back";
+export type PromptName = "menu" | "menu_restart_confirm" | "menu_restarting" | "menu_back";
 
 const PROMPTS: Record<PromptName, Clip> = {
   menu: pcmClip(prompt_menu),
-  menu_earcons: pcmClip(prompt_menu_earcons),
   menu_restart_confirm: pcmClip(prompt_menu_restart_confirm),
   menu_restarting: pcmClip(prompt_menu_restarting),
   menu_back: pcmClip(prompt_menu_back),
@@ -224,6 +222,11 @@ const PROMPTS: Record<PromptName, Clip> = {
 export function prompt(name: PromptName): Clip {
   return PROMPTS[name];
 }
+
+// Every earcon, Earcon Style, and System Menu prompt, for listings such as the /sounds page.
+export const EARCON_NAMES = Object.keys(SPOKEN) as EarconName[];
+export const EARCON_STYLES: EarconStyle[] = ["fm", "tonal", "spoken"];
+export const PROMPT_NAMES = Object.keys(PROMPTS) as PromptName[];
 
 // A tenth of a second of silence: playing any fixture cuts off the model's speech.
 export const SILENCE: Clip = { base64: toBase64(new Uint8Array(SAMPLE_RATE / 5)), seconds: 0.1 };
@@ -322,7 +325,7 @@ function normalize(pcm: Uint8Array): Uint8Array {
   return new Uint8Array(output.buffer);
 }
 
-function toBase64(bytes: Uint8Array): string {
+export function toBase64(bytes: Uint8Array): string {
   let binary = "";
   for (let i = 0; i < bytes.length; i += 0x8000) {
     binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));

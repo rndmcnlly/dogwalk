@@ -228,13 +228,16 @@ Telephone keypad presses have fixed meanings that depend on the mode of the Voic
 | Conversation | other digits | Caller input, sent to the Session Orchestrator with the conversation around it |
 | Voice Recording | pound | Save the recording |
 | Voice Recording | star | Discard the recording |
+| Pairing confirmation | one | Accept the browser that claimed the Pairing Code |
+| Pairing confirmation | star | Refuse it |
+| Pairing Tones | any | Ignored, so an echo of the tones read back as presses cannot act |
 | System Menu | see below | Menu choices |
 
 ### System Menu
 
 **Context:** Voice Interaction, with Agent Hosting actions
 
-A deterministic in-call menu opened with star: no model interprets it, the Voice Frontend does not hear the caller while it is open, and pre-rendered prompts speak it. One reads Managed Session status; two restarts the Sandbox after a second press confirms that running work stops; three hands the call to the deterministic recovery menu; four chooses the Earcon Style; nine hangs up; star, or fifteen seconds without a key, returns to the conversation. The Session Orchestrator learns of a restart through a harness event. Menu actions are recorded as Call Activity.
+A deterministic in-call menu opened with star: no model interprets it, the Voice Frontend does not hear the caller while it is open, and pre-rendered prompts speak it. It holds only what must work when the Voice Agent cannot hear the User or cannot think straight: one restarts the Sandbox after a second press of one confirms that running work stops; two hands the call to the deterministic recovery menu; star, or fifteen seconds without a key after the prompt, returns to the conversation. Preferences and routine operations go by voice instead: status (also keypad one outside the menu), hanging up, the Earcon Style, pairing a browser, and a restart the User confirms aloud (the Session Orchestrator's restart tool, which shares the menu's restart). The recovery menu covers GPT-Live being unavailable and is the only route to replacing a Sandbox; a dead Sandbox alone is a voice matter, since the Session Orchestrator runs without it. The Session Orchestrator learns of a keypad restart through a harness event. Menu actions are recorded as Call Activity.
 
 **Not:** The recovery menu outside the Voice Agent, which is reached when realtime voice is unavailable.
 
@@ -242,7 +245,7 @@ A deterministic in-call menu opened with star: no model interprets it, the Voice
 
 **Context:** Voice Interaction
 
-The User's choice of how earcons sound, kept with their Sandbox's Voice Session state: default, tones, or spoken words. Default means whatever Dogwalk currently ships as its best vocabulary (now the semantic FM set designed in `earcon_lab.py`), so it changes without the User acting. Every style marks the same events; the System Menu's own prompts are always spoken.
+The User's choice of how earcons sound, kept with their Sandbox's Voice Session state: default, tones, or spoken words. Default means whatever Dogwalk currently ships as its best vocabulary (now the semantic FM set designed in `earcon_lab.py`), so it changes without the User acting. Every style marks the same events; the System Menu's own prompts are always spoken. The User changes it by asking; the Session Orchestrator stores the preference and previews it with the opening sound. The public soundboard at `/sounds` plays every earcon in every style, as a cheat sheet.
 
 ### Agent Implementation
 
@@ -349,6 +352,18 @@ by capability, not by client-side hiding.
 
 **Not:** A control surface, a required User interface, or the Voice Interaction
 itself. "Mission Control" is superseded historical language for this surface.
+
+### Paired Browser
+
+**Context:** Access Control, with projections from Session Management
+
+An optional, read-only second surface for the User: a browser tab that shows the live Managed Session projection (Aliases, Prompt Turn state, plans, recent tool calls, Reports, pending Permission Requests) and reads Workspace files. It never starts, steers, or authorizes anything; every action stays in the Voice Call. It complements the eyes-free norm for the moments a User wants to read rather than listen, such as reading a Report, thinking, and calling back with feedback.
+
+Pairing is acoustic and confirmed by keypad. On request the Session Orchestrator plays a **Pairing Code** into the call as **Pairing Tones**: eighty random bits plus Reed-Solomon parity, sent as keypad (DTMF) tones. A browser within earshot, on a different device (phones give browsers silence during a call), decodes and claims the code; Dogwalk then has the Voice Frontend name the browser and its rough location, and the User presses one to accept or star to refuse. Playing tones authorizes nothing, so neither a model nor text an Agent produced can pair a browser; only the User's key press can. A Pairing Code works once and lapses after ninety seconds.
+
+An accepted browser holds a credential that names its Sandbox Assignment's Voice Session and a secret checked only there, kept in that browser tab's session storage. It outlasts the Voice Call and lapses after an hour without use, twelve hours in all, when the User unpairs it from the page, or when the Sandbox is replaced. Its connection never keeps Agent work or the Sandbox awake.
+
+**Not:** The Diagnostics Surface (operator-only, all Users and calls), a control surface, a required interface, or a terminal. It succeeds the retired Scoped Diagnostic View, with the call itself replacing SMS as the channel that proves the User is present.
 
 ### Handoff
 
@@ -650,6 +665,8 @@ The following language appears in Git history and is not canonical for productio
 - A Managed Session's directory is fixed at creation and Dogwalk does not yet negotiate additional directories, so work spanning two projects needs two Managed Sessions or a shared parent directory. Should Create Managed Session accept additional directories when the Agent advertises them?
 - Is a project an Agent Hosting fact (a directory found in the Sandbox) or a Session Management concept with its own identity, for example so a Managed Session survives a clone being moved or re-cloned?
 - Is the caller-ID clause permanent product behavior or a diagnostic to remove once STIR/SHAKEN attestation is understood across carriers?
+
+- Paired Browser: should it ever offer a terminal into the Sandbox (Daytona's signed web-terminal URL or an SSH token), which would make it a control surface outside the Voice Call? Should the Session Orchestrator learn which files the User opened, so a callback can start from what they read? Should unpairing also be possible by voice? Pairing Tones are not yet verified over a real carrier (speech codecs can smear tones) or against a phone's own echo.
 
 ## ACP References
 
