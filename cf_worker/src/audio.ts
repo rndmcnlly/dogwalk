@@ -42,25 +42,6 @@ export interface Clip {
   seconds: number;
 }
 
-// [frequency Hz, duration ms] notes, each with a short attack and exponential decay.
-function synthesize(notes: Array<[number, number]>, gain = 0.28): Clip {
-  const total = notes.reduce((sum, [, ms]) => sum + Math.round((ms / 1000) * SAMPLE_RATE), 0);
-  const samples = new Int16Array(total);
-  let offset = 0;
-  for (const [frequency, ms] of notes) {
-    const length = Math.round((ms / 1000) * SAMPLE_RATE);
-    for (let i = 0; i < length; i++) {
-      const t = i / SAMPLE_RATE;
-      const envelope = Math.min(1, i / 240) * Math.exp(-5 * (i / length));
-      // A touch of second harmonic keeps the chime audible through narrowband telephony.
-      const wave = Math.sin(2 * Math.PI * frequency * t) + 0.3 * Math.sin(4 * Math.PI * frequency * t);
-      samples[offset + i] = Math.round(wave * envelope * gain * 32767 / 1.3);
-    }
-    offset += length;
-  }
-  return { base64: toBase64(new Uint8Array(samples.buffer)), seconds: total / SAMPLE_RATE };
-}
-
 export type EarconName =
   | "call_started"
   | "call_started_ready"
@@ -91,42 +72,9 @@ export type EarconName =
   | "pull";
 // fm: the semantic FM vocabulary (earcon_lab.py, SOUND_DESIGN_NOTES.md), the default;
 // tonal: the first monophonic chimes; spoken: Fred's labels.
-export type EarconStyle = "fm" | "tonal" | "spoken";
+// Tonal is the semantic FM set designed in earcon_lab.py; spoken is short text-to-speech labels.
+export type EarconStyle = "tonal" | "spoken";
 
-// Tonal earcons: short note patterns, rising for arrivals and falling for departures.
-const TONAL: Record<EarconName, Clip> = {
-  call_started: synthesize([[523.25, 140], [783.99, 220]]),
-  call_started_ready: synthesize([[392, 90], [523.25, 90], [659.25, 90], [783.99, 140], [1046.5, 220]]),
-  session_created: synthesize([[523.25, 90], [659.25, 90], [783.99, 140]]),
-  turn_started: synthesize([[659.25, 100], [987.77, 140]]),
-  turn_stopped: synthesize([[783.99, 110], [1046.5, 170]]),
-  turn_failed: synthesize([[493.88, 150], [349.23, 260]]),
-  dogs_ready: synthesize([[392, 90], [523.25, 90], [659.25, 90], [783.99, 160]]),
-  turn_cancelled: synthesize([[783.99, 110], [659.25, 170]]),
-  turn_truncated: synthesize([[783.99, 110], [783.99, 110], [739.99, 200]]),
-  turn_refused: synthesize([[523.25, 120], [369.99, 240]]),
-  permission_requested: synthesize([[880, 110], [880, 110], [1174.66, 180]]),
-  session_closed: synthesize([[783.99, 110], [523.25, 170]]),
-  recording_started: synthesize([[1046.5, 260]]),
-  recording_saved: synthesize([[1046.5, 100], [1318.51, 180]]),
-  recording_discarded: synthesize([[659.25, 120], [440, 220]]),
-  // Following brackets a stretch of narration: a rising sixth in, its mirror out.
-  follow_started: synthesize([[440, 110], [739.99, 200]]),
-  follow_stopped: synthesize([[739.99, 110], [440, 200]]),
-  // Progress Beats are peripheral: quieter and shorter, one register per phase of work
-  // (looking high, changing low, running in between), so the walk is audible at a glance.
-  progress_looking: synthesize([[1174.66, 90]], 0.18),
-  progress_changing: synthesize([[587.33, 80], [587.33, 110]], 0.18),
-  progress_running: synthesize([[880, 60], [880, 60], [880, 90]], 0.18),
-  progress_still_running: synthesize([[880, 320]], 0.16),
-  progress_failed: synthesize([[622.25, 110], [587.33, 200]], 0.2),
-  progress_remark: synthesize([[987.77, 70], [830.61, 110]], 0.18),
-  progress_step: synthesize([[783.99, 80], [880, 120]], 0.18),
-  progress_plan_done: synthesize([[783.99, 80], [987.77, 80], [1174.66, 150]], 0.2),
-  progress_tiring: synthesize([[392, 380]], 0.18),
-  // A ranging session tugging: two quick pulls, loud enough to cut through.
-  pull: synthesize([[698.46, 90], [0.001, 60], [698.46, 140]]),
-};
 
 // Spoken earcons: macOS text-to-speech labels rendered by make_earcons.py (verbose and
 // diagnostic). Presentation only; the event names stay neutral.
@@ -206,7 +154,7 @@ const FM = Object.fromEntries(
 ) as Record<EarconName, Clip>;
 
 export function earcon(name: EarconName, style: EarconStyle): Clip {
-  return (style === "fm" ? FM : style === "tonal" ? TONAL : SPOKEN)[name];
+  return (style === "spoken" ? SPOKEN : FM)[name];
 }
 
 // Keypad system menu prompts, also rendered by make_earcons.py. They are instructions the
@@ -227,7 +175,7 @@ export function prompt(name: PromptName): Clip {
 
 // Every earcon, Earcon Style, and System Menu prompt, for listings such as the /sounds page.
 export const EARCON_NAMES = Object.keys(SPOKEN) as EarconName[];
-export const EARCON_STYLES: EarconStyle[] = ["fm", "tonal", "spoken"];
+export const EARCON_STYLES: EarconStyle[] = ["tonal", "spoken"];
 export const PROMPT_NAMES = Object.keys(PROMPTS) as PromptName[];
 
 // A tenth of a second of silence: playing any fixture cuts off the model's speech.

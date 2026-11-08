@@ -32,11 +32,10 @@ const ACP_CONNECT_WINDOW_MS = 3 * 60 * 1000;
 const MENU_TIMEOUT_MS = 15_000;
 // The menu waits fifteen seconds after its prompt has been heard, however long the prompt grows.
 const menuTimeoutMs = () => MENU_TIMEOUT_MS + prompt("menu").seconds * 1000;
-// What an Earcon Style preference of "default" plays; change it to move every such caller.
-const DEFAULT_EARCON_STYLE: EarconStyle = "fm";
-type EarconPreference = "default" | "tonal" | "spoken";
+// Earcon Style (DOMAIN.md): tonal by default; none silences event sounds.
+type EarconPreference = EarconStyle | "none";
 // Earcon Style preferences the set_earcon_style tool accepts.
-const EARCON_PREFERENCES: EarconPreference[] = ["default", "tonal", "spoken"];
+const EARCON_PREFERENCES: EarconPreference[] = ["tonal", "spoken", "none"];
 const MAX_SINCE_GREETING = 4;
 const MAX_SESSION_LIST_PAGES = 10;
 const MAX_WORKSPACE_PROJECTS = 60;
@@ -395,10 +394,10 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "set_earcon_style",
-    description: "Choose how event sounds (earcons) sound for this caller from now on: default (Dogwalk's current best set), tonal (plain note patterns), or spoken (short spoken labels). Plays the call-start sound in the new style as a preview, then returns; tell the caller what changed.",
+    description: "Choose how event sounds (earcons) sound for this caller from now on: tonal (Dogwalk's designed chimes, the usual choice), spoken (short spoken labels, handy while learning what each sound means), or none (no event sounds; the recording beep still plays). Plays the opening sound in the new style as a preview (nothing for none), then returns; tell the caller what changed. The caller can hear every sound at dogwalk.tools/sounds.",
     parameters: {
       type: "object",
-      properties: { style: { type: "string", enum: ["default", "tonal", "spoken"] } },
+      properties: { style: { type: "string", enum: ["tonal", "spoken", "none"] } },
       required: ["style"],
       additionalProperties: false,
     },
@@ -585,7 +584,7 @@ export class VoiceSession {
   private lastSpeechAt = 0;
   private earconQueue: Array<{ name: EarconName; queuedAt: number }> = [];
   private earconPumping = false;
-  private earconPreference: EarconPreference = "default";
+  private earconPreference: EarconPreference = "tonal";
   private follow: Follow | null = null;
   private followPumping = false;
   private clipPending = false;
@@ -616,7 +615,9 @@ export class VoiceSession {
       this.orchestratorContext = await state.storage.get<unknown[]>("orchestrator_context") ?? [];
       this.orchestratorQueue = await state.storage.get<string[]>("orchestrator_queue") ?? [];
       this.agentCapabilities = await state.storage.get<Record<string, any>>("agent_capabilities") ?? {};
-      this.earconPreference = await state.storage.get<EarconPreference>("earcon_preference") ?? "default";
+      // Anything else stored (the retired "default" and "fm") means the tonal set.
+      const storedStyle = await state.storage.get<string>("earcon_preference");
+      this.earconPreference = EARCON_PREFERENCES.find((item) => item === storedStyle) ?? "tonal";
       this.identityHash = await state.storage.get<string>("identity_hash") ?? null;
     });
   }
@@ -703,7 +704,7 @@ export class VoiceSession {
     // so a call whose dogs are already awake hears the whole phrase at once.
     const openedWaking = !this.acpReady;
     const opener: EarconName = openedWaking ? "call_started" : "call_started_ready";
-    await this.playFixture(earcon(opener, this.earconStyle), opener);
+    if (this.earconStyle) await this.playFixture(earcon(opener, this.earconStyle), opener);
     this.sendLive({ type: "session.commentary.append", delegation_id: null, content: opening });
     await this.record("voice.opening", { first_call: this.firstCall, words: opening.split(/\s+/).length });
     // Diagnostics: where this call's slice of the cross-call Orchestrator context begins.
@@ -1202,7 +1203,7 @@ export class VoiceSession {
   // as the next call will begin.
   private async setEarconStyle(style: string): Promise<Record<string, unknown>> {
     const preference = EARCON_PREFERENCES.find((item) => item === style);
-    if (!preference) throw new Error(`unknown earcon style ${style}; choose default, tonal, or spoken`);
+    if (!preference) throw new Error(`unknown earcon style ${style}; choose tonal, spoken, or none`);
     this.earconPreference = preference;
     await this.state.storage.put("earcon_preference", preference);
     await this.record("voice.earcons", { preference });
@@ -1210,7 +1211,7 @@ export class VoiceSession {
     let previewed = false;
     try {
       await this.awaitLull();
-      previewed = await this.playFixture(earcon("call_started_ready", this.earconStyle), "earcon_preview");
+      if (this.earconStyle) previewed = await this.playFixture(earcon("call_started_ready", this.earconStyle), "earcon_preview");
     } finally {
       this.clipPending = false;
     }
@@ -2135,15 +2136,15 @@ export class VoiceSession {
     };
   }
 
-  // The caller's Earcon Style preference; "default" follows whatever Dogwalk ships as best.
-  private get earconStyle(): EarconStyle {
-    return this.earconPreference === "default" ? DEFAULT_EARCON_STYLE : this.earconPreference;
+  // Null when the caller chose no event sounds.
+  private get earconStyle(): EarconStyle | null {
+    return this.earconPreference === "none" ? null : this.earconPreference;
   }
 
   // Earcons queue rather than interrupt: each waits for a lull (fixtures cut off the model
   // and mute the caller), plays one at a time, and is dropped once stale.
   private queueEarcon(name: EarconName): void {
-    if (!this.liveAttached || this.recording || this.menu) return;
+    if (!this.liveAttached || this.recording || this.menu || !this.earconStyle) return;
     this.earconQueue.push({ name, queuedAt: Date.now() });
     void this.pumpEarcons();
   }
@@ -2163,7 +2164,7 @@ export class VoiceSession {
           continue;
         }
         this.earconQueue.shift();
-        await this.playFixture(earcon(next.name, this.earconStyle), next.name);
+        if (this.earconStyle) await this.playFixture(earcon(next.name, this.earconStyle), next.name);
       }
     } finally {
       this.earconPumping = false;
@@ -2250,7 +2251,8 @@ export class VoiceSession {
     this.clipPending = true;
     try {
       await this.awaitLull();
-      await this.playFixture(earcon("recording_started", this.earconStyle), "recording_started");
+      // The beep is part of the recording convention, so it sounds even with no event sounds.
+      await this.playFixture(earcon("recording_started", this.earconStyle ?? "tonal"), "recording_started");
     } finally {
       this.clipPending = false;
     }

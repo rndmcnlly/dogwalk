@@ -20,11 +20,27 @@ from daytona import (
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_NAME = "dogwalk-acp-20261107-v2"
+DEFAULT_NAME = "dogwalk-acp-20261108-v1"
 OPENCODE_VERSION = "2.2.5"
 BASE_IMAGE = (
     "python:3.13.5-slim-bookworm@"
     "sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7b0ceaccb55e9dd7e30987419"
+)
+# Daytona's computer-use plugin reports 503 until these X11 and VNC packages
+# exist; its /computeruse/start then launches Xvfb, xfce4, x11vnc, and noVNC.
+DESKTOP_PACKAGES = (
+    "xvfb xfce4 xfce4-terminal x11vnc novnc dbus-x11 libx11-6 libxrandr2 "
+    "libxext6 libxrender1 libxfixes3 libxss1 libxtst6 libxi6 "
+    "chromium fonts-dejavu-core"
+)
+# Chromium's own sandbox and /dev/shm sizing do not fit inside the container.
+CHROMIUM_FLAGS = (
+    'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS '
+    '--no-sandbox --test-type --disable-dev-shm-usage"'
+)
+ACP_INITIALIZE = (
+    '{"jsonrpc":"2.0","id":1,"method":"initialize",'
+    '"params":{"protocolVersion":1,"clientCapabilities":{}}}'
 )
 
 
@@ -32,12 +48,14 @@ def snapshot_image() -> Image:
     return (
         Image.base(BASE_IMAGE)
         .run_commands(
-            "apt-get update && apt-get install -y --no-install-recommends "
+            "apt-get update && DEBIAN_FRONTEND=noninteractive "
+            "apt-get install -y --no-install-recommends "
             "bash ca-certificates curl dnsutils git iputils-ping jq netcat-openbsd "
-            "procps ripgrep sudo tar && "
+            f"procps ripgrep sudo tar tmux {DESKTOP_PACKAGES} && "
             "rm -rf /var/lib/apt/lists/*",
+            f"printf '%s\\n' '{CHROMIUM_FLAGS}' > /etc/chromium.d/dogwalk",
             "pip install --no-cache-dir aiohttp==3.14.2",
-            "curl -fsSL "
+            "curl -fsSL --retry 5 --retry-all-errors "
             f"https://github.com/anomalyco/opencode/releases/download/v{OPENCODE_VERSION}/"
             "opencode-linux-x64.tar.gz | tar -xz -C /usr/local/bin opencode && "
             "chmod 755 /usr/local/bin/opencode",
@@ -62,12 +80,23 @@ def snapshot_image() -> Image:
             f'v="$(opencode --version)" && echo "$v" && '
             f'case "$v" in *"{OPENCODE_VERSION}") ;; *) exit 1 ;; esac',
             "python -c 'import aiohttp'",
+            "cd /tmp && python /opt/dogwalk/sandbox_acp_gateway.py test",
+            # The Agent command must still answer ACP initialize over stdio.
+            f"cd /home/daytona && ( printf '%s\\n' '{ACP_INITIALIZE}'; sleep 15 ) | "
+            "sudo -u daytona -H timeout 30 /usr/local/bin/opencode acp | "
+            "grep -q '\"protocolVersion\":1'",
+            # Leave no OpenCode state from that check in the image.
+            "rm -rf /home/daytona/.local /home/daytona/.cache",
             "sudo -u daytona sudo -n true",
             "ping -c 1 127.0.0.1",
+            "tmux -V",
+            "chromium --version",
         )
         .env(
             {
                 "HOME": "/home/daytona",
+                # Read by Daytona's computer-use plugin when it starts Xvfb.
+                "VNC_RESOLUTION": "1280x800",
             }
         )
         .workdir("/home/daytona")

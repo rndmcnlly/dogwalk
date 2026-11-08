@@ -36,7 +36,6 @@ a:focus-visible,.btn:focus-visible{outline:3px solid var(--leash);outline-offset
 .top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:22px 0;flex-wrap:wrap}
 .mark{display:inline-flex;align-items:center;gap:10px;font-weight:700;letter-spacing:-.02em;text-decoration:none;font-size:19px}
 .mark svg{flex:none}
-.accent{stroke:var(--leash)}
 .accent-fill{fill:var(--leash)}
 .mark small{color:var(--muted);font-weight:500}
 .top nav{display:flex;gap:18px;font:500 13px/1 var(--mono)}
@@ -104,23 +103,22 @@ h2{margin:0 0 14px;font:600 clamp(26px,3.4vw,38px)/1.12 var(--serif);letter-spac
 .menu .new{display:inline-block;margin-left:8px;padding:2px 7px;border-radius:999px;font:600 10.5px/1.4 var(--mono);letter-spacing:.06em;text-transform:uppercase;background:var(--leash);color:var(--paper)}
 .rec p .k{min-width:0;font-size:12.5px;padding:2px 6px;border-bottom-width:2px}
 
-/* pairing */
-.pair{background:var(--card);border-radius:28px;border:1px solid var(--line);padding:clamp(24px,5vw,52px);display:grid;grid-template-columns:1fr;gap:clamp(24px,4vw,44px)}
-@media(min-width:880px){.pair{grid-template-columns:1fr 1fr}}
-.pair .tag{display:inline-block;margin:0 0 14px;padding:4px 10px;border-radius:999px;border:1px solid var(--rule);font:600 11px/1.3 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
-.pair h2{max-width:18ch}
-.pair .intro{margin-bottom:22px;font-size:16px}
-.pair figure{margin:0 0 6px}
-.pair svg.ill{width:100%;height:auto;max-width:440px;display:block;color:var(--ink)}
-.steps{list-style:none;margin:0;padding:0;counter-reset:s}
-.steps li{counter-increment:s;position:relative;padding:0 0 22px 50px;font-size:15.5px;color:var(--body)}
-.steps li::before{content:counter(s);position:absolute;left:0;top:-2px;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font:600 15px/1 var(--mono);color:var(--paper);background:var(--ink)}
-.steps li::after{content:"";position:absolute;left:16.5px;top:36px;bottom:4px;width:1px;background:var(--rule)}
-.steps li:last-child::after{display:none}
-.steps b{color:var(--ink)}
-.steps .k{font-size:12.5px;min-width:0;padding:2px 6px;border-bottom-width:2px}
-.fine{margin:4px 0 0;padding:14px 16px;border-radius:14px;background:var(--paper);font-size:14px;color:var(--muted)}
-.fine b{color:var(--ink)}
+/* sounds */
+.sounds{display:grid;grid-template-columns:1fr;gap:clamp(24px,4vw,48px);align-items:start}
+@media(min-width:820px){.sounds{grid-template-columns:1fr minmax(280px,360px)}}
+.sounds .intro{margin-bottom:22px}
+.styles{list-style:none;margin:0;padding:0}
+.styles li{display:grid;grid-template-columns:88px 1fr;gap:12px;align-items:baseline;padding:11px 0;border-top:1px solid var(--line);font-size:15px;color:var(--muted)}
+.styles li:last-child{border-bottom:1px solid var(--line)}
+.styles b{font:600 14px/1.3 var(--mono);color:var(--ink)}
+.styles em{font-style:normal;font:600 10.5px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--leash);margin-left:6px}
+
+/* power users */
+.power{padding:clamp(28px,4vw,44px) 0}
+.power h2{font-size:clamp(21px,2.4vw,26px)}
+.power p{margin:0;max-width:40em;font-size:15px;color:var(--muted)}
+.power p+p{margin-top:10px}
+.power a{text-underline-offset:3px;text-decoration-color:var(--leash)}
 
 /* pipeline */
 .flow{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr;gap:0}
@@ -157,8 +155,8 @@ footer.site a{text-underline-offset:3px;text-decoration-color:var(--rule)}
     <span>dogwalk<small>.tools</small></span>
   </a>
   <nav aria-label="Page">
+    <a href="/sounds">Hear the sounds</a>
     <a href="#keypad">Keypad</a>
-    <a href="#pair">Pairing</a>
     <a href="https://github.com/rndmcnlly/dogwalk">Source</a>
   </nav>
 </header>
@@ -171,11 +169,11 @@ footer.site a{text-underline-offset:3px;text-decoration-color:var(--rule)}
     <h1>Take your coding agents <em>for a walk.</em></h1>
     <p class="scene">Phone in your pocket, earbuds in, leash in hand. You call Dogwalk and <b>start work, hear progress, answer permission requests, and redirect several coding agents at once</b>, all by talking. No screen required, ever.</p>
     <div class="actions">
-      <a class="btn" href="/pair">
-        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="5" width="18" height="11" rx="1.5"/><path d="M1.5 19h21"/><path d="M8.5 10.5h1M11.5 9v3M14.5 8v5"/></svg>
-        Pair a browser
+      <a class="btn" href="/sounds">
+        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/></svg>
+        Hear what a call sounds like
       </a>
-      <span class="invite">Optional companion. Calling is invite-only.</span>
+      <span class="invite">Calling is invite-only.</span>
     </div>
   </div>
 
@@ -204,11 +202,30 @@ footer.site a{text-underline-offset:3px;text-decoration-color:var(--rule)}
     <li><h3>Sessions that outlast the call</h3><p>Each Managed Session gets a pronounceable Alias. Hang up and the agents keep working; call back hours or days later and pick up where they are.</p></li>
     <li><h3>Follow one, let the rest range</h3><p>Starting a Prompt Turn follows that session: short progress beats as it explores, edits, and runs things. The others work quietly until one pulls for your attention.</p></li>
     <li><h3>Decide out loud</h3><p>Permission requests and questions from an agent come to your ear with the agent's own options. Nothing is approved on your behalf.</p></li>
-    <li><h3>Hear events, not just words</h3><p>Short earcons mark a call starting, a turn ending, a session pulling. Ask for a different sound style any time: the default set, plain tones, or spoken words. <a href="/sounds">Hear them all</a>.</p></li>
+    <li><h3>Hear events, not just words</h3><p>Short earcons mark a call starting, a turn ending, a session pulling. Ask for a different sound style any time: tonal chimes, spoken labels, or none. <a href="/sounds">Hear them all</a>.</p></li>
     <li><h3>Leave a voice note</h3><p>Record voicemail-style into the workspace: a spec, a hummed melody, a sound to process. It becomes an ordinary file an agent can work with.</p></li>
     <li><h3>Reports, not logs</h3><p>Ask how something went and get a short spoken result that keeps the stop reason honest, never a wall of tool output. Agents can also play you audio they made.</p></li>
     <li><h3>Redirect mid-stride</h3><p>Cancel a turn, give a session a new assignment, rename it, or close it. Closing keeps its history, so it can be reopened later.</p></li>
   </ul>
+</section>
+
+<section id="sounds" aria-labelledby="sounds-h">
+  <div class="sounds">
+    <div>
+      <p class="eyebrow">What a call sounds like</p>
+      <h2 id="sounds-h">Short sounds that say what happened.</h2>
+      <p class="intro">Between words, earcons mark events: the call connecting, the sandbox waking, a turn finishing or failing, a session pulling for attention. They wait for a lull rather than talk over anyone, and after a few calls you stop noticing that you are listening for them.</p>
+      <p class="actions"><a class="btn" href="/sounds">Hear every sound, with what it means</a></p>
+    </div>
+    <div>
+      <ul class="styles" aria-label="Sound styles">
+        <li><b>tonal<em>usual</em></b><span>Chimes built from a small code: contour, harmony, and repeats tell you what kind of event it was.</span></li>
+        <li><b>spoken</b><span>A short spoken label for each event instead.</span></li>
+        <li><b>none</b><span>No event sounds. The recording beep still plays.</span></li>
+      </ul>
+      <p class="padnote">To switch, just ask during a call. Your choice carries over to later calls.</p>
+    </div>
+  </div>
 </section>
 
 <section id="keypad" aria-labelledby="keypad-h">
@@ -251,46 +268,6 @@ footer.site a{text-underline-offset:3px;text-decoration-color:var(--rule)}
   </div>
 </section>
 
-<section id="pair" aria-labelledby="pair-h">
-  <div class="pair">
-    <div>
-      <p class="tag">Optional, eyes-full</p>
-      <h2 id="pair-h">Pair a browser when you get back to a desk.</h2>
-      <p class="intro">The call is the product. But some things are better read than heard: a long report, or any other file an agent wrote. A Paired Browser is a read-only companion page, introduced by sound.</p>
-      <figure aria-hidden="true">
-        <svg class="ill" viewBox="0 0 440 150" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="18" y="22" width="62" height="112" rx="12"/>
-          <path d="M40 32h18"/>
-          <g fill="currentColor" stroke="none" opacity=".75">
-            <circle cx="36" cy="62" r="4"/><circle cx="49" cy="62" r="4"/><circle cx="62" cy="62" r="4"/>
-            <circle cx="36" cy="76" r="4"/><circle cx="49" cy="76" r="4"/><circle cx="62" cy="76" r="4"/>
-            <circle cx="36" cy="90" r="4"/><circle cx="49" cy="90" r="4"/><circle cx="62" cy="90" r="4"/>
-            <circle cx="36" cy="104" r="4"/><circle cx="62" cy="104" r="4"/>
-          </g>
-          <circle class="accent-fill" cx="49" cy="104" r="5" stroke="none"/>
-          <g class="accent" stroke-width="3">
-            <path d="M108 70v12"/><path d="M118 60v32"/><path d="M128 66v20"/><path d="M138 52v48"/><path d="M148 62v28"/><path d="M158 56v40"/><path d="M168 68v16"/><path d="M178 58v36"/><path d="M188 64v24"/><path d="M198 54v44"/><path d="M208 66v20"/><path d="M218 60v32"/><path d="M228 70v12"/>
-          </g>
-          <rect x="262" y="34" width="150" height="88" rx="6"/>
-          <path d="M246 132h182"/>
-          <path d="M278 52h60" opacity=".8"/><path d="M278 66h100" opacity=".45"/><path d="M278 78h86" opacity=".45"/><path d="M278 90h108" opacity=".45"/><path d="M278 102h70" opacity=".45"/>
-          <circle cx="392" cy="52" r="5" fill="#5fc28e" stroke="none"/>
-        </svg>
-      </figure>
-      <p class="actions" style="margin-top:18px"><a class="btn" href="/pair">Open dogwalk.tools/pair</a></p>
-    </div>
-    <div>
-      <ol class="steps">
-        <li><b>Open <a href="/pair">dogwalk.tools/pair</a> on a laptop or tablet</b> and press Listen. Use a different device from the phone in the call: phones give browsers only silence while a call is active.</li>
-        <li><b>In the call, ask to pair a browser.</b> When you say it is listening, the call plays a two-second burst of keypad tones.</li>
-        <li><b>The browser hears the tones.</b> The Voice Agent names the browser and its rough location, so you know it is the one in front of you. Press <span class="k">1</span> to accept.</li>
-        <li><b>Read along.</b> The page shows your sessions' live status and lets you open files the agents wrote, such as reports. It is read-only: every decision still happens on the call.</li>
-      </ol>
-      <p class="fine"><b>Pairing is ephemeral.</b> It lives in that browser tab and outlasts the call, so you can read a report, then call back with feedback. It expires after an hour idle or twelve hours total.</p>
-    </div>
-  </div>
-</section>
-
 <section aria-labelledby="how">
   <p class="eyebrow">Under the hood</p>
   <h2 id="how">How a call becomes code.</h2>
@@ -304,11 +281,19 @@ footer.site a{text-underline-offset:3px;text-decoration-color:var(--rule)}
   </ol>
 </section>
 
+
+<section class="power" id="power" aria-labelledby="power-h">
+  <p class="eyebrow">For power users</p>
+  <h2 id="power-h">A browser, if you happen to be at one.</h2>
+  <p>The call needs no screen, but you can ask the Voice Agent to pair a laptop or tablet by sound: the call plays a short burst of keypad tones that the page at <a href="/pair">dogwalk.tools/pair</a> hears. A Paired Browser shows live session status and the files agents wrote, and is mostly useful for diagnostics.</p>
+  <p>From a paired browser you can also take over with a full terminal or desktop inside the sandbox, for when an agent is stuck on something only a human can do, like a CAPTCHA or a login.</p>
+</section>
+
 </main>
 
 <footer class="site">
   <span>An open-source proof of concept, run by one operator.<br>Access is invite-only: a first call registers with an Invite Code.</span>
-  <span><a href="https://github.com/rndmcnlly/dogwalk">github.com/rndmcnlly/dogwalk</a><br><a href="/pair">Pair a browser</a></span>
+  <span><a href="https://github.com/rndmcnlly/dogwalk">github.com/rndmcnlly/dogwalk</a><br><a href="/sounds">Hear the sounds</a></span>
 </footer>
 
 </div>

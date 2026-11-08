@@ -2,8 +2,9 @@
 
 Status: first production component.
 
-The active production snapshot is `dogwalk-acp-20261107-v2`, built reproducibly
-by `build_sandbox_snapshot.py`.
+The current snapshot is `dogwalk-acp-20261108-v1`, built reproducibly by
+`build_sandbox_snapshot.py`; production adopts it through `DAYTONA_SNAPSHOT` in
+`cf_worker/wrangler.toml`.
 
 `sandbox_acp_gateway.py` exposes a sandbox-local ACP Agent through the
 WebSocket profile of ACP's active Streamable HTTP and WebSocket Transport RFD.
@@ -101,6 +102,17 @@ stop and archive in place, retaining their filesystem and identity indefinitely.
 
 The snapshot grants the isolated `daytona` user passwordless `sudo` and includes
 `ping`, DNS, and socket diagnostics.
+
+Since `dogwalk-acp-20261108-v1` it also includes `tmux` and the X11, xfce4,
+x11vnc, and noVNC packages that Daytona's computer-use plugin requires (without
+them its toolbox endpoints answer 503), plus Debian's Chromium.
+`/etc/chromium.d/dogwalk` adds `--no-sandbox --test-type --disable-dev-shm-usage`,
+which Chromium needs inside the container. `POST /computeruse/start` on the
+toolbox launches Xvfb, xfce4, x11vnc on 5901, and noVNC on 6080; the image sets
+`VNC_RESOLUTION=1280x800`, which Daytona reads only when a Sandbox is created.
+The packages add about 0.6 GB on disk and fit the existing 3 GB disk and 1 GiB
+memory. Sandboxes created from `-20261107-v2` received the same packages and
+flags file in place, keeping their 1024x768 resolution.
 
 ## Verification
 

@@ -4,7 +4,7 @@
 // call would (before the phone line narrows it; the page's phone filter approximates that).
 //
 //   GET /sounds                        the page
-//   GET /sounds/<fm|tonal|spoken>/<earcon>.wav
+//   GET /sounds/<tonal|spoken>/<earcon>.wav
 //   GET /sounds/prompt/<prompt>.wav
 //
 // The CSS and page script are String.raw constants with no backtick and no dollar-brace, so
@@ -209,9 +209,8 @@ if (ungrouped.length) {
 }
 
 const STYLE_INFO: Record<EarconStyle, { label: string; long: string }> = {
-  fm: { label: "FM", long: "the default FM style" },
-  tonal: { label: "Tones", long: "the plain tones style" },
-  spoken: { label: "Spoken", long: "the spoken words style" },
+  tonal: { label: "Tonal", long: "the tonal style" },
+  spoken: { label: "Spoken", long: "the spoken style" },
 };
 
 // The prompts' text, as rendered by make_earcons.py.
@@ -286,7 +285,7 @@ function eventRow(name: EarconName): string {
     const clip = earcon(name, style);
     const { label, long } = STYLE_INFO[style];
     return `<button type="button" class="play" data-src="/sounds/${style}/${name}.wav" data-style="${style}" aria-label="Play ${esc(info.title)} in ${long}, ${seconds(clip)}">`
-      + `<span class="tri" aria-hidden="true"></span><span class="sl">${label}${style === "fm" ? `<em>default</em>` : ""}</span><span class="dur">${seconds(clip)}</span></button>`;
+      + `<span class="tri" aria-hidden="true"></span><span class="sl">${label}${style === "tonal" ? `<em>usual</em>` : ""}</span><span class="dur">${seconds(clip)}</span></button>`;
   }).join("");
   return `<li class="ev" id="${name}">
   <div class="what"><h3>${esc(info.title)}</h3>${info.meaning ? `<p>${esc(info.meaning)}</p>` : ""}
@@ -321,7 +320,7 @@ function page(): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Every Dogwalk earcon, what it means in a call, and how it sounds in each sound style.">
+<meta name="description" content="Every Dogwalk earcon, what it means in a call, and how it sounds in the tonal and spoken sound styles.">
 <meta name="color-scheme" content="light dark">
 <title>Dogwalk: what the call sounds like</title>
 <style>${CSS}</style>
@@ -337,7 +336,6 @@ function page(): string {
   </a>
   <nav aria-label="Site">
     <a href="/">Home</a>
-    <a href="/pair">Pair a browser</a>
     <a href="https://github.com/rndmcnlly/dogwalk">Source</a>
   </nav>
 </header>
@@ -346,7 +344,7 @@ function page(): string {
 <div class="hero">
   <p class="kicker">Sounds</p>
   <h1>What the call <em>sounds like.</em></h1>
-  <p class="lede">Dogwalk marks events with earcons: short sounds that wait for a lull rather than talk over anyone. Every sound style marks the same events. The default is a set of FM chimes built from a small code; plain tones and short spoken words are the alternatives. Ask the Voice Agent to change the style at any time; your choice carries over to later calls.</p>
+  <p class="lede">Dogwalk marks events with earcons: short sounds that wait for a lull rather than talk over anyone. There are three sound styles. <b>Tonal</b>, the usual one, is a set of chimes built from a small code. <b>Spoken</b> marks the same events with short spoken labels. <b>None</b> plays no event sounds at all; the recording beep still plays. To change the style, just ask the walker during a call; your choice carries over to later calls.</p>
 </div>
 
 <div class="bar" role="region" aria-label="Playback">
@@ -357,7 +355,7 @@ function page(): string {
 </div>
 
 <section class="key" aria-labelledby="h-key">
-  <h2 id="h-key">How to hear the default set</h2>
+  <h2 id="h-key">How to hear the tonal set</h2>
   <ul class="legend">
     <li><b>Contour.</b> Rising means something began, falling means it ended, level means a state.</li>
     <li><b>Harmony.</b> Clean intervals are routine. A rough, sour sound means something went wrong.</li>
@@ -421,6 +419,7 @@ a:focus-visible,button:focus-visible,input:focus-visible+span{outline:3px solid 
 h1{margin:0;font:600 clamp(32px,5.4vw,58px)/1.06 var(--serif);letter-spacing:-.02em;text-wrap:balance}
 h1 em{font-style:italic;font-weight:500;color:var(--leash)}
 .lede{margin:20px 0 0;max-width:40em;font-size:clamp(16.5px,1.7vw,19px);color:var(--body)}
+.lede b{color:var(--ink);font-weight:650}
 
 .bar{position:sticky;top:0;z-index:2;display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin:0 0 8px;padding:12px 14px;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 10px 24px -22px rgba(20,30,25,.6)}
 .bar-note{flex:1 1 16em;font-size:13.5px;color:var(--muted)}
@@ -462,9 +461,9 @@ h2{margin:0 0 8px;font:600 clamp(23px,3vw,32px)/1.15 var(--serif);letter-spacing
 .what p.quote{color:var(--body);font-family:var(--serif);font-size:16px}
 .what .meta{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px 14px;font:500 12px/1.5 var(--mono);color:var(--faint)}
 .what code{font:inherit;color:var(--muted)}
-.plays{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.plays{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .plays.one{grid-template-columns:minmax(0,1fr)}
-@media(min-width:760px){.plays{grid-template-columns:repeat(3,108px)}.plays.one{grid-template-columns:108px}}
+@media(min-width:760px){.plays{grid-template-columns:repeat(2,108px)}.plays.one{grid-template-columns:108px}}
 .play{position:relative;display:grid;grid-template-columns:auto 1fr;grid-template-rows:auto auto;column-gap:8px;align-items:center;min-height:52px;padding:8px 10px;border-radius:12px;border:1.5px solid var(--rule);background:var(--card);text-align:left}
 .play:hover{border-color:var(--ink)}
 .play .tri{grid-row:1/3;width:0;height:0;border-left:10px solid var(--leash);border-top:6.5px solid transparent;border-bottom:6.5px solid transparent}

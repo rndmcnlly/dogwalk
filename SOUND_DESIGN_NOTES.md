@@ -122,4 +122,4 @@ All four homes spell one A minor seventh chord (A4 440, E5 659, G5 784, C6 1047)
 
 ## Shipping
 
-`uv run --script earcon_lab.py --export` writes `cf_worker/src/earcon_designs.json`; `audio.ts` renders it at module load with a port of the lab's `render()`. The caller's Earcon Style (System Menu four: default, tones, spoken words) selects it; `default` maps to `DEFAULT_EARCON_STYLE` in `voice_session.ts`, now `fm`.
+`uv run --script earcon_lab.py --export` writes `cf_worker/src/earcon_designs.json`; `audio.ts` renders it at module load with a port of the lab's `render()`. It is the `tonal` Earcon Style, the default; the caller can switch to `spoken` or `none` by voice.

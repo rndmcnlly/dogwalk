@@ -245,7 +245,7 @@ A deterministic in-call menu opened with star: no model interprets it, the Voice
 
 **Context:** Voice Interaction
 
-The User's choice of how earcons sound, kept with their Sandbox's Voice Session state: default, tones, or spoken words. Default means whatever Dogwalk currently ships as its best vocabulary (now the semantic FM set designed in `earcon_lab.py`), so it changes without the User acting. Every style marks the same events; the System Menu's own prompts are always spoken. The User changes it by asking; the Session Orchestrator stores the preference and previews it with the opening sound. The public soundboard at `/sounds` plays every earcon in every style, as a cheat sheet.
+The User's choice of how earcons sound, kept with their Sandbox's Voice Session state: tonal, spoken, or none. Tonal, the semantic chime set designed in `earcon_lab.py`, is what a User gets without choosing; spoken plays a short spoken label for each event; none plays no event sounds, though the recording beep still plays. Tonal and spoken mark the same events; the System Menu's own prompts are always spoken. The User changes it by asking; the Session Orchestrator stores the preference and previews it with the opening sound (no preview for none). The public soundboard at `/sounds` plays every earcon in both sounding styles, as a cheat sheet.
 
 ### Agent Implementation
 
@@ -397,7 +397,7 @@ A tool Dogwalk offers an ACP Agent through ACP's Client-supplied MCP servers, st
 
 **Context:** Voice Interaction
 
-Waveform audio played into a Voice Call: a short synthesized earcon for an event (call start, a Prompt Turn stopping during a lull) or a Workspace file an ACP Agent produced, played on request. It is the eyes-free analogue of showing an image. Earcons come in two styles: tonal note patterns, and verbose spoken labels (synthesized speech naming the event, for diagnosis); they queue for lulls rather than interrupting speech. The caller cannot interrupt a clip and the Voice Frontend does not hear it, so clips are short or announced, and the Session Orchestrator tells the Voice Frontend what was played. Telephone audio is narrowband.
+Waveform audio played into a Voice Call: a short synthesized earcon for an event (call start, a Prompt Turn stopping during a lull) or a Workspace file an ACP Agent produced, played on request. It is the eyes-free analogue of showing an image. Earcons sound in the caller's Earcon Style: tonal chimes, or short spoken labels (synthesized speech naming the event); they queue for lulls rather than interrupting speech. The caller cannot interrupt a clip and the Voice Frontend does not hear it, so clips are short or announced, and the Session Orchestrator tells the Voice Frontend what was played. Telephone audio is narrowband.
 
 ### Voice Recording
 

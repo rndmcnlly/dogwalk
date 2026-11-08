@@ -37,8 +37,9 @@ Set `OPENAI_PROJECT_ID` in `wrangler.toml`. In the matching OpenAI project,
 subscribe `https://dogwalk.tools/openai/live` to `live.transport.incoming` and
 store its `whsec_...` signing secret as `OPENAI_WEBHOOK_SECRET`.
 
-`DAYTONA_SNAPSHOT` is currently `dogwalk-acp-20261107-v2`. It contains the ACP
-Gateway, OpenCode `2.2.5`, passwordless sandbox-local `sudo`, and network
+`DAYTONA_SNAPSHOT` is currently `dogwalk-acp-20261108-v1`. It contains the ACP
+Gateway, OpenCode `2.2.5`, tmux and Daytona's computer-use desktop (Xvfb, xfce4,
+x11vnc, noVNC, Chromium with `--no-sandbox`) for Human Takeover, passwordless sandbox-local `sudo`, and network
 diagnostic utilities. The OpenCode config selects `openai/gpt-6.1-sol`.
 
 From the repository root, build a new immutable version rather than replacing
@@ -221,7 +222,7 @@ following `nextCursor`, keeping those inside `/home/daytona`),
 `load_persisted_session` (`session/resume` from the session's own directory,
 with a fresh Alias), `set_alias`, `close_managed_session` (`session/close`;
 history is kept), `restart_sandbox` (after the caller confirms aloud; shares
-the menu's restart), `set_earcon_style` (`default`, `tonal`, or `spoken`; stored
+the menu's restart), `set_earcon_style` (`tonal`, `spoken`, or `none`; stored
 as `earcon_preference` and previewed with the opening earcon), `pair_browser`
 (see Paired Browser), plus call control), and answers through `brief`
 (`session.thinking.append`) and `say` (`session.commentary.append`). Events that
@@ -240,12 +241,12 @@ registering it in `src/voice_agent_skills.ts`. `platform-self-knowledge` embeds
 `DOMAIN.md` and `PSTN_CLOUDFLARE.md` at build time.
 
 Audio goes to the caller as GPT-Live output fixtures. Earcons mark events and
-queue for lulls, in the caller's Earcon Style (System Menu four): `default` plays
-`DEFAULT_EARCON_STYLE` in `src/voice_session.ts`, currently `fm`, the semantic FM
-vocabulary designed in `../earcon_lab.py` (see `../SOUND_DESIGN_NOTES.md`) and
-exported to `src/earcon_designs.json` with `earcon_lab.py --export`; `tonal` is
-the first note patterns; `spoken` is labels rendered by `../make_earcons.py` with
-macOS `say`, committed under `earcons/`. `play_audio` renders a window of any Workspace audio or video file with
+queue for lulls, in the caller's Earcon Style (set by voice): `tonal`, the
+default, is the semantic chime vocabulary designed in `../earcon_lab.py` (see
+`../SOUND_DESIGN_NOTES.md`) and exported to `src/earcon_designs.json` with
+`earcon_lab.py --export`; `spoken` is labels rendered by `../make_earcons.py`
+with macOS `say`, committed under `earcons/`; `none` plays no event earcons (the
+recording beep still plays). `play_audio` renders a window of any Workspace audio or video file with
 `ffmpeg` in the Sandbox. `start_recording` mutes the Voice Frontend, buffers the
 caller audio GPT-Live reflects to the sideband, and saves a WAV under
 `recordings/` when the caller presses pound (star discards), after 20 s of
