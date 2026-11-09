@@ -35,7 +35,7 @@ ORCHESTRATOR_MODEL = "gpt-6.1-sol"
 ORCHESTRATOR_REASONING_EFFORT = "low"
 PUBLIC_ORIGIN = "https://dogwalk.tools"
 # Name of a pre-built Daytona snapshot containing OpenCode and the ACP Gateway.
-DAYTONA_SNAPSHOT = "dogwalk-acp-20261108-v1"
+DAYTONA_SNAPSHOT = "dogwalk-acp-20261108-v2"
 # Name of the org Daytona Secret mapped to OPENAI_API_KEY for sandbox Agents.
 DAYTONA_AGENT_SECRET = "dogwalk-openai"
 
