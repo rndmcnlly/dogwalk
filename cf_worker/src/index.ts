@@ -8,6 +8,7 @@
 
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { ADMIN_HTML } from "./admin";
+import { OPERATOR_TIMING_HTML } from "./operator_timing";
 import { LANDING_HTML } from "./landing";
 import { PAIR_HTML } from "./pair_page";
 import { handleSounds } from "./sounds_page";
@@ -654,10 +655,52 @@ function diagnosticsEvents(env: Env, verbose: boolean): Response {
 
 async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Response> {
   if (!(await adminAuthorized(req, env))) {
-    const headers = env.ADMIN_PASSWORD ? { "www-authenticate": 'Basic realm="Dogwalk Diagnostics"' } : undefined;
+    const headers: Record<string, string> = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
+    if (env.ADMIN_PASSWORD) headers["www-authenticate"] = 'Basic realm="Dogwalk Diagnostics"';
     return new Response("unauthorized", { status: env.ADMIN_PASSWORD ? 401 : 403, headers });
   }
   if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
+  if (pathname === "/admin/timing" || pathname === "/admin/timing/") {
+    return new Response(OPERATOR_TIMING_HTML, { headers: {
+      "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+      "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
+    } });
+  }
+  if (pathname === "/admin/api/timing/calls") {
+    const calls = await env.DB.prepare(
+      "SELECT call_sid, phone_number, status, started_at, ended_at, duration_seconds FROM voice_calls ORDER BY started_at DESC, call_sid LIMIT 50",
+    ).all<{ call_sid: string; phone_number: string; status: string; started_at: number; ended_at: number | null; duration_seconds: number | null }>();
+    return jsonResponse({ calls: calls.results.map(({ phone_number, ...call }) => ({ ...call, caller: maskPhone(phone_number) })), server_ms: Date.now() });
+  }
+  if (pathname === "/admin/api/timing") {
+    const params = new URL(req.url).searchParams;
+    const callSid = params.get("call_sid") ?? "";
+    const rawAfter = params.get("after") ?? "0";
+    const after = Number(rawAfter);
+    if (!/^CA[\w-]{1,78}$/.test(callSid) || !/^\d+$/.test(rawAfter) || !Number.isSafeInteger(after)) {
+      return jsonResponse({ error: "valid call_sid and nonnegative integer after are required" }, 400);
+    }
+    const call = await env.DB.prepare(
+      "SELECT call_sid, phone_number, status, started_at, ended_at, duration_seconds FROM voice_calls WHERE call_sid = ?",
+    ).bind(callSid).first<{ call_sid: string; phone_number: string; status: string; started_at: number; ended_at: number | null; duration_seconds: number | null }>();
+    if (!call) return jsonResponse({ error: "unknown call" }, 404);
+    // Cursor is insertion order, not event time: late-flushed observations can have
+    // earlier ts_ms. Clients merge by id and sort by observation time when drawing.
+    const rows = await env.DB.prepare(
+      "SELECT id, ts, source, event, detail FROM call_activity WHERE call_sid = ? AND id > ? ORDER BY id LIMIT 501",
+    ).bind(callSid, after).all<{ id: number; ts: number; source: string; event: string; detail: string | null }>();
+    const events = rows.results.slice(0, 500).map(({ detail, ...row }) => {
+      let parsed: unknown = {};
+      try {
+        parsed = JSON.parse(detail ?? "{}");
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = { malformed_detail: true };
+      } catch { parsed = { malformed_detail: true }; }
+      return { ...row, detail: parsed };
+    });
+    const { phone_number, ...metadata } = call;
+    return jsonResponse({ call: { ...metadata, caller: maskPhone(phone_number) }, events,
+      cursor: events.at(-1)?.id ?? after, has_more: rows.results.length > 500, server_ms: Date.now() });
+  }
   if (pathname === "/admin" || pathname === "/admin/") {
     return new Response(ADMIN_HTML, {
       headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },

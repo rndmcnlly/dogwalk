@@ -448,6 +448,35 @@ reference rather than copied into every activity row.
 
 ### Latency traces
 
+The operator-only live sequence diagram is at `https://dogwalk.tools/admin/timing`,
+linked from the Diagnostics tree. It is separate from `/pair`: it can discover
+recent calls for every caller without a pairing ritual or access to that caller's
+browser. It uses the existing operator authentication on **every** page/API
+request: HTTPS HTTP Basic (`adam`, password in Keychain as above), or a verified
+Cloudflare Access JWT when configured. Pairing bearer credentials do not grant
+operator access. No new bearer token, URL secret, or browser-local credential
+store is introduced. Treat the diagram and event inspector as verbose private
+operator telemetry, including when observing a friend's call.
+
+The diagram polls an incremental D1 projection, not the live Sandbox, so merely
+watching does not wake an Agent or change call state. Call discovery is
+`GET /admin/api/timing/calls` (newest 50, masked caller labels); event retrieval is
+`GET /admin/api/timing?call_sid=CA...&after=0`. Event responses contain at most 500
+rows, a monotonically increasing insertion `cursor`, and `has_more`. Drain all
+pages and continue from the returned cursor. Late timing batches still arrive
+after that cursor even when their observation timestamps precede earlier rows;
+sort the merged observations by `detail.ts_ms` for display. A call ending does
+not imply all asynchronous trace writes have arrived. Agent tool observations
+include tool IDs/status/kind and ACP Session IDs; Prompt Turn lifecycle records
+include Alias, ACP Session ID, and duration. Nested Agent sessions are only
+renderable when their identities/relationships are actually observed, never
+inferred from concurrent activity.
+
+Browser regression checks use synthetic events and mocked API requests only:
+`uv run --script cf_worker/operator_timing_test.py` (requires local Google Chrome).
+They cover incremental pagination, timing spans, packet-noise reduction, safe
+rendering of metadata, pause/resume, caller selection, and authentication failure.
+
 `uv run --script playtest.py --only timing --full` prints the latest call's detailed
 timeline. All newly written activity/audit details carry `ts_ms` (server Unix
 milliseconds); the SQL `ts` column remains Unix seconds. Historical timestamps

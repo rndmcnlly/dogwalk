@@ -64,7 +64,7 @@ th{color:var(--fnt);text-transform:uppercase;font-size:9px;letter-spacing:.06em}
 <div class="top">
   <div class="brand"><span class="dot" id="live"></span>dogwalk <small>diagnostics</small></div>
   <div class="lens">
-    <span class="ro">read-only mirror</span> &middot; operator
+    <span class="ro">read-only mirror</span> &middot; operator &middot; <a href="/admin/timing">live sequence diagram</a>
     <div class="controls">
       <label><input type="checkbox" id="verbose"> reveal verbose telemetry</label>
       <button id="refresh">reconnect</button>

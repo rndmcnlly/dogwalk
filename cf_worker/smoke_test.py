@@ -209,10 +209,10 @@ def post(
         return error.code, error.read().decode()
 
 
-def get(base_url: str, path: str) -> tuple[int, str]:
+def get(base_url: str, path: str, headers: dict | None = None) -> tuple[int, str]:
     try:
         req = urllib.request.Request(
-            base_url + path, headers={"user-agent": "twilio-smoke-test/1.0"}
+            base_url + path, headers={"user-agent": "twilio-smoke-test/1.0", **(headers or {})}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             return response.status, response.read().decode()
@@ -479,6 +479,33 @@ def run_tests(
     status, _ = get(base_url, "/admin")
     require(status == 401, f"admin did not require authentication: {status}")
 
+    # Operator diagnostics are independent of pairing and require operator auth
+    # for the page, call discovery, and every incremental read.
+    operator_headers = {"authorization": "Basic " + base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()}
+    for path in ("/admin/timing", "/admin/api/timing/calls", "/admin/api/timing?call_sid=CA_TEST2"):
+        require(get(base_url, path)[0] == 401, f"operator route is public: {path}")
+        require(get(base_url, path, {"authorization": "Bearer paired-browser-credential"})[0] == 401,
+                f"operator route accepts pairing bearer: {path}")
+    status, body = get(base_url, "/admin/timing", operator_headers)
+    require(status == 200 and "sequence" in body.lower(), "operator timing page unavailable")
+    status, body = get(base_url, "/admin/api/timing/calls", operator_headers)
+    listed = json.loads(body)
+    require(status == 200 and listed["calls"] and all("*" in call["caller"] for call in listed["calls"]),
+            "operator call discovery missing or caller labels unmasked")
+    require(all("phone_number" not in call for call in listed["calls"]), "operator discovery exposed unmasked phone field")
+    status, body = get(base_url, "/admin/api/timing?call_sid=CA_TEST2&after=0", operator_headers)
+    page = json.loads(body)
+    require(status == 200 and page["events"] and all(isinstance(row["detail"], dict) for row in page["events"]),
+            "incremental timing API did not return parsed event details")
+    require(page["cursor"] == page["events"][-1]["id"] and not page["has_more"], "bad timing cursor")
+    status, body = get(base_url, f"/admin/api/timing?call_sid=CA_TEST2&after={page['cursor']}", operator_headers)
+    require(status == 200 and json.loads(body)["events"] == [], "timing cursor repeated already-seen rows")
+    for suffix, expected in (("call_sid=CA_TEST2&after=-1", 400), ("call_sid=CA_TEST2&after=1.5", 400),
+                             ("call_sid=CA_TEST2&after=9007199254740992", 400),
+                             ("call_sid=CA_UNKNOWN", 404), ("after=0", 400)):
+        require(get(base_url, "/admin/api/timing?" + suffix, operator_headers)[0] == expected,
+                f"invalid operator query accepted: {suffix}")
+
     status, event, safe_state = first_sse_event(base_url, "adam", LOCAL_ADMIN_PASSWORD)
     require(
         status == 200 and event == "state", f"SSE did not emit state: {status} {event}"
@@ -557,7 +584,7 @@ def run_tests(
         f"completed calls remain live: {closed_state.get('live_calls')}",
     )
 
-    print("31 checks passed" if mock_daytona else "21 checks passed")
+    print("31 core checks plus operator timing checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
     return 0
 
 

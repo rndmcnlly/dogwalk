@@ -996,7 +996,11 @@ export class VoiceSession {
     // Voice never waits on the Agent: ACP connects (or keeps connecting) in the background.
     this.ensureAcp();
     await this.state.storage.setAlarm(Date.now() + KEEPALIVE_MS);
-    await this.record("voice.live.attached", { live_session_id: incomingLiveSessionId, acp_ready: this.acpReady });
+    await this.record("voice.live.attached", { live_session_id: incomingLiveSessionId, acp_ready: this.acpReady,
+      managed_sessions: Array.from(this.sessions.values()).map((session) => ({
+        alias: session.alias, acp_session_id: session.acpSessionId, session_state: session.sessionState, turn_state: session.turnState,
+      })),
+    });
     // Diagnostics must never block a call from connecting.
     const callerId = await this.callerIdAttestation().catch(() => null);
     const sinceLastCall = await this.sinceLastCall().catch((error) => ({ unavailable: errorMessage(error) }));
@@ -2655,16 +2659,17 @@ export class VoiceSession {
   private async orchestratorModel(): Promise<unknown[]> {
     const requestId = crypto.randomUUID();
     const started = Date.now();
+    const scope = { callSid: this.callSid, liveSessionId: this.liveSessionId };
     this.timing("model.started", { request_id: requestId, context_items: this.orchestratorContext.length });
     try {
-      return await this.orchestratorModelRequest(requestId, started);
+      return await this.orchestratorModelRequest(requestId, started, scope);
     } catch (error) {
-      this.timing("model.failed", { request_id: requestId, ms: Date.now() - started });
+      this.timing("model.failed", { request_id: requestId, ms: Date.now() - started }, Date.now(), scope);
       throw error;
     }
   }
 
-  private async orchestratorModelRequest(requestId: string, started: number): Promise<unknown[]> {
+  private async orchestratorModelRequest(requestId: string, started: number, scope: { callSid: string | null; liveSessionId: string | null }): Promise<unknown[]> {
     // Any /v1/responses-compatible endpoint works here; OpenAI is the default deployment.
     const base = (this.env.ORCHESTRATOR_API_BASE ?? "https://api.openai.com/v1").replace(/\/$/, "");
     const response = await fetch(`${base}/responses`, {
@@ -2685,12 +2690,12 @@ export class VoiceSession {
       }),
       signal: AbortSignal.timeout(60_000),
     });
-    this.timing("model.headers", { request_id: requestId, status: response.status, ms: Date.now() - started });
+    this.timing("model.headers", { request_id: requestId, status: response.status, ms: Date.now() - started }, Date.now(), scope);
     if (!response.ok) throw new Error(`Orchestrator model ${response.status}: ${(await response.text()).slice(0, 200)}`);
     const body = await response.json<{ output?: unknown[]; usage?: Record<string, unknown> }>();
     this.timing("model.completed", { request_id: requestId, ms: Date.now() - started,
-      tool_call_ids: (body.output ?? []).filter((item: any) => item.type === "function_call").map((item: any) => item.call_id) });
-    await this.record("orchestrator.model", { request_id: requestId, started_ms: started, ms: Date.now() - started, usage: body.usage ?? null });
+      tool_call_ids: (body.output ?? []).filter((item: any) => item.type === "function_call").map((item: any) => item.call_id) }, Date.now(), scope);
+    await this.record("orchestrator.model", { request_id: requestId, started_ms: started, ms: Date.now() - started, usage: body.usage ?? null }, scope);
     const inputTokens = Number(body.usage?.input_tokens);
     if (Number.isFinite(inputTokens) && inputTokens > 0) {
       this.contextTokens = inputTokens;
@@ -3049,7 +3054,7 @@ export class VoiceSession {
     const session = newManagedSession(alias, acpSessionId, cwd);
     this.sessions.set(session.id, session);
     await this.persistSessions();
-    await this.record("acp.session.created", { alias, directory: relativeDirectory(cwd) });
+    await this.record("acp.session.created", { alias, acp_session_id: session.acpSessionId, directory: relativeDirectory(cwd) });
     this.queueEarcon("session_created");
     return { ok: true, session: this.publicSession(session) };
   }
@@ -3085,7 +3090,10 @@ export class VoiceSession {
       if (session.unsaid.trim()) this.feedPush("agent", session.unsaid.trim(), { who: session.alias, lane: "report" });
       this.feedPush("system", `${session.alias}'s turn ended (${session.stopReason})`, { lane: "event" });
       await this.persistSessions();
-      await this.record("acp.turn.stopped", { alias: session.alias, stop_reason: session.stopReason, thoughts: this.thoughts.get(session.id) ?? null });
+      await this.record("acp.turn.stopped", { alias: session.alias, acp_session_id: session.acpSessionId,
+        started_ms: session.turnStartedAt, ended_ms: session.turnEndedAt,
+        ms: session.turnEndedAt - (session.turnStartedAt ?? session.turnEndedAt),
+        stop_reason: session.stopReason, thoughts: this.thoughts.get(session.id) ?? null });
       // How a turn ended matters more than that it ended: each stop reason gets its own
       // earcon and opening clause.
       const ending = turnEnding(session.stopReason);
@@ -3102,14 +3110,17 @@ export class VoiceSession {
       session.failure = `Prompt Turn failed: ${errorMessage(error)}`;
       closeOpenToolCalls(session);
       await this.persistSessions();
-      await this.record("acp.turn.failed", { alias: session.alias, message: errorMessage(error), thoughts: this.thoughts.get(session.id) ?? null });
+      await this.record("acp.turn.failed", { alias: session.alias, acp_session_id: session.acpSessionId,
+        started_ms: session.turnStartedAt, ended_ms: session.turnEndedAt,
+        ms: session.turnEndedAt - (session.turnStartedAt ?? session.turnEndedAt),
+        message: errorMessage(error), thoughts: this.thoughts.get(session.id) ?? null });
       await this.noteSinceGreeting(`${session.alias}'s turn failed`);
       this.queueEarcon("turn_failed");
       const followed = this.turnEndedWhileFollowed(session);
       const agentTermination = error instanceof AgentTerminatedError ? error.termination.reason : undefined;
       await this.orchestratorEvent(`[harness event] turn_failed: ${JSON.stringify({ alias: session.alias, followed, error: errorMessage(error), agent_termination: agentTermination })}`);
     });
-    await this.record("acp.turn.started", { alias: session.alias });
+    await this.record("acp.turn.started", { alias: session.alias, acp_session_id: session.acpSessionId, started_ms: session.turnStartedAt });
     this.queueEarcon("turn_started");
     return {
       ok: true, alias: session.alias, turn_state: session.turnState, following: session.alias, stopped_following: previous,
@@ -3562,6 +3573,9 @@ export class VoiceSession {
       rpc_id: message.id, method: message.method,
       session_id: message.params?.sessionId,
       update: (message.params?.update as { sessionUpdate?: unknown } | undefined)?.sessionUpdate,
+      tool_call_id: (message.params?.update as { toolCallId?: unknown } | undefined)?.toolCallId,
+      tool_status: (message.params?.update as { status?: unknown } | undefined)?.status,
+      tool_kind: (message.params?.update as { kind?: unknown } | undefined)?.kind,
       queue_ms: Date.now() - receivedMs,
       error: Boolean(message.error),
     }, receivedMs);
@@ -4169,12 +4183,13 @@ export class VoiceSession {
     return response.json<T>();
   }
 
-  private timing(event: string, detail: Record<string, unknown> = {}, tsMs = Date.now()): void {
-    if (!this.callSid || !this.liveSessionId) return;
+  private timing(event: string, detail: Record<string, unknown> = {}, tsMs = Date.now(),
+    scope = { callSid: this.callSid, liveSessionId: this.liveSessionId }): void {
+    if (!scope.callSid || !scope.liveSessionId) return;
     this.timingRows.push({
-      callSid: this.callSid, ts: Math.floor(tsMs / 1000),
+      callSid: scope.callSid, ts: Math.floor(tsMs / 1000),
       detail: JSON.stringify({ ...detail, event, ts_ms: tsMs, clock_id: this.timingClockId,
-        seq: ++this.timingSequence, live_session_id: this.liveSessionId }),
+        seq: ++this.timingSequence, live_session_id: scope.liveSessionId }),
     });
     if (this.timingRows.length >= 50) this.state.waitUntil(this.flushTiming());
     else if (!this.timingTimer) this.timingTimer = setTimeout(() => {
@@ -4198,23 +4213,24 @@ export class VoiceSession {
     }
   }
 
-  private async record(event: string, detail: Record<string, unknown>): Promise<void> {
+  private async record(event: string, detail: Record<string, unknown>,
+    scope = { callSid: this.callSid, liveSessionId: this.liveSessionId }): Promise<void> {
     // Most changes a paired browser shows (call, Agent Connection, permissions) are recorded.
     this.schedulePairedStatus();
-    if (!this.callSid || !this.phone) return;
+    if (!scope.callSid || !this.phone) return;
     const tsMs = Date.now();
     const now = Math.floor(tsMs / 1000);
-    detail = { ...detail, ts_ms: tsMs, live_session_id: this.liveSessionId };
+    detail = { ...detail, ts_ms: tsMs, live_session_id: scope.liveSessionId };
     try {
       await this.env.DB.batch([
         this.env.DB.prepare(
           `INSERT INTO call_activity (call_sid, ts, source, direction, event, detail)
            VALUES (?, ?, ?, ?, ?, ?)`,
         ).bind(
-          this.callSid, now, event.startsWith("acp.") ? "acp" : event.startsWith("menu.") ? "menu" : "voice",
+          scope.callSid, now, event.startsWith("acp.") ? "acp" : event.startsWith("menu.") ? "menu" : "voice",
           "internal", event, JSON.stringify(detail),
         ),
-        this.env.DB.prepare("UPDATE voice_calls SET last_activity_at = ? WHERE call_sid = ?").bind(now, this.callSid),
+        this.env.DB.prepare("UPDATE voice_calls SET last_activity_at = ? WHERE call_sid = ?").bind(now, scope.callSid),
       ]);
     } catch (error) {
       console.error("voice session audit failed", error);

@@ -644,6 +644,16 @@ def call_activity(call_sid: str) -> list[str]:
     return [row["event"] for row in call_activity_rows(call_sid)]
 
 
+def operator_timing_page(call_sid: str, after: int = 0) -> dict:
+    credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:8787/admin/api/timing?call_sid={call_sid}&after={after}",
+        headers={"authorization": f"Basic {credentials}"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)
+
+
 def conversations() -> list[dict]:
     credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
     request = urllib.request.Request(
@@ -951,6 +961,8 @@ async def run_protocol(identity: str) -> None:
         queued = next(row for row in timed if row["event"] == "handoff.queued" and row["delegation_id"] == "del-2")
         started = next(row for row in timed if row["event"] == "handoff.started" and row["delegation_id"] == "del-2")
         assert queued["ts_ms"] - started["ts_ms"] >= 300
+        tools = [row for row in timed if row["event"] == "acp.received" and row.get("tool_call_id")]
+        assert tools and any(row.get("tool_status") == "completed" for row in tools), tools
 
         # Handoff 3: leash earlier work, retag it, let it go home, and list what remains.
         await mocks.send_live(transcript("input", "Pick up that parser work from yesterday ", 7000, 8000))
@@ -1432,6 +1444,23 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(dtmf("2"))
         await wait_for(lambda: any(path == "/live/sessions/live-test-3/hangup" for path, _ in DaytonaMock.openai_requests), 10)
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
+        # Drain the operator API by insertion cursor, independently of event-time
+        # sorting and without pairing to either caller's browser.
+        pages, observed, cursor = 0, [], 0
+        while True:
+            page = await asyncio.to_thread(operator_timing_page, "CA_VOICE_TEST", cursor)
+            pages += 1
+            assert len(page["events"]) <= 500
+            observed.extend(page["events"])
+            assert page["cursor"] >= cursor
+            cursor = page["cursor"]
+            if not page["has_more"]:
+                break
+            assert pages < 30, "operator timing pagination did not terminate"
+        assert observed and len({row["id"] for row in observed}) == len(observed)
+        assert [row["id"] for row in observed] == sorted(row["id"] for row in observed)
+        turn = next(row for row in observed if row["event"] == "acp.turn.stopped")
+        assert turn["detail"]["acp_session_id"] and turn["detail"]["ms"] >= 0
         for expected in ("menu.opened", "menu.closed", "menu.restart.requested", "menu.recovery", "voice.keypad.stop", "voice.keypad.status",
                          "voice.earcons", "voice.theme", "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted", "pairing.page_stale"):
             assert expected in events, (expected, events)

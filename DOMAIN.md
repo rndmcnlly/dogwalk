@@ -435,6 +435,16 @@ Attention Request), with Voice Calls, Sandbox Assignments, Access
 Control records, and the audit tail as sibling roots. Bounded context is a label
 on each node, not the organizing structure.
 
+The operator may also inspect a live sequence diagram: a chronological projection
+of observed Voice Frontend, Session Orchestrator, session-management, and ACP
+messages and spans, including millisecond server timings where recorded. It is
+independent of the Paired Browser and requires operator authentication on every
+request, so observing a Voice Call does not require pairing with its User. A lane
+or arrow represents observed identity or a correlated message, never an invented
+Agent or nested session. Missing instrumentation remains explicitly unknown.
+Provider media offsets, server observation time, and audible telephone delivery
+are distinct clocks and must not be presented as interchangeable measurements.
+
 Only the operator capability resolves the tree. What a viewer may see is decided
 by capability, not by client-side hiding.
 
