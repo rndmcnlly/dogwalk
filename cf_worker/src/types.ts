@@ -3,6 +3,7 @@ export interface Env {
   VOICE_SESSIONS: DurableObjectNamespace;
   TERMINAL_RELAYS: DurableObjectNamespace;
   TWILIO_AUTH_TOKEN: string;
+  TWILIO_API_BASE?: string;
   DAYTONA_API_KEY: string;
   DOGWALK_IDENTITY_SECRET: string;
   OPENAI_API_KEY: string;

@@ -35,6 +35,20 @@ class TimingTests(unittest.TestCase):
         self.assertEqual(event_ms(old), 2000)
         self.assertIn("[seconds only]", timing_lines({"started_at": 1, "activity": [old]})[-1])
 
+    def test_provider_backfill_uses_occurrence_with_explicit_precision(self):
+        external = row("provider.twilio.call.created", 3000, provider="twilio", occurred_at_ms=500,
+                       received_at_ms=3000, timestamp_precision_ms=1000)
+        call = {"started_at": 1, "activity": [row("call.entered", 1000), external]}
+        lines = timing_lines(call)
+        self.assertEqual(event_ms(external), 500)
+        self.assertIn("provider.twilio.call.created", lines[2])
+        self.assertIn("[provider seconds]", lines[2])
+        self.assertIn("-", lines[2])
+
+    def test_unknown_provider_event_time_uses_receipt(self):
+        external = row("provider.twilio.callback.completed", 3000, provider="twilio", occurred_at_ms=None)
+        self.assertEqual(event_ms(external), 3000)
+
 
 if __name__ == "__main__":
     unittest.main()

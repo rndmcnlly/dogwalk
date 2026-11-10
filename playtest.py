@@ -136,15 +136,17 @@ def detail(row: dict) -> dict:
 
 
 def event_ms(row: dict) -> float:
-    """New records carry server Unix milliseconds; old records have seconds only."""
-    return detail(row).get("ts_ms", row["ts"] * 1000)
+    """Place late provider evidence by occurrence time, retaining receipt separately."""
+    data = detail(row)
+    occurred = data.get("occurred_at_ms")
+    return occurred if isinstance(occurred, (int, float)) else data.get("ts_ms", row["ts"] * 1000)
 
 
 def timing_lines(call: dict) -> list[str]:
     activity = call.get("activity", [])
     rows = sorted(enumerate(activity), key=lambda pair: (event_ms(pair[1]), pair[0]))
     precise = sum("ts_ms" in detail(row) for row in activity)
-    out = [f"server receipt/send times, NOT telephone playout; {precise}/{len(activity)} records have ms timestamps",
+    out = [f"Worker receipt/send and provider occurrence times, NOT telephone playout; {precise}/{len(activity)} records have ms-unit timestamps",
            "provider start_ms/end_ms/offset_ms are session-relative media offsets, not Unix time"]
     for _, row in rows:
         data = dict(detail(row))
@@ -152,6 +154,8 @@ def timing_lines(call: dict) -> list[str]:
         label = data.pop("event", row["event"]) if row["event"] == "voice.timing" else row["event"]
         data.pop("ts_ms", None)
         precision = "" if "ts_ms" in detail(row) else " [seconds only]"
+        if data.get("provider"):
+            precision = " [provider seconds]" if data.get("timestamp_precision_ms") == 1000 else " [event time unknown; receipt]"
         out.append(f"+{stamp - call['started_at'] * 1000:010.0f}ms {label}{precision} "
                    + json.dumps(data, ensure_ascii=False, separators=(",", ":")))
     return out

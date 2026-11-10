@@ -445,6 +445,16 @@ Agent or nested session. Missing instrumentation remains explicitly unknown.
 Provider media offsets, server observation time, and audible telephone delivery
 are distinct clocks and must not be presented as interchangeable measurements.
 
+External observations preserve both the originating provider's occurrence time
+(when known) and Dogwalk's receipt time, with clock identity, timestamp precision,
+and source provenance. Late observations may be placed before earlier-received
+events on the diagnostic timeline, including before Dogwalk first received the
+Voice Call. Their call-leg parent relationships and sequence identifiers are
+evidence, not permission to invent unobserved message exchanges. A reporting
+interval across clocks includes clock uncertainty and is not automatically a
+network-latency measurement. Historical enrichment is diagnostic only: it cannot
+revive a completed Voice Call, replay actions, or change Managed Sessions.
+
 Only the operator capability resolves the tree. What a viewer may see is decided
 by capability, not by client-side hiding.
 

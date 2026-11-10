@@ -448,6 +448,43 @@ reference rather than copied into every activity row.
 
 ### Latency traces
 
+#### Provider event time and delayed evidence
+
+The operator diagram also accepts Twilio observations, placed by provider
+occurrence time when available, even before the Worker's first observation.
+Receipt time remains separately visible. Timestamps expressed in milliseconds
+are not necessarily millisecond-accurate: Twilio callback RFC 2822 timestamps
+and standard Call resource dates have one-second precision. Cross-clock reporting
+age includes clock skew and is not a measured one-way network delay.
+
+The outgoing SIP leg subscribes to `initiated ringing answered completed` on
+`/voice/provider-status`. This endpoint verifies the Twilio signature and uses
+`ParentCallSid` to correlate with an existing incoming PSTN call. It is diagnostic
+only: no `From` number from a SIP child is used as caller identity, and neither
+late progress nor historical enrichment can reopen a completed call. The normal
+incoming-number `/voice/status` callback also preserves provider timing evidence.
+Nonterminal callbacks there no longer modify operational call state.
+
+Signed call observations schedule standard Twilio Call resource metadata reads
+off the voice request's critical path. Terminal observations schedule delayed
+Call Events enrichment after sixteen minutes; a once-per-minute Worker cron
+processes durable jobs even when the operator page is closed. Retrieval uses the
+Account SID from the authenticated Twilio form and the existing Worker
+`TWILIO_AUTH_TOKEN`. `TWILIO_API_BASE` is a local-test override, not a URL accepted
+from a caller. No paid Voice Insights feature is enabled.
+
+Provider observations retain only allowlisted metadata: identifiers, explicit
+parent-leg relationships, timestamps/provenance/precision, status, request path
+without its query string, response status, and request duration. They never
+retain raw forms, phone-number parameters, TwiML/response bodies, or signed SIP
+URLs. Retries deduplicate on a durable fingerprint. Provider logs enrich Call
+Activity only, never the lifecycle controller or the Session Orchestrator.
+
+Apply the idempotent `provider_timing.sql` schema addition remotely before deploying
+this version; fresh local databases include it in `schema.sql`. Existing historical calls with
+no authenticated Account SID observation are not guessed into an account. Newly
+observed calls are enriched automatically, including their earlier provider times.
+
 The operator-only live sequence diagram is at `https://dogwalk.tools/admin/timing`,
 linked from the Diagnostics tree. It is separate from `/pair`: it can discover
 recent calls for every caller without a pairing ritual or access to that caller's

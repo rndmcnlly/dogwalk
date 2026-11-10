@@ -584,8 +584,56 @@ def run_tests(
         f"completed calls remain live: {closed_state.get('live_calls')}",
     )
 
-    print("31 core checks plus operator timing checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
+    if mock_daytona:
+        provider_route_checks(base_url, token, operator_headers)
+    print("31 core checks plus operator/provider timing checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
     return 0
+
+
+def provider_route_checks(base_url: str, token: str, headers: dict) -> None:
+    """Signed child callbacks enrich an ended root without touching call control."""
+    root, child, account = "CA" + "a" * 32, "CA" + "b" * 32, "AC" + "c" * 32
+    wrangler = project_wrangler()
+    subprocess.run([wrangler, "d1", "execute", "dogwalk", "--local", "--command",
+        f"INSERT OR REPLACE INTO voice_calls (call_sid,phone_number,status,started_at,last_activity_at,ended_at,duration_seconds) "
+        f"VALUES ('{root}','{TEST_PHONE}','completed',100,200,200,100)"],
+        cwd=WORKER_DIR, check=True, stdout=subprocess.DEVNULL)
+    date = "Tue, 10 Nov 2026 17:00:00 +0000"
+    requested = []
+
+    def resource(path):
+        requested.append(path)
+        if path == f"/twilio/Accounts/{account}/Calls/{child}.json":
+            body = {"sid": child, "account_sid": account, "parent_call_sid": root, "status": "ringing", "date_created": date,
+                    "from": "do-not-retain-phone", "to": "sip:private?cap=do-not-retain-capability"}
+            return 200, json.dumps(body).encode(), "application/json"
+        return None
+
+    DaytonaMock.get_hooks.append(resource)
+    form = {"AccountSid": account, "CallSid": child, "ParentCallSid": root, "CallStatus": "ringing",
+            "Timestamp": date, "SequenceNumber": "1", "To": "do-not-retain-phone"}
+    require(post(base_url, "/voice/provider-status", form, "bogus")[0] == 403, "provider callback accepted a bad signature")
+    require(post(base_url, "/voice/provider-status", form, token)[0] == 204, "signed SIP callback rejected without From")
+    deadline = time.time() + 10
+    while True:
+        _, body = get(base_url, f"/admin/api/timing?call_sid={root}&after=0", headers)
+        page = json.loads(body)
+        if any(row["event"] == "provider.twilio.call.created" for row in page["events"]):
+            break
+        require(time.time() < deadline, f"provider metadata did not arrive off-path; local requests: {requested}")
+        time.sleep(0.05)
+    require(page["call"]["status"] == "completed" and page["call"]["ended_at"] == 200, "child callback revived ended root")
+    callback = next(row["detail"] for row in page["events"] if row["event"] == "provider.twilio.callback.ringing")
+    require(callback["parent_call_sid"] == root and callback["leg"] == "sip" and callback["sequence_number"] == 1,
+            "provider callback lost explicit relationship")
+    require(callback["timestamp_precision_ms"] == 1000 and callback["occurred_at_ms"] < callback["received_at_ms"],
+            "provider event and receipt clocks conflated")
+    require("do-not-retain" not in json.dumps(page), "provider metadata persisted sensitive fields")
+    require(post(base_url, "/voice/provider-status", form, token)[0] == 204, "provider retry failed")
+    time.sleep(0.2)
+    _, body = get(base_url, f"/admin/api/timing?call_sid={root}&after=0", headers)
+    require(sum(row["event"] == "provider.twilio.callback.ringing" for row in json.loads(body)["events"]) == 1,
+            "provider callback retry was not deduplicated")
 
 
 def project_wrangler() -> str | None:
@@ -595,6 +643,7 @@ def project_wrangler() -> str | None:
 
 def prepare_local_fixture(wrangler: str) -> None:
     sql = f"""
+DELETE FROM provider_call_jobs WHERE root_call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
 DELETE FROM call_activity WHERE call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
 DELETE FROM call_handoffs WHERE phone_number LIKE '{TEST_NUMBERS}';
 DELETE FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}';
@@ -670,6 +719,8 @@ def main() -> int:
             "127.0.0.1",
             "--var",
             f"TWILIO_AUTH_TOKEN:{LOCAL_TOKEN}",
+            "--var",
+            f"TWILIO_API_BASE:http://127.0.0.1:{DAYTONA_MOCK_PORT}/twilio",
             "--var",
             "DAYTONA_API_KEY:local-daytona-token",
             "--var",

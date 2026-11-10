@@ -15,7 +15,7 @@ export const OPERATOR_TIMING_HTML = String.raw`<!doctype html>
 <div class="summary" role="status" aria-live="polite"><strong id="status">Connecting</strong><span id="lag">No sample yet</span><span id="counts">0 events</span><span id="callMeta"></span></div>
 <div class="workspace"><section class="chartbox" aria-label="Observed sequence diagram"><div id="chartScroll"><div id="heads" class="lanehead"></div><svg id="plot" role="img" aria-label="Time flows down; observed event sequence"></svg><div id="empty">No call selected. No synthetic data is shown.</div></div><div class="paging"><button id="older">Older rows</button><span id="window">0 rows</span><button id="newer">Newer rows</button></div></section>
 <details id="inspectorPanel"><summary>Event inspector (expand / collapse)</summary><aside><h2>Event inspector</h2><div id="selection" class="mut">Select a mark, span, or message. Keyboard: Tab, then Enter.</div><pre id="inspector">Verbose details are hidden until raw metadata is enabled.</pre><div class="inspect-actions"><button id="copy" disabled>Copy selected JSON</button><button id="download" disabled>Download loaded JSON</button></div><p class="note">Memory only. No credentials or events are saved in browser storage. Exports stay local and may contain sensitive data.</p><div id="related" class="note"></div></aside></details></div>
-<section class="legend"><p><b>Evidence:</b> ● observed event; → observed control-message direction; vertical colored bar = matched start/end identifiers; dashed vertical tail = start observed, end not observed; dotted connector = same delegation identifier, not a causal claim. Unmatched endpoints remain individual events.</p><p>Time flows down. Axis: milliseconds since call start (call-start anchor has second precision), with Δ between visible observations. Minimum row spacing separates simultaneous events; this is not a proportional waveform. Long gaps are explicitly labeled when compressed. Old second-only records are marked “±1s precision”; cross-clock differences are wall-clock observations, not latency measurements.</p><p>Caller lane is intentionally empty unless caller-side evidence exists. Transcript receipt and provider media offsets are not phone playout timestamps. Media start_ms/end_ms/offset_ms remain metadata, never Unix time. Orchestrator tools are not ACP Agent tools. ACP roundtrips require an exact scoped RPC identifier match.</p><p id="nested">nested ACP sessions: not observed</p></section>
+<section class="legend"><p><b>Evidence:</b> ● observed event; → observed control-message direction; vertical colored bar = matched start/end identifiers; dashed vertical tail = start observed, end not observed; dotted connector = same delegation identifier, not a causal claim. Unmatched endpoints remain individual events.</p><p>Time flows down. Axis: milliseconds since Worker call start (fixed anchor with second precision), with Δ between visible observations. Negative positions precede that anchor. Minimum row spacing separates simultaneous events; this is not a proportional waveform. Long gaps are explicitly labeled when compressed. Old second-only records are marked “±1s precision”; cross-clock differences are wall-clock observations, not latency measurements. Twilio uses occurrence time when known, otherwise receipt time. Numeric millisecond units do not imply millisecond accuracy. Received-minus-occurred is reporting lag plus clock skew, not network latency.</p><p>Caller lane is intentionally empty unless caller-side evidence exists. Transcript receipt and provider media offsets are not phone playout timestamps. Media start_ms/end_ms/offset_ms remain metadata, never Unix time. Orchestrator tools are not ACP Agent tools. ACP roundtrips require an exact scoped RPC identifier match. Provider root/parent leg metadata and same-leg grouping are relationships, not exact send/receive matches or causal arrows.</p><p id="nested">nested ACP sessions: not observed</p></section>
 </main><script>
 (() => {
 'use strict';
@@ -33,11 +33,22 @@ const key = (e, kind, id) => JSON.stringify([...scope(e),kind,typeof id,id]);
 const ident = v => v !== undefined && v !== null && v !== '';
 const live = c => c && !c.ended_at && !['completed','failed','busy','no-answer','canceled','cancelled'].includes(c.status);
 const stamp = e => typeof e.detail?.ts_ms === 'number' && Number.isFinite(e.detail.ts_ms) ? e.detail.ts_ms : Number(e.ts) * 1000;
+const finite = v => typeof v === 'number' && Number.isFinite(v);
+const providerEvent = e => e.name.startsWith('provider.twilio.');
+const precisionLabel = e => providerEvent(e) ? e.d.timestamp_precision_ms === 1000 ? '1s precision (1000ms units; not millisecond accuracy)' : 'provider precision unknown' : e.precise ? 'millisecond timestamp units' : 'seconds only (±1s precision)';
+const deliveryAge = e => providerEvent(e) && finite(e.d.occurred_at_ms) ? e.received-e.d.occurred_at_ms : null;
+function deliveryLabel(e) {
+  const age=deliveryAge(e);
+  return age === null ? 'occurrence unknown; positioned at receipt' : 'received ' + (age>=0?'+':'') + (age/1000).toFixed(1) + 's later' + (age<0?' · uncertainty: negative clock offset':'') + ' (clock-skew-inclusive)';
+}
 function normalize(e) {
   const d = e.detail && typeof e.detail === 'object' && !Array.isArray(e.detail) ? e.detail : {};
-  return {...e, d, t:stamp(e), precise:typeof d.ts_ms === 'number' && Number.isFinite(d.ts_ms), name:e.event === 'voice.timing' ? String(d.event || 'voice.timing') : String(e.event)};
+  const name=e.event === 'voice.timing' ? String(d.event || 'voice.timing') : String(e.event), external=name.startsWith('provider.twilio.');
+  const received=external && finite(d.received_at_ms) ? d.received_at_ms : stamp(e);
+  return {...e, d, received, t:external && finite(d.occurred_at_ms) ? d.occurred_at_ms : received, precise:external ? false : finite(d.ts_ms), name};
 }
 function activityKind(e) {
+  if (providerEvent(e)) return '';
   const type=String(e.d.type || e.name);
   if (/audio.*(?:delta|packet)|session\.usage\.updated/i.test(type)) return 'hidden';
   if (/transcript.*delta/i.test(type)) return /input/i.test(type)?'input transcript':'output transcript';
@@ -48,6 +59,7 @@ function correlationEndpoint(e) { return ['delegation_id','request_id','tool_cal
 function agentSession(e) { return e.d.acp_session_id || e.d.session_id || ''; }
 function agentTool(e) { return e.name === 'acp.received' && ident(e.d.tool_call_id) && ident(agentSession(e)); }
 function laneOf(e) {
+  if (providerEvent(e)) return 'twilio:' + (e.d.leg === 'sip' ? 'sip' : 'pstn');
   if (agentTool(e)) return 'tools:' + agentSession(e);
   if (e.name.startsWith('model.') || e.name.startsWith('tool.') || e.name.startsWith('orchestrator.') || e.name.startsWith('handoff.')) return 'orchestrator';
   if (e.name.startsWith('acp.')) return agentSession(e) ? 'agent:' + agentSession(e) : 'transport';
@@ -59,7 +71,7 @@ function status() {
   $('status').textContent = authBlocked ? 'Authentication required: reopen /admin, then reconnect' : document.hidden ? 'Hidden: polling stopped' : $('pause').checked ? 'Paused: fetching stopped' : message;
   $('status').dataset.error = String(isError || authBlocked);
   const age = sampled ? Math.max(0, Date.now() - sampled) : 0;
-  let latest = 0; for (const e of events.values()) if (Number.isFinite(e.t)) latest = Math.max(latest,e.t);
+  let latest = 0; for (const e of events.values()) if (Number.isFinite(e.received)) latest = Math.max(latest,e.received);
    $('lag').textContent = sampled ? 'sample age ' + (age/1000).toFixed(1) + 's · last event age ' + (latest ? Math.max(0,(serverAtSample + age - latest)/1000).toFixed(1) + 's' : 'unknown') : 'No sample yet';
   $('callMeta').textContent = call ? call.status + ' · ' + (call.caller || 'masked caller unavailable') + ' · ' + (call.duration_seconds == null ? 'duration pending' : call.duration_seconds + 's') : '';
 }
@@ -68,15 +80,21 @@ function inspect(e) {
   if (e) $('inspectorPanel').open=true;
   $('selection').textContent = e ? '#' + e.id + ' · ' + e.name + ' · ' + new Date(e.t).toISOString() : 'Select an event';
   const raw = $('raw').checked;
-  $('inspector').textContent = e ? JSON.stringify(raw ? original(e) : {id:e.id,ts:e.ts,source:e.source,event:e.event,precision:e.precise ? 'milliseconds' : 'seconds only',note:'Enable raw metadata to inspect details.'},null,2) : 'No event selected.';
+  const provenance = e ? {source:e.source,clock_id:e.d.clock_id || 'Worker observation clock (unspecified)',occurred_at_ms:providerEvent(e) ? e.d.occurred_at_ms ?? null : e.t,received_at_ms:e.received,positioned_by:providerEvent(e) && !finite(e.d.occurred_at_ms) ? 'receipt time (occurrence unknown)' : 'event time',precision:precisionLabel(e),event_time_source:e.d.event_time_source || 'Worker observation timestamp',...(providerEvent(e) ? {provider_event_key:e.d.provider_event_key,provider_event_key_meaning:'dedupe fingerprint, not a claimed native event ID',provider_call_sid:e.d.provider_call_sid,root_call_sid:e.d.root_call_sid,parent_call_sid:e.d.parent_call_sid ?? null,leg:e.d.leg,observed_delivery_age_ms:deliveryAge(e),observed_delivery_age:deliveryLabel(e),delivery_age_meaning:'Reporting lag plus clock skew, not network latency; provider timestamp precision also limits this difference.'} : {})} : null;
+  $('inspector').textContent = e ? JSON.stringify(raw ? {...original(e),provenance} : {id:e.id,event:e.event,...provenance,note:'Enable raw metadata to inspect details.'},null,2) : 'No event selected.';
   $('copy').disabled = !e || !raw;
   $('download').disabled = !events.size || !raw;
   if (!e) { $('related').textContent = ''; return; }
   const ids = ['delegation_id','request_id','tool_call_id','rpc_id'];
+  if (providerEvent(e)) {
+    const related=Array.from(events.values()).filter(other=>other.id!==e.id && providerEvent(other) && ident(e.d.provider_call_sid) && e.d.provider_call_sid===other.d.provider_call_sid);
+    $('related').textContent='Related same leg (exact provider_call_sid, not causality): ' + (related.length?related.slice(0,30).map(x=>'#' + x.id).join(', '):'none observed') + (e.d.parent_call_sid ? '. Observed parent-leg metadata: ' + e.d.parent_call_sid + '; no exact message match inferred.' : '');
+    return;
+  }
   const related = Array.from(events.values()).filter(other => other.id !== e.id && ids.some(k => ident(e.d[k]) && key(e,k,e.d[k]) === key(other,k,other.d[k]) && (k !== 'tool_call_id' || (agentTool(e) === agentTool(other) && (!agentTool(e) || agentSession(e) === agentSession(other))))));
   $('related').textContent = 'Same scoped identifiers: ' + (related.length ? related.slice(0,30).map(x => '#' + x.id).join(', ') + (related.length > 30 ? '…' : '') : 'none observed');
 }
-function original(e) { const {d,t,precise,name,collapsed,chars,activity,lastActivityMs,...rest} = e; return rest; }
+function original(e) { const {d,t,received,precise,name,collapsed,chars,activity,lastActivityMs,...rest} = e; return rest; }
 function compact(all) {
   if ($('raw').checked) return all;
   const rows = [], buckets = new Map();
@@ -112,6 +130,7 @@ function draw() {
   for (const [id,s] of retained) addLane('agent:' + id,sessionTitle(id),id + ' · retained at attach · ' + (s.turn_state||s.session_state||'state unknown'));
   let nested = 0;
   for (const e of all) {
+    if (providerEvent(e)) addLane(laneOf(e),'Twilio/' + (e.d.leg === 'sip' ? 'SIP' : 'PSTN'),'Provider clock · occurrence or receipt fallback');
     const session = agentSession(e);
     if (session) addLane('agent:' + session,sessionTitle(session),String(session));
     if (agentTool(e)) addLane(laneOf(e),'Agent tools · ' + (aliases.get(String(session)) || String(session).slice(0,18)),String(session));
@@ -148,6 +167,7 @@ function draw() {
   // It never pairs by adjacency, alias, event order, or provider media offsets.
   const pending = new Map(), rpcs = new Map(), delegations = new Map(), endpointMs = new Map();
   for (const e of all) {
+    if (providerEvent(e)) continue; // Provider metadata never supplies Worker span or message endpoints.
     const d = e.d; let kind = '', id, begin = false, finish = false;
     if (e.name.startsWith('model.')) { kind='model'; id=d.request_id; begin=e.name==='model.started'; finish=['model.completed','model.failed'].includes(e.name); }
     if (e.name.startsWith('tool.')) { kind='orchestrator-tool'; id=d.tool_call_id; begin=e.name==='tool.started'; finish=['tool.completed','tool.failed'].includes(e.name); }
@@ -203,7 +223,7 @@ function draw() {
     const g=svg('g');
     g.append(svg('rect',{x:0,y:yy-15,width,height:31,fill:selected?.id===e.id?'#b9f36b15':'transparent',class:'hit'}));
     const delta=previous===null?'': ' Δ' + (e.t-previous).toFixed(0);
-    g.append(svg('text',{x:8,y:yy-3,class:'axis'},(Number.isFinite(origin)?(e.t-origin).toFixed(0):'?') + 'ms'),svg('text',{x:8,y:yy+10,class:'axis'},delta + (!e.precise?' ±1s precision':'')));
+    g.append(svg('text',{x:8,y:yy-3,class:'axis'},(Number.isFinite(origin)?(e.t-origin).toFixed(0):'?') + 'ms'),svg('text',{x:8,y:yy+10,class:'axis'},delta + (providerEvent(e)?e.d.timestamp_precision_ms===1000?' 1s precision':' precision ?':!e.precise?' ±1s precision':'')));
     g.append(svg('circle',{cx:xx,cy:yy,r:3.5,fill:e.name.includes('failed')?'#ff796d':'#f3b85c'}));
     const friendly={'model.started':'Model request started','model.completed':'Model completed','model.failed':'Model failed','model.headers':'Model headers received','tool.started':'Tool started','tool.completed':'Tool completed','acp.turn.started':'Prompt Turn started','acp.turn.stopped':'Prompt Turn stopped','acp.turn.failed':'Prompt Turn failed'};
     let label=(friendly[e.name]||e.name) + (d.type?' · ' + d.type:'') + (d.name?' · ' + d.name:'') + (d.update?' · ' + String(d.update):'') + (d.tool_status?' · ' + d.tool_status:'');
@@ -211,7 +231,7 @@ function draw() {
     if (e.collapsed) label=e.activity + ' · ' + e.collapsed + ' chunks' + (e.chars?' / ' + e.chars + ' chars':'') + ' (5s bucket)';
     const matched=endpointMs.get(e.id);
     const duration=Number.isFinite(d.ms)?d.ms + 'ms':matched?'Δ ' + matched.ms + 'ms' + (matched.precise?'':' (seconds only)'):'';
-    const metrics=[duration,Number(d.queue_ms)>0?'queue ' + d.queue_ms + 'ms':''].filter(Boolean).join(' · ');
+    const metrics=providerEvent(e)?deliveryLabel(e):[duration,Number(d.queue_ms)>0?'queue ' + d.queue_ms + 'ms':''].filter(Boolean).join(' · ');
     // Keep labels in their lane; the inspector retains the complete observation.
     g.append(svg('text',{x:xx-94,y:yy-7},label.length>31?label.slice(0,30)+'…':label));
     if (metrics) g.append(svg('text',{x:xx-94,y:yy+13,class:'metric'},metrics));

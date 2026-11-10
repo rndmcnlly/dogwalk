@@ -53,7 +53,7 @@ def main():
         add("voice.timing", 1600 + index * 200, event="live.received", type="session.output_audio.delta",
             chars=12800, start_ms=index * 200, end_ms=(index + 1) * 200, clock_id="clock")
     add("acp.turn.stopped", 106000, acp_session_id="ses_test", alias="Example", ms=104000, ended_ms=T0 * 1000 + 105000)
-    requests = {"calls": 0, "events": 0, "unauthorized": False}
+    requests = {"calls": 0, "events": 0, "unauthorized": False, "after": [], "server_ms": T0 * 1000 + 106000}
     errors = []
 
     with sync_playwright() as playwright:
@@ -74,12 +74,13 @@ def main():
                     request.fulfill(status=401, body="unauthorized")
                     return
                 params = parse_qs(url.query)
+                requests["after"].append(int(params["after"][0]))
                 selected = other if params["call_sid"][0] == other["call_sid"] else call
                 available = [] if selected == other else [row for row in rows if row["id"] > int(params["after"][0])]
                 batch = available[:500]
                 request.fulfill(json={"call": selected, "events": batch,
                     "cursor": batch[-1]["id"] if batch else int(params["after"][0]),
-                    "has_more": len(available) > 500, "server_ms": T0 * 1000 + 106000})
+                    "has_more": len(available) > 500, "server_ms": requests["server_ms"]})
             else:
                 request.fulfill(status=404)
 
@@ -95,6 +96,71 @@ def main():
         assert page.locator("#heads img").count() == 0
         assert int(page.locator("#plot").get_attribute("height")) < 6000, "audio packets overwhelm the default view"
         assert "not observed" in page.locator("#nested").inner_text()
+        assert "Twilio/" not in page.locator("#heads").inner_text(), "unobserved provider lanes appeared"
+
+        # Backfill is delivered only after the first cursor pages have drained.
+        initial_cursor = len(rows)
+        requests["server_ms"] = T0 * 1000 + 108000
+
+        def provider(kind, occurred, leg="pstn", **metadata):
+            add("provider.twilio." + kind, 108000, provider="twilio",
+                provider_event_key=f"fingerprint-{len(rows)}", provider_call_sid="CA_PSTN" if leg == "pstn" else "CA_SIP",
+                root_call_sid="CA_PSTN", parent_call_sid=None if leg == "pstn" else "CA_PSTN",
+                leg=leg, clock_id="twilio", occurred_at_ms=None if occurred is None else T0 * 1000 + occurred,
+                received_at_ms=T0 * 1000 + 108000, timestamp_precision_ms=1000 if occurred is not None else None,
+                event_time_source="synthetic provider timestamp" if occurred is not None else "unknown", **metadata)
+            return len(rows)
+
+        early_id = provider("call.created", -5000)
+        provider("call.start_time", -4000)
+        negative_id = provider("callback.answered", 110000, "sip")
+        unknown_id = provider("webhook.exchange", None, "sip", request_path="/voice")
+        # Same identifiers in different clocks must not manufacture spans.
+        for kind, identity in (("model", {"request_id": "cross-clock"}),
+                               ("tool", {"tool_call_id": "cross-clock"}),
+                               ("acp.turn", {"acp_session_id": "ses_test"})):
+            add("voice.timing", 107000, event=kind + ".started", clock_id="clock-a", **identity)
+            add("voice.timing", 107500, event=kind + (".stopped" if kind == "acp.turn" else ".completed"),
+                clock_id="clock-b", **identity)
+        add("voice.timing", 107600, event="acp.sent", rpc_id="cross-clock", method="session/prompt", clock_id="clock-a")
+        add("voice.timing", 107700, event="acp.received", rpc_id="cross-clock", clock_id="clock-b")
+        page.wait_for_function("n => document.querySelector('#counts').textContent.startsWith(n + ' loaded')", arg=len(rows))
+        assert initial_cursor in requests["after"], "backfill did not use the retained insertion cursor"
+        assert "Twilio/PSTN" in page.locator("#heads").inner_text()
+        assert "Twilio/SIP" in page.locator("#heads").inner_text()
+        early = page.locator(f'#plot .event[aria-label^="#{early_id} "]')
+        assert "-5000ms" in early.text_content(), "backfill shifted the fixed call-start anchor"
+        assert "1s precision" in early.text_content()
+        assert "received +113.0s later" in early.text_content()
+        assert page.locator("#plot .event[aria-label^='#']").first.get_attribute("aria-label").startswith(f"#{early_id} "), "late event was not inserted before Worker events"
+        assert "last event age 0." in page.locator("#lag").inner_text(), "status uses occurrence instead of receipt time"
+        early.focus()
+        early.press("Enter")
+        provenance = json.loads(page.locator("#inspector").inner_text())
+        assert provenance["source"] == "voice" and provenance["clock_id"] == "twilio"
+        assert provenance["occurred_at_ms"] == T0 * 1000 - 5000
+        assert provenance["received_at_ms"] == T0 * 1000 + 108000
+        assert "not millisecond accuracy" in provenance["precision"]
+        assert provenance["event_time_source"] == "synthetic provider timestamp"
+        assert "not network latency" in provenance["delivery_age_meaning"]
+        assert "Related same leg" in page.locator("#related").inner_text()
+        assert "not causality" in page.locator("#related").inner_text()
+        negative = page.locator(f'#plot .event[aria-label^="#{negative_id} "]')
+        assert "negative clock offset" in negative.get_attribute("aria-label")
+        negative.focus()
+        negative.press("Enter")
+        assert "clock-skew-inclusive" in page.locator("#inspector").inner_text()
+        assert "Observed parent-leg metadata: CA_PSTN" in page.locator("#related").inner_text()
+        unknown = page.locator(f'#plot .event[aria-label^="#{unknown_id} "]')
+        unknown.focus()
+        unknown.press("Enter")
+        provenance = json.loads(page.locator("#inspector").inner_text())
+        assert provenance["occurred_at_ms"] is None
+        assert provenance["positioned_by"] == "receipt time (occurrence unknown)"
+        assert provenance["precision"] == "provider precision unknown"
+        assert page.locator("#plot .event[aria-label*='matched #']").count() == 4, "cross-clock spans were joined"
+        assert page.locator("#plot .event[aria-label='matched RPC response']").count() == 0
+        assert page.locator("#plot .event[aria-label^='Observed live']").count() == 0, "provider observations invented live arrows"
         page.locator("#raw").check()
         page.locator("#plot .event").first.focus()
         page.locator("#plot .event").first.press("Enter")
@@ -120,7 +186,7 @@ def main():
         assert requests["events"] == before, "unauthorized page keeps requesting private telemetry"
         assert not errors, errors
         browser.close()
-    print("operator timing browser checks passed (pagination, spans, noise, XSS, pause, selection, auth)")
+    print("operator timing browser checks passed (pagination, provider backfill, provenance, clock scope, spans, noise, XSS, pause, selection, auth)")
 
 
 if __name__ == "__main__":

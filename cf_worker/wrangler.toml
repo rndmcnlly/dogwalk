@@ -2,6 +2,7 @@ name = "dogwalk"
 main = "src/index.ts"
 compatibility_date = "2026-07-20"
 workers_dev = true
+
 routes = [
   { pattern = "dogwalk.tools", custom_domain = true }
 ]
@@ -71,3 +72,7 @@ new_sqlite_classes = ["TerminalRelay"]
 # Observability: enable logs in the Cloudflare dashboard / wrangler tail.
 [observability]
 enabled = true
+
+# Delayed provider logs must arrive even when no operator browser is open.
+[triggers]
+crons = ["* * * * *"]

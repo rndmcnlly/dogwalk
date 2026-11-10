@@ -9,6 +9,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { ADMIN_HTML } from "./admin";
 import { OPERATOR_TIMING_HTML } from "./operator_timing";
+import { observeTwilio, processTwilioJobs } from "./provider_timing";
 import { LANDING_HTML } from "./landing";
 import { PAIR_HTML } from "./pair_page";
 import { handleSounds } from "./sounds_page";
@@ -111,7 +112,7 @@ const Pause = (seconds: number) => `<Pause length="${seconds}"/>`;
 const Redirect = (path: string) => `<Redirect method="POST">${escapeXml(path)}</Redirect>`;
 const Hangup = () => `<Hangup/>`;
 const DialSip = (uri: string) =>
-  `<Dial action="/voice/after-live" method="POST"><Sip>${escapeXml(uri)}</Sip></Dial>`;
+  `<Dial action="/voice/after-live" method="POST"><Sip statusCallback="/voice/provider-status" statusCallbackMethod="POST" statusCallbackEvent="initiated ringing answered completed">${escapeXml(uri)}</Sip></Dial>`;
 
 const GatherSpeech = (
   promptText: string,
@@ -868,6 +869,9 @@ function voiceSessionFor(env: Env, identity: string): DurableObjectStub {
 // --- /voice routing -----------------------------------------------------
 
 export default {
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(processTwilioJobs(env));
+  },
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
@@ -902,7 +906,7 @@ export default {
       return handleOpenAiLiveWebhook(req, env);
     }
     if (url.pathname === "/voice/after-live" && req.method === "POST") {
-      return handleAfterLive(req, env);
+      return handleAfterLive(req, env, ctx);
     }
     if (url.pathname === "/voice/recovery" && req.method === "POST") {
       return handleRecovery(req, env);
@@ -920,7 +924,10 @@ export default {
       return handleMenu(req, env);
     }
     if (url.pathname === "/voice/status" && req.method === "POST") {
-      return handleCallStatus(req, env);
+      return handleCallStatus(req, env, ctx);
+    }
+    if (url.pathname === "/voice/provider-status" && req.method === "POST") {
+      return handleProviderStatus(req, env, ctx);
     }
     return new Response("not found", { status: 404 });
   },
@@ -929,6 +936,7 @@ export default {
 // --- main /voice entrypoint --------------------------------------------
 
 async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const receivedMs = Date.now();
   // Twilio signature check. We clone the body because formData() consumes it.
   const sig = await twilioSignatureValid(req, env);
   if (!sig.valid) {
@@ -942,6 +950,7 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
   }
 
   await recordCallStarted(env, from, callSid);
+  deferTwilioObservation(env, ctx, form, callSid, receivedMs);
   await audit(env, "call.entered", from, callSid, { signedUrl: sig.url });
   // Caller-ID attestation (STIR/SHAKEN) is the only evidence that From is genuine, since
   // the Twilio signature proves only that Twilio sent this request. Record it once per call
@@ -1018,13 +1027,24 @@ async function prewarmVoiceSession(env: Env, identity: string, phone: string, sa
   }
 }
 
-async function handleAfterLive(req: Request, env: Env): Promise<Response> {
+async function handleAfterLive(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const receivedMs = Date.now();
   const signature = await twilioSignatureValid(req, env);
   if (!signature.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
   const from = normalizePhone(form.get("From"));
   const callSid = String(form.get("CallSid") ?? "");
   if (!from || !callSid) return twiml(Hangup());
+  // Dial's result supplies an explicit parent/child relationship even if an
+  // asynchronous SIP progress callback was lost. No SIP URI/capability is saved.
+  if (form.get("DialCallSid")) {
+    const child = new FormData();
+    child.set("AccountSid", String(form.get("AccountSid") ?? ""));
+    child.set("CallSid", String(form.get("DialCallSid")));
+    child.set("ParentCallSid", callSid);
+    child.set("CallStatus", String(form.get("DialCallStatus") ?? "unknown"));
+    deferTwilioObservation(env, ctx, child, callSid, receivedMs);
+  }
   const handoff = await env.DB.prepare(
     "SELECT action FROM call_handoffs WHERE call_sid = ? AND phone_number = ?",
   ).bind(callSid, from).first<{ action: string }>();
@@ -1229,7 +1249,28 @@ async function recordCallStarted(env: Env, phone: string, callSid: string): Prom
   ).bind(callSid, phone, now, now).run();
 }
 
-async function handleCallStatus(req: Request, env: Env): Promise<Response> {
+// Diagnostics are a separate projection. They never dispatch harness events or
+// change call/session state, and provider network requests run off the voice path.
+function deferTwilioObservation(env: Env, ctx: ExecutionContext, form: FormData, rootCallSid: string, receivedMs: number): void {
+  ctx.waitUntil((async () => {
+    const known = await env.DB.prepare("SELECT 1 FROM voice_calls WHERE call_sid = ?").bind(rootCallSid).first();
+    if (!known) return;
+    await observeTwilio(env, form, rootCallSid, receivedMs);
+    await processTwilioJobs(env);
+  })().catch(() => console.error("provider timing observation failed")));
+}
+
+async function handleProviderStatus(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const receivedMs = Date.now();
+  if (!(await twilioSignatureValid(req, env)).valid) return new Response("forbidden", { status: 403 });
+  const form = await req.formData();
+  const rootCallSid = String(form.get("ParentCallSid") ?? form.get("CallSid") ?? "");
+  deferTwilioObservation(env, ctx, form, rootCallSid, receivedMs);
+  return new Response(null, { status: 204 });
+}
+
+async function handleCallStatus(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const receivedMs = Date.now();
   const sig = await twilioSignatureValid(req, env);
   if (!sig.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
@@ -1240,6 +1281,10 @@ async function handleCallStatus(req: Request, env: Env): Promise<Response> {
   if (!from || !callSid) return new Response("bad request", { status: 400 });
   const now = Math.floor(Date.now() / 1000);
   const terminal = ["completed", "busy", "failed", "no-answer", "canceled"].includes(status);
+  if (!terminal) {
+    deferTwilioObservation(env, ctx, form, callSid, receivedMs);
+    return new Response(null, { status: 204 });
+  }
   await env.DB.prepare(
     `INSERT INTO voice_calls
        (call_sid, phone_number, status, started_at, last_activity_at, ended_at, duration_seconds)
@@ -1248,9 +1293,11 @@ async function handleCallStatus(req: Request, env: Env): Promise<Response> {
        status = excluded.status,
        last_activity_at = excluded.last_activity_at,
        ended_at = excluded.ended_at,
-       duration_seconds = excluded.duration_seconds`,
+        duration_seconds = excluded.duration_seconds
+      WHERE voice_calls.ended_at IS NULL`,
   ).bind(callSid, from, status, now, now, terminal ? now : null, duration || null).run();
   await audit(env, `call.${status}`, from, callSid, duration ? { duration } : {});
+  deferTwilioObservation(env, ctx, form, callSid, receivedMs);
   if (terminal) {
     // The telephone call is over: make sure the VoiceSession has noticed, even if the
     // GPT-Live sideband ended without telling it.
