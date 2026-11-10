@@ -1074,7 +1074,7 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(transcript("input", "Have Juniper check the repository.", 22500, 23100))
         await mocks.send_live(delegation("del-f", 23150))
         await wait_for(lambda: "Juniper is working with Git." in beats(), 10)
-        await wait_for(lambda: "3 steps in a row failed for Juniper; its turn is still going." in beats(), 10)
+        await wait_for(lambda: "3 steps in a row failed for Juniper, the latest while looking something up on the web; its turn is still going." in beats(), 10)
         await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "f-inspect" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
         failed_at = len(beats())
         assert "git status" not in beats() and "--short" not in beats() and "(" not in beats(), beats()

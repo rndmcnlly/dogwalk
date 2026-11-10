@@ -109,7 +109,8 @@ interface Follow {
   told: string[];  // beats not yet sent as thinking
   toldAt: number;
   lastBeat: { at: number; weight: number } | null;  // for coalescing a burst
-  unspoken: { text: string; at: number; urgent: boolean } | null;  // the latest beat worth narrating
+  // The beat to narrate next: the weightiest since the last narration, the latest of equals.
+  unspoken: { text: string; at: number; weight: number; urgent: boolean } | null;
   narratedAt: number;
   narrationOpen: boolean;  // false after a narration until the caller speaks or a turn starts or ends
   earconAt: number;
@@ -735,7 +736,7 @@ Keypad: the caller can press star for a menu (restart the sandbox, recovery opti
 
 Thoughts arriving from the Session Orchestrator: thinking is background you now know; use it when relevant but do not recite it. Commentary is something you have decided to tell the caller now; say it in your own words. These are your own thoughts, not the caller speaking; never thank or address them. Never say a session finished or work is done unless the Session Orchestrator said so.
 
-Following: you follow at most one session, and thoughts beginning "Following" are what it is doing right now. Use them to answer "what's it doing?" at once, without thinking it over. They are neutral system text: restate them in the theme's words at the current register, briefly, and never speak the "Following" label, file names, or commands. A failed step is not a failed turn: when one or more steps failed and the turn is still going, say the session hit a snag and is carrying on, never that it failed, stopped, or tripped up for good; only the Session Orchestrator tells you a turn failed. When some arrive as commentary, say only the latest, in a few words, and stop; never chain several, and never repeat what you already said about the session. An intention or estimate is not an action or a limit: when a session says it will do something, say it plans to, not that it is doing it, and keep "will", "about", and "plans to" as given. You cannot see sessions you are not following; for those, think it over.
+Following: you follow at most one session, and thoughts beginning "Following" are what it is doing right now. Use them to answer "what's it doing?" at once, without thinking it over. They are neutral system text: restate them in the theme's words at the current register, briefly, and never speak the "Following" label, file names, or commands. A failed step is not a failed turn: when one or more steps failed and the turn is still going, say the session hit a snag (with what it was doing, when the thought says) and is carrying on, never that it failed, stopped, or tripped up for good; only the Session Orchestrator tells you a turn failed. When some arrive as commentary, say only the latest, in a few words, and stop; never chain several, and never repeat what you already said about the session. An intention or estimate is not an action or a limit: when a session says it will do something, say it plans to, not that it is doing it, and keep "will", "about", and "plans to" as given. You cannot see sessions you are not following; for those, think it over.
 
 Your opening line arrives as your first commentary, already written; say it once as given, without adding to it.
 
@@ -820,6 +821,9 @@ export class VoiceSession {
   private rpcId = 1;
   private pendingRpc = new Map<string | number, PendingRpc>();
   private sessions = new Map<string, ManagedSession>();
+  // agent_thought_chunk traffic per session's current turn, recorded at its end and otherwise
+  // unused until playtests show whether the production model's thoughts are worth narrating.
+  private thoughts = new Map<string, { chunks: number; chars: number; tail: string }>();
   private permissions = new Map<string | number, PendingPermission>();
   private liveAttached = false;
   private acpReady = false;
@@ -3007,6 +3011,7 @@ export class VoiceSession {
     session.turnState = "queued";
     session.assignment = prompt;
     Object.assign(session, { report: "", toolCalls: [], plan: [], unsaid: "", remark: null, failure: null, stopReason: null });
+    this.thoughts.delete(session.id);
     await this.persistSessions();
 
     session.turnState = "in_progress";
@@ -3030,7 +3035,7 @@ export class VoiceSession {
       if (session.unsaid.trim()) this.feedPush("agent", session.unsaid.trim(), { who: session.alias, lane: "report" });
       this.feedPush("system", `${session.alias}'s turn ended (${session.stopReason})`, { lane: "event" });
       await this.persistSessions();
-      await this.record("acp.turn.stopped", { alias: session.alias, stop_reason: session.stopReason });
+      await this.record("acp.turn.stopped", { alias: session.alias, stop_reason: session.stopReason, thoughts: this.thoughts.get(session.id) ?? null });
       // How a turn ended matters more than that it ended: each stop reason gets its own
       // earcon and opening clause.
       const ending = turnEnding(session.stopReason);
@@ -3047,7 +3052,7 @@ export class VoiceSession {
       session.failure = `Prompt Turn failed: ${errorMessage(error)}`;
       closeOpenToolCalls(session);
       await this.persistSessions();
-      await this.record("acp.turn.failed", { alias: session.alias, message: errorMessage(error) });
+      await this.record("acp.turn.failed", { alias: session.alias, message: errorMessage(error), thoughts: this.thoughts.get(session.id) ?? null });
       await this.noteSinceGreeting(`${session.alias}'s turn failed`);
       this.queueEarcon("turn_failed");
       const followed = this.turnEndedWhileFollowed(session);
@@ -3541,6 +3546,11 @@ export class VoiceSession {
       const text = String(update.content.text ?? "");
       session.report = (session.report + text).slice(-64_000);
       session.unsaid = (session.unsaid + text).slice(-2000);
+    } else if (kind === "agent_thought_chunk" && update.content?.type === "text") {
+      const text = String(update.content.text ?? "");
+      const seen = this.thoughts.get(session.id) ?? { chunks: 0, chars: 0, tail: "" };
+      this.thoughts.set(session.id, { chunks: seen.chunks + 1, chars: seen.chars + text.length, tail: (seen.tail + text).slice(-300) });
+      return;
     } else if (kind === "session_info_update" && update.title) {
       session.title = String(update.title);
     } else if (kind === "usage_update") {
@@ -3613,8 +3623,10 @@ export class VoiceSession {
   }
 
   // A Followed Session's failures are beats, one per burst, carrying the streak at the burst's
-  // end; a failed step is not a failed turn, so the beat says the session carries on, and
-  // none comes once the turn has ended (its turn event speaks instead). An unfollowed session
+  // end and what the latest failed step was doing; a failed step is not a failed turn, so the
+  // beat says the session carries on, and none comes once the turn has ended (its turn event
+  // speaks instead). A short streak is routine (a web page refusing a fetch) and weighs less
+  // than the Agent's own words; a stuck-length streak outweighs them and is urgent. An unfollowed session
   // that keeps failing bids: the Voice Agent mentions it and offers to follow, and never
   // switches on its own.
   private toolCallFailed(session: ManagedSession): void {
@@ -3627,9 +3639,13 @@ export class VoiceSession {
         follow.failureBurst = false;
         if (!turnStillRunning(session, turn)) return;
         const streak = failureStreak(session);
+        const latest = [...session.toolCalls].reverse().find((item) => item.status === "failed");
+        const doing = latest && toolPhase(latest.kind) !== "other" ? `while ${toolDoing(latest)}` : "";
+        const stuck = streak >= STUCK_STREAK;
         this.beat(session, streak > 1
-          ? `${streak} steps in a row failed for ${session.alias}; its turn is still going.`
-          : `A step failed for ${session.alias}; its turn is still going.`, "progress_failed");
+          ? `${streak} steps in a row failed for ${session.alias}${doing ? `, the latest ${doing}` : ""}; its turn is still going.`
+          : `A step failed for ${session.alias}${doing ? ` ${doing}` : ""}; its turn is still going.`,
+        "progress_failed", { weight: stuck ? 4 : 2, urgent: stuck });
       }, FAILURE_BURST_MS);
       return;
     }
@@ -3668,7 +3684,7 @@ export class VoiceSession {
     };
     void this.record("session.followed", { alias: session.alias, previous });
     // Catch up silently, so "what is it doing?" has an answer at once.
-    this.beat(session, this.currentDoing(session), null, false);
+    this.beat(session, this.currentDoing(session), null, { narrate: false });
     return previous;
   }
 
@@ -3702,12 +3718,16 @@ export class VoiceSession {
   // A Progress Beat (DOMAIN.md) about the Followed Session; other sessions' beats are dropped.
   // Beats within BEAT_COALESCE_MS of each other make one: the weightiest, else the latest.
   // Each beat may cue an earcon at once; the speech comes later, if at all. A burst of beats
-  // cues only its first earcon.
-  private beat(session: ManagedSession, text: string, earconName: EarconName | null, narrate = true): void {
+  // cues only its first earcon. What waits to be narrated is likewise the weightiest beat
+  // since the last narration, so the Agent's own words are not lost to a phase change that
+  // follows them before a quiet moment comes.
+  private beat(
+    session: ManagedSession, text: string, earconName: EarconName | null,
+    { narrate = true, weight = beatWeight(earconName), urgent = earconName === "progress_context_low" } = {},
+  ): void {
     const follow = this.follow;
     if (!follow || follow.sessionId !== session.id || !this.liveAttached) return;
     const now = Date.now();
-    const weight = beatWeight(earconName);
     const burst = follow.lastBeat !== null && now - follow.lastBeat.at < BEAT_COALESCE_MS;
     if (burst && follow.lastBeat!.weight > weight) {
       void this.record("session.beat.coalesced", { alias: session.alias, text: text.slice(0, 300) });
@@ -3716,7 +3736,7 @@ export class VoiceSession {
     if (burst && follow.told.length) follow.told[follow.told.length - 1] = text;
     else follow.told = [...follow.told, text].slice(-4);
     follow.lastBeat = { at: now, weight };
-    if (narrate) follow.unspoken = { text, at: now, urgent: earconName === "progress_failed" || earconName === "progress_context_low" };
+    if (narrate && (!follow.unspoken || weight >= follow.unspoken.weight)) follow.unspoken = { text, at: now, weight, urgent };
     if (earconName && now - follow.earconAt >= BEAT_EARCON_GAP_MS) {
       follow.earconAt = Date.now();
       this.queueEarcon(earconName);
@@ -3747,7 +3767,7 @@ export class VoiceSession {
         if (follow.unspoken && settled && (follow.narrationOpen || follow.unspoken.urgent)
           && now - follow.narratedAt >= NARRATION_GAP_MS && this.quietMoment()) {
           this.sendLive({ type: "session.commentary.append", delegation_id: null, content: follow.unspoken.text });
-          await this.record("session.narrated", { alias });
+          await this.record("session.narrated", { alias, text: follow.unspoken.text.slice(0, 300) });
           follow.unspoken = null;
           follow.narratedAt = now;
           follow.narrationOpen = false;
@@ -4333,12 +4353,13 @@ function toolPhase(kind: string): string {
   return "other";
 }
 
-// Which beat of a burst survives coalescing: failures and a full context window, then the
-// Agent's own words, then a new step or first change, then a phase change.
+// Which beat of a burst survives coalescing, and which waits to be narrated: a full context
+// window (and a stuck-length failure streak, weighed at its call site), then the Agent's own
+// words, then a new step, a first change, or a short failure streak, then a phase change.
 function beatWeight(earconName: EarconName | null): number {
-  if (earconName === "progress_failed" || earconName === "progress_context_low") return 4;
+  if (earconName === "progress_context_low") return 4;
   if (earconName === "progress_remark") return 3;
-  if (earconName === "progress_step" || earconName === "progress_plan_done" || earconName === "progress_changing") return 2;
+  if (earconName === "progress_step" || earconName === "progress_plan_done" || earconName === "progress_changing" || earconName === "progress_failed") return 2;
   return 1;
 }
 

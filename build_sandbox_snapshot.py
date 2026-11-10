@@ -75,6 +75,12 @@ def snapshot_image() -> Image:
             ROOT / "sandbox_opencode.json",
             "/home/daytona/.config/opencode/opencode.json",
         )
+        # Global rules OpenCode loads into every session: narrate between tool calls,
+        # since Dogwalk relays the Agent's text, not its tool arguments.
+        .add_local_file(
+            ROOT / "sandbox_opencode_agents.md",
+            "/home/daytona/.config/opencode/AGENTS.md",
+        )
         # OpenCode discovers plugins in this directory without a config entry.
         .add_local_file(
             ROOT / "sandbox_opencode_binary_guard.ts",
