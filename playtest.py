@@ -43,7 +43,7 @@ ROOT = Path(__file__).resolve().parent
 ACCOUNT_ID = "890753ccd6f0bbbfbe2c030cc44f6a87"  # Adam's personal Cloudflare account, as in deploy.py
 CF_PROFILE = Path.home() / "Library/Preferences/cloudflare/config/personal.json"
 EVICTION_SECONDS = 900  # a Durable Object holding only outbound WebSockets is evicted after 15 min
-SECTIONS = ["transcript", "orchestrator", "boundary", "stats", "reminders"]
+SECTIONS = ["transcript", "orchestrator", "boundary", "stats", "reminders", "timing"]
 INVITATION_TOOLS = {"create_invitation", "list_invitations", "set_invitation_recipient", "revoke_invitation",
                     "inspect_registration"}
 
@@ -133,6 +133,28 @@ def loads(text) -> dict:
 
 def detail(row: dict) -> dict:
     return loads(row.get("detail"))
+
+
+def event_ms(row: dict) -> float:
+    """New records carry server Unix milliseconds; old records have seconds only."""
+    return detail(row).get("ts_ms", row["ts"] * 1000)
+
+
+def timing_lines(call: dict) -> list[str]:
+    activity = call.get("activity", [])
+    rows = sorted(enumerate(activity), key=lambda pair: (event_ms(pair[1]), pair[0]))
+    precise = sum("ts_ms" in detail(row) for row in activity)
+    out = [f"server receipt/send times, NOT telephone playout; {precise}/{len(activity)} records have ms timestamps",
+           "provider start_ms/end_ms/offset_ms are session-relative media offsets, not Unix time"]
+    for _, row in rows:
+        data = dict(detail(row))
+        stamp = event_ms(row)
+        label = data.pop("event", row["event"]) if row["event"] == "voice.timing" else row["event"]
+        data.pop("ts_ms", None)
+        precision = "" if "ts_ms" in detail(row) else " [seconds only]"
+        out.append(f"+{stamp - call['started_at'] * 1000:010.0f}ms {label}{precision} "
+                   + json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+    return out
 
 
 def text_of(item: dict) -> str:
@@ -274,12 +296,13 @@ def stats_lines(call: dict, items: list) -> list[str]:
     model_ms = [m["ms"] for m in model if "ms" in m]
     usage = [m.get("usage") or {} for m in model]
     first = lambda name: next((f"+{r['ts'] - t0}s" for r in activity if r["event"] == name), "n/a")
-    handoffs = [(r["ts"], detail(r).get("delegation_id")) for r in activity if r["event"] == "voice.delegation.received"]
-    says = [(r["ts"], detail(r).get("delegation_id")) for r in activity if r["event"] == "orchestrator.say"]
+    handoffs = [(event_ms(r), detail(r).get("delegation_id")) for r in activity if r["event"] == "voice.delegation.received"]
+    says = [(event_ms(r), detail(r).get("delegation_id")) for r in activity
+            if r["event"] == "orchestrator.say" and detail(r).get("ok") is not False]
     waits = []
     for ts, delegation in handoffs:
         spoken = [s for s, d in says if d == delegation and s >= ts]
-        waits.append(f"{spoken[0] - ts}s" if spoken else "none")
+        waits.append(f"{min(spoken) - ts:.0f}ms" if spoken else "none")
     names = [i.get("name") for i in items if i.get("type") == "function_call"]
     errors = sum(1 for i in items if i.get("type") == "function_call_output" and failed(loads(i.get("output"))))
     closes = [f"{detail(r).get('reason')} {(detail(r).get('usage') or {}).get('seconds')}s"
@@ -290,7 +313,7 @@ def stats_lines(call: dict, items: list) -> list[str]:
         f"ended +{(call.get('ended_at') or (activity[-1]['ts'] if activity else t0)) - t0}s ({call.get('status')})",
         f"voice sessions: {sum(1 for r in activity if r['event'] == 'voice.live.attached')}; "
         f"closes: {', '.join(closes) or 'none'}" + (f"; theme changes: {', '.join(map(str, themes))}" if themes else ""),
-        f"handoffs: {len(handoffs)}; first say after handoff: {', '.join(waits) or 'n/a'}",
+        f"handoffs: {len(handoffs)}; first say accepted after handoff (not heard): {', '.join(waits) or 'n/a'}",
         f"model calls: {len(model_ms)}"
         + (f", p50 {statistics.median(model_ms) / 1000:.1f}s, max {max(model_ms) / 1000:.1f}s" if model_ms else "")
         + (f", tokens in {sum(u.get('input_tokens', 0) for u in usage)}"
@@ -409,7 +432,7 @@ def main() -> None:
     args = parser.parse_args()
     width = 0 if args.full else args.width
 
-    calls = api("/admin/api/calls?verbose=1&limit=20")
+    calls = api("/admin/api/calls?verbose=1&limit=20" + ("&timing=1" if args.only == "timing" else ""))
     conversation = (api("/admin/api/conversations?verbose=1") or [{}])[0]
     mask = masker(invite_codes(conversation.get("orchestrator_context", [])), args.unmask)
     emit = lambda lines: print("\n".join(clip(mask(line), width) for line in lines) or "(none)")
@@ -451,6 +474,9 @@ def main() -> None:
     if args.only in (None, "stats"):
         print("\n## stats")
         emit(stats_lines(call, items))
+    if args.only == "timing":
+        print("\n## timing (use --full to avoid truncating metadata)")
+        emit(timing_lines(call))
     if reminders := reminder_lines(conversation, call, bounds, deploys) if args.only in (None, "reminders") else []:
         print("\n## reminders (available context worth reaching for)")
         emit([f"- {line}" for line in reminders])

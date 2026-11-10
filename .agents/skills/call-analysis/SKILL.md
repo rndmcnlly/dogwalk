@@ -16,6 +16,7 @@ uv run --script playtest.py 2               # previous call, or a Call SID prefi
 uv run --script playtest.py --only reminders   # or transcript | orchestrator | boundary | stats
 uv run --script playtest.py --deploys       # Worker deployments interleaved with calls, PT
 uv run --script playtest.py --full          # no truncation; --width N otherwise
+uv run --script playtest.py --only timing --full  # detailed millisecond server timeline
 ```
 
 Read the `reminders` block first: each line is context that was available on an earlier review but nobody reached for, and it names where to look. `boundary` hits are candidates: decide whether the word came from the caller's own request (fine) or from the Theme (a leak).
@@ -44,6 +45,7 @@ Keep `playtest.py` small; this skill carries the checklist as prose.
 - **Arc and outcomes:** what the caller wanted, what got done. Verify claims against tool outputs and `turn_stopped` agent messages; "done" spoken is not done.
 - **Frontend vs Orchestrator split:** handoffs that should have happened; handoffs with no `say` (stats shows `none`); the Frontend claiming results before a turn began; aliases the Frontend invented instead of naming given ones. Several caller utterances merged into one transcript entry suggest the Frontend never responded between them.
 - **Latency:** handoff to first `say` (stats), model p50 and max; long silences in the transcript.
+- **Precise latency:** `--only timing --full` opts into `voice.timing` rows (`/admin/api/calls?verbose=1&timing=1`). Sort by `detail.ts_ms`, not database insertion order; timing writes are batched. Use delegation/request/tool-call/RPC IDs and `live_session_id` for joins. `live.received.queue_ms` is receipt-to-handler delay; handoff preparation includes the 300 ms transcript grace; model spans separate headers from body completion; `live.held` versus `live.sent` distinguishes speech queueing from transport send. Provider media offsets are a separate clock. Transcript output and `say` acceptance are not telephone playout. Old records have second-only precision; resets can lose the pending timing batch.
 - **Beats:** sparse, the Agent's own remarks quoted in its tense, no raw tool names or shell commands (`running a command (git ...)` is a defect), no recitation of every step. Check `session.beat.coalesced` (bursts within 1.5 s make one beat) and that narrated beats waited for a pause.
 - **Themes and register:** `voice.theme` and the voice sessions it started; Intensity moves with the caller (light by default, plain when frustrated); the clarity floor (the facts must survive the metaphor); Runtime Dramaturgy fits the moment.
 - **ACP boundary:** no Theme words or phone numbers in Agent prompts (`boundary`).

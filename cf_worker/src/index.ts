@@ -570,7 +570,7 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
   await Promise.all(liveCalls.map(async (call) => {
     const activity = await env.DB.prepare(
       `SELECT id, ts, source, direction, event, detail
-         FROM call_activity WHERE call_sid = ?
+         FROM call_activity WHERE call_sid = ? AND event != 'voice.timing'
         ORDER BY id DESC LIMIT 30`,
     ).bind(String(call.call_sid)).all<Record<string, unknown>>();
     call.activity = (activity.results ?? []).reverse();
@@ -669,14 +669,15 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
   if (pathname === "/admin/api/calls") {
     if (!verbose) return new Response("calls require verbose=1", { status: 400 });
     const limit = Math.min(20, Math.max(1, Number(new URL(req.url).searchParams.get("limit") ?? "5") || 5));
+    const timing = new URL(req.url).searchParams.get("timing") === "1";
     const calls = await env.DB.prepare(
       `SELECT call_sid, status, started_at, ended_at, duration_seconds FROM voice_calls ORDER BY started_at DESC LIMIT ?`,
     ).bind(limit).all<Record<string, unknown>>();
     const withActivity = await Promise.all(calls.results.map(async (call) => ({
       ...call,
       activity: (await env.DB.prepare(
-        "SELECT ts, source, event, detail FROM call_activity WHERE call_sid = ? ORDER BY id",
-      ).bind(call.call_sid).all()).results,
+        "SELECT ts, source, event, detail FROM call_activity WHERE call_sid = ? AND (? OR event != 'voice.timing') ORDER BY id",
+      ).bind(call.call_sid, timing ? 1 : 0).all()).results,
     })));
     return jsonResponse(withActivity);
   }
@@ -1481,7 +1482,9 @@ async function audit(
   detail: Record<string, unknown>,
 ): Promise<void> {
   try {
-    const now = Math.floor(Date.now() / 1000);
+    const tsMs = Date.now();
+    const now = Math.floor(tsMs / 1000);
+    detail = { ...detail, ts_ms: tsMs };
     const statements = [env.DB.prepare(
       "INSERT INTO audit_log (ts, event, phone_number, call_sid, detail) VALUES (?, ?, ?, ?, ?)",
     ).bind(now, event, phone, callSid, JSON.stringify(detail))];

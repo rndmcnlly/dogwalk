@@ -446,6 +446,34 @@ server. `Reveal verbose telemetry` reconnects with `verbose=1` for the current
 page session only. Large conversation or tool payloads should be stored by
 reference rather than copied into every activity row.
 
+### Latency traces
+
+`uv run --script playtest.py --only timing --full` prints the latest call's detailed
+timeline. All newly written activity/audit details carry `ts_ms` (server Unix
+milliseconds); the SQL `ts` column remains Unix seconds. Historical timestamps
+cannot be made more precise. The stats report uses millisecond timestamps for
+handoff-to-say acceptance, which is not time-to-audible-response.
+
+The authenticated `/admin/api/calls?verbose=1&timing=1` includes `voice.timing`
+rows, hidden from the ordinary diagnostic tree and the Voice Agent's activity
+summary. They record sideband receipt and message-chain wait (`queue_ms`), transcript
+delta character counts and provider media offsets, handoff preparation, model
+request/headers/completion/failure, tool start/end, ACP send/receipt, and actual
+sideband sends versus appends held behind menus or fixtures. Request IDs, tool-call
+IDs, delegation IDs, and voice-session IDs support joins. `clock_id` and `seq`
+identify local observation order across Durable Object resets; database insertion
+order is not observation order because timing rows are batched.
+
+Timing rows exclude transcript text, tool arguments/results, and audio payloads.
+They flush off the voice message chain every second or 50 observations, and at
+normal voice cleanup. This is best-effort telemetry: an abrupt reset can lose
+the pending batch, and failed writes are logged rather than delaying speech.
+Millisecond timestamp units do not imply millisecond measurement accuracy.
+Provider `start_ms`, `end_ms`, and `offset_ms` belong to the voice session's media
+clock, not the server's Unix clock. Output transcript receipt is not audio playout;
+fixture acknowledgements indicate the provider mixer drained, not arrival at the
+telephone. No full-call audio is retained by this instrumentation.
+
 The Twilio incoming number must send status callbacks to:
 
 ```text

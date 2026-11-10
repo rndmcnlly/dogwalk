@@ -629,15 +629,19 @@ def post_webhook(body: str, identity: str, signature_header: str) -> int:
         return error.code
 
 
-def call_activity(call_sid: str) -> list[str]:
+def call_activity_rows(call_sid: str, timing: bool = False) -> list[dict]:
     credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
     request = urllib.request.Request(
-        "http://127.0.0.1:8787/admin/api/calls?verbose=1&limit=10",
+        "http://127.0.0.1:8787/admin/api/calls?verbose=1&limit=10" + ("&timing=1" if timing else ""),
         headers={"authorization": f"Basic {credentials}"},
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         calls = json.load(response)
-    return [item["event"] for call in calls if call["call_sid"] == call_sid for item in call["activity"]]
+    return [item for call in calls if call["call_sid"] == call_sid for item in call["activity"]]
+
+
+def call_activity(call_sid: str) -> list[str]:
+    return [row["event"] for row in call_activity_rows(call_sid)]
 
 
 def conversations() -> list[dict]:
@@ -928,6 +932,25 @@ async def run_protocol(identity: str) -> None:
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST")
         for expected in ("session.followed", "session.beat", "session.unfollowed"):
             assert expected in events, (expected, events)
+
+        # The detailed trace is opt-in, millisecond-stamped, correlated, and metadata-only.
+        await asyncio.sleep(1.2)  # one off-path telemetry flush
+        rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST", True)
+        timed = [json.loads(row["detail"]) for row in rows if row["event"] == "voice.timing"]
+        assert "voice.timing" not in events
+        assert timed and all(isinstance(row["ts_ms"], int) and row["live_session_id"] == "live-test" for row in timed)
+        assert all(not ({"audio", "content", "delta"} & row.keys()) for row in timed)
+        kinds = {row["event"] for row in timed}
+        assert {"live.received", "live.sent", "handoff.started", "handoff.queued", "model.started",
+                "model.headers", "model.completed", "tool.started", "tool.completed", "acp.sent", "acp.received"} <= kinds, kinds
+        received = next(row for row in timed if row["event"] == "live.received" and row.get("type") == "session.input_transcript.delta")
+        assert received["end_ms"] >= received["start_ms"] and received["queue_ms"] >= 0
+        for row in (row for row in timed if row["event"] == "model.completed"):
+            start = next(start for start in timed if start["event"] == "model.started" and start["request_id"] == row["request_id"])
+            assert row["ts_ms"] >= start["ts_ms"] and row["ms"] >= 0
+        queued = next(row for row in timed if row["event"] == "handoff.queued" and row["delegation_id"] == "del-2")
+        started = next(row for row in timed if row["event"] == "handoff.started" and row["delegation_id"] == "del-2")
+        assert queued["ts_ms"] - started["ts_ms"] >= 300
 
         # Handoff 3: leash earlier work, retag it, let it go home, and list what remains.
         await mocks.send_live(transcript("input", "Pick up that parser work from yesterday ", 7000, 8000))

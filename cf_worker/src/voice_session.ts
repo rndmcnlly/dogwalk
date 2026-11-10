@@ -865,6 +865,12 @@ export class VoiceSession {
   private inputLevels = { open: newLevels(), recording: newLevels() };
   private liveError: string | null = null;
   private transcript: TranscriptEntry[] = [];
+  // Timing is metadata only, batched off the voice message chain. Each row captures its
+  // call identity now, so a late flush cannot attach it to a subsequent call.
+  private timingRows: { callSid: string; ts: number; detail: string }[] = [];
+  private timingTimer: ReturnType<typeof setTimeout> | null = null;
+  private timingSequence = 0;
+  private timingClockId = crypto.randomUUID();
   private transcriptCutMs = 0;
   private transcriptSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private acpMessageChain: Promise<void> = Promise.resolve();
@@ -1040,8 +1046,9 @@ export class VoiceSession {
     this.liveAttached = true;
     live.accept();
     live.addEventListener("message", (event) => {
+      const receivedMs = Date.now();
       this.liveMessageChain = this.liveMessageChain
-        .then(() => this.handleLiveMessage(event))
+        .then(() => this.handleLiveMessage(event, receivedMs))
         .catch((error) => this.record("voice.live.message.failed", { message: errorMessage(error) }));
     });
     live.addEventListener("close", () => {
@@ -1158,8 +1165,9 @@ export class VoiceSession {
     this.acp = acp;
     acp.accept();
     acp.addEventListener("message", (event) => {
+      const receivedMs = Date.now();
       this.acpMessageChain = this.acpMessageChain
-        .then(() => this.handleAcpMessage(event))
+        .then(() => this.handleAcpMessage(event, receivedMs))
         .catch((error) => this.record("acp.message.failed", { message: errorMessage(error) }));
     });
     acp.addEventListener("close", (event) => {
@@ -1232,7 +1240,7 @@ export class VoiceSession {
     await this.persistSessions();
   }
 
-  private async handleLiveMessage(event: MessageEvent): Promise<void> {
+  private async handleLiveMessage(event: MessageEvent, receivedMs = Date.now()): Promise<void> {
     if (typeof event.data !== "string") return;
     let message: Record<string, any>;
     try {
@@ -1241,6 +1249,19 @@ export class VoiceSession {
       return;
     }
 
+    // Never archive audio payloads or arbitrary provider data. Provider offsets are in
+    // the voice session's media clock, not Unix time or evidence of PSTN playout.
+    if (typeof message.audio !== "string") {
+      this.timing("live.received", {
+        type: message.type,
+        queue_ms: Date.now() - receivedMs,
+        start_ms: message.start_ms,
+        end_ms: message.end_ms,
+        offset_ms: message.offset_ms,
+        delegation_id: message.delegation?.id,
+        chars: typeof message.delta === "string" ? message.delta.length : undefined,
+      }, receivedMs);
+    }
     switch (message.type) {
       case "session.input_transcript.delta":
       case "session.output_transcript.delta":
@@ -2556,6 +2577,8 @@ export class VoiceSession {
   }
 
   private async receiveDelegation(delegationId: string, offsetMs: number): Promise<void> {
+    const startedMs = Date.now();
+    this.timing("handoff.started", { delegation_id: delegationId, offset_ms: Number.isFinite(offsetMs) ? offsetMs : null });
     this.delegations.add(delegationId);
     if (this.recording) {
       // The caller is dictating; anything the Voice Frontend hands off now is the note itself.
@@ -2566,7 +2589,8 @@ export class VoiceSession {
     // Late transcript deltas for the same utterance get a short grace period.
     await new Promise((resolve) => setTimeout(resolve, 300));
     const lines = this.takeTranscript(offsetMs);
-    await this.record("voice.delegation.received", { delegation_id: delegationId });
+    await this.record("voice.delegation.received", { delegation_id: delegationId, started_ms: startedMs, ms: Date.now() - startedMs });
+    this.timing("handoff.queued", { delegation_id: delegationId });
     await this.orchestratorEvent(`[handoff ${delegationId}]\n${lines.join("\n") || "(no new transcript)"}`);
   }
 
@@ -2583,6 +2607,7 @@ export class VoiceSession {
   private async orchestratorEvent(text: string): Promise<void> {
     this.feedPush("system", text.replace(/^\[harness event\] /, ""), { lane: "event" });
     this.orchestratorQueue.push(text);
+    this.timing("orchestrator.queued", { queued_events: this.orchestratorQueue.length, chars: text.length });
     await this.state.storage.put("orchestrator_queue", this.orchestratorQueue);
     if (this.liveAttached) void this.runOrchestrator();
   }
@@ -2628,9 +2653,20 @@ export class VoiceSession {
   }
 
   private async orchestratorModel(): Promise<unknown[]> {
+    const requestId = crypto.randomUUID();
+    const started = Date.now();
+    this.timing("model.started", { request_id: requestId, context_items: this.orchestratorContext.length });
+    try {
+      return await this.orchestratorModelRequest(requestId, started);
+    } catch (error) {
+      this.timing("model.failed", { request_id: requestId, ms: Date.now() - started });
+      throw error;
+    }
+  }
+
+  private async orchestratorModelRequest(requestId: string, started: number): Promise<unknown[]> {
     // Any /v1/responses-compatible endpoint works here; OpenAI is the default deployment.
     const base = (this.env.ORCHESTRATOR_API_BASE ?? "https://api.openai.com/v1").replace(/\/$/, "");
-    const started = Date.now();
     const response = await fetch(`${base}/responses`, {
       method: "POST",
       headers: {
@@ -2649,9 +2685,12 @@ export class VoiceSession {
       }),
       signal: AbortSignal.timeout(60_000),
     });
+    this.timing("model.headers", { request_id: requestId, status: response.status, ms: Date.now() - started });
     if (!response.ok) throw new Error(`Orchestrator model ${response.status}: ${(await response.text()).slice(0, 200)}`);
     const body = await response.json<{ output?: unknown[]; usage?: Record<string, unknown> }>();
-    await this.record("orchestrator.model", { ms: Date.now() - started, usage: body.usage ?? null });
+    this.timing("model.completed", { request_id: requestId, ms: Date.now() - started,
+      tool_call_ids: (body.output ?? []).filter((item: any) => item.type === "function_call").map((item: any) => item.call_id) });
+    await this.record("orchestrator.model", { request_id: requestId, started_ms: started, ms: Date.now() - started, usage: body.usage ?? null });
     const inputTokens = Number(body.usage?.input_tokens);
     if (Number.isFinite(inputTokens) && inputTokens > 0) {
       this.contextTokens = inputTokens;
@@ -2777,6 +2816,17 @@ export class VoiceSession {
   }
 
   private async executeOrchestratorTool(item: Record<string, any>): Promise<unknown> {
+    const started = Date.now();
+    const metadata = { tool_call_id: item.call_id, name: item.name };
+    this.timing("tool.started", metadata);
+    try {
+      return await this.executeOrchestratorToolInner(item);
+    } finally {
+      this.timing("tool.completed", { ...metadata, ms: Date.now() - started });
+    }
+  }
+
+  private async executeOrchestratorToolInner(item: Record<string, any>): Promise<unknown> {
     let args: Record<string, unknown> = {};
     try {
       args = JSON.parse(String(item.arguments ?? "{}"));
@@ -3351,7 +3401,7 @@ export class VoiceSession {
     const calls = await this.env.DB.prepare(
       `SELECT call_sid, started_at, ended_at, status FROM voice_calls WHERE phone_number = ? ORDER BY started_at DESC LIMIT 3`,
     ).bind(this.phone).all<{ call_sid: string; started_at: number; ended_at: number | null; status: string }>();
-    const noise = new Set(["orchestrator.model", "orchestrator.tool", "orchestrator.say", "voice.delegation.received"]);
+    const noise = new Set(["orchestrator.model", "orchestrator.tool", "orchestrator.say", "voice.delegation.received", "voice.timing"]);
     const now = Math.floor(Date.now() / 1000);
     return {
       ok: true,
@@ -3500,7 +3550,7 @@ export class VoiceSession {
     return { ok: true, alias: session.alias, selected_option_id: optionId };
   }
 
-  private async handleAcpMessage(event: MessageEvent): Promise<void> {
+  private async handleAcpMessage(event: MessageEvent, receivedMs = Date.now()): Promise<void> {
     if (typeof event.data !== "string") return;
     let message: JsonRpcMessage;
     try {
@@ -3508,6 +3558,13 @@ export class VoiceSession {
     } catch {
       return;
     }
+    this.timing("acp.received", {
+      rpc_id: message.id, method: message.method,
+      session_id: message.params?.sessionId,
+      update: (message.params?.update as { sessionUpdate?: unknown } | undefined)?.sessionUpdate,
+      queue_ms: Date.now() - receivedMs,
+      error: Boolean(message.error),
+    }, receivedMs);
     if (message.id !== undefined && !message.method) {
       const pending = this.pendingRpc.get(message.id);
       if (!pending) return;
@@ -3836,6 +3893,8 @@ export class VoiceSession {
   private sendAcp(message: unknown): void {
     if (!this.acp || this.acp.readyState !== WebSocket.OPEN) throw new Error("ACP connection is unavailable");
     this.acp.send(JSON.stringify(message));
+    const rpc = message as JsonRpcMessage;
+    this.timing("acp.sent", { rpc_id: rpc.id, method: rpc.method, session_id: rpc.params?.sessionId });
   }
 
   private sendLive(message: unknown): void {
@@ -3847,10 +3906,17 @@ export class VoiceSession {
     }
     // Appends wait out a playing clip and the keypad menu, so speech never talks over either.
     if ((this.fixture || this.menu) && String((message as { type?: string }).type ?? "").endsWith(".append")) {
+      this.timing("live.held", { type: outgoing.type, fixture: Boolean(this.fixture), menu: Boolean(this.menu),
+        delegation_id: (message as { delegation_id?: unknown }).delegation_id });
       this.heldAppends.push(message);
       return;
     }
     this.live.send(JSON.stringify(message));
+    this.timing("live.sent", {
+      type: outgoing.type,
+      delegation_id: (message as { delegation_id?: unknown }).delegation_id,
+      chars: typeof outgoing.content === "string" ? outgoing.content.length : undefined,
+    });
   }
 
   private playFixture(clip: Clip, label: string): Promise<boolean> {
@@ -3868,6 +3934,7 @@ export class VoiceSession {
       // The played acknowledgement means the server mixer drained; the timeout is a fallback.
       this.fixture = { done: () => done(true), timer: setTimeout(() => done(false), clip.seconds * 1000 + 2000) };
       this.live!.send(JSON.stringify({ type: "session.output_audio.fixture.play", audio: clip.base64 }));
+      this.timing("fixture.sent", { label, seconds: clip.seconds });
     });
   }
 
@@ -4037,6 +4104,7 @@ export class VoiceSession {
     await this.record("voice.input.levels", summarizeLevels(this.inputLevels.open));
     this.inputLevels = { open: newLevels(), recording: newLevels() };
     await this.record("voice.live.detached", { reason, live_session_id: this.liveSessionId });
+    await this.flushTiming();
     const live = this.live;
     this.live = null;
     this.liveAttached = false;
@@ -4101,11 +4169,42 @@ export class VoiceSession {
     return response.json<T>();
   }
 
+  private timing(event: string, detail: Record<string, unknown> = {}, tsMs = Date.now()): void {
+    if (!this.callSid || !this.liveSessionId) return;
+    this.timingRows.push({
+      callSid: this.callSid, ts: Math.floor(tsMs / 1000),
+      detail: JSON.stringify({ ...detail, event, ts_ms: tsMs, clock_id: this.timingClockId,
+        seq: ++this.timingSequence, live_session_id: this.liveSessionId }),
+    });
+    if (this.timingRows.length >= 50) this.state.waitUntil(this.flushTiming());
+    else if (!this.timingTimer) this.timingTimer = setTimeout(() => {
+      this.timingTimer = null;
+      this.state.waitUntil(this.flushTiming());
+    }, 1000);
+  }
+
+  private async flushTiming(): Promise<void> {
+    if (this.timingTimer) clearTimeout(this.timingTimer);
+    this.timingTimer = null;
+    const rows = this.timingRows.splice(0);
+    if (!rows.length) return;
+    try {
+      await this.env.DB.batch(rows.map((row) => this.env.DB.prepare(
+        "INSERT INTO call_activity (call_sid, ts, source, direction, event, detail) VALUES (?, ?, 'voice', 'internal', 'voice.timing', ?)",
+      ).bind(row.callSid, row.ts, row.detail)));
+    } catch (error) {
+      // Best effort, like other diagnostics: never stall speech for telemetry.
+      console.error("voice timing flush failed", errorMessage(error));
+    }
+  }
+
   private async record(event: string, detail: Record<string, unknown>): Promise<void> {
     // Most changes a paired browser shows (call, Agent Connection, permissions) are recorded.
     this.schedulePairedStatus();
     if (!this.callSid || !this.phone) return;
-    const now = Math.floor(Date.now() / 1000);
+    const tsMs = Date.now();
+    const now = Math.floor(tsMs / 1000);
+    detail = { ...detail, ts_ms: tsMs, live_session_id: this.liveSessionId };
     try {
       await this.env.DB.batch([
         this.env.DB.prepare(
