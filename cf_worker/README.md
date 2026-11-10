@@ -509,6 +509,25 @@ include Alias, ACP Session ID, and duration. Nested Agent sessions are only
 renderable when their identities/relationships are actually observed, never
 inferred from concurrent activity.
 
+The domain bands map the current deployment: Twilio PSTN then SIP at the left,
+OpenAI Voice Frontend and reasoning API, Cloudflare Orchestrator/control transport,
+and Daytona-hosted Managed Sessions/Agent tools. Reasoning API durations remain
+Worker-observed round trips, not model-internal compute measurements.
+
+`Show content` is independent of raw metadata: it reveals transcript text,
+Handoffs, speech/context requests, ACP engineering briefs, and Agent messages
+alongside the technical timeline. This is intentionally private operator access,
+not the Paired Browser experience. Turning it off hides message content in the
+diagram, inspector, and local exports, but does not revoke the operator's access.
+No raw audio, arbitrary provider payload, or model-private reasoning dump is added.
+
+Historical call content is read on demand from
+`GET /admin/api/timing/content?call_sid=CA...`, using the same operator gate.
+Saved media-relative transcripts are labeled separately from observations with
+exact timing correlations. Retention/compaction may leave gaps, which the page
+reports rather than inventing content or timestamps. New calls also retain
+bounded content at the instrumented boundaries; truncation is explicitly marked.
+
 Browser regression checks use synthetic events and mocked API requests only:
 `uv run --script cf_worker/operator_timing_test.py` (requires local Google Chrome).
 They cover incremental pagination, timing spans, packet-noise reduction, safe
@@ -530,7 +549,12 @@ IDs, delegation IDs, and voice-session IDs support joins. `clock_id` and `seq`
 identify local observation order across Durable Object resets; database insertion
 order is not observation order because timing rows are batched.
 
-Timing rows exclude transcript text, tool arguments/results, and audio payloads.
+Timing rows may retain bounded, allowlisted content at conversation and ACP
+boundaries. Arbitrary tool argument/result dumps, private reasoning chunks, and
+audio payloads are excluded. The compact view adaptively fuses text deltas into
+observed bursts by stream identity and cadence, with explicit lifecycle ends;
+these are presentation segments, not guaranteed speech turns or VAD silence.
+Raw deltas and observation timestamps remain available independently.
 They flush off the voice message chain every second or 50 observations, and at
 normal voice cleanup. This is best-effort telemetry: an abrupt reset can lose
 the pending batch, and failed writes are logged rather than delaying speech.

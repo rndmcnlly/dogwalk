@@ -461,6 +461,15 @@ by capability, not by client-side hiding.
 **Not:** A control surface, a required User interface, or the Voice Interaction
 itself. "Mission Control" is superseded historical language for this surface.
 
+The operator may reveal human-readable content independently of low-level
+metadata: caller/Voice Agent transcripts, Handoffs, speech/context requests,
+engineering briefs, and Agent messages at observed boundaries. This is a
+presentation preference within the operator capability, not a separate permission
+or a Paired Browser entitlement. Historical content retains its actual provenance:
+provider media offsets, exact identifier-correlated observations, or unknown
+timing, never a fabricated wall-clock position. This diagnostic presentation can
+inform future User-facing designs without exposing other Users' calls to them.
+
 ### Paired Browser
 
 **Context:** Access Control, with projections from Session Management

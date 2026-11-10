@@ -9,6 +9,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { ADMIN_HTML } from "./admin";
 import { OPERATOR_TIMING_HTML } from "./operator_timing";
+import { operatorCallContent } from "./operator_content";
 import { observeTwilio, processTwilioJobs } from "./provider_timing";
 import { LANDING_HTML } from "./landing";
 import { PAIR_HTML } from "./pair_page";
@@ -672,6 +673,16 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
       "SELECT call_sid, phone_number, status, started_at, ended_at, duration_seconds FROM voice_calls ORDER BY started_at DESC, call_sid LIMIT 50",
     ).all<{ call_sid: string; phone_number: string; status: string; started_at: number; ended_at: number | null; duration_seconds: number | null }>();
     return jsonResponse({ calls: calls.results.map(({ phone_number, ...call }) => ({ ...call, caller: maskPhone(phone_number) })), server_ms: Date.now() });
+  }
+  if (pathname === "/admin/api/timing/content") {
+    const callSid = new URL(req.url).searchParams.get("call_sid") ?? "";
+    if (!/^CA[\w-]{1,78}$/.test(callSid)) return jsonResponse({ error: "valid call_sid is required" }, 400);
+    try {
+      const content = await operatorCallContent(env, callSid);
+      return content ? jsonResponse(content) : jsonResponse({ error: "unknown call" }, 404);
+    } catch {
+      return jsonResponse({ error: "saved content is temporarily unavailable" }, 503);
+    }
   }
   if (pathname === "/admin/api/timing") {
     const params = new URL(req.url).searchParams;

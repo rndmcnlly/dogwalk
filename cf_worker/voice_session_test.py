@@ -654,6 +654,16 @@ def operator_timing_page(call_sid: str, after: int = 0) -> dict:
         return json.load(response)
 
 
+def operator_content(call_sid: str) -> dict:
+    credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:8787/admin/api/timing/content?call_sid={call_sid}",
+        headers={"authorization": f"Basic {credentials}"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)
+
+
 def conversations() -> list[dict]:
     credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
     request = urllib.request.Request(
@@ -943,24 +953,32 @@ async def run_protocol(identity: str) -> None:
         for expected in ("session.followed", "session.beat", "session.unfollowed"):
             assert expected in events, (expected, events)
 
-        # The detailed trace is opt-in, millisecond-stamped, correlated, and metadata-only.
+        # The trace is opt-in, millisecond-stamped, and never retains raw audio.
+        await mocks.send_live({"type": "session.output_audio.delta", "delta": "PRIVATE_AUDIO_BASE64_SENTINEL", "start_ms": 0, "end_ms": 200})
         await asyncio.sleep(1.2)  # one off-path telemetry flush
         rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST", True)
         timed = [json.loads(row["detail"]) for row in rows if row["event"] == "voice.timing"]
         assert "voice.timing" not in events
         assert timed and all(isinstance(row["ts_ms"], int) and row["live_session_id"] == "live-test" for row in timed)
         assert all(not ({"audio", "content", "delta"} & row.keys()) for row in timed)
+        assert "PRIVATE_AUDIO_BASE64_SENTINEL" not in json.dumps(timed), "audio delta was mistaken for transcript content"
         kinds = {row["event"] for row in timed}
         assert {"live.received", "live.sent", "handoff.started", "handoff.queued", "model.started",
                 "model.headers", "model.completed", "tool.started", "tool.completed", "acp.sent", "acp.received"} <= kinds, kinds
         received = next(row for row in timed if row["event"] == "live.received" and row.get("type") == "session.input_transcript.delta")
         assert received["end_ms"] >= received["start_ms"] and received["queue_ms"] >= 0
+        assert isinstance(received.get("content_text"), str) and received.get("content_kind") == "caller"
         for row in (row for row in timed if row["event"] == "model.completed"):
             start = next(start for start in timed if start["event"] == "model.started" and start["request_id"] == row["request_id"])
             assert row["ts_ms"] >= start["ts_ms"] and row["ms"] >= 0
         queued = next(row for row in timed if row["event"] == "handoff.queued" and row["delegation_id"] == "del-2")
         started = next(row for row in timed if row["event"] == "handoff.started" and row["delegation_id"] == "del-2")
         assert queued["ts_ms"] - started["ts_ms"] >= 300
+        content = await asyncio.to_thread(operator_content, "CA_VOICE_TEST")
+        kinds = {entry["kind"] for entry in content["entries"]}
+        assert {"caller", "voice", "handoff", "say", "acp_prompt", "agent_report"} <= kinds, kinds
+        assert all(entry["source"] in ("saved_transcript", "orchestrator_history") for entry in content["entries"])
+        assert any(entry["observed_at_ms"] is not None for entry in content["entries"]), "known tool/handoff IDs lost timing correlation"
         tools = [row for row in timed if row["event"] == "acp.received" and row.get("tool_call_id")]
         assert tools and any(row.get("tool_status") == "completed" for row in tools), tools
 

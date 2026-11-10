@@ -865,7 +865,8 @@ export class VoiceSession {
   private inputLevels = { open: newLevels(), recording: newLevels() };
   private liveError: string | null = null;
   private transcript: TranscriptEntry[] = [];
-  // Timing is metadata only, batched off the voice message chain. Each row captures its
+  // Operator-only timing includes allowlisted conversation evidence, never wire dumps,
+  // and is batched off the voice message chain. Each row captures its
   // call identity now, so a late flush cannot attach it to a subsequent call.
   private timingRows: { callSid: string; ts: number; detail: string }[] = [];
   private timingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1264,6 +1265,9 @@ export class VoiceSession {
         offset_ms: message.offset_ms,
         delegation_id: message.delegation?.id,
         chars: typeof message.delta === "string" ? message.delta.length : undefined,
+        ...(typeof message.delta === "string" &&
+          (message.type === "session.input_transcript.delta" || message.type === "session.output_transcript.delta")
+          ? { content_text: message.delta, content_kind: message.type === "session.input_transcript.delta" ? "caller" : "voice" } : {}),
       }, receivedMs);
     }
     switch (message.type) {
@@ -2594,7 +2598,8 @@ export class VoiceSession {
     await new Promise((resolve) => setTimeout(resolve, 300));
     const lines = this.takeTranscript(offsetMs);
     await this.record("voice.delegation.received", { delegation_id: delegationId, started_ms: startedMs, ms: Date.now() - startedMs });
-    this.timing("handoff.queued", { delegation_id: delegationId });
+    this.timing("handoff.queued", { delegation_id: delegationId,
+      content_text: lines.join("\n") || "(no new transcript)", content_kind: "handoff" });
     await this.orchestratorEvent(`[handoff ${delegationId}]\n${lines.join("\n") || "(no new transcript)"}`);
   }
 
@@ -3569,6 +3574,7 @@ export class VoiceSession {
     } catch {
       return;
     }
+    const update = message.params?.update as { sessionUpdate?: unknown; content?: { type?: unknown; text?: unknown } } | undefined;
     this.timing("acp.received", {
       rpc_id: message.id, method: message.method,
       session_id: message.params?.sessionId,
@@ -3578,6 +3584,9 @@ export class VoiceSession {
       tool_kind: (message.params?.update as { kind?: unknown } | undefined)?.kind,
       queue_ms: Date.now() - receivedMs,
       error: Boolean(message.error),
+      ...(message.method === "session/update" && update?.sessionUpdate === "agent_message_chunk" &&
+        update.content?.type === "text" && typeof update.content.text === "string"
+        ? { content_text: update.content.text, content_kind: "agent_report" } : {}),
     }, receivedMs);
     if (message.id !== undefined && !message.method) {
       const pending = this.pendingRpc.get(message.id);
@@ -3908,20 +3917,27 @@ export class VoiceSession {
     if (!this.acp || this.acp.readyState !== WebSocket.OPEN) throw new Error("ACP connection is unavailable");
     this.acp.send(JSON.stringify(message));
     const rpc = message as JsonRpcMessage;
-    this.timing("acp.sent", { rpc_id: rpc.id, method: rpc.method, session_id: rpc.params?.sessionId });
+    // Only ACP prompt text blocks, not arbitrary params, resources, or tool payloads.
+    const prompt = rpc.method === "session/prompt" && Array.isArray(rpc.params?.prompt)
+      ? rpc.params.prompt.filter((block: any) => block?.type === "text" && typeof block.text === "string")
+        .map((block: any) => block.text).join("\n") : undefined;
+    this.timing("acp.sent", { rpc_id: rpc.id, method: rpc.method, session_id: rpc.params?.sessionId,
+      ...(prompt !== undefined ? { content_text: prompt, content_kind: "acp_prompt" } : {}) });
   }
 
   private sendLive(message: unknown): void {
     if (!this.live || this.live.readyState !== WebSocket.OPEN) return;
     const outgoing = message as { type?: string; content?: unknown };
     const lane = /^session\.(thinking|commentary|instructions)\.append$/.exec(String(outgoing.type ?? ""))?.[1];
+    const content = lane && typeof outgoing.content === "string"
+      ? { content_text: outgoing.content, content_kind: lane === "commentary" ? "say" : lane === "thinking" ? "brief" : "instructions" } : {};
     if (lane && typeof outgoing.content === "string") {
       this.feedPush("orchestrator", outgoing.content, { lane: lane === "commentary" ? "say" : lane });
     }
     // Appends wait out a playing clip and the keypad menu, so speech never talks over either.
     if ((this.fixture || this.menu) && String((message as { type?: string }).type ?? "").endsWith(".append")) {
       this.timing("live.held", { type: outgoing.type, fixture: Boolean(this.fixture), menu: Boolean(this.menu),
-        delegation_id: (message as { delegation_id?: unknown }).delegation_id });
+        delegation_id: (message as { delegation_id?: unknown }).delegation_id, ...content });
       this.heldAppends.push(message);
       return;
     }
@@ -3930,6 +3946,7 @@ export class VoiceSession {
       type: outgoing.type,
       delegation_id: (message as { delegation_id?: unknown }).delegation_id,
       chars: typeof outgoing.content === "string" ? outgoing.content.length : undefined,
+      ...content,
     });
   }
 
@@ -4186,6 +4203,11 @@ export class VoiceSession {
   private timing(event: string, detail: Record<string, unknown> = {}, tsMs = Date.now(),
     scope = { callSid: this.callSid, liveSessionId: this.liveSessionId }): void {
     if (!scope.callSid || !scope.liveSessionId) return;
+    // Private operator evidence: the admin API may expose this, never Paired Browser
+    // permissions. Bound at collection, independently of the UI's content opt-in.
+    if (typeof detail.content_text === "string") detail = { ...detail,
+      content_text: detail.content_text.slice(0, 12_000),
+      content_truncated: detail.content_text.length > 12_000 };
     this.timingRows.push({
       callSid: scope.callSid, ts: Math.floor(tsMs / 1000),
       detail: JSON.stringify({ ...detail, event, ts_ms: tsMs, clock_id: this.timingClockId,

@@ -482,7 +482,7 @@ def run_tests(
     # Operator diagnostics are independent of pairing and require operator auth
     # for the page, call discovery, and every incremental read.
     operator_headers = {"authorization": "Basic " + base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()}
-    for path in ("/admin/timing", "/admin/api/timing/calls", "/admin/api/timing?call_sid=CA_TEST2"):
+    for path in ("/admin/timing", "/admin/api/timing/calls", "/admin/api/timing?call_sid=CA_TEST2", "/admin/api/timing/content?call_sid=CA_TEST2"):
         require(get(base_url, path)[0] == 401, f"operator route is public: {path}")
         require(get(base_url, path, {"authorization": "Bearer paired-browser-credential"})[0] == 401,
                 f"operator route accepts pairing bearer: {path}")
@@ -493,6 +493,10 @@ def run_tests(
     require(status == 200 and listed["calls"] and all("*" in call["caller"] for call in listed["calls"]),
             "operator call discovery missing or caller labels unmasked")
     require(all("phone_number" not in call for call in listed["calls"]), "operator discovery exposed unmasked phone field")
+    status, body = get(base_url, "/admin/api/timing/content?call_sid=CA_TEST2", operator_headers)
+    require(status == 200 and isinstance(json.loads(body).get("entries"), list), "operator content unavailable for known call")
+    require(get(base_url, "/admin/api/timing/content?call_sid=CA_UNKNOWN", operator_headers)[0] == 404,
+            "operator content accepted unknown call")
     status, body = get(base_url, "/admin/api/timing?call_sid=CA_TEST2&after=0", operator_headers)
     page = json.loads(body)
     require(status == 200 and page["events"] and all(isinstance(row["detail"], dict) for row in page["events"]),
