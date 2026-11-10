@@ -2,6 +2,20 @@
 
 Dogwalk aims to provide the capability surface of an agentic coding-session manager, including juggling many concurrent sessions, entirely through hands-free voice with zero dependence on visual user interaction. A deliberately engineering-weak Voice Agent coordinates stronger ACP Agents running in isolated sandboxes; the diagnostic web UI exists only for iterative harness development, telemetry, and debugging, not as a required user interface.
 
+## Accessibility Ethos
+
+Dogwalk's central promise is access to a highly capable team of agents, and through them much more of the web and computing, through an ordinary voice telephone call. The benchmark is what someone could do from a payphone, a borrowed handset, or a satellite phone: sophisticated infrastructure behind an extremely modest interface. This is not merely a convenient alternative to a screen. It expands who can act, from where, and with what equipment.
+
+- Put complexity in the infrastructure, not on the caller. Preserve a useful path requiring only a low-bandwidth voice connection, without a smartphone, installed app, browser, display, or companion device.
+- Treat eyes-free operation as an end-to-end requirement, including authentication, permissions, interruptions, error recovery, and returning to ongoing work. Do not quietly introduce a visual prerequisite at the difficult parts.
+- Prefer natural conversation over memorized commands, passwords spoken aloud, or mentally demanding challenge–response rituals. Authentication still needs an explicit threat model and honest limits; accessibility is not a reason to silently bypass security.
+- Design for imperfect connections, background noise, latency, and interrupted calls. A borrowed or unfamiliar phone should not be excluded merely because it is unfamiliar.
+- Rich clients, including Android clients and experiments with alternative voice models or providers, are welcome as parallel paths. They must not redefine the minimum required equipment or displace the ordinary-telephone accessibility goal. The goal is not loyalty to PSTN or a particular provider: it is preserving access without requiring sophisticated equipment at the caller's end.
+
+When weighing a feature or architecture change, ask: does this make more capability available through an ordinary call, or does it move a new burden onto the caller?
+
+## Deployment and Development
+
 The production path is Twilio PSTN -> Cloudflare Worker access and Sandbox wake-up -> OpenAI GPT-Live over secure SIP as the Voice Frontend, with a client-delegation sideband to the sandbox-keyed Durable Object, which runs the Session Orchestrator -> ACP-over-WebSocket -> the Daytona-hosted ACP Gateway and OpenCode 2. `orchestrator_spike.py` is a text-only harness for judging Orchestrator behavior against local `opencode acp`. Run `uv run --script cf_worker/smoke_test.py`, `uv run --script cf_worker/voice_session_test.py`, and `uv run --script sandbox_acp_gateway.py test`; run `npm run typecheck` from `cf_worker/`. `cf_worker/README.md` is the operational runbook and `PSTN_CLOUDFLARE.md` records the deployed architecture. To review a call or playtest, run `uv run --script playtest.py` and follow the `call-analysis` skill (`.agents/skills/call-analysis/SKILL.md`), which holds the review checklist and the rule for when a check moves into the CLI.
 
 This is a public repository for one operator-managed deployment. It is acceptable to document public hostnames, provider resource IDs, local Keychain service names, and commands that retrieve secrets on Adam's laptop. Never commit secret values, local `.env` or `.dev.vars` files, private keys, capability tokens, signed preview URLs, or production request payloads containing them.
