@@ -1,0 +1,24 @@
+{
+  "status": "passed",
+  "models": [
+    "ecapa",
+    "cam",
+    "cam-pt",
+    "redim-b3",
+    "redim-b6"
+  ],
+  "checks": [
+    "nine unique WAV hashes",
+    "36 common processed inputs",
+    "90 identical trials per duration",
+    "180 scored pairs per model",
+    "first3 contains exactly 48000 samples",
+    "finite bounded cosine",
+    "summary gaps and counts recomputed",
+    "full ECAPA matches original scores.json within 1e-7"
+  ],
+  "trial_sha256": "19717410e4d92c69e701417cf314167fbbfbb877049eb7756ee4020746e50177",
+  "report_sha256": "c5063e83443b16725e07c8d5e2c9d271f9cf0e4a15b8a315e63137eb2b5d099b",
+  "rerun_max_cosine_delta": 0.0,
+  "rerun_sha256": "f61a99595c7ffc940d6408160a17d571e773ea406349c8a6dc8fb344c2338ca6"
+}

@@ -1,0 +1,205 @@
+{
+  "model": "mlx-community/Breeze-TTS-2-mlx-4bit",
+  "revision": "3a06d26b172ea4ae1da2f42d708383e9c79d5526",
+  "python": "3.11.12",
+  "versions": {
+    "mlx": "0.32.2",
+    "mlx-audio": "0.5.3",
+    "transformers": "5.16.1",
+    "soundfile": "0.14.0"
+  },
+  "device": "Device(gpu, 0)",
+  "sample_rate": 24000,
+  "load_seconds": 3.187495750025846,
+  "selection": "Three designed identities, no human audition or transcript verification",
+  "license": "Research/noncommercial Breeze weights and outputs",
+  "clips": [
+    {
+      "speaker": "baritone",
+      "take": 0,
+      "request": {
+        "text": "The morning train arrives beside the river. I have brought a notebook to record what we discover along the way.",
+        "seed": 1701,
+        "cfg_scale": 4,
+        "max_tokens": 350,
+        "voice": "S0",
+        "instruct": "An adult masculine low baritone, warm grainy resonance, neutral American accent, deliberate conversational pacing and crisp consonants. Clean dry close-miked speech. No music, effects, whispering, laughter or shouting."
+      },
+      "path": "artifacts/audio/baritone-0.wav",
+      "sha256": "4304b9e073764231a60da07927b03cfedb3919faaf2be309eacb731e6a75a557",
+      "anchor_sha256": "4304b9e073764231a60da07927b03cfedb3919faaf2be309eacb731e6a75a557",
+      "seconds": 7.44,
+      "wall_seconds": 14.174990916042589,
+      "peak": 0.49544358253479004,
+      "token_count": 93,
+      "possibly_truncated": false
+    },
+    {
+      "speaker": "baritone",
+      "take": 1,
+      "request": {
+        "text": "Please leave the package on the kitchen table. After lunch we can walk through the garden and check the weather together.",
+        "seed": 1720,
+        "cfg_scale": 4,
+        "max_tokens": 350,
+        "voice": "S0",
+        "ref_audio": "artifacts/audio/baritone-0.wav",
+        "ref_text": "The morning train arrives beside the river. I have brought a notebook to record what we discover along the way."
+      },
+      "path": "artifacts/audio/baritone-1.wav",
+      "sha256": "9eff23248675eacb8782c5484ce95cdfbfd0200c008bcfcbd8ca75ee63381198",
+      "anchor_sha256": "4304b9e073764231a60da07927b03cfedb3919faaf2be309eacb731e6a75a557",
+      "seconds": 7.2,
+      "wall_seconds": 7.958331875037402,
+      "peak": 0.5419088006019592,
+      "token_count": 90,
+      "possibly_truncated": false
+    },
+    {
+      "speaker": "baritone",
+      "take": 2,
+      "request": {
+        "text": "Yesterday I found a small blue umbrella near the library. Tomorrow I will ask the neighbors whether anyone has lost it.",
+        "seed": 1739,
+        "cfg_scale": 4,
+        "max_tokens": 350,
+        "voice": "S0",
+        "ref_audio": "artifacts/audio/baritone-0.wav",
+        "ref_text": "The morning train arrives beside the river. I have brought a notebook to record what we discover along the way."
+      },
+      "path": "artifacts/audio/baritone-2.wav",
+      "sha256": "98a248ce9ebc35b740c7457c567d705e1770b634656b76c5ca271e262b2913b3",
+      "anchor_sha256": "4304b9e073764231a60da07927b03cfedb3919faaf2be309eacb731e6a75a557",
+      "seconds": 9.12,
+      "wall_seconds": 9.738054417073727,
+      "peak": 0.45422184467315674,
+      "token_count": 114,
+      "possibly_truncated": false
+    },
+    {
+      "speaker": "bright",
+      "take": 0,
+      "request": {
+        "text": "The morning train arrives beside the river. I have brought a notebook to record what we discover along the way.",
+        "seed": 2701,
+        "cfg_scale": 4,
+        "max_tokens": 350,
+        "voice": "S0",
+        "instruct": "An adult feminine high mezzo voice, bright forward resonance, neutral American accent, nimble articulation and lively conversational rhythm. Clean dry close-miked speech. No music, effects, whispering, laughter or shouting."
+      },
+      "path": "artifacts/audio/bright-0.wav",
+      "sha256": "bfc955f61cf62880c1db5c5c2626adf2baff7c3c6aa60edcb346eb3db5f5ee16",
+      "anchor_sha256": "bfc955f61cf62880c1db5c5c2626adf2baff7c3c6aa60edcb346eb3db5f5ee16",
+      "seconds": 6.16,
+      "wall_seconds": 11.581287499982864,
+      "peak": 0.5447851419448853,
+      "token_count": 77,
+      "possibly_truncated": false
+    },
+    {
+      "speaker": "bright",
+      "take": 1,
+      "request": {
+        "text": "Please leave the package on the kitchen table. After lunch we can walk through the garden and check the weather together.",
+        "seed": 2720,
+        "cfg_scale": 4,
+        "max_tokens": 350,
+        "voice": "S0",
+        "ref_audio": "artifacts/audio/bright-0.wav",
+        "ref_text": "The morning train arrives beside the river. I have brought a notebook to record what we discover along the way."
+      },
+      "path": "artifacts/audio/bright-1.wav",
+      "sha256": "e520881970a8c2c33b66da30bd758b7fa11d4f0e9ced1a0b5446f8bd6e3142d5",
+      "anchor_sha256": "bfc955f61cf62880c1db5c5c2626adf2baff7c3c6aa60edcb346eb3db5f5ee16",
+      "seconds": 9.04,
+      "wall_seconds": 9.703356957994401,
+      "peak": 0.40335866808891296,
+      "token_count": 113,
+      "possibly_truncated": false
+    },
+    {
+      "speaker": "bright",
+      "take": 2,
+      "request": {
+        "text": "Yesterday I found a small blue umbrella near the library. Tomorrow I will ask the neighbors whether anyone has lost it.",
+        "seed": 2739,
+        "cfg_scale": 4,
+        "max_tokens": 350,
+        "voice": "S0",
+        "ref_audio": "artifacts/audio/bright-0.wav",
+        "ref_text": "The morning train arrives beside the river. I have brought a notebook to record what we discover along the way."
+      },
+      "path": "artifacts/audio/bright-2.wav",
+      "sha256": "9abd0217acc1a3a5a29690934d47a0aee0afd23bf35193e7232209731207ac06",
+      "anchor_sha256": "bfc955f61cf62880c1db5c5c2626adf2baff7c3c6aa60edcb346eb3db5f5ee16",
+      "seconds": 9.52,
+      "wall_seconds": 10.193665000027977,
+      "peak": 0.6323422193527222,
+      "token_count": 119,
+      "possibly_truncated": false
+    },
+    {
+      "speaker": "contralto",
+      "take": 0,
+      "request": {
+        "text": "The morning train arrives beside the river. I have brought a notebook to record what we discover along the way.",
+        "seed": 3701,
+        "cfg_scale": 4,
+        "max_tokens": 350,
+        "voice": "S0",
+        "instruct": "An older adult feminine low contralto, dark smooth resonance, light southern English accent, measured precise diction and relaxed conversational pacing. Clean dry close-miked speech. No music, effects, whispering, laughter or shouting."
+      },
+      "path": "artifacts/audio/contralto-0.wav",
+      "sha256": "cffcaef01862823727bd3e0864e75fb4231996f234b4310dee7e422ff304b89c",
+      "anchor_sha256": "cffcaef01862823727bd3e0864e75fb4231996f234b4310dee7e422ff304b89c",
+      "seconds": 7.92,
+      "wall_seconds": 15.319080708897673,
+      "peak": 0.2308337539434433,
+      "token_count": 99,
+      "possibly_truncated": false
+    },
+    {
+      "speaker": "contralto",
+      "take": 1,
+      "request": {
+        "text": "Please leave the package on the kitchen table. After lunch we can walk through the garden and check the weather together.",
+        "seed": 3720,
+        "cfg_scale": 4,
+        "max_tokens": 350,
+        "voice": "S0",
+        "ref_audio": "artifacts/audio/contralto-0.wav",
+        "ref_text": "The morning train arrives beside the river. I have brought a notebook to record what we discover along the way."
+      },
+      "path": "artifacts/audio/contralto-1.wav",
+      "sha256": "108a88783e36cefb83fa81118ef3d3e66b95ebbca0e986aa5e446578c31bbb73",
+      "anchor_sha256": "cffcaef01862823727bd3e0864e75fb4231996f234b4310dee7e422ff304b89c",
+      "seconds": 7.68,
+      "wall_seconds": 8.143635499989614,
+      "peak": 0.23868803679943085,
+      "token_count": 96,
+      "possibly_truncated": false
+    },
+    {
+      "speaker": "contralto",
+      "take": 2,
+      "request": {
+        "text": "Yesterday I found a small blue umbrella near the library. Tomorrow I will ask the neighbors whether anyone has lost it.",
+        "seed": 3739,
+        "cfg_scale": 4,
+        "max_tokens": 350,
+        "voice": "S0",
+        "ref_audio": "artifacts/audio/contralto-0.wav",
+        "ref_text": "The morning train arrives beside the river. I have brought a notebook to record what we discover along the way."
+      },
+      "path": "artifacts/audio/contralto-2.wav",
+      "sha256": "70e53ce78137c4739f975115f7d828da06033013930fcdfae5712e522bd67c07",
+      "anchor_sha256": "cffcaef01862823727bd3e0864e75fb4231996f234b4310dee7e422ff304b89c",
+      "seconds": 9.52,
+      "wall_seconds": 10.049251958029345,
+      "peak": 0.18143106997013092,
+      "token_count": 119,
+      "possibly_truncated": false
+    }
+  ],
+  "total_seconds": 100.24792166601401
+}

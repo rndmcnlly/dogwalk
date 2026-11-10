@@ -1,0 +1,23 @@
+name = "dogwalk-redimnet-b3-experiment"
+account_id = "890753ccd6f0bbbfbe2c030cc44f6a87"
+main = ".worker/index.js"
+compatibility_date = "2026-01-01"
+workers_dev = true
+preview_urls = false
+no_bundle = true
+
+# Personal account currently uses Workers Free: 10 ms CPU, no cpu_ms override.
+# Do not upgrade its subscription automatically for this experiment.
+
+[observability]
+enabled = false
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
+
+[[rules]]
+type = "Data"
+globs = ["**/*.onnx"]
+fallthrough = true

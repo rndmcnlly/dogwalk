@@ -1,0 +1,3159 @@
+{
+  "python": "3.11.12",
+  "platform": "macOS-27.0.1-arm64-arm-64bit",
+  "device": "cpu",
+  "torch_threads": 4,
+  "interop_threads": 1,
+  "timing_repeats": 3,
+  "versions": {
+    "speechbrain": "1.0.3",
+    "torch": "2.8.0",
+    "torchaudio": "2.8.0",
+    "huggingface-hub": "0.36.0",
+    "numpy": "2.2.6",
+    "scipy": "1.16.3",
+    "soundfile": "0.14.0",
+    "onnxruntime": "1.23.2"
+  },
+  "generation_manifest_sha256": "5e32134d53a20a707795dba62521e67b082e83379854656173fabb622ae1fd4a",
+  "script_sha256": "91eeb252ca0b5033dd4bb8ee95de436009afde5b7764c9098d7474f2da86acf0",
+  "preprocessing_script_sha256": "0153e487d78a7b07670cb7f4c11e3e90e7c1048459cd37742cc21ec1700e64d1",
+  "audio_sha256": {
+    "baritone-0": "4304b9e073764231a60da07927b03cfedb3919faaf2be309eacb731e6a75a557",
+    "baritone-1": "9eff23248675eacb8782c5484ce95cdfbfd0200c008bcfcbd8ca75ee63381198",
+    "baritone-2": "98a248ce9ebc35b740c7457c567d705e1770b634656b76c5ca271e262b2913b3",
+    "bright-0": "bfc955f61cf62880c1db5c5c2626adf2baff7c3c6aa60edcb346eb3db5f5ee16",
+    "bright-1": "e520881970a8c2c33b66da30bd758b7fa11d4f0e9ced1a0b5446f8bd6e3142d5",
+    "bright-2": "9abd0217acc1a3a5a29690934d47a0aee0afd23bf35193e7232209731207ac06",
+    "contralto-0": "cffcaef01862823727bd3e0864e75fb4231996f234b4310dee7e422ff304b89c",
+    "contralto-1": "108a88783e36cefb83fa81118ef3d3e66b95ebbca0e986aa5e446578c31bbb73",
+    "contralto-2": "70e53ce78137c4739f975115f7d828da06033013930fcdfae5712e522bd67c07"
+  },
+  "input_sha256": {
+    "baritone-0/clean/full": "3e29b3f54d946df97a566ede9d1d745a3676424164c0f75e3c45d41828570976",
+    "baritone-0/clean/first3": "157c68c6749638f323a47193c67128fc1c59570bd520f4398bfb2461a3fc083f",
+    "baritone-0/telephone/full": "c8b3f21e2ee95fc665b88a987fb4bf472b77fae3aaea896b952fbeee67193daa",
+    "baritone-0/telephone/first3": "4efe0a8c26a357cc2675edf432906916a62d59414207c908d52e0d54b67254b9",
+    "baritone-1/clean/full": "9f413fef2940fb819947494ad7ea120080172519de544d2a69bcda927a6b5314",
+    "baritone-1/clean/first3": "6a5725e6934f265ac371633d73ee3df0fbafcf37227a9dfa9d2d61caef1f7a9a",
+    "baritone-1/telephone/full": "05d20f17b0f62364fc2579c5556e45c5ea70f586719693738372686ee257d585",
+    "baritone-1/telephone/first3": "95fdb875e074fcceead6c04ce656f3491e912f7e8d1555bff4e74b4ce5d149bd",
+    "baritone-2/clean/full": "a85833a0eb079c70fdd84db902618c7d3c4cbaa9b03a9bedc04e070f0a56a87f",
+    "baritone-2/clean/first3": "963c7674e35d6d0ba8aa441ae7376315937c3d3c687d774062132ef63083f891",
+    "baritone-2/telephone/full": "1416610beb886b04b1c44f289b84470eb479275c14113da386784de15b3bd8cb",
+    "baritone-2/telephone/first3": "794c0e9c9186d08c82412008ebb2630f5012254a6662ad0c1710d46403d3adf8",
+    "bright-0/clean/full": "8678c564e0494fe013bfa103be56af6b724ff284a4b5a5a20b444f249f71afa1",
+    "bright-0/clean/first3": "ace4638211feab7576dc0244f14a622953015347224e4499fd3a86f32e72f947",
+    "bright-0/telephone/full": "4ffee0bd994699cb2fed63d5896bb249c9b9c0be24271fa9d5fb99629874d64e",
+    "bright-0/telephone/first3": "ebc848bfdc430b0d64e8d19ea4a05318297df8495d8f3c380ee122fc8d10fca5",
+    "bright-1/clean/full": "953816e4380dee1d91fc61acf2daa8b5d954e49b20d7396c1361bc1c8492742a",
+    "bright-1/clean/first3": "95d8ff6e204cbf088952112197abd4ad824d1e0f50c7a459aa858b29ac22dce9",
+    "bright-1/telephone/full": "9407d8b8f2a7be5d3d100f06a53d20e304e9ed7416ccb043ed58167d351999c7",
+    "bright-1/telephone/first3": "261c332f8667aeee450e7b778f433e526abeb123c6c88dff40856f5932431da2",
+    "bright-2/clean/full": "bed799a3d9d65df82745c62b2391c0f9f3d67fc61b8a3a5809469f7935ed2e27",
+    "bright-2/clean/first3": "49dadada24e76cadde57117d52c4296b0df03d246fe0f508dcf244aa5d39585b",
+    "bright-2/telephone/full": "173666d8b2898b86fc0d198bbf43465f772522f157d5ec59f9948d3f1488c1f9",
+    "bright-2/telephone/first3": "bdf11a7cd556ff66b93ebe314902921fd104025a11f79b5ef9fab8a21c0377b8",
+    "contralto-0/clean/full": "867fe93e09f03a7d1354a5c79cfd48ff460f8a1de227ca0bd09a0de5210039ab",
+    "contralto-0/clean/first3": "b988dcc1f3979cd65dbe021957ec7ff7fb6845383b289668947d67ae13155580",
+    "contralto-0/telephone/full": "0ad6f27ceb2257877957dad6c74852b20202874a08451885e25b210cd0f5a42c",
+    "contralto-0/telephone/first3": "1662180c9aae848628b523aac55352d5b51e0159b62c7c450f4f59487f340548",
+    "contralto-1/clean/full": "701a575fa9d6a38f666a466cc194e7936b751594388fe279ba7f47ec62c7b626",
+    "contralto-1/clean/first3": "3107dbacccc9e229c7197aae2d17bd3c2f48cd9428c20a606428492c646aaa90",
+    "contralto-1/telephone/full": "0f223f9c1c73a9a43624dd2675b6fcf3967cdbdcd83e2fcbf46882ea90a2cc47",
+    "contralto-1/telephone/first3": "f69086891f2edb53efc2340f20f362fdeade46ac88af0e3d1e84cbaa4b447e40",
+    "contralto-2/clean/full": "e4e67e67a3499459f8de456c284a8e1ae9e2a1300dd79fe117e6d9f4d8fde054",
+    "contralto-2/clean/first3": "e5f90c18d9a9e8637dd9a4ac3a181c1e52551ad3ddf89921466365985696cc11",
+    "contralto-2/telephone/full": "10908fc16a1e90d21409dd8a7a320e81489a9714ae8a31c87d84d3a586cc8a9a",
+    "contralto-2/telephone/first3": "ba1f8e3e43692830bb852c682f124c0d7bbd4cfd3ab4aa5c4fe13f441c600bec"
+  },
+  "preprocess_seconds": 0.0852641670498997,
+  "trials": [
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "baritone-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": true
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "baritone-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": true
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "bright-0",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "bright-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "bright-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "contralto-0",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "contralto-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "contralto-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "baritone-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": true
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "bright-0",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "bright-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "bright-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "contralto-0",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "contralto-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "contralto-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "bright-0",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "bright-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "bright-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "contralto-0",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "contralto-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "contralto-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "bright-0",
+      "b": "bright-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": true
+    },
+    {
+      "condition": "clean",
+      "a": "bright-0",
+      "b": "bright-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": true
+    },
+    {
+      "condition": "clean",
+      "a": "bright-0",
+      "b": "contralto-0",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "bright-0",
+      "b": "contralto-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "bright-0",
+      "b": "contralto-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "bright-1",
+      "b": "bright-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": true
+    },
+    {
+      "condition": "clean",
+      "a": "bright-1",
+      "b": "contralto-0",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "bright-1",
+      "b": "contralto-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "bright-1",
+      "b": "contralto-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "bright-2",
+      "b": "contralto-0",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "bright-2",
+      "b": "contralto-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "bright-2",
+      "b": "contralto-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": false
+    },
+    {
+      "condition": "clean",
+      "a": "contralto-0",
+      "b": "contralto-1",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": true
+    },
+    {
+      "condition": "clean",
+      "a": "contralto-0",
+      "b": "contralto-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": true
+    },
+    {
+      "condition": "clean",
+      "a": "contralto-1",
+      "b": "contralto-2",
+      "a_channel": "clean",
+      "b_channel": "clean",
+      "genuine": true
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "baritone-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "baritone-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "bright-0",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "bright-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "bright-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "contralto-0",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "contralto-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "contralto-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "baritone-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "bright-0",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "bright-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "bright-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "contralto-0",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "contralto-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "contralto-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "bright-0",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "bright-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "bright-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "contralto-0",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "contralto-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "contralto-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-0",
+      "b": "bright-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-0",
+      "b": "bright-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-0",
+      "b": "contralto-0",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-0",
+      "b": "contralto-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-0",
+      "b": "contralto-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-1",
+      "b": "bright-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-1",
+      "b": "contralto-0",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-1",
+      "b": "contralto-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-1",
+      "b": "contralto-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-2",
+      "b": "contralto-0",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-2",
+      "b": "contralto-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-2",
+      "b": "contralto-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "telephone",
+      "a": "contralto-0",
+      "b": "contralto-1",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "telephone",
+      "a": "contralto-0",
+      "b": "contralto-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "telephone",
+      "a": "contralto-1",
+      "b": "contralto-2",
+      "a_channel": "telephone",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "baritone-1",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "baritone-2",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "bright-1",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "bright-2",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "contralto-1",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "contralto-2",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "baritone-1",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "baritone-2",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "bright-1",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "bright-2",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "contralto-1",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "contralto-2",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "baritone-1",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "baritone-2",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "bright-1",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "bright-2",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": false
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "contralto-1",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": true
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "contralto-2",
+      "a_channel": "clean",
+      "b_channel": "telephone",
+      "genuine": true
+    }
+  ],
+  "trial_sha256": "19717410e4d92c69e701417cf314167fbbfbb877049eb7756ee4020746e50177",
+  "models": {
+    "cam-pt": {
+      "model": "Wespeaker/wespeaker-voxceleb-campplus",
+      "revision": "acf623ad8ca746e50baa432255cf8fc57c669c45",
+      "runtime": "PyTorch CPU",
+      "checkpoint_sha256": {
+        "voxceleb_CAM++.onnx": "b50810498b5bcf5773d086f6993d344476bd0c88b566a41e8d801aaf8461efad"
+      },
+      "checkpoint_bytes": 29292449,
+      "frontend": "80-bin Kaldi fbank, PCM scale 32768, 25/10 ms, hamming, dither=0, utterance CMN",
+      "frontend_reference": "wenet-e2e/wespeaker@9fecd6cb4f47475d01761d87c826298dff4ef18c/wespeaker/bin/infer_onnx.py",
+      "license": "HF card Apache-2.0; WeSpeaker pretrained policy separately follows VoxCeleb CC BY 4.0",
+      "pytorch_checkpoint_sha256": "07abeeb5150441995b51ea65c9ccc8feed78b33040012f1d2fad29a0e4f5b8d7",
+      "pytorch_checkpoint_bytes": 66210861,
+      "removed_training_projection_shape": [
+        17982,
+        512
+      ],
+      "source_revision": "9fecd6cb4f47475d01761d87c826298dff4ef18c",
+      "source_sha256": {
+        "wespeaker/__init__.py": "77203c422743d5c90d49c8a02d08289dd7949946df397169288a49fad01b7fe6",
+        "wespeaker/models/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "wespeaker/models/pooling_layers.py": "0482b9de52983a7ad3fd2d76dfebd001a4c5ee7e6c3418eb017352d5d1a85b50",
+        "wespeaker/models/multi_view_attention.py": "a103182ea46ca3fcab807d7e6dda73bd9e5fa39466e37d7a7c22577f878e95ef",
+        "wespeaker/models/campplus.py": "b1d6a3c39cdb9d85db8d7a7fe1885c39f6644663fd465db2592d2a63ed3a0d08"
+      },
+      "parity": [
+        {
+          "frames": 298,
+          "max_abs_difference": 12.506247520446777,
+          "cosine": 0.0636046826839447
+        },
+        {
+          "frames": 700,
+          "max_abs_difference": 8.109618186950684,
+          "cosine": 0.0570206493139267
+        }
+      ],
+      "load_seconds_including_resolution_download": 0.5185386249795556,
+      "warmup_seconds": 0.018919917056337,
+      "status": "ok",
+      "summary": {
+        "full": {
+          "clean": {
+            "genuine_n": 9,
+            "impostor_n": 27,
+            "genuine_min": 0.7256615161895752,
+            "genuine_mean": 0.8033845689561632,
+            "genuine_max": 0.8786206245422363,
+            "impostor_min": -0.019538139924407005,
+            "impostor_mean": 0.13084258180525568,
+            "impostor_max": 0.24609535932540894,
+            "sample_gap": 0.47956615686416626
+          },
+          "telephone": {
+            "genuine_n": 9,
+            "impostor_n": 27,
+            "genuine_min": 0.6983740925788879,
+            "genuine_mean": 0.781329956319597,
+            "genuine_max": 0.860210120677948,
+            "impostor_min": -0.019956499338150024,
+            "impostor_mean": 0.10732778642947476,
+            "impostor_max": 0.22418324649333954,
+            "sample_gap": 0.4741908460855484
+          },
+          "clean_anchor_telephone_query": {
+            "genuine_n": 6,
+            "impostor_n": 12,
+            "genuine_min": 0.5215439796447754,
+            "genuine_mean": 0.6038713753223419,
+            "genuine_max": 0.7113173007965088,
+            "impostor_min": -0.08619378507137299,
+            "impostor_mean": 0.055971252266317606,
+            "impostor_max": 0.2105562388896942,
+            "sample_gap": 0.3109877407550812
+          }
+        },
+        "first3": {
+          "clean": {
+            "genuine_n": 9,
+            "impostor_n": 27,
+            "genuine_min": 0.5637421011924744,
+            "genuine_mean": 0.6568279133902656,
+            "genuine_max": 0.7347869873046875,
+            "impostor_min": -0.11346006393432617,
+            "impostor_mean": 0.1340271185186726,
+            "impostor_max": 0.2687719464302063,
+            "sample_gap": 0.29497015476226807
+          },
+          "telephone": {
+            "genuine_n": 9,
+            "impostor_n": 27,
+            "genuine_min": 0.4672636389732361,
+            "genuine_mean": 0.6229174402025011,
+            "genuine_max": 0.7123430967330933,
+            "impostor_min": -0.02815871685743332,
+            "impostor_mean": 0.11048459965321752,
+            "impostor_max": 0.20967747271060944,
+            "sample_gap": 0.25758616626262665
+          },
+          "clean_anchor_telephone_query": {
+            "genuine_n": 6,
+            "impostor_n": 12,
+            "genuine_min": 0.3852989673614502,
+            "genuine_mean": 0.47687779863675434,
+            "genuine_max": 0.5943384170532227,
+            "impostor_min": -0.09392978996038437,
+            "impostor_mean": 0.0743046667582045,
+            "impostor_max": 0.18940390646457672,
+            "sample_gap": 0.19589506089687347
+          }
+        }
+      },
+      "audio": [
+        {
+          "clip": "baritone-0",
+          "channel": "clean",
+          "duration": "full",
+          "samples": 119040,
+          "dimension": 512,
+          "seconds": [
+            0.033080541994422674,
+            0.03247012500651181,
+            0.030788791947998106
+          ]
+        },
+        {
+          "clip": "baritone-0",
+          "channel": "clean",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.01572766702156514,
+            0.016851125052198768,
+            0.019699750002473593
+          ]
+        },
+        {
+          "clip": "baritone-0",
+          "channel": "telephone",
+          "duration": "full",
+          "samples": 119040,
+          "dimension": 512,
+          "seconds": [
+            0.03329454199410975,
+            0.03221350000239909,
+            0.03246858308557421
+          ]
+        },
+        {
+          "clip": "baritone-0",
+          "channel": "telephone",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.017812625039368868,
+            0.017602917039766908,
+            0.017617875011637807
+          ]
+        },
+        {
+          "clip": "baritone-1",
+          "channel": "clean",
+          "duration": "full",
+          "samples": 115200,
+          "dimension": 512,
+          "seconds": [
+            0.03164279193151742,
+            0.030456000007689,
+            0.03227245796006173
+          ]
+        },
+        {
+          "clip": "baritone-1",
+          "channel": "clean",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.01862166600767523,
+            0.017888791975565255,
+            0.017349916975945234
+          ]
+        },
+        {
+          "clip": "baritone-1",
+          "channel": "telephone",
+          "duration": "full",
+          "samples": 115200,
+          "dimension": 512,
+          "seconds": [
+            0.030239166924729943,
+            0.030413541942834854,
+            0.030673458939418197
+          ]
+        },
+        {
+          "clip": "baritone-1",
+          "channel": "telephone",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.017525458009913564,
+            0.017400291981175542,
+            0.017200332949869335
+          ]
+        },
+        {
+          "clip": "baritone-2",
+          "channel": "clean",
+          "duration": "full",
+          "samples": 145920,
+          "dimension": 512,
+          "seconds": [
+            0.03675391699653119,
+            0.036823582951910794,
+            0.038218499976210296
+          ]
+        },
+        {
+          "clip": "baritone-2",
+          "channel": "clean",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.0208747920114547,
+            0.01787699991837144,
+            0.017168082995340228
+          ]
+        },
+        {
+          "clip": "baritone-2",
+          "channel": "telephone",
+          "duration": "full",
+          "samples": 145920,
+          "dimension": 512,
+          "seconds": [
+            0.035574750043451786,
+            0.0361415829975158,
+            0.03750574996229261
+          ]
+        },
+        {
+          "clip": "baritone-2",
+          "channel": "telephone",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.018413125071674585,
+            0.01762695808429271,
+            0.01745812501758337
+          ]
+        },
+        {
+          "clip": "bright-0",
+          "channel": "clean",
+          "duration": "full",
+          "samples": 98560,
+          "dimension": 512,
+          "seconds": [
+            0.02807275007944554,
+            0.028138249996118248,
+            0.02798929193522781
+          ]
+        },
+        {
+          "clip": "bright-0",
+          "channel": "clean",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.01762516691815108,
+            0.01737079198937863,
+            0.01731625001411885
+          ]
+        },
+        {
+          "clip": "bright-0",
+          "channel": "telephone",
+          "duration": "full",
+          "samples": 98560,
+          "dimension": 512,
+          "seconds": [
+            0.02822545904200524,
+            0.02820429194252938,
+            0.02883929095696658
+          ]
+        },
+        {
+          "clip": "bright-0",
+          "channel": "telephone",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.01819983299355954,
+            0.017617917037568986,
+            0.017474499996751547
+          ]
+        },
+        {
+          "clip": "bright-1",
+          "channel": "clean",
+          "duration": "full",
+          "samples": 144640,
+          "dimension": 512,
+          "seconds": [
+            0.0356166249839589,
+            0.03564616700168699,
+            0.035456250072456896
+          ]
+        },
+        {
+          "clip": "bright-1",
+          "channel": "clean",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.017561832908540964,
+            0.017482624971307814,
+            0.01745929103344679
+          ]
+        },
+        {
+          "clip": "bright-1",
+          "channel": "telephone",
+          "duration": "full",
+          "samples": 144640,
+          "dimension": 512,
+          "seconds": [
+            0.037328667007386684,
+            0.04044908401556313,
+            0.03910804202314466
+          ]
+        },
+        {
+          "clip": "bright-1",
+          "channel": "telephone",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.02020904200617224,
+            0.019577000057324767,
+            0.01991629204712808
+          ]
+        },
+        {
+          "clip": "bright-2",
+          "channel": "clean",
+          "duration": "full",
+          "samples": 152320,
+          "dimension": 512,
+          "seconds": [
+            0.040609957999549806,
+            0.04053175006993115,
+            0.04075691697653383
+          ]
+        },
+        {
+          "clip": "bright-2",
+          "channel": "clean",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.019704250036738813,
+            0.021908250055275857,
+            0.024247542023658752
+          ]
+        },
+        {
+          "clip": "bright-2",
+          "channel": "telephone",
+          "duration": "full",
+          "samples": 152320,
+          "dimension": 512,
+          "seconds": [
+            0.04159304092172533,
+            0.04047762497793883,
+            0.04044245800469071
+          ]
+        },
+        {
+          "clip": "bright-2",
+          "channel": "telephone",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.019680750090628862,
+            0.019628125010058284,
+            0.019545292016118765
+          ]
+        },
+        {
+          "clip": "contralto-0",
+          "channel": "clean",
+          "duration": "full",
+          "samples": 126720,
+          "dimension": 512,
+          "seconds": [
+            0.03485933400224894,
+            0.03640737500973046,
+            0.03784808295313269
+          ]
+        },
+        {
+          "clip": "contralto-0",
+          "channel": "clean",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.019216540968045592,
+            0.019023665925487876,
+            0.02165891695767641
+          ]
+        },
+        {
+          "clip": "contralto-0",
+          "channel": "telephone",
+          "duration": "full",
+          "samples": 126720,
+          "dimension": 512,
+          "seconds": [
+            0.03862775000743568,
+            0.039298249990679324,
+            0.038454749970696867
+          ]
+        },
+        {
+          "clip": "contralto-0",
+          "channel": "telephone",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.020970124984160066,
+            0.021258457913063467,
+            0.021379707963205874
+          ]
+        },
+        {
+          "clip": "contralto-1",
+          "channel": "clean",
+          "duration": "full",
+          "samples": 122880,
+          "dimension": 512,
+          "seconds": [
+            0.036157957976683974,
+            0.034677666961215436,
+            0.03475729108322412
+          ]
+        },
+        {
+          "clip": "contralto-1",
+          "channel": "clean",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.0194312910316512,
+            0.019158750073984265,
+            0.01870787504594773
+          ]
+        },
+        {
+          "clip": "contralto-1",
+          "channel": "telephone",
+          "duration": "full",
+          "samples": 122880,
+          "dimension": 512,
+          "seconds": [
+            0.03587000002153218,
+            0.03233783401083201,
+            0.03280054195784032
+          ]
+        },
+        {
+          "clip": "contralto-1",
+          "channel": "telephone",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.017874250072054565,
+            0.01768483396153897,
+            0.017599000013433397
+          ]
+        },
+        {
+          "clip": "contralto-2",
+          "channel": "clean",
+          "duration": "full",
+          "samples": 152320,
+          "dimension": 512,
+          "seconds": [
+            0.0358582918997854,
+            0.0382834579795599,
+            0.03692016692366451
+          ]
+        },
+        {
+          "clip": "contralto-2",
+          "channel": "clean",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.01798891695216298,
+            0.019827333046123385,
+            0.02085670898668468
+          ]
+        },
+        {
+          "clip": "contralto-2",
+          "channel": "telephone",
+          "duration": "full",
+          "samples": 152320,
+          "dimension": 512,
+          "seconds": [
+            0.03749437490478158,
+            0.03744975000154227,
+            0.03688745794352144
+          ]
+        },
+        {
+          "clip": "contralto-2",
+          "channel": "telephone",
+          "duration": "first3",
+          "samples": 48000,
+          "dimension": 512,
+          "seconds": [
+            0.01840479194652289,
+            0.01797366701066494,
+            0.017713750014081597
+          ]
+        }
+      ],
+      "pairs": [
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "baritone-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.8254677653312683
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "baritone-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.8301799297332764
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "bright-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.20138782262802124
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.20879045128822327
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.24609535932540894
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.08917717635631561
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.1974068284034729
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.0683290958404541
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "baritone-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.76198810338974
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "bright-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.16694554686546326
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.15276455879211426
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.23206548392772675
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.1325964480638504
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.182979017496109
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.12182505428791046
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "bright-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.15976719558238983
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.18851660192012787
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.21288922429084778
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.11857663840055466
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.21846041083335876
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.1309698224067688
+        },
+        {
+          "condition": "clean",
+          "a": "bright-0",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.825342059135437
+        },
+        {
+          "condition": "clean",
+          "a": "bright-0",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.817665696144104
+        },
+        {
+          "condition": "clean",
+          "a": "bright-0",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.07417012751102448
+        },
+        {
+          "condition": "clean",
+          "a": "bright-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.10570220649242401
+        },
+        {
+          "condition": "clean",
+          "a": "bright-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.08090786635875702
+        },
+        {
+          "condition": "clean",
+          "a": "bright-1",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.7693765163421631
+        },
+        {
+          "condition": "clean",
+          "a": "bright-1",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": -0.019538139924407005
+        },
+        {
+          "condition": "clean",
+          "a": "bright-1",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.046171098947525024
+        },
+        {
+          "condition": "clean",
+          "a": "bright-1",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.020547444000840187
+        },
+        {
+          "condition": "clean",
+          "a": "bright-2",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.050204772502183914
+        },
+        {
+          "condition": "clean",
+          "a": "bright-2",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.09207777678966522
+        },
+        {
+          "condition": "clean",
+          "a": "bright-2",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.05296381935477257
+        },
+        {
+          "condition": "clean",
+          "a": "contralto-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.7961589097976685
+        },
+        {
+          "condition": "clean",
+          "a": "contralto-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.8786206245422363
+        },
+        {
+          "condition": "clean",
+          "a": "contralto-1",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.7256615161895752
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "baritone-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.8056154847145081
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "baritone-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.7987302541732788
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "bright-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.19134782254695892
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "bright-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.22418324649333954
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "bright-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.21642263233661652
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.13854628801345825
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.1879194676876068
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.08496447652578354
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "baritone-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.7618184685707092
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "bright-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.16089680790901184
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "bright-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.15809108316898346
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "bright-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.16728395223617554
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.10531339794397354
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.17608004808425903
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.05170552432537079
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "bright-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.15275175869464874
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "bright-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.21110227704048157
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "bright-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.18335822224617004
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.10599581152200699
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.1362372785806656
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.11081741750240326
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-0",
+          "b": "bright-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.7754406929016113
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-0",
+          "b": "bright-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.7965869903564453
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-0",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.02871992439031601
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-0",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.04908723384141922
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-0",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.007117222994565964
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-1",
+          "b": "bright-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.7497972846031189
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-1",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": -0.01225008349865675
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-1",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": -0.002527281641960144
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-1",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": -0.00499628996476531
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-2",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.017356805503368378
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-2",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.07228168845176697
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-2",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": -0.019956499338150024
+        },
+        {
+          "condition": "telephone",
+          "a": "contralto-0",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.7853962182998657
+        },
+        {
+          "condition": "telephone",
+          "a": "contralto-0",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.860210120677948
+        },
+        {
+          "condition": "telephone",
+          "a": "contralto-1",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.6983740925788879
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "baritone-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.5760073661804199
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "baritone-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.5305664539337158
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.2105562388896942
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.16368694603443146
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.16675935685634613
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.051229506731033325
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "baritone-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.1409342885017395
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "baritone-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.1134701669216156
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.6453211307525635
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.5215439796447754
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.009835809469223022
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": -0.029535362496972084
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "baritone-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.005923410877585411
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "baritone-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": 0.005799161270260811
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": -0.08081071078777313
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "full",
+          "cosine": -0.08619378507137299
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.6384720206260681
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "full",
+          "cosine": 0.7113173007965088
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "baritone-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.6997922658920288
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "baritone-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.7237957119941711
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "bright-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.25617414712905884
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.2687719464302063
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.19533120095729828
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.1307622790336609
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.17476028203964233
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.14493843913078308
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "baritone-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.6092847585678101
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "bright-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.18952667713165283
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.1969813108444214
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.20319026708602905
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.20075088739395142
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.15409955382347107
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-1",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.22862368822097778
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "bright-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.1677803099155426
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.21197544038295746
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.12953421473503113
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.12530528008937836
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.15793560445308685
+        },
+        {
+          "condition": "clean",
+          "a": "baritone-2",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.16312751173973083
+        },
+        {
+          "condition": "clean",
+          "a": "bright-0",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.6338605880737305
+        },
+        {
+          "condition": "clean",
+          "a": "bright-0",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.5839812755584717
+        },
+        {
+          "condition": "clean",
+          "a": "bright-0",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.07072475552558899
+        },
+        {
+          "condition": "clean",
+          "a": "bright-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.12686440348625183
+        },
+        {
+          "condition": "clean",
+          "a": "bright-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.16777315735816956
+        },
+        {
+          "condition": "clean",
+          "a": "bright-1",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.5637421011924744
+        },
+        {
+          "condition": "clean",
+          "a": "bright-1",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": -0.11346006393432617
+        },
+        {
+          "condition": "clean",
+          "a": "bright-1",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.03130491450428963
+        },
+        {
+          "condition": "clean",
+          "a": "bright-1",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": -0.006109914742410183
+        },
+        {
+          "condition": "clean",
+          "a": "bright-2",
+          "b": "contralto-0",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.030576493591070175
+        },
+        {
+          "condition": "clean",
+          "a": "bright-2",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.021187951788306236
+        },
+        {
+          "condition": "clean",
+          "a": "bright-2",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": -0.009698538109660149
+        },
+        {
+          "condition": "clean",
+          "a": "contralto-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.6893190145492554
+        },
+        {
+          "condition": "clean",
+          "a": "contralto-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.6728885173797607
+        },
+        {
+          "condition": "clean",
+          "a": "contralto-1",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "clean",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.7347869873046875
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "baritone-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.6492633819580078
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "baritone-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.6967217922210693
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "bright-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.2020624876022339
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "bright-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.20967747271060944
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "bright-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.17036104202270508
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.18658900260925293
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.17224104702472687
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-0",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.11495024710893631
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "baritone-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.6139228343963623
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "bright-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.1251159906387329
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "bright-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.13491755723953247
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "bright-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.18059828877449036
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.16278743743896484
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.20864897966384888
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-1",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.10896673798561096
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "bright-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.08537653088569641
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "bright-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.034494731575250626
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "bright-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.09871196746826172
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.16031251847743988
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.13564655184745789
+        },
+        {
+          "condition": "telephone",
+          "a": "baritone-2",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.14082616567611694
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-0",
+          "b": "bright-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.5141454339027405
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-0",
+          "b": "bright-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.6099052429199219
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-0",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.022707758471369743
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-0",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.08016294240951538
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-0",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.09687364101409912
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-1",
+          "b": "bright-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.4672636389732361
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-1",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": -0.02815871685743332
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-1",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.09266795963048935
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-1",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.05434369668364525
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-2",
+          "b": "contralto-0",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": -0.01930578611791134
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-2",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.05849447101354599
+        },
+        {
+          "condition": "telephone",
+          "a": "bright-2",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": -0.006986532360315323
+        },
+        {
+          "condition": "telephone",
+          "a": "contralto-0",
+          "b": "contralto-1",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.6835819482803345
+        },
+        {
+          "condition": "telephone",
+          "a": "contralto-0",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.7123430967330933
+        },
+        {
+          "condition": "telephone",
+          "a": "contralto-1",
+          "b": "contralto-2",
+          "a_channel": "telephone",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.6591095924377441
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "baritone-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.42716163396835327
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "baritone-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.4536820650100708
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.18940390646457672
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.13785862922668457
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.1324978917837143
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "baritone-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.10179716348648071
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "baritone-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.13218365609645844
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "baritone-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.12892276048660278
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.443439781665802
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.3852989673614502
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.006856340914964676
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "bright-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": -0.02466883696615696
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "baritone-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.08576495200395584
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "baritone-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": 0.10704409331083298
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "bright-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": -0.09392978996038437
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "bright-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": false,
+          "duration": "first3",
+          "cosine": -0.012074765749275684
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "contralto-1",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.5943384170532227
+        },
+        {
+          "condition": "clean_anchor_telephone_query",
+          "a": "contralto-0",
+          "b": "contralto-2",
+          "a_channel": "clean",
+          "b_channel": "telephone",
+          "genuine": true,
+          "duration": "first3",
+          "cosine": 0.5573459267616272
+        }
+      ],
+      "timing_summary": {
+        "full": {
+          "n": 54,
+          "p50_seconds": 0.035752229450736195,
+          "p95_seconds": 0.04055912284529768,
+          "total_seconds": 1.893507836270146
+        },
+        "first3": {
+          "n": 54,
+          "p50_seconds": 0.01798129198141396,
+          "p95_seconds": 0.02147743111127056,
+          "total_seconds": 1.0099698342382908
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+# Keep only the reviewed proof and documentation eligible for version control.
+# All runtime data belongs in private storage outside the repository regardless.
+*
+!.gitignore
+!README.md
+!flow.py
+!collect.py
+!stream.py

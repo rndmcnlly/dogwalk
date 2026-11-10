@@ -1,0 +1,8 @@
+{
+  "name": "dogwalk-redimnet-b3-experiment",
+  "private": true,
+  "type": "module",
+  "scripts": {"build": "node build.mjs", "build:waveform": "node build.mjs --waveform", "deploy": "npm run build && python3 personal_wrangler.py deploy --no-bundle", "deploy:waveform": "npm run build:waveform && python3 personal_wrangler.py deploy --no-bundle"},
+  "dependencies": {"onnxruntime-web": "1.24.1"},
+  "devDependencies": {"esbuild": "0.25.12", "wrangler": "4.160.0"}
+}

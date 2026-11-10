@@ -1,0 +1,929 @@
+{
+  "model": "speechbrain/spkrec-ecapa-voxceleb",
+  "revision": "0f99f2d0ebe89ac095bcc5903c4dd8f72b367286",
+  "device": "cpu",
+  "threads": 4,
+  "checkpoint_sha256": {
+    "mean_var_norm_emb.ckpt": "cd70225b05b37be64fc5a95e24395d804231d43f74b2e1e5a513db7b69b34c33",
+    "embedding_model.ckpt": "0575cb64845e6b9a10db9bcb74d5ac32b326b8dc90352671d345e2ee3d0126a2",
+    "classifier.ckpt": "fd9e3634fe68bd0a427c95e354c0c677374f62b3f434e45b78599950d860d535"
+  },
+  "python": "3.11.12",
+  "platform": "macOS-27.0.1-arm64-arm-64bit",
+  "versions": {
+    "speechbrain": "1.0.3",
+    "torch": "2.8.0",
+    "torchaudio": "2.8.0",
+    "huggingface-hub": "0.36.0",
+    "numpy": "2.2.6",
+    "scipy": "1.16.3",
+    "soundfile": "0.14.0"
+  },
+  "generation_manifest_sha256": "5e32134d53a20a707795dba62521e67b082e83379854656173fabb622ae1fd4a",
+  "load_seconds": 0.49454437498934567,
+  "total_seconds": 1.2471331669948995,
+  "model_sample_rate": 16000,
+  "summary": {
+    "clean": {
+      "genuine_n": 9,
+      "impostor_n": 27,
+      "genuine_min": 0.6923778653144836,
+      "genuine_mean": 0.7449562284681532,
+      "genuine_max": 0.8427962064743042,
+      "impostor_min": -0.07807530462741852,
+      "impostor_mean": 0.08495874223471792,
+      "impostor_max": 0.22354258596897125,
+      "sample_gap": 0.4688352793455124
+    },
+    "telephone": {
+      "genuine_n": 9,
+      "impostor_n": 27,
+      "genuine_min": 0.7197623252868652,
+      "genuine_mean": 0.7835223542319404,
+      "genuine_max": 0.8670594692230225,
+      "impostor_min": 0.16821728646755219,
+      "impostor_mean": 0.23301200844623424,
+      "impostor_max": 0.3385638892650604,
+      "sample_gap": 0.3811984360218048
+    },
+    "clean_anchor_telephone_query": {
+      "genuine_n": 6,
+      "impostor_n": 12,
+      "genuine_min": 0.4769213795661926,
+      "genuine_mean": 0.5303790271282196,
+      "genuine_max": 0.5827940106391907,
+      "impostor_min": 0.011807069182395935,
+      "impostor_mean": 0.10438080783933401,
+      "impostor_max": 0.24485230445861816,
+      "sample_gap": 0.23206907510757446
+    }
+  },
+  "audio": [
+    {
+      "speaker": "baritone",
+      "take": 0,
+      "condition": "clean",
+      "embedding_seconds": 0.03845304099377245,
+      "samples": 119040,
+      "rms": 0.0912351906299591
+    },
+    {
+      "speaker": "baritone",
+      "take": 0,
+      "condition": "telephone",
+      "embedding_seconds": 0.03293374995701015,
+      "samples": 119040,
+      "rms": 0.058732859790325165
+    },
+    {
+      "speaker": "baritone",
+      "take": 1,
+      "condition": "clean",
+      "embedding_seconds": 0.0317826250102371,
+      "samples": 115200,
+      "rms": 0.08120506256818771
+    },
+    {
+      "speaker": "baritone",
+      "take": 1,
+      "condition": "telephone",
+      "embedding_seconds": 0.03140320896636695,
+      "samples": 115200,
+      "rms": 0.051456570625305176
+    },
+    {
+      "speaker": "baritone",
+      "take": 2,
+      "condition": "clean",
+      "embedding_seconds": 0.04297458298970014,
+      "samples": 145920,
+      "rms": 0.09829381108283997
+    },
+    {
+      "speaker": "baritone",
+      "take": 2,
+      "condition": "telephone",
+      "embedding_seconds": 0.03792370797600597,
+      "samples": 145920,
+      "rms": 0.04250505194067955
+    },
+    {
+      "speaker": "bright",
+      "take": 0,
+      "condition": "clean",
+      "embedding_seconds": 0.02895037503913045,
+      "samples": 98560,
+      "rms": 0.06603959202766418
+    },
+    {
+      "speaker": "bright",
+      "take": 0,
+      "condition": "telephone",
+      "embedding_seconds": 0.0288878750288859,
+      "samples": 98560,
+      "rms": 0.06483373045921326
+    },
+    {
+      "speaker": "bright",
+      "take": 1,
+      "condition": "clean",
+      "embedding_seconds": 0.037421499961055815,
+      "samples": 144640,
+      "rms": 0.030587654560804367
+    },
+    {
+      "speaker": "bright",
+      "take": 1,
+      "condition": "telephone",
+      "embedding_seconds": 0.03738037496805191,
+      "samples": 144640,
+      "rms": 0.030138449743390083
+    },
+    {
+      "speaker": "bright",
+      "take": 2,
+      "condition": "clean",
+      "embedding_seconds": 0.04330275009851903,
+      "samples": 152320,
+      "rms": 0.04854857176542282
+    },
+    {
+      "speaker": "bright",
+      "take": 2,
+      "condition": "telephone",
+      "embedding_seconds": 0.039410166908055544,
+      "samples": 152320,
+      "rms": 0.04786289483308792
+    },
+    {
+      "speaker": "contralto",
+      "take": 0,
+      "condition": "clean",
+      "embedding_seconds": 0.03459033300168812,
+      "samples": 126720,
+      "rms": 0.03628401830792427
+    },
+    {
+      "speaker": "contralto",
+      "take": 0,
+      "condition": "telephone",
+      "embedding_seconds": 0.03400075004901737,
+      "samples": 126720,
+      "rms": 0.02044166997075081
+    },
+    {
+      "speaker": "contralto",
+      "take": 1,
+      "condition": "clean",
+      "embedding_seconds": 0.03347791696432978,
+      "samples": 122880,
+      "rms": 0.027157003059983253
+    },
+    {
+      "speaker": "contralto",
+      "take": 1,
+      "condition": "telephone",
+      "embedding_seconds": 0.03320645808707923,
+      "samples": 122880,
+      "rms": 0.017515119165182114
+    },
+    {
+      "speaker": "contralto",
+      "take": 2,
+      "condition": "clean",
+      "embedding_seconds": 0.03928612498566508,
+      "samples": 152320,
+      "rms": 0.029195919632911682
+    },
+    {
+      "speaker": "contralto",
+      "take": 2,
+      "condition": "telephone",
+      "embedding_seconds": 0.040068792062811553,
+      "samples": 152320,
+      "rms": 0.01687534898519516
+    }
+  ],
+  "pairs": [
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "baritone-1",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.8080679178237915
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "baritone-2",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.7993180751800537
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "bright-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.12235913425683975
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "bright-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.18596763908863068
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "bright-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.22354258596897125
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.13931702077388763
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.11586716026067734
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-0",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.04513240605592728
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "baritone-2",
+      "genuine": true,
+      "anchor_pair": false,
+      "cosine": 0.6955108642578125
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "bright-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.09450283646583557
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "bright-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.1602998524904251
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "bright-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.18351206183433533
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.16523629426956177
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.13360783457756042
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-1",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.0665435940027237
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "bright-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.09288358688354492
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "bright-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.14515304565429688
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "bright-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.20866729319095612
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.06209355220198631
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.0770401805639267
+    },
+    {
+      "condition": "clean",
+      "a": "baritone-2",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.014775719493627548
+    },
+    {
+      "condition": "clean",
+      "a": "bright-0",
+      "b": "bright-1",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.7103930711746216
+    },
+    {
+      "condition": "clean",
+      "a": "bright-0",
+      "b": "bright-2",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.7170127034187317
+    },
+    {
+      "condition": "clean",
+      "a": "bright-0",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.088060662150383
+    },
+    {
+      "condition": "clean",
+      "a": "bright-0",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.10945948213338852
+    },
+    {
+      "condition": "clean",
+      "a": "bright-0",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": -0.0020933663472533226
+    },
+    {
+      "condition": "clean",
+      "a": "bright-1",
+      "b": "bright-2",
+      "genuine": true,
+      "anchor_pair": false,
+      "cosine": 0.6923778653144836
+    },
+    {
+      "condition": "clean",
+      "a": "bright-1",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": -0.040738899260759354
+    },
+    {
+      "condition": "clean",
+      "a": "bright-1",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.03537367284297943
+    },
+    {
+      "condition": "clean",
+      "a": "bright-1",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": -0.07283467054367065
+    },
+    {
+      "condition": "clean",
+      "a": "bright-2",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": -0.014888513833284378
+    },
+    {
+      "condition": "clean",
+      "a": "bright-2",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.03312117978930473
+    },
+    {
+      "condition": "clean",
+      "a": "bright-2",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": -0.07807530462741852
+    },
+    {
+      "condition": "clean",
+      "a": "contralto-0",
+      "b": "contralto-1",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.7427771687507629
+    },
+    {
+      "condition": "clean",
+      "a": "contralto-0",
+      "b": "contralto-2",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.8427962064743042
+    },
+    {
+      "condition": "clean",
+      "a": "contralto-1",
+      "b": "contralto-2",
+      "genuine": true,
+      "anchor_pair": false,
+      "cosine": 0.6963521838188171
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "baritone-1",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.8277156949043274
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "baritone-2",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.7906017303466797
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "bright-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.3238488733768463
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "bright-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.3214123547077179
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "bright-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.3385638892650604
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.20951694250106812
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.2364198863506317
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-0",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.19743847846984863
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "baritone-2",
+      "genuine": true,
+      "anchor_pair": false,
+      "cosine": 0.7396303415298462
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "bright-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.25194549560546875
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "bright-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.31237685680389404
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "bright-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.3046552836894989
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.19026240706443787
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.2281249463558197
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-1",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.18438152968883514
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "bright-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.22815784811973572
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "bright-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.2729061543941498
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "bright-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.29955434799194336
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.21417151391506195
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.22755858302116394
+    },
+    {
+      "condition": "telephone",
+      "a": "baritone-2",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.20100004971027374
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-0",
+      "b": "bright-1",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.7197623252868652
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-0",
+      "b": "bright-2",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.8242242336273193
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-0",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.20375701785087585
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-0",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.19704002141952515
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-0",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.16821728646755219
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-1",
+      "b": "bright-2",
+      "genuine": true,
+      "anchor_pair": false,
+      "cosine": 0.7266125082969666
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-1",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.17847110331058502
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-1",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.20955659449100494
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-1",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.2500966489315033
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-2",
+      "b": "contralto-0",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.17669978737831116
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-2",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.18573713302612305
+    },
+    {
+      "condition": "telephone",
+      "a": "bright-2",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": false,
+      "cosine": 0.17945319414138794
+    },
+    {
+      "condition": "telephone",
+      "a": "contralto-0",
+      "b": "contralto-1",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.7890529632568359
+    },
+    {
+      "condition": "telephone",
+      "a": "contralto-0",
+      "b": "contralto-2",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.8670594692230225
+    },
+    {
+      "condition": "telephone",
+      "a": "contralto-1",
+      "b": "contralto-2",
+      "genuine": true,
+      "anchor_pair": false,
+      "cosine": 0.7670419216156006
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "baritone-1",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.5827940106391907
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "baritone-2",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.4953349828720093
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "bright-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.22268204391002655
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "bright-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.24485230445861816
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.08081911504268646
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "baritone-0",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.07091774046421051
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "baritone-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.14195166528224945
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "baritone-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.10297951102256775
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "bright-1",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.4769213795661926
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "bright-2",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.549553632736206
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "contralto-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.13127194344997406
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "bright-0",
+      "b": "contralto-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.03845023363828659
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "baritone-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.09717194736003876
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "baritone-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.07616618275642395
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "bright-1",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.03349993750452995
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "bright-2",
+      "genuine": false,
+      "anchor_pair": true,
+      "cosine": 0.011807069182395935
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "contralto-1",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.5195749402046204
+    },
+    {
+      "condition": "clean_anchor_telephone_query",
+      "a": "contralto-0",
+      "b": "contralto-2",
+      "genuine": true,
+      "anchor_pair": true,
+      "cosine": 0.5580952167510986
+    }
+  ]
+}

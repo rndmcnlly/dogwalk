@@ -1,0 +1,413 @@
+{
+  "url": "https://dogwalk-redimnet-b3-experiment.amsmith-1a4.workers.dev",
+  "checks": {
+    "health": 200,
+    "unauthorized": 401,
+    "bad_size": 400,
+    "too_large": 400,
+    "bad_type": 415
+  },
+  "inputs": [
+    {
+      "label": "baritone-0/clean",
+      "status": 200,
+      "roundtrip_seconds": 2.5988445420516655,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 5.245208740234375e-06,
+        "normalized_max_abs": 2.2713071681779162e-07,
+        "cosine": 0.9999999999994745
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 5.0961971282958984e-06,
+        "normalized_max_abs": 2.1277763697291271e-07,
+        "cosine": 0.9999999999995599
+      },
+      "worker_normalization_max_abs": 2.7755575615628914e-17
+    },
+    {
+      "label": "baritone-0/telephone",
+      "status": 200,
+      "roundtrip_seconds": 2.4200654999585822,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 5.7220458984375e-06,
+        "normalized_max_abs": 2.4875731054196937e-07,
+        "cosine": 0.9999999999992693
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 5.4836273193359375e-06,
+        "normalized_max_abs": 2.3739839227765458e-07,
+        "cosine": 0.9999999999994813
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "baritone-1/clean",
+      "status": 200,
+      "roundtrip_seconds": 0.8516669579548761,
+      "cold": false,
+      "call": 2,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 4.5299530029296875e-06,
+        "normalized_max_abs": 1.7533003240227663e-07,
+        "cosine": 0.9999999999995495
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.649162292480469e-06,
+        "normalized_max_abs": 1.8048412316062912e-07,
+        "cosine": 0.9999999999996949
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "baritone-1/telephone",
+      "status": 200,
+      "roundtrip_seconds": 2.1010616250569,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 5.602836608886719e-06,
+        "normalized_max_abs": 2.325699820018845e-07,
+        "cosine": 0.9999999999995473
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.410743713378906e-06,
+        "normalized_max_abs": 1.781130645472917e-07,
+        "cosine": 0.9999999999996456
+      },
+      "worker_normalization_max_abs": 2.7755575615628914e-17
+    },
+    {
+      "label": "baritone-2/clean",
+      "status": 200,
+      "roundtrip_seconds": 3.813002707902342,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 3.933906555175781e-06,
+        "normalized_max_abs": 1.660221856242261e-07,
+        "cosine": 0.9999999999995302
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.231929779052734e-06,
+        "normalized_max_abs": 1.7603345826150418e-07,
+        "cosine": 0.9999999999996897
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "baritone-2/telephone",
+      "status": 200,
+      "roundtrip_seconds": 1.3626392500009388,
+      "cold": false,
+      "call": 2,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 5.245208740234375e-06,
+        "normalized_max_abs": 2.2985524361640586e-07,
+        "cosine": 0.9999999999992679
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.291534423828125e-06,
+        "normalized_max_abs": 1.8675541264834283e-07,
+        "cosine": 0.9999999999995334
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "bright-0/clean",
+      "status": 200,
+      "roundtrip_seconds": 0.7607764579588547,
+      "cold": false,
+      "call": 3,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 6.377696990966797e-06,
+        "normalized_max_abs": 2.6780030397410837e-07,
+        "cosine": 0.9999999999992967
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.9620866775512695e-06,
+        "normalized_max_abs": 2.082639422463367e-07,
+        "cosine": 0.9999999999996587
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "bright-0/telephone",
+      "status": 200,
+      "roundtrip_seconds": 0.9051453329157084,
+      "cold": false,
+      "call": 2,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 5.9604644775390625e-06,
+        "normalized_max_abs": 2.4953987792786236e-07,
+        "cosine": 0.9999999999993382
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 3.829598426818848e-06,
+        "normalized_max_abs": 1.6989503884290436e-07,
+        "cosine": 0.9999999999996585
+      },
+      "worker_normalization_max_abs": 2.7755575615628914e-17
+    },
+    {
+      "label": "bright-1/clean",
+      "status": 200,
+      "roundtrip_seconds": 2.4087777090026066,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 5.125999450683594e-06,
+        "normalized_max_abs": 1.9382041092919078e-07,
+        "cosine": 0.999999999999513
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.887580871582031e-06,
+        "normalized_max_abs": 1.809982403885857e-07,
+        "cosine": 0.9999999999996689
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "bright-1/telephone",
+      "status": 200,
+      "roundtrip_seconds": 2.986414584098384,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 4.455447196960449e-06,
+        "normalized_max_abs": 1.7823712422648796e-07,
+        "cosine": 0.9999999999995157
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.76837158203125e-06,
+        "normalized_max_abs": 1.7581646793995986e-07,
+        "cosine": 0.9999999999997039
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "bright-2/clean",
+      "status": 200,
+      "roundtrip_seconds": 0.7712493749568239,
+      "cold": false,
+      "call": 2,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 6.318092346191406e-06,
+        "normalized_max_abs": 2.6001645128670425e-07,
+        "cosine": 0.9999999999992402
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.5299530029296875e-06,
+        "normalized_max_abs": 2.023778410756294e-07,
+        "cosine": 0.9999999999995577
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "bright-2/telephone",
+      "status": 200,
+      "roundtrip_seconds": 0.7864485830068588,
+      "cold": false,
+      "call": 3,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 4.76837158203125e-06,
+        "normalized_max_abs": 1.9544056837142443e-07,
+        "cosine": 0.9999999999994604
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.5299530029296875e-06,
+        "normalized_max_abs": 1.9109314675080924e-07,
+        "cosine": 0.9999999999995268
+      },
+      "worker_normalization_max_abs": 5.551115123125783e-17
+    },
+    {
+      "label": "contralto-0/clean",
+      "status": 200,
+      "roundtrip_seconds": 1.0994282079627737,
+      "cold": false,
+      "call": 2,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 6.079673767089844e-06,
+        "normalized_max_abs": 2.218928111946683e-07,
+        "cosine": 0.999999999999445
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.649162292480469e-06,
+        "normalized_max_abs": 1.7123199261281918e-07,
+        "cosine": 0.9999999999996841
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "contralto-0/telephone",
+      "status": 200,
+      "roundtrip_seconds": 4.160353458020836,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 5.7220458984375e-06,
+        "normalized_max_abs": 1.9920752102053907e-07,
+        "cosine": 0.9999999999994496
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.291534423828125e-06,
+        "normalized_max_abs": 1.5270305583903188e-07,
+        "cosine": 0.9999999999996989
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "contralto-1/clean",
+      "status": 200,
+      "roundtrip_seconds": 3.0439310839865357,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 6.198883056640625e-06,
+        "normalized_max_abs": 2.3084332277656383e-07,
+        "cosine": 0.9999999999994653
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.172325134277344e-06,
+        "normalized_max_abs": 1.566711952793315e-07,
+        "cosine": 0.9999999999997228
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "contralto-1/telephone",
+      "status": 200,
+      "roundtrip_seconds": 2.251216124976054,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 5.945563316345215e-06,
+        "normalized_max_abs": 2.2073144687593561e-07,
+        "cosine": 0.9999999999994813
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.753470420837402e-06,
+        "normalized_max_abs": 1.7651911641083408e-07,
+        "cosine": 0.9999999999996697
+      },
+      "worker_normalization_max_abs": 5.551115123125783e-17
+    },
+    {
+      "label": "contralto-2/clean",
+      "status": 200,
+      "roundtrip_seconds": 5.395953124971129,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 6.079673767089844e-06,
+        "normalized_max_abs": 2.515653410306573e-07,
+        "cosine": 0.999999999999495
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 4.827976226806641e-06,
+        "normalized_max_abs": 1.856282591181091e-07,
+        "cosine": 0.9999999999996841
+      },
+      "worker_normalization_max_abs": 2.7755575615628914e-17
+    },
+    {
+      "label": "contralto-2/telephone",
+      "status": 200,
+      "roundtrip_seconds": 0.7695202089380473,
+      "cold": false,
+      "call": 3,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 0,
+      "wasmMemoryAfter": 0,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 5.9604644775390625e-06,
+        "normalized_max_abs": 2.250840673984067e-07,
+        "cosine": 0.9999999999994934
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 3.9637088775634766e-06,
+        "normalized_max_abs": 1.5271184147791494e-07,
+        "cosine": 0.9999999999996912
+      },
+      "worker_normalization_max_abs": 2.7755575615628914e-17
+    }
+  ],
+  "synthetic_only": true,
+  "scope": "features to embedding, not waveform frontend",
+  "passed": true,
+  "pair_count": 153,
+  "max_score_abs_difference": 5.223985908159312e-07
+}

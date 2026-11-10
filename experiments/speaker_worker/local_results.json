@@ -1,0 +1,185 @@
+{
+  "revision": "c5bbe0b76e37df698c403f8844e41304ceab6307",
+  "checkpoint_sha256": "02d14efdc184573873b5c3f62bea847fcdb6919fbba19a8da7af7c1ba36b76a2",
+  "checkpoint_bytes": 17929528,
+  "model_config": {
+    "C": 24,
+    "F": 72,
+    "block_1d_type": "conv+att",
+    "block_2d_type": "basic_resnet",
+    "causal": "none",
+    "compress_tconvs": true,
+    "emb_bn": false,
+    "embed_dim": 192,
+    "feat_type": "tf",
+    "fm_weigthing_type": "NC",
+    "global_context_att": true,
+    "group_divisor": 1,
+    "hop_length": 160,
+    "pooling_func": "ASTP",
+    "return_2d_output": true,
+    "spec_in_channels": 1,
+    "spec_params": {
+      "do_preemph": true,
+      "do_spec_aug": false,
+      "norm_signal": true
+    }
+  },
+  "source_license_sha256": "3d5a4bf9936a7d09dd770588c0d7cb116fc16916a0310d71fb1fff5d64562101",
+  "onnx_sha256": "d7c2cff2c200a2637068e6be06a2f9a5457363a312e29be0d2f9df72d66c36b5",
+  "onnx_bytes": 17047855,
+  "feature_shape": [
+    1,
+    72,
+    299
+  ],
+  "embedding_shape": [
+    192
+  ],
+  "opset": 17,
+  "waveform_split_bitwise_equal": true,
+  "dtype": "float32",
+  "quantized": false,
+  "tolerances": {
+    "raw_max_abs": 0.001,
+    "normalized_max_abs": 1e-05,
+    "min_cosine": 0.999999,
+    "score_abs": 1e-05
+  },
+  "inputs": [
+    {
+      "label": "baritone-0/clean",
+      "raw_max_abs": 3.814697265625e-06,
+      "normalized_max_abs": 1.617261946446069e-07,
+      "cosine": 0.999999999999737,
+      "seconds": 0.12797724991105497
+    },
+    {
+      "label": "baritone-0/telephone",
+      "raw_max_abs": 4.172325134277344e-06,
+      "normalized_max_abs": 1.734336347314347e-07,
+      "cosine": 0.9999999999995377,
+      "seconds": 0.1285339160822332
+    },
+    {
+      "label": "baritone-1/clean",
+      "raw_max_abs": 3.6954879760742188e-06,
+      "normalized_max_abs": 1.427409773505084e-07,
+      "cosine": 0.999999999999812,
+      "seconds": 0.12218216597102582
+    },
+    {
+      "label": "baritone-1/telephone",
+      "raw_max_abs": 4.5299530029296875e-06,
+      "normalized_max_abs": 1.7854020648022662e-07,
+      "cosine": 0.9999999999996418,
+      "seconds": 0.12214695895090699
+    },
+    {
+      "label": "baritone-2/clean",
+      "raw_max_abs": 3.933906555175781e-06,
+      "normalized_max_abs": 1.625183116485407e-07,
+      "cosine": 0.9999999999996655,
+      "seconds": 0.12182258302345872
+    },
+    {
+      "label": "baritone-2/telephone",
+      "raw_max_abs": 3.2186508178710938e-06,
+      "normalized_max_abs": 1.4151834043518718e-07,
+      "cosine": 0.9999999999996718,
+      "seconds": 0.1220707920147106
+    },
+    {
+      "label": "bright-0/clean",
+      "raw_max_abs": 6.377696990966797e-06,
+      "normalized_max_abs": 2.702022769418555e-07,
+      "cosine": 0.9999999999995179,
+      "seconds": 0.12275700003374368
+    },
+    {
+      "label": "bright-0/telephone",
+      "raw_max_abs": 4.76837158203125e-06,
+      "normalized_max_abs": 2.132662745152336e-07,
+      "cosine": 0.9999999999995571,
+      "seconds": 0.12457516707945615
+    },
+    {
+      "label": "bright-1/clean",
+      "raw_max_abs": 4.500150680541992e-06,
+      "normalized_max_abs": 1.664845268303447e-07,
+      "cosine": 0.9999999999997244,
+      "seconds": 0.1236462090164423
+    },
+    {
+      "label": "bright-1/telephone",
+      "raw_max_abs": 4.723668098449707e-06,
+      "normalized_max_abs": 1.7946454117234723e-07,
+      "cosine": 0.9999999999996709,
+      "seconds": 0.12238683400209993
+    },
+    {
+      "label": "bright-2/clean",
+      "raw_max_abs": 5.7220458984375e-06,
+      "normalized_max_abs": 2.2856414430560967e-07,
+      "cosine": 0.9999999999994815,
+      "seconds": 0.1239310409873724
+    },
+    {
+      "label": "bright-2/telephone",
+      "raw_max_abs": 4.351139068603516e-06,
+      "normalized_max_abs": 1.834945268577859e-07,
+      "cosine": 0.9999999999996165,
+      "seconds": 0.1260093750897795
+    },
+    {
+      "label": "contralto-0/clean",
+      "raw_max_abs": 4.410743713378906e-06,
+      "normalized_max_abs": 1.6214893650001727e-07,
+      "cosine": 0.9999999999996593,
+      "seconds": 0.12275570805650204
+    },
+    {
+      "label": "contralto-0/telephone",
+      "raw_max_abs": 5.245208740234375e-06,
+      "normalized_max_abs": 1.9143589809200723e-07,
+      "cosine": 0.9999999999996295,
+      "seconds": 0.1214061250211671
+    },
+    {
+      "label": "contralto-1/clean",
+      "raw_max_abs": 4.827976226806641e-06,
+      "normalized_max_abs": 1.8101604188844322e-07,
+      "cosine": 0.9999999999996355,
+      "seconds": 0.12192700000014156
+    },
+    {
+      "label": "contralto-1/telephone",
+      "raw_max_abs": 5.0067901611328125e-06,
+      "normalized_max_abs": 1.8143216094779202e-07,
+      "cosine": 0.9999999999996376,
+      "seconds": 0.12250716704875231
+    },
+    {
+      "label": "contralto-2/clean",
+      "raw_max_abs": 4.5299530029296875e-06,
+      "normalized_max_abs": 1.7822280570789495e-07,
+      "cosine": 0.999999999999726,
+      "seconds": 0.12184325000271201
+    },
+    {
+      "label": "contralto-2/telephone",
+      "raw_max_abs": 4.291534423828125e-06,
+      "normalized_max_abs": 1.6182552477900236e-07,
+      "cosine": 0.9999999999996634,
+      "seconds": 0.126002624980174
+    }
+  ],
+  "pair_count": 153,
+  "max_score_abs_difference": 2.921268905109464e-07,
+  "versions": {
+    "torch": "2.8.0",
+    "numpy": "2.2.6",
+    "onnx": "1.19.1",
+    "onnxruntime": "1.23.2"
+  }
+}

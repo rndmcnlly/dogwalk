@@ -1,0 +1,431 @@
+{
+  "url": "https://dogwalk-redimnet-b3-experiment.amsmith-1a4.workers.dev",
+  "checks": {
+    "health": 200,
+    "unauthorized": 401,
+    "bad_size": 400,
+    "too_large": 400,
+    "bad_type": 415
+  },
+  "inputs": [
+    {
+      "label": "baritone-0/clean",
+      "status": 200,
+      "roundtrip_seconds": 2.4736404159339145,
+      "frontend_feature_max_abs": 4.863739013671875e-05,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 56492032,
+      "wasmMemoryAfter": 97714176,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 6.67572021484375e-06,
+        "normalized_max_abs": 2.674541080133208e-07,
+        "cosine": 0.9999999999991277
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 5.781650543212891e-06,
+        "normalized_max_abs": 2.407367931901369e-07,
+        "cosine": 0.9999999999992952
+      },
+      "worker_normalization_max_abs": 2.7755575615628914e-17
+    },
+    {
+      "label": "baritone-0/telephone",
+      "status": 200,
+      "roundtrip_seconds": 2.7815779160009697,
+      "frontend_feature_max_abs": 0.0006670951843261719,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 56492032,
+      "wasmMemoryAfter": 97714176,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 2.0742416381835938e-05,
+        "normalized_max_abs": 8.853380991380444e-07,
+        "cosine": 0.9999999999900138
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 2.574920654296875e-05,
+        "normalized_max_abs": 1.0676378862095603e-06,
+        "cosine": 0.9999999999889781
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "baritone-1/clean",
+      "status": 200,
+      "roundtrip_seconds": 3.112595957936719,
+      "frontend_feature_max_abs": 7.963180541992188e-05,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 56492032,
+      "wasmMemoryAfter": 97714176,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 6.67572021484375e-06,
+        "normalized_max_abs": 2.575109154315247e-07,
+        "cosine": 0.9999999999993219
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 5.245208740234375e-06,
+        "normalized_max_abs": 2.022769187391693e-07,
+        "cosine": 0.9999999999994185
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "baritone-1/telephone",
+      "status": 200,
+      "roundtrip_seconds": 0.896280208020471,
+      "frontend_feature_max_abs": 0.0004849433898925781,
+      "cold": false,
+      "call": 2,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 97714176,
+      "wasmMemoryAfter": 117309440,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 2.4497509002685547e-05,
+        "normalized_max_abs": 9.996387580445132e-07,
+        "cosine": 0.9999999999904731
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 2.300739288330078e-05,
+        "normalized_max_abs": 9.210305912735195e-07,
+        "cosine": 0.9999999999860827
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "baritone-2/clean",
+      "status": 200,
+      "roundtrip_seconds": 1.008447082946077,
+      "frontend_feature_max_abs": 7.152557373046875e-05,
+      "cold": false,
+      "call": 2,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 97714176,
+      "wasmMemoryAfter": 117309440,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 6.601214408874512e-06,
+        "normalized_max_abs": 2.739708994062978e-07,
+        "cosine": 0.9999999999991169
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 6.020069122314453e-06,
+        "normalized_max_abs": 2.5114953704219456e-07,
+        "cosine": 0.9999999999992317
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "baritone-2/telephone",
+      "status": 200,
+      "roundtrip_seconds": 2.579830333008431,
+      "frontend_feature_max_abs": 0.000690460205078125,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 56492032,
+      "wasmMemoryAfter": 97714176,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 2.193450927734375e-05,
+        "normalized_max_abs": 9.408679577521672e-07,
+        "cosine": 0.9999999999892161
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 3.2901763916015625e-05,
+        "normalized_max_abs": 1.4357387123596632e-06,
+        "cosine": 0.999999999977738
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "bright-0/clean",
+      "status": 200,
+      "roundtrip_seconds": 1.172918582917191,
+      "frontend_feature_max_abs": 0.0005474090576171875,
+      "cold": false,
+      "call": 2,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 97714176,
+      "wasmMemoryAfter": 117309440,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 7.927417755126953e-06,
+        "normalized_max_abs": 3.3720250510252403e-07,
+        "cosine": 0.9999999999987204
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 5.602836608886719e-06,
+        "normalized_max_abs": 2.4335789153284715e-07,
+        "cosine": 0.9999999999991408
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "bright-0/telephone",
+      "status": 200,
+      "roundtrip_seconds": 6.6204235419863835,
+      "frontend_feature_max_abs": 0.0004096031188964844,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 56492032,
+      "wasmMemoryAfter": 97714176,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 3.260374069213867e-05,
+        "normalized_max_abs": 1.4074666217708809e-06,
+        "cosine": 0.999999999978058
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 3.0040740966796875e-05,
+        "normalized_max_abs": 1.3103967209521228e-06,
+        "cosine": 0.9999999999838907
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "bright-1/clean",
+      "status": 200,
+      "roundtrip_seconds": 0.836074833991006,
+      "frontend_feature_max_abs": 0.0051727294921875,
+      "cold": false,
+      "call": 3,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 117309440,
+      "wasmMemoryAfter": 117309440,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 9.894371032714844e-06,
+        "normalized_max_abs": 3.623636627338861e-07,
+        "cosine": 0.9999999999984877
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 7.152557373046875e-06,
+        "normalized_max_abs": 2.529564386930666e-07,
+        "cosine": 0.9999999999989702
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "bright-1/telephone",
+      "status": 200,
+      "roundtrip_seconds": 6.9462994170608,
+      "frontend_feature_max_abs": 0.00015163421630859375,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 56492032,
+      "wasmMemoryAfter": 97714176,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 1.2040138244628906e-05,
+        "normalized_max_abs": 4.5675127927080617e-07,
+        "cosine": 0.9999999999971897
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 1.4185905456542969e-05,
+        "normalized_max_abs": 5.339418139849172e-07,
+        "cosine": 0.9999999999968908
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "bright-2/clean",
+      "status": 200,
+      "roundtrip_seconds": 0.8392296660458669,
+      "frontend_feature_max_abs": 0.000335693359375,
+      "cold": false,
+      "call": 2,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 97714176,
+      "wasmMemoryAfter": 117309440,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 7.987022399902344e-06,
+        "normalized_max_abs": 3.176857071574002e-07,
+        "cosine": 0.9999999999987358
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 7.3909759521484375e-06,
+        "normalized_max_abs": 3.00727664830254e-07,
+        "cosine": 0.9999999999990884
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "bright-2/telephone",
+      "status": 200,
+      "roundtrip_seconds": 5.740628166007809,
+      "frontend_feature_max_abs": 0.00012636184692382812,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 56492032,
+      "wasmMemoryAfter": 97714176,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 2.0677223801612854e-05,
+        "normalized_max_abs": 8.839258253855653e-07,
+        "cosine": 0.9999999999890475
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 1.9848346710205078e-05,
+        "normalized_max_abs": 8.37234237948542e-07,
+        "cosine": 0.9999999999923332
+      },
+      "worker_normalization_max_abs": 5.551115123125783e-17
+    },
+    {
+      "label": "contralto-0/clean",
+      "status": 200,
+      "roundtrip_seconds": 0.7823767499066889,
+      "frontend_feature_max_abs": 9.775161743164062e-05,
+      "cold": false,
+      "call": 3,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 117309440,
+      "wasmMemoryAfter": 117309440,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 9.775161743164062e-06,
+        "normalized_max_abs": 3.540370824284267e-07,
+        "cosine": 0.9999999999989906
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 5.424022674560547e-06,
+        "normalized_max_abs": 1.9910933652528273e-07,
+        "cosine": 0.9999999999995686
+      },
+      "worker_normalization_max_abs": 2.7755575615628914e-17
+    },
+    {
+      "label": "contralto-0/telephone",
+      "status": 200,
+      "roundtrip_seconds": 1.2446545829297975,
+      "frontend_feature_max_abs": 0.000583648681640625,
+      "cold": false,
+      "call": 4,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 117309440,
+      "wasmMemoryAfter": 117309440,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 1.6033649444580078e-05,
+        "normalized_max_abs": 5.590003691324785e-07,
+        "cosine": 0.9999999999957092
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 1.8835067749023438e-05,
+        "normalized_max_abs": 7.058692152589474e-07,
+        "cosine": 0.9999999999942721
+      },
+      "worker_normalization_max_abs": 2.7755575615628914e-17
+    },
+    {
+      "label": "contralto-1/clean",
+      "status": 200,
+      "roundtrip_seconds": 0.8726955000311136,
+      "frontend_feature_max_abs": 0.00040912628173828125,
+      "cold": false,
+      "call": 3,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 117309440,
+      "wasmMemoryAfter": 117309440,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 8.463859558105469e-06,
+        "normalized_max_abs": 3.145210613342275e-07,
+        "cosine": 0.9999999999992537
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 6.198883056640625e-06,
+        "normalized_max_abs": 2.356609012099664e-07,
+        "cosine": 0.9999999999994517
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "contralto-1/telephone",
+      "status": 200,
+      "roundtrip_seconds": 2.5889324999880046,
+      "frontend_feature_max_abs": 0.0012335777282714844,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 56492032,
+      "wasmMemoryAfter": 97714176,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 3.337860107421875e-05,
+        "normalized_max_abs": 1.275390163452128e-06,
+        "cosine": 0.9999999999838959
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 2.7179718017578125e-05,
+        "normalized_max_abs": 9.546831493470465e-07,
+        "cosine": 0.999999999989118
+      },
+      "worker_normalization_max_abs": 2.7755575615628914e-17
+    },
+    {
+      "label": "contralto-2/clean",
+      "status": 200,
+      "roundtrip_seconds": 2.2915682080201805,
+      "frontend_feature_max_abs": 9.918212890625e-05,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 56492032,
+      "wasmMemoryAfter": 97714176,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 6.9141387939453125e-06,
+        "normalized_max_abs": 2.835971982251273e-07,
+        "cosine": 0.9999999999990227
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 7.271766662597656e-06,
+        "normalized_max_abs": 2.992751040459263e-07,
+        "cosine": 0.9999999999992581
+      },
+      "worker_normalization_max_abs": 0.0
+    },
+    {
+      "label": "contralto-2/telephone",
+      "status": 200,
+      "roundtrip_seconds": 2.8018730839248747,
+      "frontend_feature_max_abs": 0.0009007453918457031,
+      "cold": true,
+      "call": 1,
+      "initMs": 0,
+      "inferenceMs": 0,
+      "wasmMemoryBefore": 56492032,
+      "wasmMemoryAfter": 97714176,
+      "worker_vs_pytorch": {
+        "raw_max_abs": 2.0071864128112793e-05,
+        "normalized_max_abs": 7.642816213853862e-07,
+        "cosine": 0.9999999999928555
+      },
+      "worker_vs_local_onnx": {
+        "raw_max_abs": 1.8596649169921875e-05,
+        "normalized_max_abs": 6.894830377329741e-07,
+        "cosine": 0.9999999999928805
+      },
+      "worker_normalization_max_abs": 0.0
+    }
+  ],
+  "synthetic_only": true,
+  "scope": "16 kHz float32 waveform to embedding",
+  "passed": true,
+  "pair_count": 153,
+  "max_score_abs_difference": 1.3196589215974663e-06
+}

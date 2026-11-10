@@ -1,0 +1,11 @@
+{
+  "url": "https://dogwalk-redimnet-b3-experiment.adam-890.workers.dev",
+  "passed": false,
+  "stage": "health",
+  "status": 0,
+  "failure": {
+    "transport_error": "[SSL: SSLV3_ALERT_HANDSHAKE_FAILURE] sslv3 alert handshake failure (_ssl.c:1016)"
+  },
+  "synthetic_only": true,
+  "inference_attempted": false
+}

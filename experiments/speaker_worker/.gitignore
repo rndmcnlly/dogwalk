@@ -1,0 +1,6 @@
+artifacts/
+.worker/
+.wrangler/
+node_modules/
+__pycache__/
+.dev.vars
