@@ -55,35 +55,46 @@ def auth() -> str:
 
 def call(authorization: str, path: str, body: bytes | None = None,
          connection: http.client.HTTPSConnection | None = None) -> dict:
-    """One request on a fresh connection, or on `connection` (kept alive across calls)."""
+    """One request on a fresh connection, or on `connection` (kept alive across calls).
+
+    Never raises: a transport failure is a sample with status 0 and its exception as the
+    error (and closes `connection`, so the next request reconnects and reports it), and a
+    body that is not a JSON object is an empty payload.
+    """
     headers = {"authorization": authorization, "user-agent": "dogwalk-research/1"}
     if body is not None:
         headers["content-type"] = "audio/wav"
     started = time.monotonic()
-    if connection is not None:
-        connection.request("POST" if body else "GET", path, body=body, headers=headers)
-        resp = connection.getresponse()
-        status, raw, ray = resp.status, resp.read(), resp.headers.get("cf-ray", "")
-        try:
-            payload = json.loads(raw)
-        except ValueError:
-            payload = {}
-    else:
-        req = urllib.request.Request(ORIGIN + path, data=body, headers=headers, method="POST" if body else "GET")
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                status, payload, ray = resp.status, json.loads(resp.read()), resp.headers.get("cf-ray", "")
-        except urllib.error.HTTPError as error:
-            status, ray = error.code, error.headers.get("cf-ray", "")
+    status, raw, ray, transport_error = 0, b"", "", None
+    try:
+        if connection is not None:
+            connection.request("POST" if body else "GET", path, body=body, headers=headers)
+            resp = connection.getresponse()
+            status, raw, ray = resp.status, resp.read(), resp.headers.get("cf-ray", "")
+        else:
+            req = urllib.request.Request(ORIGIN + path, data=body, headers=headers, method="POST" if body else "GET")
             try:
-                payload = json.loads(error.read())
-            except ValueError:
-                payload = {}
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    status, raw, ray = resp.status, resp.read(), resp.headers.get("cf-ray", "")
+            except urllib.error.HTTPError as error:
+                status, raw, ray = error.code, error.read(), error.headers.get("cf-ray", "")
+    except (OSError, http.client.HTTPException) as error:  # URLError is an OSError
+        transport_error = f"transport: {type(error).__name__}: {error}"[:200]
+        if connection is not None:
+            connection.close()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
     total = round((time.monotonic() - started) * 1000)
     ms = payload.get("ms")
+    if not isinstance(ms, (int, float)):
+        ms = None
     return {"status": status, "rpc_ms": ms, "total_ms": total, "colo": ray.rpartition("-")[2],
             "slow": ms is not None and ms > SLOW_MS, "cold": payload.get("cold"), "warm_ms": payload.get("warm_ms"),
-            "error": payload.get("error")}
+            "error": transport_error or payload.get("error")}
 
 
 def probe(authorization: str, connection: http.client.HTTPSConnection | None = None, **extra) -> dict:
@@ -148,8 +159,13 @@ def idle(args, authorization: str) -> None:
             deadline = time.monotonic() + gap
             while (left := deadline - time.monotonic()) > 0:
                 time.sleep(min(20, left))
-                connection.request("GET", "/healthz", headers={"user-agent": "dogwalk-research/1"})
-                connection.getresponse().read()
+                try:
+                    connection.request("GET", "/healthz", headers={"user-agent": "dogwalk-research/1"})
+                    connection.getresponse().read()
+                except (OSError, http.client.HTTPException):
+                    # The next request reconnects, so the sample reports same_connection=false
+                    # and stays out of the retention summary.
+                    connection.close()
             results.append(probe(authorization, connection, mode="idle", gap=gap, repeat=repeat,
                                  same_connection=sock is not None and connection.sock is sock))
     for gap in args.gaps:
