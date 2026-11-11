@@ -60,12 +60,28 @@ Owns realtime audio transport, speech turn detection, browser or telephone media
 
 ### Access Control
 
-Owns phone Registration, Invite Codes, and Invitations at the PSTN boundary. A
-registered phone number identifies a User for access purposes; Dogwalk does not
-maintain a separate personal name in this context. Telephony providers and
-sandbox hosts are adapters, not identity authorities. Phone numbers and the
-invitation graph stay here and in the caller's Voice Session state: they never
-reach ACP Agents, Sandbox files, or hosting-provider labels.
+Owns Registration, Handles, Homes, Voice References, the Identity Check,
+Invite Codes, and Invitations at the PSTN boundary. A User is identified by a
+spoken Handle, never by a personal name, birth date, or account number, and
+proves it by voice in an Identity Check before the Voice Agent answers. Caller
+ID only suggests which Handle to check. Telephony providers and sandbox hosts
+are adapters, not identity authorities. Phone numbers, Voice References, the
+invitation graph, and identity audio stay here and in the caller's Voice Session
+state: they never reach ACP Agents, Sandbox files, or hosting-provider labels.
+
+The access rules aim at casual impersonation: friends, pranksters, and
+opportunists who know a Handle or briefly hold a User's phone. They do not stop
+a determined attacker with a recording of the User, who can speak each fresh
+challenge phrase through a real-time voice converter that narrowband telephone
+audio helps disguise. Dogwalk says so rather than presenting the Identity Check
+as a password replacement.
+
+Every way out of an identity ends at the same way in: a User who loses their
+Home, fails their Identity Check, or is reaped can be invited again by any
+active User and register as a new User, through the same ritual every newcomer
+uses. Like crash-only software, the recovery path is the ordinary path, so it is
+exercised constantly and needs no special machinery. Durable work belongs in
+places that outlive a Sandbox, such as Git remotes.
 
 ## Context Map
 
@@ -174,7 +190,7 @@ Themes exist only above ACP; ACP prompts, tools, schemas, harness events, and an
 | Patrol | a present-day cyber operation under mission command: sessions are operatives, tool calls are their drones, the User is Actual | military science fiction, laconic over hyperviolent vocabulary aimed only at code: the mundane made lethal |
 | Plain | none: the domain vocabulary shows through | plain |
 
-Plain is both a User choice and the regression fixture that shows the rules never live in a Theme. Park is the default. The User switches by asking, and the choice is kept with their Sandbox's Voice Session state like the Earcon Style. GPT-Live fixes a voice for the life of a voice session, so a switch bounces the Voice Call: the Session Orchestrator writes the new voice's first line in the new Theme, re-presenting where things stand, then the voice session ends and the same Voice Call reconnects to a fresh one, which opens with that line and no caller-ID clause. The register carries across the bounce: the Session Orchestrator names the rung the conversation stood at, the line is written at it, and the fresh Voice Frontend is told to start there. Aliases stay across a switch; the User may ask for sessions to be renamed in the new conceit's naming style, and the Voice Agent does so only then. The public pages stay Park for now.
+Plain is both a User choice and the regression fixture that shows the rules never live in a Theme. Park is the default. The User switches by asking, and the choice is kept with their Sandbox's Voice Session state like the Earcon Style. GPT-Live fixes a voice for the life of a voice session, so a switch bounces the Voice Call: the Session Orchestrator writes the new voice's first line in the new Theme, re-presenting where things stand, then the voice session ends and the same Voice Call reconnects to a fresh one, which opens with that line and no identity clause. The register carries across the bounce: the Session Orchestrator names the rung the conversation stood at, the line is written at it, and the fresh Voice Frontend is told to start there. Aliases stay across a switch; the User may ask for sessions to be renamed in the new conceit's naming style, and the Voice Agent does so only then. The public pages stay Park for now.
 
 **Not:** A rule set, a persona with its own capabilities, or a visual color scheme.
 
@@ -230,13 +246,100 @@ The Voice Agent mirrors the caller's sophistication, especially on technical top
 
 **Context:** Access Control
 
-Authorization for one phone number to use Dogwalk. The normalized phone number
-is the Registration's identity and is unique. Registration records which Invite
-Code authorized it and when it occurred, but does not contain a personal name,
-sandbox identity, or hosting policy. When the Invite Code belongs to an
-Invitation, the Registration is the durable inviter -> Invitation -> invitee
-edge, and the invitee can ask the Voice Agent who invited them (the inviter's
-number).
+The creation of a User by redeeming an Invite Code. Registration assigns the
+new User a Handle, makes the calling number their Home, and enrolls their Voice
+Reference from the ritual's speech: the spoken Invite Code, which alone is too
+short, followed by a few phrases repeated like Identity Challenges while the new
+Sandbox is created. It records which Invite Code authorized it
+and when, but contains no personal name, sandbox identity, or hosting policy.
+When the Invite Code belongs to an Invitation, the Registration is the durable
+inviter -> Invitation -> invitee edge, and the invitee can ask the Voice Agent
+who invited them (the inviter's Handle). A User who lost their identity
+registers again as a new User; nothing links the two.
+
+### Handle
+
+**Context:** Access Control
+
+A User's spoken, nonsecret, unique identifier: two words assigned at
+Registration, such as "brindle whippet". A caller says it to claim an identity;
+the Identity Check proves the claim. Handles draw from EFF short wordlist 2,
+whose longer words survive narrowband audio and whose unique three-letter
+prefixes tolerate speech-recognition errors, minus grim words, every word of
+the Invite Code vocabulary (the PGP word list), and the Identity Check's escape
+words. Two words against three, from disjoint vocabularies, lets one transcript
+tell a Handle from an Invite Code. A Handle is neutral and survives every Theme
+switch; a Theme may say it warmly but never supplies its words.
+
+**Not:** A credential, a Theme name, an Alias, or an Invite Code.
+
+### Home
+
+**Context:** Access Control
+
+The one phone number Dogwalk associates with a User for convenience. A User has
+at most one Home and a number is Home to at most one User. A call from a Home
+starts the Identity Check with that User's Handle and one Identity Challenge.
+A Home expires 90 days after its last successful call. Any User who passes the
+Identity Check may make the calling number their Home, displacing that number's
+previous User, who still gets in by naming their Handle. Re-homing is rare; the
+usual alternative is Roaming.
+
+**Not:** The User's identity or proof of it. Caller ID only selects which
+Handle the Identity Check starts with.
+
+### Voice Reference
+
+**Context:** Access Control
+
+The enrolled speaker embedding against which a User's Identity Challenges are
+scored, tagged with the embedding space (model weights, preprocessing, and
+normalization) that produced it. It is never audio, and challenge audio is
+discarded once scored. It is deleted when its User is reaped.
+
+### Identity Check
+
+**Context:** Access Control
+
+The deterministic, speech-only stage of a Voice Call before the Voice Agent
+answers. No model interprets it and the keypad is never required. A call from a
+Home hears the Handle and one Identity Challenge; any other call, or a caller
+who says they are someone else, names a Handle and takes three Identity
+Challenges. Each answer's transcript is classified deterministically: the
+challenge phrase (its audio is then scored against the Voice Reference), a
+Handle (switch to that identity), an Invite Code or a mention of an invite
+(Registration), or anything else (ask again). Only a matched phrase in the
+wrong voice counts as a failure, so noise and bad lines never lock a caller
+out. A User whose Home check fails moves to the three-challenge path, never to
+a dead end. Repeated failures for one Handle pause checks for that Handle for a
+while, and the User hears about the attempts in their next Opening. The check
+runs while the Sandbox wakes, and the Session Orchestrator learns how the
+caller passed it.
+
+### Identity Challenge
+
+**Context:** Access Control
+
+One fresh, short, grammatical sentence the caller repeats at once in their own
+voice, such as "The purple suitcase belongs upstairs." Nothing is remembered
+for later. Phrases use familiar syntax and concrete words, and avoid digit
+strings, tongue twisters, disturbing content, Handle words, and escape words.
+Phrase correctness and speaker similarity are separate signals, and both must
+pass. Fresh phrases defeat replayed recordings, not voice cloning. The
+similarity threshold is configuration, not a domain rule: calibrated
+provisionally against synthetic impostor voices played through a real
+telephone call, and adjusted as real calls accumulate.
+
+### Roaming
+
+**Context:** Access Control
+
+Using Dogwalk from a number that is not the User's Home, such as an office
+phone, a friend's phone, or a payphone: the caller names their Handle and takes
+three Identity Challenges. Roaming grants the same access as a Home call and
+leaves the Home unchanged.
+
+**Not:** A reduced access tier, or re-homing.
 
 ### Invite Code
 
@@ -245,8 +348,8 @@ number).
 A speakable capability that authorizes Registration. An Invite Code may have an
 expiration time and a maximum number of uses. No expiration means it remains
 valid indefinitely; no maximum means unlimited registrations. A code is usable
-only while unexpired and below its maximum, and each phone number may register
-only once regardless of how many codes it knows. An operator mints Invite Codes
+only while unexpired and below its maximum. Registering from a number that is
+already a Home displaces it, as re-homing does. An operator mints Invite Codes
 directly; a User mints one by creating an Invitation.
 
 ### Invitation
@@ -257,8 +360,8 @@ A User-created, single-use Invite Code with provenance: the inviting User
 (resolved from the authenticated Voice Call, never from what a model claims),
 an optional bound recipient number, and a lifecycle of active, then redeemed,
 expired (24 hours after creation), or revoked. A User may hold at most three
-active Invitations. Unbound, the words work for whichever unregistered phone
-redeems them first; bound, only for that number. The inviter binds or changes
+active Invitations. Unbound, the words work for whichever caller redeems them
+first; bound, only from that number. The inviter binds or changes
 the recipient only while it is unredeemed, and only after the Voice Agent read
 the number back and the inviter confirmed it; this records an intended
 recipient and does not verify that the recipient controls the number, which
@@ -268,7 +371,7 @@ bound number in one transaction: a failed claim consumes nothing and records no
 edge. Removing an Invitation from the User's list revokes it if still active
 and hides it; nothing is deleted, so provenance and the Registration it
 produced survive. The inviter hears each Invitation's status, when it was
-redeemed, and by which number; the invitee may hear the inviter's number. The
+redeemed, and by which Handle; the invitee may hear the inviter's Handle. The
 operator-wide graph is visible only on the Diagnostics Surface or in D1. Its
 read-only Access Control projection includes hidden Invitations, distinguishes
 intended recipients from registered invitees, and links each Invitation to its
@@ -296,13 +399,13 @@ default and requires an explicit, session-only opt-in to reveal verbose details.
 
 The Session Orchestrator may read the current User's recent Call Activity to explain interruptions, and each call begins with a since-last-call summary (how the previous call ended, including provider errors such as moderation, recovery actions, failed Prompt Turns, and its last words) as context for the Opening.
 
-A registered caller talks first: the Voice Call connects to the Voice Agent at once while the Sandbox is started in parallel, and the Agent Connection is established in the background. Until it is ready, Session Management answers inspection and listing from its persisted projection, operations that need the ACP Agent fail fast with a neutral "still starting" error rather than waiting, and the Session Orchestrator keeps conversing and acts on held requests once the connection is ready. Losing the Agent Connection mid-call makes Managed Sessions unavailable but does not end the Voice Call. Only a Sandbox the provider reports broken sends the caller to deterministic recovery before the Voice Agent. A provider ending the voice connection is not a User hanging up, and neither cancels Prompt Turns; only a Sandbox restart or replacement interrupts Agent work. A Voice Call may contain several voice sessions (after a drop, the recovery path can start another, and a Theme switch bounces to a fresh one with the new voice). A voice session ends at the first of the provider's close event or the loss of the control sideband; the Voice Call ends only when the telephony provider reports it complete, and that report also closes out any voice session whose end was never observed. Each voice session's transcript is saved as it grows, so one whose end was never observed (the Durable Object reset mid-call) still files its transcript and last words when the telephony report arrives or the next voice session attaches.
+A caller who passes the Identity Check talks first: the Voice Call connects to the Voice Agent at once while the Sandbox is started in parallel, and the Agent Connection is established in the background. Until it is ready, Session Management answers inspection and listing from its persisted projection, operations that need the ACP Agent fail fast with a neutral "still starting" error rather than waiting, and the Session Orchestrator keeps conversing and acts on held requests once the connection is ready. Losing the Agent Connection mid-call makes Managed Sessions unavailable but does not end the Voice Call. Only a Sandbox the provider reports broken sends the caller to deterministic recovery before the Voice Agent. A provider ending the voice connection is not a User hanging up, and neither cancels Prompt Turns; only a Sandbox restart or replacement interrupts Agent work. A Voice Call may contain several voice sessions (after a drop, the recovery path can start another, and a Theme switch bounces to a fresh one with the new voice). A voice session ends at the first of the provider's close event or the loss of the control sideband; the Voice Call ends only when the telephony provider reports it complete, and that report also closes out any voice session whose end was never observed. Each voice session's transcript is saved as it grows, so one whose end was never observed (the Durable Object reset mid-call) still files its transcript and last words when the telephony report arrives or the next voice session attaches.
 
 ### Opening
 
 **Context:** Voice Interaction
 
-The first words of a Voice Call, composed deterministically by Dogwalk with no model call on the critical path: a terse caller-ID verification clause (from the carrier's STIR/SHAKEN attestation), the product name, a welcome line, and an invitation to speak. The welcome line was written by one short Session Orchestrator model call when the previous Voice Call ended; deterministic clauses about Managed Session changes since then (a Prompt Turn stopped or failed, a Permission Request arrived, a recording was saved) and about an abnormal previous ending are added at connection. A User's first call after Registration gets a fixed welcome instead, and the Session Orchestrator follows it with a short spoken tour while the new Sandbox is created. The Session Orchestrator is told the Opening's exact words and does not repeat them.
+The first words of a Voice Call, composed deterministically by Dogwalk with no model call on the critical path, after the Identity Check: a terse identity clause (Home or Roaming, plus the carrier's STIR/SHAKEN attestation), any failed Identity Check attempts against the User's Handle since their last call, the product name, a welcome line, and an invitation to speak. The welcome line was written by one short Session Orchestrator model call when the previous Voice Call ended; deterministic clauses about Managed Session changes since then (a Prompt Turn stopped or failed, a Permission Request arrived, a recording was saved) and about an abnormal previous ending are added at connection. A User's first call after Registration gets a fixed welcome instead, and the Session Orchestrator follows it with a short spoken tour while the new Sandbox is created. The Session Orchestrator is told the Opening's exact words and does not repeat them.
 
 ### Keypad Conventions
 
@@ -415,17 +518,17 @@ An optional execution and security boundary around Agents, processes, files, net
 
 Dogwalk's association between an authorized User identity and one provider-hosted
 Sandbox. It records provider identity and lifecycle projection separately from
-Registration: registering a phone does not create or identify a Sandbox. Agent
-Hosting may derive a non-reversible provider label from the phone identity, but
-must not expose the phone number to the provider as a sandbox name or label.
+Registration: registering does not create or identify a Sandbox. Agent Hosting
+may derive a non-reversible provider label from the User, but must not expose a
+phone number or Handle to the provider as a sandbox name or label.
 
 The provider ID is a cached reference, not durable identity. If the provider
 reports that a Sandbox was deleted, Dogwalk invalidates the reference and may
 create a replacement Sandbox for the same User. Registration survives; files,
 Agent-held session history, and other state in the deleted Sandbox do not.
-Replacement is exceptional reconciliation after explicit provider-side deletion,
-not normal lifecycle. Stopped and archived Sandboxes retain identity and durable
-filesystem state and are resumed in place, potentially across months.
+Replacement after explicit provider-side deletion is exceptional reconciliation.
+Stopped and archived Sandboxes retain identity and durable filesystem state and
+are resumed in place, until reaped (see Identity and Hosting Lifecycle).
 
 ### Diagnostics Surface
 
@@ -698,6 +801,16 @@ A Permission Request or Elicitation can make an in-progress turn need User atten
 
 The Voice Agent may describe a ready session as "resting" or an in-progress session as "working." Those are conversational projections, not core lifecycle values.
 
+### Identity and Hosting Lifecycle
+
+Inactivity reaps from the outside in, each layer more slowly:
+
+- **Home:** expires 90 days after its last successful call. The User remains and can still get in by Roaming.
+- **Sandbox:** reaped 30 days after its last Voice Call, deleting its files and Agent-held session history. The User's next call gets a fresh Sandbox.
+- **User:** reaped after a longer inactivity, deleting the Handle's binding, Voice Reference, and Home. Registrations and Invitations stay as provenance.
+
+Reaping is ordinary lifecycle, not failure. Someone reaped, or locked out of their identity, is invited again and registers as a new User.
+
 ### Attention Lifecycle
 
 An Attention Request is received from the Agent, queued for the appropriate interaction surface, presented to the User, resolved with subtype-correct semantics, and returned to the Agent. Cancelling a Prompt Turn also resolves or cancels its pending protocol requests as ACP requires.
@@ -748,6 +861,9 @@ These canonical terms name Voice Agent tools as well as core methods. Narration 
 - Client-provided tools bind to an attachment, not to an ACP Session.
 - Following a session is not directing it, and Stop Following is not closing or cancelling anything.
 - A Bid is not an Attention Request.
+- A Handle is not a credential, and a Home is not an identity.
+- Roaming is not re-homing, and grants no less access than a Home call.
+- Passing the Identity Check is not Registration; failing it is not losing the identity.
 
 ## Adapter Vocabulary
 
@@ -765,6 +881,13 @@ The following names may appear in adapter configuration and deployment documenta
 - **Daytona:** Current remote Sandbox provider.
 - **stdio, WebSocket, HTTP:** Transport mechanisms.
 - **ACP Python SDK:** Current protocol library.
+- **Twilio:** Current telephony provider. The Identity Check is TwiML: a speech
+  `<Gather>` for transcripts and a `<Start><Stream>` fork for challenge audio,
+  stopped before the SIP dial. Never `<Record>`, whose media this account served
+  without authentication.
+- **Speaker verification Worker:** Current Voice Reference scorer: a stateless
+  WASM speaker-embedding model in its own Worker (Workers Paid), reached only
+  through a Service Binding. It holds no per-User state.
 
 Adapter-specific limitations should be represented as negotiated capabilities, adapter behavior, or compatibility notes rather than generalized into Dogwalk's domain model.
 
@@ -809,7 +932,8 @@ The following language appears in Git history and is not canonical for productio
 
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Invitations: should a successful Registration by Invitation continue straight into the new User's first call rather than hanging up? Should the Diagnostics Surface draw the invitation graph, and should an operator be able to raise or lower a User's active-Invitation limit?
-- Could Access Control identify a User by something spoken, such as a passphrase in the style of Invite Codes, so a call from any telephone, even a payphone, works without caller ID?
+- Resolved: a spoken Handle plus Identity Challenges lets a User call from any telephone (see Roaming). Still open: how long before an inactive User is reaped; how many failed Identity Check attempts pause a Handle, and for how long; whether a reaped Handle may be reissued, and after what quarantine; whether a User may ask for a new Handle; how far one successful call may update a Voice Reference, so voice drift is followed without letting a one-time impostor pull it toward their own voice; and whether registering from a number that is already a Home should be limited, since one phone could otherwise create many Users (bounded today only by Invitation limits).
+- Should the Identity Check ever collect more voice evidence during the conversation, or does whole-call collection need its own consent and retention decision?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
 
 - Should the Voice Frontend also receive recent conversation directly (as provider session history at call start), rather than only through the Session Orchestrator's reorienting speech?
@@ -819,7 +943,7 @@ The following language appears in Git history and is not canonical for productio
 - The Opening's welcome line is written when a call ends; how stale may it become (for example after days, or after work that changed what is unfinished) before Dogwalk prefers the neutral fallback?
 - A Managed Session's directory is fixed at creation and Dogwalk does not yet negotiate additional directories, so work spanning two projects needs two Managed Sessions or a shared parent directory. Should Create Managed Session accept additional directories when the Agent advertises them?
 - Is a project an Agent Hosting fact (a directory found in the Sandbox) or a Session Management concept with its own identity, for example so a Managed Session survives a clone being moved or re-cloned?
-- Is the caller-ID clause permanent product behavior or a diagnostic to remove once STIR/SHAKEN attestation is understood across carriers?
+- Now that the Identity Check, not caller ID, establishes identity, should the Opening's STIR/SHAKEN attestation remain, or is it a diagnostic to remove once attestation is understood across carriers?
 
 - Paired Browser: should the Session Orchestrator learn which files the User opened, so a callback can start from what they read? Should unpairing also be possible by voice? Pairing Tones decode through simulated speech codecs and reverberant rooms but are not yet verified over a real carrier. Decode Failures cannot be attributed to a call before a claim; if Dogwalk ever has more than one active User, should a page learn something per attempt (without weakening the one-press authorization) so the count stops being global?
 - Whiteboard and shown-report images are snapshots taken when drawn or shown (resolved: viewing never wakes the Sandbox; redraw or reshow to refresh). Should a board say when a captured file has since changed? Export or sharing of a board with its images is not supported.
