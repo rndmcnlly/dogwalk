@@ -17,6 +17,7 @@ import secrets
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -51,6 +52,8 @@ from smoke_test import (
 WORKER_DIR = Path(__file__).resolve().parent
 SOCKET_PORT = PORT_BASE + 4
 ORCHESTRATOR_MOCK_PORT = PORT_BASE + 5
+# wrangler dev's output, kept per port base and shown when the suite fails.
+WRANGLER_LOG = Path(tempfile.gettempdir()) / f"dogwalk-voice-session-{PORT_BASE}.log"
 IDENTITY_SECRET = f"local-identity-secret-{secrets.token_hex(8)}"
 OPENAI_WEBHOOK_KEY = secrets.token_bytes(32)
 OPENAI_WEBHOOK_SECRET = "whsec_" + base64.b64encode(OPENAI_WEBHOOK_KEY).decode()
@@ -681,6 +684,19 @@ def call_activity_rows(call_sid: str, timing: bool = False) -> list[dict]:
     return [item for call in calls if call["call_sid"] == call_sid for item in call["activity"]]
 
 
+def activity_line(row: dict) -> str:
+    """One activity row for failure output: what happened, to which tool, first; the rest cut."""
+    try:
+        detail = json.loads(row.get("detail") or "{}")
+    except ValueError:
+        detail = {}
+    if not isinstance(detail, dict):
+        detail = {}
+    head = [detail.pop(key, None) for key in ("event", "name", "tool_call_id", "outcome", "ms")]
+    head = " ".join(str(field) for field in [row.get("ts"), row.get("event"), *head] if field is not None)
+    return f"{head} {json.dumps(detail)[:160]}"
+
+
 def call_activity(call_sid: str) -> list[str]:
     return [row["event"] for row in call_activity_rows(call_sid)]
 
@@ -860,9 +876,14 @@ def of_type(kind: str):
 
 
 async def wait_for(condition, timeout: float = 8) -> None:
-    async with asyncio.timeout(timeout):
-        while not condition():
-            await asyncio.sleep(0.05)
+    try:
+        async with asyncio.timeout(timeout):
+            while not condition():
+                await asyncio.sleep(0.05)
+    except TimeoutError:
+        # A stalled Worker and a script that stopped matching look alike without the last steps.
+        issued = [call_id for call_id, _ in OrchestratorMock.issued[-4:]]
+        raise TimeoutError(f"condition unmet after {timeout} s; last Orchestrator calls issued: {issued}") from None
 
 
 async def run_protocol(identity: str) -> None:
@@ -1691,8 +1712,10 @@ def confirm_claim(phone: str, call_sid: str) -> str:
 def d1(sql: str) -> list[dict]:
     result = subprocess.run(
         [project_wrangler(), "d1", "execute", "dogwalk", "--local", "--json", "--command", sql],
-        cwd=WORKER_DIR, check=True, capture_output=True, text=True,
+        cwd=WORKER_DIR, capture_output=True, text=True,
     )
+    if result.returncode:
+        raise RuntimeError(f"wrangler d1 execute exited {result.returncode}: {result.stderr.strip()[-2000:]}")
     return json.loads(result.stdout)[0]["results"]
 
 
@@ -1958,6 +1981,7 @@ def main() -> int:
     thread.start()
     orchestrator = ThreadingHTTPServer(("127.0.0.1", ORCHESTRATOR_MOCK_PORT), OrchestratorMock)
     threading.Thread(target=orchestrator.serve_forever, daemon=True).start()
+    WRANGLER_LOG.write_text("")
     processes = [start_wrangler(wrangler)]
 
     def restart() -> None:
@@ -1969,6 +1993,18 @@ def main() -> int:
         asyncio.run(run_unobserved_end(restart))
         print("voice session delegation checks passed")
         return 0
+    except BaseException:
+        # The known flake is one Worker call stalling under host load; these show which one.
+        tail = WRANGLER_LOG.read_text(errors="replace").splitlines()[-60:]
+        print(f"--- last lines of {WRANGLER_LOG}", *tail, sep="\n", file=sys.stderr)
+        # A tool.started with no tool.completed names the Worker call that stalled.
+        for call_sid in ("CA_VOICE_TEST", "CA_VOICE_TEST2", "CA_VOICE_TEST3"):
+            try:
+                rows = [activity_line(row) for row in call_activity_rows(call_sid, timing=True)[-20:]]
+            except Exception as error:
+                rows = [f"unavailable: {error!r}"]
+            print(f"--- last activity of {call_sid}", *rows, sep="\n", file=sys.stderr)
+        raise
     finally:
         stop_wrangler(processes[-1])
         daytona.shutdown()
@@ -2023,8 +2059,8 @@ def start_wrangler(wrangler: str) -> subprocess.Popen:
             f"ADMIN_PASSWORD:{LOCAL_ADMIN_PASSWORD}",
         ],
         cwd=WORKER_DIR,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=WRANGLER_LOG.open("a"),
+        stderr=subprocess.STDOUT,
     )
     if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
         process.kill()
