@@ -510,6 +510,27 @@ def run_tests(
         require(get(base_url, "/admin/api/timing?" + suffix, operator_headers)[0] == expected,
                 f"invalid operator query accepted: {suffix}")
 
+    # OTLP export: same operator gate, pure OTLP bodies, row-local log pages.
+    for path in ("/admin/api/otlp/v1/logs?call_sid=CA_TEST2", "/admin/api/otlp/v1/traces?call_sid=CA_TEST2"):
+        require(get(base_url, path)[0] == 401, f"OTLP export is public: {path}")
+        require(get(base_url, path, {"authorization": "Bearer paired-browser-credential"})[0] == 401,
+                f"OTLP export accepts pairing bearer: {path}")
+    status, body = get(base_url, "/admin/api/otlp/v1/logs?call_sid=CA_TEST2&after=0", operator_headers)
+    records = json.loads(body)["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+    require(status == 200 and records and all(r["observedTimeUnixNano"].isdigit() and r["eventName"] for r in records),
+            "OTLP logs export did not return LogRecords")
+    require(all("rowId" not in r and "body" not in r for r in records), "OTLP logs carry non-OTLP fields or content")
+    last = max(int(a["value"]["intValue"]) for r in records for a in r["attributes"] if a["key"] == "dogwalk.journal.row_id")
+    status, body = get(base_url, f"/admin/api/otlp/v1/logs?call_sid=CA_TEST2&after={last}", operator_headers)
+    require(status == 200 and json.loads(body)["resourceLogs"][0]["scopeLogs"][0]["logRecords"] == [],
+            "OTLP log cursor repeated already-seen rows")
+    status, body = get(base_url, "/admin/api/otlp/v1/traces?call_sid=CA_TEST2", operator_headers)
+    require(status == 200 and isinstance(json.loads(body)["resourceSpans"][0]["scopeSpans"][0]["spans"], list),
+            "OTLP traces export unavailable")
+    for path, expected in (("logs?call_sid=CA_UNKNOWN", 404), ("logs?call_sid=CA_TEST2&after=-1", 400), ("traces?after=0", 400)):
+        require(get(base_url, "/admin/api/otlp/v1/" + path, operator_headers)[0] == expected,
+                f"invalid OTLP query accepted: {path}")
+
     status, event, safe_state = first_sse_event(base_url, "adam", LOCAL_ADMIN_PASSWORD)
     require(
         status == 200 and event == "state", f"SSE did not emit state: {status} {event}"

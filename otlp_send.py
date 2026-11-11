@@ -16,6 +16,7 @@ like playtest.py. Saved bodies are metadata-only but come from production: keep 
 """
 import argparse
 import base64
+import email.message
 import json
 import pathlib
 import subprocess
@@ -28,7 +29,7 @@ ORIGIN = "https://dogwalk.tools"
 RETRYABLE = {429, 502, 503, 504}  # OTLP/HTTP spec: retry these, never other 4xx.
 
 
-def admin_get(path: str) -> tuple[dict, dict]:
+def admin_get(path: str) -> tuple[dict, "email.message.Message"]:
     password = subprocess.run(["security", "find-generic-password", "-a", "adam", "-s", "dogwalk-admin", "-w"],
                               capture_output=True, text=True, check=True).stdout.strip()
     request = urllib.request.Request(f"{ORIGIN}{path}", headers={
@@ -36,7 +37,7 @@ def admin_get(path: str) -> tuple[dict, dict]:
         "user-agent": "dogwalk-otlp-send/1",  # Cloudflare's bot filter rejects Python-urllib
     })
     with urllib.request.urlopen(request, timeout=60) as response:
-        return json.load(response), dict(response.headers)
+        return json.load(response), response.headers  # case-insensitive lookups
 
 
 def fetch_call(call_sid: str) -> tuple[list[dict], dict]:
@@ -47,14 +48,14 @@ def fetch_call(call_sid: str) -> tuple[list[dict], dict]:
         if body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]:
             pages.append(body)
         cursor = int(headers["x-dogwalk-cursor"])
-        if headers.get("x-dogwalk-truncated") == "true":
-            print("warning: call exceeds the export row cap; spans and logs are truncated", file=sys.stderr)
         if headers.get("x-dogwalk-has-more") != "true":
             break
         if cursor <= after:
             raise SystemExit("log cursor did not advance")
         after = cursor
-    traces, _ = admin_get(f"/admin/api/otlp/v1/traces?call_sid={call_sid}")
+    traces, headers = admin_get(f"/admin/api/otlp/v1/traces?call_sid={call_sid}")
+    if headers.get("x-dogwalk-truncated") == "true":
+        print("warning: call exceeds the export row cap; spans cover only its first rows", file=sys.stderr)
     return pages, traces
 
 

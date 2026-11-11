@@ -3,7 +3,9 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { logsRequest, msToNanos, projectCall, tracesRequest } from "./src/otlp.ts";
+import { type ActivityRow, type CallRow, logsRequest, msToNanos, projectLogs, projectSpans, tracesRequest } from "./src/otlp.ts";
+
+const projectCall = async (call: CallRow, rows: ActivityRow[]) => ({ logs: await projectLogs(call, rows), spans: await projectSpans(call, rows) });
 
 const CALL_A = "CAfixture000000000000000000000000a";
 const CALL_B = "CAfixture000000000000000000000000b";
@@ -113,7 +115,10 @@ const tools = spanNamed(a, "orchestrator.tool");
 assert.equal(tools.length, 1, "tool without completion is not a span");
 assert.equal(tools[0].status.code, 0, "finally-completion does not imply success");
 assert.equal(tools[0].links?.[0].spanId, models[0].spanId, "tool links to the model response that requested it");
-assert.equal(attr(logFor(a, rowsA[7].id), "dogwalk.interval.state"), "end_not_observed");
+const openTool = logFor(a, rowsA[7].id);
+assert.match(openTool.spanId!, /^[0-9a-f]{16}$/, "an open start names its span at once");
+assert.ok(!a.spans.some((s) => s.spanId === openTool.spanId), "but that span is never exported");
+assert.ok(a.logs.every((l) => attr(l, "dogwalk.interval.state") === undefined), "no trace-level state on logs");
 
 // RPC roundtrips are scoped by Agent Connection.
 const rpcs = spanNamed(a, "acp session/prompt");
@@ -126,8 +131,9 @@ assert.equal(spanNamed(a, "acp session/cancel").length, 0, "legacy rows without 
 
 // Prompt Turn begun in Call A, ended in Call B: same deterministic identity, never fabricated.
 assert.equal(spanNamed(a, "acp.prompt_turn").length, 0);
-assert.equal(attr(logFor(a, rowsA[17].id), "dogwalk.interval.state"), "end_not_observed");
-assert.equal(attr(logFor(b, rowsB[0].id), "dogwalk.interval.state"), "start_not_observed");
+const turnStartLog = logFor(a, rowsA[17].id), turnStopLog = logFor(b, rowsB[0].id);
+assert.equal(turnStartLog.traceId, turnStopLog.traceId, "both halves of a cross-call turn name the same trace");
+assert.equal(turnStartLog.spanId, turnStopLog.spanId);
 const crossCall = await projectCall({ call_sid: CALL_A, started_at: Math.floor(T0 / 1000), ended_at: Math.floor(T0 / 1000) + 60,
   status: "completed" }, [...rowsA, ...rowsB]);
 const turn = spanNamed(crossCall, "acp.prompt_turn")[0];
@@ -135,6 +141,32 @@ assert.ok(turn && turn.traceId !== call.traceId, "Prompt Turn is its own work tr
 assert.equal(turn.links?.[0].spanId, call.spanId, "linked to the initiating call, not parented by it");
 assert.equal(turn.status.code, 1);
 assert.equal(turn.startTimeUnixNano, msToNanos(turnStart));
+assert.equal(turn.spanId, turnStartLog.spanId, "the span, once exported, is the one the logs named");
+
+// Row-local: projecting one row alone gives exactly its record in the full projection,
+// so a log fetched by cursor before later rows exist never changes.
+const callA: CallRow = { call_sid: CALL_A, started_at: Math.floor(T0 / 1000), ended_at: Math.floor(T0 / 1000) + 60, status: "completed" };
+for (const row of rowsA) assert.deepEqual((await projectLogs(callA, [row]))[0], logFor(a, row.id), `row ${row.id} is row-local`);
+// Matched start and end logs name the exported span.
+for (const s of a.spans.filter((s) => s.name !== "voice_call")) {
+  const ends = [attr(s, "dogwalk.journal.start_row_id"), attr(s, "dogwalk.journal.end_row_id")].map(Number);
+  for (const id of ends) assert.equal(logFor(a, id).spanId, s.spanId, `${s.name} row ${id} names its span`);
+}
+// An RPC response observed under a different voice session still names its request's span.
+const crossLive = [
+  { id: 1001, ts: Math.floor(T0 / 1000), source: "voice", event: "voice.timing", detail: JSON.stringify({ event: "acp.sent",
+    rpc_id: 42, method: "session/prompt", agent_connection_id: "conn-z", ts_ms: T0, clock_id: CLOCK, live_session_id: "rtc_one" }) },
+  { id: 1002, ts: Math.floor(T0 / 1000), source: "voice", event: "voice.timing", detail: JSON.stringify({ event: "acp.received",
+    rpc_id: 42, agent_connection_id: "conn-z", ts_ms: T0 + 50, clock_id: CLOCK, live_session_id: "rtc_two" }) },
+];
+const rpcSpan = (await projectSpans(callA, crossLive)).find((s) => s.name === "acp session/prompt")!;
+const rpcLogs = await projectLogs(callA, crossLive);
+assert.ok(rpcSpan && rpcLogs.every((l) => l.spanId === rpcSpan.spanId && l.traceId === rpcSpan.traceId));
+// RPC rows without Agent Connection identity, and Agent-initiated requests, name no span.
+assert.equal(logFor(a, rowsA[14].id).spanId, undefined);
+const agentRequest = { id: 999, ts: Math.floor(T0 / 1000), source: "voice", event: "voice.timing",
+  detail: JSON.stringify({ event: "acp.received", rpc_id: 7, method: "session/request_permission", agent_connection_id: "conn-a", ts_ms: T0 }) };
+assert.equal((await projectLogs(callA, [agentRequest]))[0].spanId, undefined);
 
 // Deterministic IDs and valid lengths.
 const again = await projectCall({ call_sid: CALL_A, started_at: Math.floor(T0 / 1000), ended_at: Math.floor(T0 / 1000) + 60, status: "completed" }, rowsA);

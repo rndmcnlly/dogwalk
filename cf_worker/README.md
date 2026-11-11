@@ -543,10 +543,12 @@ travels in `x-dogwalk-cursor` / `x-dogwalk-has-more` so the body stays pure OTLP
 `GET /admin/api/otlp/v1/traces?call_sid=CA...` returns an `ExportTraceServiceRequest`
 of reconstructed spans: the ended Voice Call, Orchestrator model requests and tools,
 Prompt Turns (their own trace, linked to the call), and ACP RPC roundtrips matched
-within one Agent Connection. Both use the operator gate and cap a call at 20,000 rows
-(`x-dogwalk-truncated`). Provider occurrence time maps to `timeUnixNano` only when
-known; receipt is `observedTimeUnixNano`. Unmatched starts and ends stay logs marked
-`dogwalk.interval.state`. Attributes come from a server-side allowlist: content,
+within one Agent Connection. Both use the operator gate; spans are matched over at most
+20,000 rows per call (`x-dogwalk-truncated`). Provider occurrence time maps to `timeUnixNano` only when
+known; receipt is `observedTimeUnixNano`. Log records are row-local: each depends only
+on its own row, so a page fetched during a live call never changes later. A start row
+names its span's trace and span ID at once; if the end never arrives, that span is
+simply never exported. Attributes come from a server-side allowlist: content,
 Aliases, error strings, and thought tails are dropped and counted in
 `droppedAttributesCount`, whatever the page's Show content setting.
 

@@ -10,7 +10,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { ADMIN_HTML } from "./admin";
 import { OPERATOR_TIMING_HTML } from "./operator_timing";
 import { operatorCallContent } from "./operator_content";
-import { type ActivityRow, type CallRow, logsRequest, projectCall, tracesRequest } from "./otlp";
+import { type ActivityRow, type CallRow, logsRequest, projectLogs, projectSpans, tracesRequest } from "./otlp";
 import { observeTwilio, processTwilioJobs } from "./provider_timing";
 import { LANDING_HTML } from "./landing";
 import { PAIR_HTML } from "./pair_page";
@@ -679,8 +679,8 @@ function diagnosticsEvents(env: Env, verbose: boolean): Response {
   });
 }
 
-// Bounds for the operator OTLP export. Spans are matched across the whole call (up to the
-// cap), so a log page and the trace body agree on trace and span IDs.
+// Bounds for the operator OTLP export. Logs are row-local, so a page reads only its own
+// rows. Spans are matched across the whole call, up to the cap.
 const OTLP_MAX_ROWS = 20_000;
 const OTLP_LOG_PAGE = 500;
 
@@ -698,18 +698,22 @@ async function otlpExport(env: Env, params: URLSearchParams, signal: "logs" | "t
   const call = await env.DB.prepare("SELECT call_sid, status, started_at, ended_at FROM voice_calls WHERE call_sid = ?")
     .bind(callSid).first<CallRow>();
   if (!call) return jsonResponse({ error: "unknown call" }, 404);
+  if (signal === "logs") {
+    const rows = await env.DB.prepare(
+      "SELECT id, ts, source, event, detail FROM call_activity WHERE call_sid = ? AND id > ? ORDER BY id LIMIT ?",
+    ).bind(callSid, after, OTLP_LOG_PAGE + 1).all<ActivityRow>();
+    const page = rows.results.slice(0, OTLP_LOG_PAGE);
+    return jsonResponse(logsRequest(await projectLogs(call, page)), 200, {
+      "x-dogwalk-cursor": String(page.at(-1)?.id ?? after),
+      "x-dogwalk-has-more": String(rows.results.length > OTLP_LOG_PAGE),
+    });
+  }
   const rows = await env.DB.prepare(
     "SELECT id, ts, source, event, detail FROM call_activity WHERE call_sid = ? ORDER BY id LIMIT ?",
   ).bind(callSid, OTLP_MAX_ROWS + 1).all<ActivityRow>();
   const truncated = rows.results.length > OTLP_MAX_ROWS;
-  const { logs, spans } = await projectCall(call, rows.results.slice(0, OTLP_MAX_ROWS));
-  const headers: Record<string, string> = { "cache-control": "no-store", "x-dogwalk-truncated": String(truncated) };
-  if (signal === "traces") return jsonResponse(tracesRequest(spans), 200, headers);
-  const page = logs.filter((log) => log.rowId > after).slice(0, OTLP_LOG_PAGE);
-  const remaining = logs.filter((log) => log.rowId > after).length > page.length;
-  headers["x-dogwalk-cursor"] = String(page.at(-1)?.rowId ?? after);
-  headers["x-dogwalk-has-more"] = String(remaining);
-  return jsonResponse(logsRequest(page), 200, headers);
+  return jsonResponse(tracesRequest(await projectSpans(call, rows.results.slice(0, OTLP_MAX_ROWS))), 200,
+    { "x-dogwalk-truncated": String(truncated) });
 }
 
 async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Response> {
