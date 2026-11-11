@@ -534,7 +534,7 @@ exact timing correlations. Retention/compaction may leave gaps, which the page
 reports rather than inventing content or timestamps. New calls also retain
 bounded content at the instrumented boundaries; truncation is explicitly marked.
 
-### OpenTelemetry export (issue #4, Phase 1)
+### OpenTelemetry export (issue #4, Phase 1; issue #8)
 
 `src/otlp.ts` projects one call's journal into standard OTLP/JSON, metadata only.
 `GET /admin/api/otlp/v1/logs?call_sid=CA...&after=0` returns an
@@ -578,6 +578,28 @@ and matches recorded starts to ends by span ID, marking spans
 existing local D1 state (or delete `.wrangler/state/v3/d1`). Attributes come from a server-side allowlist: content,
 Aliases, error strings, and thought tails are dropped and counted in
 `droppedAttributesCount`, whatever the page's Show content setting.
+
+Each Orchestrator model request sends its own span as `traceparent` (no `tracestate` or
+`baggage`) and its `request_id` as `X-Client-Request-Id`. OpenAI documents the client ID
+for support correlation; neither header makes a provider continue the trace or return spans.
+The journal records metadata only: the requested model, endpoint host and port (never the
+path or key), and reasoning effort on `model.started`; the provider's `x-request-id`
+(dropped unless a plain identifier of at most 128 characters) on `model.headers`; the
+response `id`, served `model`, and input/output token counts on `model.completed`; and
+`error_type` on `model.failed`.
+
+Model request and Orchestrator tool spans follow the Development GenAI semantic conventions
+pinned at `open-telemetry/semantic-conventions-genai@e6658f14c9d9ea0760825f029cb82e7673f48fab`
+(2026-11-06; `src/otlp.ts` lists every adopted attribute). Model spans are named
+`chat {model}` with `gen_ai.request.model`, `gen_ai.response.*`, `gen_ai.usage.*`,
+`server.address`/`server.port`, and `error.type`; `gen_ai.provider.name` is `openai` only
+when the recorded host is `api.openai.com` or a subdomain of it, and is omitted for any other
+`ORCHESTRATOR_API_BASE` rather than guessed. Tool spans are `execute_tool {name}` with
+`gen_ai.tool.name`, `gen_ai.tool.call.id`, and `gen_ai.tool.type=function`. Content
+attributes (`gen_ai.input.messages` and the like) are Opt-In and never exported. Model rows
+written before this change keep the `orchestrator.model_request` name and no GenAI
+attributes; usage everywhere is now `gen_ai.usage.*`. Because the conventions are
+Development, moving the pin is a deliberate review, never tracking `main`.
 
 `uv run --script otlp_send.py CA...` fetches both and POSTs them unchanged to an
 OTLP/HTTP receiver (default `http://localhost:4318`), honouring partial success and

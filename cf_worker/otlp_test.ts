@@ -112,7 +112,8 @@ assert.deepEqual(models.map((s) => s.status.code), [1, 2]);
 assert.equal(models[0].events?.[0].name, "model.headers");
 assert.equal(attr(models[0].events![0], "http.response.status_code"), "200");
 assert.ok(models.every((s) => s.parentSpanId === call.spanId && s.traceId === call.traceId));
-const tools = spanNamed(a, "orchestrator.tool");
+assert.ok(models.every((s) => attr(s, "gen_ai.operation.name") === undefined), "rows without request_model gain no GenAI attributes");
+const tools = spanNamed(a, "execute_tool send_prompt");
 assert.equal(tools.length, 1, "tool without completion is not a span");
 assert.equal(tools[0].status.code, 0, "finally-completion does not imply success");
 assert.equal(tools[0].links?.[0].spanId, models[0].spanId, "tool links to the model response that requested it");
@@ -187,10 +188,14 @@ assert.equal(resAttrs(producedLogs[1].resource)["deployment.environment.name"], 
 assert.ok(!("deployment.environment.name" in resAttrs(producedLogs[2].resource)), "legacy rows are not stamped with today's build");
 assert.ok(!JSON.stringify(producedLogs).includes('"service_version"'), "producer fields are Resource, not log attributes");
 const producedSpans = tracesRequest(await projectSpans(callA, producedRows)).resourceSpans;
-const spanStatus = Object.fromEntries(producedSpans.flatMap((r) => r.scopeSpans[0].spans)
-  .filter((s) => s.name === "orchestrator.tool").map((s) => [attr(s, "dogwalk.tool_call.id"), [s.status.code, attr(s, "dogwalk.outcome")]]));
-assert.deepEqual(spanStatus, { "t-ok": [1, "ok"], "t-err": [2, "error_result"], "t-throw": [2, "threw"], "t-plain": [0, "returned"] });
-const okSpanResource = producedSpans.find((r) => r.scopeSpans[0].spans.some((s) => attr(s, "dogwalk.tool_call.id") === "t-ok"))!;
+const toolSpans = producedSpans.flatMap((r) => r.scopeSpans[0].spans).filter((s) => attr(s, "gen_ai.operation.name") === "execute_tool");
+const spanStatus = Object.fromEntries(toolSpans.map((s) => [attr(s, "gen_ai.tool.call.id"), [s.status.code, attr(s, "dogwalk.outcome"), attr(s, "error.type")]]));
+assert.deepEqual(spanStatus, { "t-ok": [1, "ok", undefined], "t-err": [2, "error_result", "error_result"],
+  "t-throw": [2, "threw", "threw"], "t-plain": [0, "returned", undefined] });
+// execute_tool naming needs the Required tool name; unnamed rows keep the interim span name.
+assert.deepEqual(toolSpans.map((s) => s.name), ["execute_tool list_sessions", "orchestrator.tool", "orchestrator.tool", "orchestrator.tool"]);
+assert.ok(toolSpans.every((s) => s.kind === 1 && attr(s, "gen_ai.tool.type") === "function"));
+const okSpanResource = producedSpans.find((r) => r.scopeSpans[0].spans.some((s) => attr(s, "gen_ai.tool.call.id") === "t-ok"))!;
 assert.equal(resAttrs(okSpanResource.resource)["service.version"], "ver-1111", "a span belongs to the build that observed its start");
 assert.equal(attr(tools[0], "dogwalk.outcome"), "not_recorded", "legacy finally-completion stays Unset");
 assert.deepEqual(logsRequest([]).resourceLogs, [], "an empty page is a valid, empty export");
@@ -266,11 +271,64 @@ assert.equal((await projectSpans(callA, [turnA, interrupted])).filter((s) => s.n
   "detecting an interruption is not observing the turn's end");
 assert.equal((await projectLogs(callA, [interrupted]))[0].spanId, crossTurn.spanId);
 
+// Older rows stored usage verbatim: only nonnegative integer token counts are exported.
+const oddUsage = (await projectLogs(callA, [{ id: 5001, ts: Math.floor(T0 / 1000), source: "voice", event: "orchestrator.model",
+  detail: JSON.stringify({ ts_ms: T0, usage: { input_tokens: "PRIVATE_USAGE_SENTINEL", output_tokens: 12, extra: "x" } }) }]))[0];
+assert.equal(attr(oddUsage, "gen_ai.usage.input_tokens"), undefined);
+assert.equal(attr(oddUsage, "gen_ai.usage.output_tokens"), "12");
+assert.ok(!JSON.stringify(oddUsage).includes("PRIVATE_USAGE_SENTINEL") && oddUsage.droppedAttributesCount! >= 1);
+
 // RPC rows without Agent Connection identity, and Agent-initiated requests, name no span.
 assert.equal(logFor(a, rowsA[14].id).spanId, undefined);
 const agentRequest = { id: 999, ts: Math.floor(T0 / 1000), source: "voice", event: "voice.timing",
   detail: JSON.stringify({ event: "acp.received", rpc_id: 7, method: "session/request_permission", agent_connection_id: "conn-a", ts_ms: T0 }) };
 assert.equal((await projectLogs(callA, [agentRequest]))[0].spanId, undefined);
+
+// GenAI inference conventions (B4) on model requests that recorded their endpoint and model.
+// The provider is OpenAI only when the request went to OpenAI's host; a compatible base keeps
+// server.address and no guessed provider. Prompt and response content is never journaled, and
+// even if a row carried some, the allowlist drops it.
+const genRows = (base: number, host: string, extra: Record<string, unknown>, ok: boolean) => [
+  live(base, "model.started", T0, { request_id: `r-${base}`, request_model: "gpt-6.1-sol", server_address: host, server_port: 443,
+    reasoning_level: "low", context_items: 3, input: "PROMPT_CONTENT_SENTINEL", ...extra }),
+  live(base + 1, "model.headers", T0 + 400, { request_id: `r-${base}`, status: ok ? 200 : 503, provider_request_id: "req_abc123", ...extra }),
+  ok ? live(base + 2, "model.completed", T0 + 900, { request_id: `r-${base}`, response_id: "resp_0123", response_model: "gpt-6.1-sol-2026-10-01",
+    usage: { input_tokens: 812, output_tokens: 34 }, output_text: "RESPONSE_CONTENT_SENTINEL", tool_call_ids: [], ...extra })
+    : live(base + 2, "model.failed", T0 + 900, { request_id: `r-${base}`, error_type: "503", ...extra }),
+];
+const genOpenAi = genRows(5001, "api.openai.com", spanFields(childOf(callCtx), callCtx), true);
+const genCustom = genRows(5101, "llm.example.edu", {}, true);
+const genFailed = genRows(5201, "api.openai.com", {}, false);
+const genSpans = await projectSpans(callA, [...genOpenAi, ...genCustom, ...genFailed]);
+const genLogs = await projectLogs(callA, [...genOpenAi, ...genCustom, ...genFailed]);
+const genSpan = (request: string) => genSpans.find((s) => attr(s, "dogwalk.model_request.id") === request)!;
+const openAiSpan = genSpan("r-5001"), customSpan = genSpan("r-5101"), failedSpan = genSpan("r-5201");
+assert.equal(openAiSpan.name, "chat gpt-6.1-sol");
+assert.equal(openAiSpan.kind, 3);
+for (const [key, value] of Object.entries({ "gen_ai.operation.name": "chat", "gen_ai.provider.name": "openai", "openai.api.type": "responses",
+  "gen_ai.request.model": "gpt-6.1-sol", "gen_ai.request.reasoning.level": "low", "server.address": "api.openai.com", "server.port": "443",
+  "gen_ai.response.id": "resp_0123", "gen_ai.response.model": "gpt-6.1-sol-2026-10-01", "gen_ai.usage.input_tokens": "812",
+  "gen_ai.usage.output_tokens": "34", "dogwalk.model_request.provider_request_id": "req_abc123" })) {
+  assert.equal(attr(openAiSpan, key), value, key);
+}
+assert.equal(attr(customSpan, "server.address"), "llm.example.edu");
+assert.equal(attr(customSpan, "gen_ai.provider.name"), undefined, "a compatible endpoint is not labelled OpenAI");
+assert.equal(attr(customSpan, "openai.api.type"), undefined, "no openai.* attributes without the openai provider");
+assert.equal(attr(customSpan, "gen_ai.usage.input_tokens"), "812");
+assert.equal(failedSpan.status.code, 2);
+assert.equal(attr(failedSpan, "error.type"), "503");
+assert.equal(attr(failedSpan, "gen_ai.response.id"), undefined);
+const completedLog = genLogs.find((l) => l.eventName === "model.completed")!;
+assert.equal(attr(completedLog, "gen_ai.usage.output_tokens"), "34", "usage on model.completed logs uses GenAI names");
+assert.equal(attr(genLogs.find((l) => l.eventName === "model.headers")!, "dogwalk.model_request.provider_request_id"), "req_abc123");
+assert.equal(attr(genLogs.find((l) => l.eventName === "model.failed")!, "error.type"), "503");
+assert.equal(attr(logFor(a, rowsA[4].id), "gen_ai.usage.input_tokens"), "1234", "orchestrator.model usage rows too");
+assert.ok(!JSON.stringify(a.logs).includes("dogwalk.usage."), "interim usage names are gone");
+const genExport = JSON.stringify([logsRequest(genLogs), tracesRequest(genSpans)]);
+for (const leak of ["PROMPT_CONTENT_SENTINEL", "RESPONSE_CONTENT_SENTINEL", "gen_ai.input.messages", "gen_ai.output.messages", "gen_ai.system_instructions"]) {
+  assert.ok(!genExport.includes(leak), `GenAI export leaked ${leak}`);
+}
+assert.ok(genLogs.find((l) => l.eventName === "model.started")!.droppedAttributesCount! >= 1, "content-shaped fields are dropped and counted");
 
 // Deterministic IDs and valid lengths.
 const again = await projectCall({ call_sid: CALL_A, started_at: Math.floor(T0 / 1000), ended_at: Math.floor(T0 / 1000) + 60, status: "completed" }, rowsA);

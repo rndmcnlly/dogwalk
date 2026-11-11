@@ -480,11 +480,16 @@ class OrchestratorMock(BaseHTTPRequestHandler):
             if step < len(ORCHESTRATOR_SCRIPT) and ORCHESTRATOR_SCRIPT[step][0] in user_text:
                 output = ORCHESTRATOR_SCRIPT[step][1](context)
                 OrchestratorMock.issued.extend((item["call_id"], step) for item in output)
-        self.respond({"output": output, "usage": {"input_tokens": 1, "output_tokens": 1}})
+        # Provider correlation metadata, derived from the client's ID so the test can match rows.
+        client = headers.get("x-client-request-id", "").replace("-", "")
+        self.respond({"id": f"resp_{client}", "model": "mock-model-2026-11-10", "output": output,
+                      "usage": {"input_tokens": 1, "output_tokens": 1}}, {"x-request-id": f"req_{client}"})
 
-    def respond(self, value: dict) -> None:
+    def respond(self, value: dict, extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(value).encode()
         self.send_response(200)
+        for key, header in (extra_headers or {}).items():
+            self.send_header(key, header)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
@@ -1003,6 +1008,26 @@ async def run_protocol(identity: str) -> None:
         requests = {row["rpc_id"]: row for row in timed if row["event"] == "acp.sent" and row.get("method")}
         answers = [row for row in timed if row["event"] == "acp.received" and not row.get("method") and row.get("rpc_id") in requests]
         assert answers and all(a.get("span_id") == requests[a["rpc_id"]].get("span_id") for a in answers), "responses name their request"
+        # Responses propagation (issue #8, B2): each model request carries its own span as a
+        # version-00 traceparent and its request_id as X-Client-Request-Id; the provider's
+        # correlation metadata, never content, is journaled on the headers and completed rows.
+        sent = {headers.get("x-client-request-id"): headers for headers, _ in OrchestratorMock.requests}
+        model_done = [row for row in timed if row["event"] == "model.completed"]
+        assert model_done
+        for done in model_done:  # Completed rows only: a request may still be in flight.
+            start = next(row for row in timed if row["event"] == "model.started" and row["request_id"] == done["request_id"])
+            headers = sent.get(start["request_id"])
+            assert headers, f"no request carried X-Client-Request-Id {start['request_id']}"
+            assert headers.get("traceparent") == f"00-{start['trace_id']}-{start['span_id']}-01", headers.get("traceparent")
+            assert "tracestate" not in headers and "baggage" not in headers
+            assert (start["request_model"], start["server_address"], start["server_port"], start["reasoning_level"]) == (
+                "gpt-6.1-sol", "127.0.0.1", ORCHESTRATOR_MOCK_PORT, "low"), start
+            client = start["request_id"].replace("-", "")
+            heard = next(row for row in timed if row["event"] == "model.headers" and row["request_id"] == start["request_id"])
+            assert heard["provider_request_id"] == f"req_{client}", heard
+            assert (done["response_id"], done["response_model"], done["usage"]) == (
+                f"resp_{client}", "mock-model-2026-11-10", {"input_tokens": 1, "output_tokens": 1}), done
+        assert not any({"input", "output", "instructions"} & row.keys() for row in timed if row["event"].startswith("model."))
         received = next(row for row in timed if row["event"] == "live.received" and row.get("type") == "session.input_transcript.delta")
         assert received["end_ms"] >= received["start_ms"] and received["queue_ms"] >= 0
         assert isinstance(received.get("content_text"), str) and received.get("content_kind") == "caller"

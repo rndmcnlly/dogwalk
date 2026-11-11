@@ -16,7 +16,7 @@ import {
 } from "./invitations";
 import { PAIR_BUILD } from "./pair_page";
 import { producerFields } from "./otlp";
-import { childOf, newRootContext, parseTraceparent, spanFields, type TraceContext } from "./trace_context";
+import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, type TraceContext } from "./trace_context";
 
 const ACP_PORT = 8765;
 const WORKSPACE = "/home/daytona";
@@ -1398,15 +1398,15 @@ export class VoiceSession {
       const cut = this.orchestratorContext.findIndex((item: any) => item.type === "function_call" && !answered.has(item.call_id));
       const context = cut < 0 ? [...this.orchestratorContext] : this.orchestratorContext.slice(0, cut);
       while ((context.at(-1) as any)?.type === "reasoning") context.pop();
-      const base = (this.env.ORCHESTRATOR_API_BASE ?? "https://api.openai.com/v1").replace(/\/$/, "");
-      const response = await fetch(`${base}/responses`, {
+      const endpoint = orchestratorEndpoint(this.env);
+      const response = await fetch(`${endpoint.base}/responses`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${this.env.ORCHESTRATOR_API_KEY ?? this.env.OPENAI_API_KEY}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          model: this.env.ORCHESTRATOR_MODEL ?? "gpt-6.1-sol",
+          model: endpoint.model,
           instructions: greetingInstructions(theme, switching, register),
           input: [
             ...this.pinnedMemory(),
@@ -2689,44 +2689,65 @@ export class VoiceSession {
     const requestId = crypto.randomUUID();
     const started = Date.now();
     const scope = { callSid: this.callSid, liveSessionId: this.liveSessionId };
-    const span = spanFields(this.callTrace && childOf(this.callTrace), this.callTrace);
-    this.timing("model.started", { request_id: requestId, context_items: this.orchestratorContext.length, ...span });
+    const context = this.callTrace && childOf(this.callTrace);
+    const span = spanFields(context, this.callTrace);
+    const endpoint = orchestratorEndpoint(this.env);
+    const effort = this.env.ORCHESTRATOR_REASONING_EFFORT ?? "low";
+    // Endpoint host and port only: never the path or query, which may carry deployment secrets.
+    this.timing("model.started", { request_id: requestId, context_items: this.orchestratorContext.length,
+      request_model: endpoint.model, server_address: endpoint.host, server_port: endpoint.port, reasoning_level: effort, ...span });
     try {
-      return await this.orchestratorModelRequest(requestId, started, scope, span);
+      return await this.orchestratorModelRequest(requestId, started, scope, span, context, endpoint, effort);
     } catch (error) {
-      this.timing("model.failed", { request_id: requestId, ms: Date.now() - started, ...span }, Date.now(), scope);
+      this.timing("model.failed", { request_id: requestId, ms: Date.now() - started, error_type: modelErrorType(error), ...span }, Date.now(), scope);
       throw error;
     }
   }
 
   private async orchestratorModelRequest(requestId: string, started: number,
-    scope: { callSid: string | null; liveSessionId: string | null }, span: Record<string, string>): Promise<unknown[]> {
+    scope: { callSid: string | null; liveSessionId: string | null }, span: Record<string, string>,
+    context: TraceContext | null, endpoint: OrchestratorEndpoint, effort: string): Promise<unknown[]> {
     // Any /v1/responses-compatible endpoint works here; OpenAI is the default deployment.
-    const base = (this.env.ORCHESTRATOR_API_BASE ?? "https://api.openai.com/v1").replace(/\/$/, "");
-    const response = await fetch(`${base}/responses`, {
+    // traceparent names this request's span and X-Client-Request-Id our request_id. OpenAI
+    // documents the client ID for support correlation only: no provider is known to continue
+    // our trace or return spans, so these are correlation keys, not distributed tracing.
+    const response = await fetch(`${endpoint.base}/responses`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.env.ORCHESTRATOR_API_KEY ?? this.env.OPENAI_API_KEY}`,
         "content-type": "application/json",
+        "x-client-request-id": requestId,
+        ...(context ? { traceparent: formatTraceparent(context) } : {}),
       },
       body: JSON.stringify({
-        model: this.env.ORCHESTRATOR_MODEL ?? "gpt-6.1-sol",
+        model: endpoint.model,
         instructions: orchestratorInstructions(this.theme),
         input: [...this.pinnedMemory(), ...this.orchestratorContext],
         tools: ORCHESTRATOR_TOOLS,
         parallel_tool_calls: true,
-        reasoning: { effort: this.env.ORCHESTRATOR_REASONING_EFFORT ?? "low" },
+        reasoning: { effort },
         store: false,
         include: ["reasoning.encrypted_content"],
       }),
       signal: AbortSignal.timeout(60_000),
     });
-    this.timing("model.headers", { request_id: requestId, status: response.status, ms: Date.now() - started, ...span }, Date.now(), scope);
-    if (!response.ok) throw new Error(`Orchestrator model ${response.status}: ${(await response.text()).slice(0, 200)}`);
-    const body = await response.json<{ output?: unknown[]; usage?: Record<string, unknown> }>();
+    const providerRequestId = correlationId(response.headers.get("x-request-id"));
+    this.timing("model.headers", { request_id: requestId, status: response.status, ms: Date.now() - started,
+      ...(providerRequestId ? { provider_request_id: providerRequestId } : {}), ...span }, Date.now(), scope);
+    if (!response.ok) {
+      throw Object.assign(new Error(`Orchestrator model ${response.status}: ${(await response.text()).slice(0, 200)}`), { status: response.status });
+    }
+    const body = await response.json<{ id?: unknown; model?: unknown; output?: unknown[]; usage?: Record<string, unknown> }>();
+    // Response metadata only: identifiers, the served model, and token counts, never content.
+    const responseId = correlationId(body.id), responseModel = modelName(body.model);
+    const usage = Object.fromEntries((["input_tokens", "output_tokens"] as const)
+      .map((key) => [key, body.usage?.[key]]).filter(([, value]) => Number.isSafeInteger(value) && (value as number) >= 0));
     this.timing("model.completed", { request_id: requestId, ms: Date.now() - started, ...span,
+      ...(responseId ? { response_id: responseId } : {}), ...(responseModel ? { response_model: responseModel } : {}),
+      ...(Object.keys(usage).length ? { usage } : {}),
       tool_call_ids: (body.output ?? []).filter((item: any) => item.type === "function_call").map((item: any) => item.call_id) }, Date.now(), scope);
-    await this.record("orchestrator.model", { request_id: requestId, started_ms: started, ms: Date.now() - started, usage: body.usage ?? null }, scope);
+    await this.record("orchestrator.model", { request_id: requestId, started_ms: started, ms: Date.now() - started,
+      usage: Object.keys(usage).length ? usage : null }, scope);
     const inputTokens = Number(body.usage?.input_tokens);
     if (Number.isFinite(inputTokens) && inputTokens > 0) {
       this.contextTokens = inputTokens;
@@ -4482,6 +4503,43 @@ function withoutCredentials(url: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+type OrchestratorEndpoint = { base: string; model: string; host?: string; port?: number };
+
+// The Orchestrator's Responses endpoint, plus the host and port the journal may record.
+function orchestratorEndpoint(env: Env): OrchestratorEndpoint {
+  const base = (env.ORCHESTRATOR_API_BASE ?? "https://api.openai.com/v1").replace(/\/$/, "");
+  const model = env.ORCHESTRATOR_MODEL ?? "gpt-6.1-sol";
+  try {
+    const url = new URL(base);
+    const port = url.port ? Number(url.port) : url.protocol === "https:" ? 443 : url.protocol === "http:" ? 80 : undefined;
+    return { base, model, host: url.hostname, port };
+  } catch {
+    return { base, model };  // fetch reports the malformed base; the journal records no host.
+  }
+}
+
+// Provider identifiers (request, response, model) are journaled only in a plain bounded shape;
+// anything odd is dropped rather than truncated or escaped.
+// Provider identifiers (request and response IDs): a single opaque token, never URL-shaped.
+function correlationId(value: unknown): string | null {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value) ? value : null;
+}
+
+// Served model names may carry colons (fine-tunes) or one slash (routed providers), not URLs.
+function modelName(value: unknown): string | null {
+  return typeof value === "string" && /^[A-Za-z0-9._-]+(?:[:/][A-Za-z0-9._-]+)*$/.test(value)
+    && value.length <= 128 && !value.includes("//") ? value : null;
+}
+
+// Low-cardinality `error.type` for a failed model request: the HTTP status when the provider
+// answered with one, else the exception class (TimeoutError, TypeError, ...), else `_OTHER`.
+function modelErrorType(error: unknown): string {
+  const status = (error as { status?: unknown } | null)?.status;
+  if (typeof status === "number") return String(status);
+  const name = (error as { name?: unknown } | null)?.name;
+  return typeof name === "string" && name !== "Error" && /^[A-Za-z]\w{0,63}$/.test(name) ? name : "_OTHER";
 }
 
 function shellQuote(value: string): string {

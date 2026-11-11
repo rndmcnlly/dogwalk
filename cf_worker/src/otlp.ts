@@ -15,12 +15,33 @@
 //   `dogwalk.timestamp.precision_ms` carries serialized precision, not an uncertainty bound.
 // - Metadata only: attributes come from an explicit allowlist below. Content, aliases, error
 //   strings, thought tails, and anything unlisted are dropped and counted.
-// - All spans are reconstructed after the fact with deterministic IDs, marked
-//   `dogwalk.reconstructed`. No claim is made that trace context was propagated at the time.
+// - All spans are reconstructed after the fact, marked `dogwalk.reconstructed`. Rows with
+//   context recorded at start use it; older rows get deterministic derived IDs. Orchestrator
+//   model requests send their span as `traceparent`, but no provider is known to continue it.
 //
-// Attribute names are `dogwalk.*` extensions except Stable semantic conventions
-// (service.*, http.response.status_code). Development GenAI and RPC conventions wait for
-// Phase 2, when a reviewed revision is pinned deliberately.
+// Attribute names are `dogwalk.*` extensions except Stable semantic conventions (service.*,
+// http.response.status_code, server.*, error.type) and the pinned GenAI subset below. RPC
+// conventions are not adopted yet.
+//
+// GenAI semantic conventions, pinned: open-telemetry/semantic-conventions-genai at
+// e6658f14c9d9ea0760825f029cb82e7673f48fab (2026-11-06, still `main` when reviewed 2026-11-10;
+// the repository has no releases). Status: Development, so names may change; re-review before
+// moving the pin. Adopted, metadata only (content attributes are Opt-In and never exported):
+// - Model request spans (client-inference.md, openai.md), only for rows that recorded
+//   `request_model`: name `chat {gen_ai.request.model}`, kind CLIENT, gen_ai.operation.name
+//   `chat` (the Responses create call; openai.md names no Responses-specific value),
+//   gen_ai.request.model, gen_ai.request.reasoning.level, server.address, server.port,
+//   gen_ai.response.id, gen_ai.response.model, gen_ai.usage.input_tokens/output_tokens, and on
+//   failure error.type (HTTP status, exception class, or `_OTHER`). gen_ai.provider.name
+//   `openai` and openai.api.type `responses` only when the recorded host is OpenAI's: for any
+//   other Responses-compatible base the provider is unknown, so this Required attribute is
+//   deliberately omitted rather than guessed, and server.address says where the request went.
+// - Orchestrator tool spans (execute-tool.md): name `execute_tool {gen_ai.tool.name}`, kind
+//   INTERNAL, gen_ai.operation.name `execute_tool`, gen_ai.tool.name, gen_ai.tool.call.id (the
+//   model supplied it), gen_ai.tool.type `function`, and error.type = the recorded outcome
+//   (`error_result`, `threw`, or legacy `failed`) when status is Error.
+// Not adopted: gen_ai.conversation.id (no provider-side conversation exists; store is false),
+// gen_ai.agent.name, GenAI metrics and events, and the interim `dogwalk.usage.*` names.
 
 import type { Env } from "./types";
 import { isTraceContext, type TraceContext } from "./trace_context.ts";  // Explicit extension: Node tests load this module directly.
@@ -116,12 +137,21 @@ function kv(key: string, value: unknown): KeyValue | null {
 }
 
 // Journal key -> exported attribute key. Anything not listed is dropped. Keys whose meaning
-// depends on the event (`status`, `name`, `method`) are mapped per event in `attributes()`.
+// depends on the event (`status`, `name`, `method`, `tool_call_id`) are mapped per event in
+// `attributes()`: ACP rows carry the Agent's tool call IDs, Orchestrator `tool.*` rows the model's.
 const ALLOW: Record<string, string> = {
   seq: "dogwalk.observation.sequence",
   clock_id: "dogwalk.clock.id",
   live_session_id: "dogwalk.live_session.id",
-  request_id: "dogwalk.model_request.id",
+  request_id: "dogwalk.model_request.id",  // Also sent as X-Client-Request-Id.
+  provider_request_id: "dogwalk.model_request.provider_request_id",  // The provider's x-request-id; no convention.
+  request_model: "gen_ai.request.model",
+  reasoning_level: "gen_ai.request.reasoning.level",
+  response_id: "gen_ai.response.id",
+  response_model: "gen_ai.response.model",
+  server_address: "server.address",
+  server_port: "server.port",
+  error_type: "error.type",
   tool_call_id: "dogwalk.tool_call.id",
   tool_call_ids: "dogwalk.tool_call.ids",
   rpc_id: "dogwalk.acp.rpc.id",
@@ -181,18 +211,23 @@ function attributes(name: string, detail: Detail): { attrs: KeyValue[]; dropped:
   for (const [key, value] of Object.entries(detail)) {
     if (STRUCTURAL.has(key) || value === undefined || value === null) continue;
     if (key === "usage" && value && typeof value === "object") {
+      // Token counts only, and only as nonnegative integers: older rows stored usage verbatim.
       const usage = value as Detail;
-      push("dogwalk.usage.input_tokens", usage.input_tokens);
-      push("dogwalk.usage.output_tokens", usage.output_tokens);
+      for (const key of ["input_tokens", "output_tokens"] as const) {
+        const count = usage[key];
+        if (Number.isSafeInteger(count) && (count as number) >= 0) push(`gen_ai.usage.${key}`, count);
+        else if (count !== undefined && count !== null) dropped++;
+      }
       continue;
     }
+    if (key === "tool_call_id" && name.startsWith("tool.")) { push("gen_ai.tool.call.id", value); continue; }
     if (key === "status") {
       if (name === "model.headers") push("http.response.status_code", value);
       else if (name.startsWith("provider.twilio.")) push("dogwalk.twilio.call_status", value);
       else dropped++;
       continue;
     }
-    if (key === "name" && name.startsWith("tool.")) { push("dogwalk.orchestrator_tool.name", value); continue; }
+    if (key === "name" && name.startsWith("tool.")) { push("gen_ai.tool.name", value); continue; }
     if (key === "method") {
       push(name.startsWith("provider.twilio.") ? "dogwalk.twilio.webhook.method" : "dogwalk.acp.method", value);
       continue;
@@ -407,6 +442,35 @@ export function openRecordedSpanIds(rows: ActivityRow[]): string[] {
   return [...open];
 }
 
+/** Only a request that went to OpenAI's own API host is labelled as OpenAI. */
+const isOpenAiHost = (host: unknown): boolean =>
+  typeof host === "string" && (host === "api.openai.com" || host.endsWith(".api.openai.com"));
+
+/**
+ * GenAI inference name and attributes for a model request span (pinned revision above). Rows
+ * written before the request model was recorded keep the interim name and gain nothing.
+ */
+function inferenceConvention(start: Observation, headers: Observation | undefined, end: Observation, ok: boolean):
+  { name: string; attributes: KeyValue[] } {
+  const model = start.detail.request_model;
+  if (typeof model !== "string" || !model) return { name: "orchestrator.model_request", attributes: [] };
+  const usage = (ok && end.detail.usage && typeof end.detail.usage === "object" ? end.detail.usage : {}) as Detail;
+  const errorType = typeof end.detail.error_type === "string" ? end.detail.error_type : "_OTHER";
+  return { name: `chat ${model}`, attributes: [
+    ["gen_ai.operation.name", "chat"],
+    ...(isOpenAiHost(start.detail.server_address) ? [["gen_ai.provider.name", "openai"], ["openai.api.type", "responses"]] : []),
+    ["gen_ai.request.model", model],
+    ["gen_ai.request.reasoning.level", start.detail.reasoning_level],
+    ["server.address", start.detail.server_address],
+    ["server.port", start.detail.server_port],
+    ["dogwalk.model_request.provider_request_id", headers?.detail.provider_request_id],
+    ...(ok ? [["gen_ai.response.id", end.detail.response_id], ["gen_ai.response.model", end.detail.response_model],
+      ["gen_ai.usage.input_tokens", usage.input_tokens], ["gen_ai.usage.output_tokens", usage.output_tokens]]
+      : [["error.type", errorType]]),
+  ].map(([key, value]) => (value === undefined || value === null ? null : kv(key as string, value)))
+    .filter((pair): pair is KeyValue => pair !== null) };
+}
+
 /** Spans for exactly matched intervals only. Needs every row of the call (up to the cap). */
 export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<ProjectedSpan[]> {
   // Insertion order is the matching order; event time is carried, never used to reorder here.
@@ -462,10 +526,12 @@ export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<
     } else if (r.kind === "model") {
       const headers = observations.find((o) => o.name === "model.headers" && role(o)?.key === r.key);
       const headersNanos = headers ? msToNanos(headers.observedMs) : null;
-      spans.push({ ...base, parentSpanId, links: callLink, name: "orchestrator.model_request", kind: SPAN_KIND.client,
-        status: { code: end.name === "model.completed" ? STATUS.ok : STATUS.error },
+      const ok = end.name === "model.completed";
+      const genAi = inferenceConvention(start, headers, end, ok);
+      spans.push({ ...base, parentSpanId, links: callLink, name: genAi.name, kind: SPAN_KIND.client,
+        status: { code: ok ? STATUS.ok : STATUS.error },
         attributes: [...attrs, kv("dogwalk.model_request.id", r.id)!,
-          kv("dogwalk.interval.includes", "network_and_worker_overhead")!],
+          kv("dogwalk.interval.includes", "network_and_worker_overhead")!, ...genAi.attributes],
         events: headersNanos ? [{ timeUnixNano: headersNanos, name: "model.headers",
           attributes: attributes(headers!.name, headers!.detail).attrs }] : [] });
       for (const id of Array.isArray(end.detail.tool_call_ids) ? end.detail.tool_call_ids : []) {
@@ -477,12 +543,15 @@ export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<
       const model = modelSpanByTool.get(scopeKey(start, "tool", r.id));
       const outcome = typeof end.detail.outcome === "string" ? end.detail.outcome
         : end.name === "tool.failed" ? "failed" : "not_recorded";
-      spans.push({ ...base, parentSpanId, name: "orchestrator.tool", kind: SPAN_KIND.internal,
-        status: { code: outcome === "ok" ? STATUS.ok
-          : outcome === "error_result" || outcome === "threw" || outcome === "failed" ? STATUS.error : STATUS.unset },
-        attributes: [...attrs, kv("dogwalk.tool_call.id", r.id)!,
-          ...(typeof start.detail.name === "string" ? [kv("dogwalk.orchestrator_tool.name", start.detail.name)!] : []),
-          kv("dogwalk.outcome", outcome)!],
+      const failed = outcome === "error_result" || outcome === "threw" || outcome === "failed";
+      // Orchestrator tools are function tools the model asked for and this Worker executed.
+      // Without a recorded name the Required gen_ai.tool.name is unknown, so no convention name.
+      const tool = typeof start.detail.name === "string" ? start.detail.name : null;
+      spans.push({ ...base, parentSpanId, name: tool ? `execute_tool ${tool}` : "orchestrator.tool", kind: SPAN_KIND.internal,
+        status: { code: outcome === "ok" ? STATUS.ok : failed ? STATUS.error : STATUS.unset },
+        attributes: [...attrs, kv("gen_ai.operation.name", "execute_tool")!, kv("gen_ai.tool.call.id", r.id)!,
+          ...(tool ? [kv("gen_ai.tool.name", tool)!] : []), kv("gen_ai.tool.type", "function")!,
+          kv("dogwalk.outcome", outcome)!, ...(failed ? [kv("error.type", outcome)!] : [])],
         links: [...callLink, ...(model ? [{ ...model, attributes: [kv("dogwalk.link.reason", "requested_by_model_response")!] }] : [])] });
     } else {
       spans.push({ ...base, parentSpanId, links: callLink, name: `acp ${String(start.detail.method)}`, kind: SPAN_KIND.client,
