@@ -162,6 +162,38 @@ const crossLive = [
 const rpcSpan = (await projectSpans(callA, crossLive)).find((s) => s.name === "acp session/prompt")!;
 const rpcLogs = await projectLogs(callA, crossLive);
 assert.ok(rpcSpan && rpcLogs.every((l) => l.spanId === rpcSpan.spanId && l.traceId === rpcSpan.traceId));
+// Producer identity: Resources come only from what each row recorded.
+const produced = (id: number, event: string, ms: number, extra: Record<string, unknown>) => ({ id, ts: Math.floor(ms / 1000),
+  source: "voice", event: "voice.timing", detail: JSON.stringify({ event, ts_ms: ms, clock_id: CLOCK, live_session_id: LIVE, ...extra }) });
+const v1 = { service_version: "ver-1111", deployment_environment: "production" };
+const v2 = { service_version: "ver-2222", deployment_environment: "production" };
+const producedRows = [
+  produced(2001, "tool.started", T0, { tool_call_id: "t-ok", name: "list_sessions", ...v1 }),
+  produced(2002, "tool.completed", T0 + 5, { tool_call_id: "t-ok", outcome: "ok", ...v2 }), // A deploy between start and end.
+  produced(2003, "tool.started", T0 + 10, { tool_call_id: "t-err", ...v2 }),
+  produced(2004, "tool.completed", T0 + 15, { tool_call_id: "t-err", outcome: "error_result", ...v2 }),
+  produced(2005, "tool.started", T0 + 20, { tool_call_id: "t-throw", ...v2 }),
+  produced(2006, "tool.failed", T0 + 25, { tool_call_id: "t-throw", outcome: "threw", ...v2 }),
+  produced(2007, "tool.started", T0 + 30, { tool_call_id: "t-plain", ...v2 }),
+  produced(2008, "tool.completed", T0 + 35, { tool_call_id: "t-plain", outcome: "returned", ...v2 }),
+  produced(2009, "live.sent", T0 + 40, { type: "session.commentary.append" }), // Legacy: no producer.
+];
+const resAttrs = (r: { attributes: { key: string; value: any }[] }) => Object.fromEntries(r.attributes.map((a) => [a.key, a.value.stringValue]));
+const producedLogs = logsRequest(await projectLogs(callA, producedRows)).resourceLogs;
+assert.deepEqual(producedLogs.map((r) => resAttrs(r.resource)["service.version"]), ["ver-1111", "ver-2222", undefined]);
+assert.deepEqual(producedLogs.map((r) => r.scopeLogs[0].logRecords.length), [1, 7, 1]);
+assert.equal(resAttrs(producedLogs[1].resource)["deployment.environment.name"], "production");
+assert.ok(!("deployment.environment.name" in resAttrs(producedLogs[2].resource)), "legacy rows are not stamped with today's build");
+assert.ok(!JSON.stringify(producedLogs).includes('"service_version"'), "producer fields are Resource, not log attributes");
+const producedSpans = tracesRequest(await projectSpans(callA, producedRows)).resourceSpans;
+const spanStatus = Object.fromEntries(producedSpans.flatMap((r) => r.scopeSpans[0].spans)
+  .filter((s) => s.name === "orchestrator.tool").map((s) => [attr(s, "dogwalk.tool_call.id"), [s.status.code, attr(s, "dogwalk.outcome")]]));
+assert.deepEqual(spanStatus, { "t-ok": [1, "ok"], "t-err": [2, "error_result"], "t-throw": [2, "threw"], "t-plain": [0, "returned"] });
+const okSpanResource = producedSpans.find((r) => r.scopeSpans[0].spans.some((s) => attr(s, "dogwalk.tool_call.id") === "t-ok"))!;
+assert.equal(resAttrs(okSpanResource.resource)["service.version"], "ver-1111", "a span belongs to the build that observed its start");
+assert.equal(attr(tools[0], "dogwalk.outcome"), "not_recorded", "legacy finally-completion stays Unset");
+assert.deepEqual(logsRequest([]).resourceLogs, [], "an empty page is a valid, empty export");
+
 // RPC rows without Agent Connection identity, and Agent-initiated requests, name no span.
 assert.equal(logFor(a, rowsA[14].id).spanId, undefined);
 const agentRequest = { id: 999, ts: Math.floor(T0 / 1000), source: "voice", event: "voice.timing",

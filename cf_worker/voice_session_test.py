@@ -975,6 +975,11 @@ async def run_protocol(identity: str) -> None:
         kinds = {row["event"] for row in timed}
         assert {"live.received", "live.sent", "handoff.started", "handoff.queued", "model.started",
                 "model.headers", "model.completed", "tool.started", "tool.completed", "acp.sent", "acp.received"} <= kinds, kinds
+        # Producer identity and tool outcomes are recorded as rows are written.
+        assert all(row.get("deployment_environment") == "local-test" for row in timed), "rows not stamped with their environment"
+        acp_rows = [row for row in timed if row["event"] in {"acp.sent", "acp.received"}]
+        assert acp_rows and all(isinstance(row.get("agent_connection_id"), str) for row in acp_rows), "ACP rows lack Agent Connection identity"
+        assert all(row.get("outcome") in {"ok", "error_result", "returned"} for row in timed if row["event"] == "tool.completed")
         received = next(row for row in timed if row["event"] == "live.received" and row.get("type") == "session.input_transcript.delta")
         assert received["end_ms"] >= received["start_ms"] and received["queue_ms"] >= 0
         assert isinstance(received.get("content_text"), str) and received.get("content_kind") == "caller"
@@ -1835,6 +1840,8 @@ def start_wrangler(wrangler: str) -> subprocess.Popen:
             "8787",
             "--ip",
             "127.0.0.1",
+            "--var",
+            "DEPLOYMENT_ENVIRONMENT:local-test",
             "--var",
             f"TWILIO_AUTH_TOKEN:{LOCAL_TOKEN}",
             "--var",

@@ -57,6 +57,10 @@ async function record(env: Env, job: Parameters<typeof context>[0], event: strin
     occurred_at_ms: occurred, received_at_ms: received, ts_ms: received,
     timestamp_precision_ms: occurred === null ? null : 1000,
     event_time_source: occurred === null ? 'unknown' : source,
+    // Same fields as producerFields() in otlp.ts, inlined: provider_timing_test.mjs loads this
+    // module directly in Node, which cannot resolve extensionless value imports.
+    ...(env.CF_VERSION_METADATA?.id ? { service_version: env.CF_VERSION_METADATA.id } : {}),
+    ...(env.DEPLOYMENT_ENVIRONMENT ? { deployment_environment: env.DEPLOYMENT_ENVIRONMENT } : {}),
   };
   const result = await env.DB.prepare(`INSERT OR IGNORE INTO call_activity
     (call_sid, ts, source, direction, event, detail) VALUES (?, ?, 'voice', 'internal', ?, ?)`)

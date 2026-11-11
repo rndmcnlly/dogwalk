@@ -10,7 +10,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { ADMIN_HTML } from "./admin";
 import { OPERATOR_TIMING_HTML } from "./operator_timing";
 import { operatorCallContent } from "./operator_content";
-import { type ActivityRow, type CallRow, logsRequest, projectLogs, projectSpans, tracesRequest } from "./otlp";
+import { type ActivityRow, type CallRow, logsRequest, producerFields, projectLogs, projectSpans, tracesRequest } from "./otlp";
 import { observeTwilio, processTwilioJobs } from "./provider_timing";
 import { LANDING_HTML } from "./landing";
 import { PAIR_HTML } from "./pair_page";
@@ -1649,7 +1649,7 @@ async function audit(
   try {
     const tsMs = Date.now();
     const now = Math.floor(tsMs / 1000);
-    detail = { ...detail, ts_ms: tsMs };
+    detail = { ...detail, ts_ms: tsMs, ...producerFields(env) };
     const statements = [env.DB.prepare(
       "INSERT INTO audit_log (ts, event, phone_number, call_sid, detail) VALUES (?, ?, ?, ?, ?)",
     ).bind(now, event, phone, callSid, JSON.stringify(detail))];

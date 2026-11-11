@@ -24,4 +24,7 @@ export interface Env {
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
   ADMIN_PASSWORD?: string;
+  // Producer identity stamped on observations (OTel service.version, deployment.environment.name).
+  CF_VERSION_METADATA?: WorkerVersionMetadata;
+  DEPLOYMENT_ENVIRONMENT?: string;
 }

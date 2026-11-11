@@ -39,6 +39,12 @@ PUBLIC_ORIGIN = "https://dogwalk.tools"
 DAYTONA_SNAPSHOT = "dogwalk-acp-20261108-v2"
 # Name of the org Daytona Secret mapped to OPENAI_API_KEY for sandbox Agents.
 DAYTONA_AGENT_SECRET = "dogwalk-openai"
+# Stamped on every observation. The integration tests override it; so should a manual `wrangler dev`.
+DEPLOYMENT_ENVIRONMENT = "production"
+
+# Worker Version ID, stamped on observations as OTel service.version.
+[version_metadata]
+binding = "CF_VERSION_METADATA"
 
 # Bound in Spike 1. DB id is filled in after `wrangler d1 create dogwalk`
 # is run on the adam@adamsmith.as account.

@@ -45,7 +45,7 @@ def fetch_call(call_sid: str) -> tuple[list[dict], dict]:
     pages, after = [], 0
     while True:
         body, headers = admin_get(f"/admin/api/otlp/v1/logs?call_sid={call_sid}&after={after}")
-        if body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]:
+        if count(body, "logs"):
             pages.append(body)
         cursor = int(headers["x-dogwalk-cursor"])
         if headers.get("x-dogwalk-has-more") != "true":

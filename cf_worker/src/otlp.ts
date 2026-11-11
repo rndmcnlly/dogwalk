@@ -22,6 +22,19 @@
 // (service.*, http.response.status_code). Development GenAI and RPC conventions wait for
 // Phase 2, when a reviewed revision is pinned deliberately.
 
+import type { Env } from "./types";
+
+/**
+ * Who produced an observation, stamped into its journal detail at write time. The projection
+ * turns these into Resource attributes, so an old row never inherits the build that exports it.
+ */
+export function producerFields(env: Pick<Env, "CF_VERSION_METADATA" | "DEPLOYMENT_ENVIRONMENT">): Record<string, string> {
+  const fields: Record<string, string> = {};
+  if (env.CF_VERSION_METADATA?.id) fields.service_version = env.CF_VERSION_METADATA.id;
+  if (env.DEPLOYMENT_ENVIRONMENT) fields.deployment_environment = env.DEPLOYMENT_ENVIRONMENT;
+  return fields;
+}
+
 export type ActivityRow = { id: number; ts: number; source: string; event: string; detail: string | null };
 export type CallRow = { call_sid: string; started_at: number; ended_at: number | null; status: string };
 
@@ -46,12 +59,36 @@ export type OtlpSpan = {
 
 export const PROJECTION_VERSION = "1";
 const SCOPE = { name: "dogwalk.call_activity.projection", version: PROJECTION_VERSION };
-// Producer identity at observation time was not recorded for historical rows, so
-// service.version and deployment.environment.name are absent rather than guessed.
-const RESOURCE: KeyValue[] = [
-  { key: "service.namespace", value: { stringValue: "dogwalk" } },
-  { key: "service.name", value: { stringValue: "dogwalk-worker" } },
-];
+// Producer identity comes only from what a row recorded when written (see producerFields).
+// Rows from before that existed get no service.version or deployment.environment.name.
+type Producer = { service_version?: string; deployment_environment?: string };
+
+function producerOf(detail: Detail): Producer {
+  const p: Producer = {};
+  if (typeof detail.service_version === "string" && detail.service_version) p.service_version = detail.service_version;
+  if (typeof detail.deployment_environment === "string" && detail.deployment_environment) p.deployment_environment = detail.deployment_environment;
+  return p;
+}
+
+function resource(p: Producer): { attributes: KeyValue[] } {
+  return { attributes: [
+    { key: "service.namespace", value: { stringValue: "dogwalk" } },
+    { key: "service.name", value: { stringValue: "dogwalk-worker" } },
+    ...(p.service_version ? [{ key: "service.version", value: { stringValue: p.service_version } }] : []),
+    ...(p.deployment_environment ? [{ key: "deployment.environment.name", value: { stringValue: p.deployment_environment } }] : []),
+  ] };
+}
+
+/** One Resource per distinct recorded producer, in first-seen order. */
+function byProducer<T extends { producer?: Producer }>(items: T[]): { producer: Producer; items: Omit<T, "producer">[] }[] {
+  const groups = new Map<string, { producer: Producer; items: Omit<T, "producer">[] }>();
+  for (const { producer = {}, ...item } of items) {
+    const key = JSON.stringify([producer.service_version ?? null, producer.deployment_environment ?? null]);
+    if (!groups.has(key)) groups.set(key, { producer, items: [] });
+    groups.get(key)!.items.push(item);
+  }
+  return [...groups.values()];
+}
 
 const SPAN_KIND = { internal: 1, client: 3 } as const;
 const STATUS = { unset: 0, ok: 1, error: 2 } as const;
@@ -93,6 +130,7 @@ const ALLOW: Record<string, string> = {
   tool_status: "dogwalk.agent_tool.status",
   tool_kind: "dogwalk.agent_tool.kind",
   stop_reason: "dogwalk.acp.stop_reason",
+  outcome: "dogwalk.outcome",
   error: "dogwalk.acp.error_response",
   queue_ms: "dogwalk.queue_ms",
   ms: "dogwalk.observed_interval_ms",
@@ -126,7 +164,7 @@ const ALLOW: Record<string, string> = {
   event_time_source: "dogwalk.timestamp.source",
 };
 // Read for timestamps or span matching, then represented by fields rather than attributes.
-const STRUCTURAL = new Set(["event", "ts_ms", "occurred_at_ms", "received_at_ms"]);
+const STRUCTURAL = new Set(["event", "ts_ms", "occurred_at_ms", "received_at_ms", "service_version", "deployment_environment"]);
 
 function attributes(name: string, detail: Detail): { attrs: KeyValue[]; dropped: number } {
   const attrs: KeyValue[] = [];
@@ -268,9 +306,12 @@ async function identity(call: CallRow, o: Observation, r: Role): Promise<{ trace
  * row carries its span's ID at once; if the end never arrives, the log points at a span that
  * is never exported, which is valid OTel and the honest picture.
  */
-export async function projectLogs(call: CallRow, rows: ActivityRow[]): Promise<(OtlpLogRecord & { rowId: number })[]> {
+export type ProjectedLog = OtlpLogRecord & { rowId: number; producer: Producer };
+export type ProjectedSpan = OtlpSpan & { producer: Producer };
+
+export async function projectLogs(call: CallRow, rows: ActivityRow[]): Promise<ProjectedLog[]> {
   const callAttr = kv("dogwalk.voice_call.id", call.call_sid)!;
-  const logs: (OtlpLogRecord & { rowId: number })[] = [];
+  const logs: ProjectedLog[] = [];
   for (const row of [...rows].sort((a, b) => a.id - b.id)) {
     const o = observe(row);
     const observed = msToNanos(o.observedMs);
@@ -279,8 +320,8 @@ export async function projectLogs(call: CallRow, rows: ActivityRow[]): Promise<(
     const failed = /(?:^|\.)failed$/.test(o.name);
     const r = role(o);
     const source = o.sourceMs !== null ? msToNanos(o.sourceMs) : null;
-    const record: OtlpLogRecord & { rowId: number } = {
-      rowId: o.row.id,
+    const record: ProjectedLog = {
+      rowId: o.row.id, producer: producerOf(o.detail),
       observedTimeUnixNano: observed,
       ...(source ? { timeUnixNano: source } : {}),
       severityNumber: failed ? 17 : 9, severityText: failed ? "ERROR" : "INFO",
@@ -323,12 +364,12 @@ function matchIntervals(observations: Observation[]): Interval[] {
 }
 
 /** Spans for exactly matched intervals only. Needs every row of the call (up to the cap). */
-export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<OtlpSpan[]> {
+export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<ProjectedSpan[]> {
   // Insertion order is the matching order; event time is carried, never used to reorder here.
   const observations = [...rows].sort((a, b) => a.id - b.id).map(observe);
   const callTrace = await traceId("voice_call", call.call_sid);
   const callSpanId = await spanId("voice_call", call.call_sid);
-  const spans: OtlpSpan[] = [];
+  const spans: ProjectedSpan[] = [];
   const reconstructed = kv("dogwalk.reconstructed", true)!;
 
   // A Voice Call span exists only once the call has ended. Second precision, from voice_calls.
@@ -336,7 +377,8 @@ export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<
   const callEnd = call.ended_at !== null ? msToNanos(call.ended_at * 1000) : null;
   const callSpanExported = Boolean(callStart && callEnd && call.ended_at! >= call.started_at);
   if (callSpanExported) {
-    spans.push({ traceId: callTrace, spanId: callSpanId, name: "voice_call", kind: SPAN_KIND.internal,
+    // voice_calls rows record no producer, so the call span has none.
+    spans.push({ producer: {}, traceId: callTrace, spanId: callSpanId, name: "voice_call", kind: SPAN_KIND.internal,
       startTimeUnixNano: callStart!, endTimeUnixNano: callEnd!, status: { code: STATUS.unset },
       attributes: [reconstructed, kv("dogwalk.voice_call.id", call.call_sid)!,
         kv("dogwalk.voice_call.status", call.status)!, kv("dogwalk.timestamp.precision_ms", 1000)!] });
@@ -352,7 +394,8 @@ export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<
     const attrs: KeyValue[] = [reconstructed, kv("dogwalk.timestamp.precision_ms", Math.max(start.precisionMs, end.precisionMs))!,
       kv("dogwalk.journal.start_row_id", start.row.id)!, kv("dogwalk.journal.end_row_id", end.row.id)!,
       kv("dogwalk.interval.basis", lifecycle ? "recorded_lifecycle" : "worker_observations")!];
-    const base = { ...ids, startTimeUnixNano: startNanos, endTimeUnixNano: endNanos };
+    // The span belongs to whoever observed its start; a later build that observed the end is in end_row_id.
+    const base = { ...ids, producer: producerOf(start.detail), startTimeUnixNano: startNanos, endTimeUnixNano: endNanos };
     // Model requests, Orchestrator tools, and RPCs are this call's Orchestrator work in the
     // journal's own scoping (snapshotted at start), so they are children of the call span.
     const parentSpanId = callSpanExported ? callSpanId : undefined;
@@ -378,13 +421,17 @@ export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<
         modelSpanByTool.set(scopeKey(start, "tool", id), ids);
       }
     } else if (r.kind === "tool") {
-      // tool.completed is emitted in `finally`: it proves the call returned or threw, not success.
+      // Status follows the outcome the tool reported. Rows written before outcomes were recorded
+      // came from a `finally` block, which proves the tool ended, not that it worked: Unset.
       const model = modelSpanByTool.get(r.key);
+      const outcome = typeof end.detail.outcome === "string" ? end.detail.outcome
+        : end.name === "tool.failed" ? "failed" : "not_recorded";
       spans.push({ ...base, parentSpanId, name: "orchestrator.tool", kind: SPAN_KIND.internal,
-        status: { code: end.name === "tool.failed" ? STATUS.error : STATUS.unset },
+        status: { code: outcome === "ok" ? STATUS.ok
+          : outcome === "error_result" || outcome === "threw" || outcome === "failed" ? STATUS.error : STATUS.unset },
         attributes: [...attrs, kv("dogwalk.tool_call.id", r.id)!,
           ...(typeof start.detail.name === "string" ? [kv("dogwalk.orchestrator_tool.name", start.detail.name)!] : []),
-          kv("dogwalk.outcome", end.name === "tool.failed" ? "failed" : "not_recorded")!],
+          kv("dogwalk.outcome", outcome)!],
         ...(model ? { links: [{ ...model, attributes: [kv("dogwalk.link.reason", "requested_by_model_response")!] }] } : {}) });
     } else {
       spans.push({ ...base, parentSpanId, name: `acp ${String(start.detail.method)}`, kind: SPAN_KIND.client,
@@ -396,13 +443,14 @@ export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<
   return spans;
 }
 
-/** ExportLogsServiceRequest body (OTLP/JSON). */
-export function logsRequest(logs: OtlpLogRecord[]) {
-  return { resourceLogs: [{ resource: { attributes: RESOURCE },
-    scopeLogs: [{ scope: SCOPE, logRecords: logs.map(({ rowId: _rowId, ...log }: OtlpLogRecord & { rowId?: number }) => log) }] }] };
+/** ExportLogsServiceRequest body (OTLP/JSON): one ResourceLogs per recorded producer. */
+export function logsRequest(logs: (OtlpLogRecord & { rowId?: number; producer?: Producer })[]) {
+  return { resourceLogs: byProducer(logs).map(({ producer, items }) => ({ resource: resource(producer),
+    scopeLogs: [{ scope: SCOPE, logRecords: items.map(({ rowId: _rowId, ...log }) => log) }] })) };
 }
 
-/** ExportTraceServiceRequest body (OTLP/JSON). */
-export function tracesRequest(spans: OtlpSpan[]) {
-  return { resourceSpans: [{ resource: { attributes: RESOURCE }, scopeSpans: [{ scope: SCOPE, spans }] }] };
+/** ExportTraceServiceRequest body (OTLP/JSON): one ResourceSpans per recorded producer. */
+export function tracesRequest(spans: (OtlpSpan & { producer?: Producer })[]) {
+  return { resourceSpans: byProducer(spans).map(({ producer, items }) => ({ resource: resource(producer),
+    scopeSpans: [{ scope: SCOPE, spans: items }] })) };
 }

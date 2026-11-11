@@ -378,7 +378,7 @@ function draw() {
     const delta=previous===null?'': ' Δ' + (e.t-previous).toFixed(0);
     g.append(svg('text',{x:8,y:yy-3,class:'axis'},(Number.isFinite(origin)?(e.t-origin).toFixed(0):'?') + 'ms'),svg('text',{x:8,y:yy+10,class:'axis'},delta + (providerEvent(e)?e.d.timestamp_precision_ms===1000?' 1s precision':' precision ?':!e.precise?' ±1s precision':'')));
     g.append(svg('circle',{cx:xx,cy:yy,r:3.5,fill:e.name.includes('failed')?'#ff796d':'#f3b85c'}));
-    const friendly={'model.started':'Model request started','model.completed':'Model completed','model.failed':'Model failed','model.headers':'Model headers received','tool.started':'Tool started','tool.completed':'Tool completed','acp.turn.started':'Prompt Turn started','acp.turn.stopped':'Prompt Turn stopped','acp.turn.failed':'Prompt Turn failed'};
+    const friendly={'model.started':'Model request started','model.completed':'Model completed','model.failed':'Model failed','model.headers':'Model headers received','tool.started':'Tool started','tool.completed':'Tool completed','tool.failed':'Tool failed','acp.turn.started':'Prompt Turn started','acp.turn.stopped':'Prompt Turn stopped','acp.turn.failed':'Prompt Turn failed'};
     let label=(friendly[e.name]||e.name) + (d.type?' · ' + d.type:'') + (d.name && e.name.startsWith('tool.')?' · ' + d.name:'') + (d.update?' · ' + String(d.update):'') + (d.tool_status?' · ' + d.tool_status:'');
     if (agentTool(e)) label=(d.tool_kind || 'Agent tool') + ' #' + String(d.tool_call_id).slice(-7) + ' · ' + (d.tool_status || 'update');
     if (e.collapsed) label='observed text burst · ' + e.activity + ' · ' + e.collapsed + ' deltas / ' + e.chars + ' chars · ' + e.burst.state;

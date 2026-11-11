@@ -516,16 +516,20 @@ def run_tests(
         require(get(base_url, path, {"authorization": "Bearer paired-browser-credential"})[0] == 401,
                 f"OTLP export accepts pairing bearer: {path}")
     status, body = get(base_url, "/admin/api/otlp/v1/logs?call_sid=CA_TEST2&after=0", operator_headers)
-    records = json.loads(body)["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+    records = [r for rl in json.loads(body)["resourceLogs"] for s in rl["scopeLogs"] for r in s["logRecords"]]
     require(status == 200 and records and all(r["observedTimeUnixNano"].isdigit() and r["eventName"] for r in records),
             "OTLP logs export did not return LogRecords")
     require(all("rowId" not in r and "body" not in r for r in records), "OTLP logs carry non-OTLP fields or content")
+    # Every writer (front door, Durable Object, timing) records its producer, exported as Resource.
+    resources = [{a["key"]: a["value"]["stringValue"] for a in rl["resource"]["attributes"]} for rl in json.loads(body)["resourceLogs"]]
+    require(resources and all(r.get("deployment.environment.name") == "local-test" and r.get("service.version") for r in resources),
+            f"OTLP log rows without recorded producer: {resources}")
     last = max(int(a["value"]["intValue"]) for r in records for a in r["attributes"] if a["key"] == "dogwalk.journal.row_id")
     status, body = get(base_url, f"/admin/api/otlp/v1/logs?call_sid=CA_TEST2&after={last}", operator_headers)
-    require(status == 200 and json.loads(body)["resourceLogs"][0]["scopeLogs"][0]["logRecords"] == [],
+    require(status == 200 and json.loads(body)["resourceLogs"] == [],
             "OTLP log cursor repeated already-seen rows")
     status, body = get(base_url, "/admin/api/otlp/v1/traces?call_sid=CA_TEST2", operator_headers)
-    require(status == 200 and isinstance(json.loads(body)["resourceSpans"][0]["scopeSpans"][0]["spans"], list),
+    require(status == 200 and isinstance(json.loads(body)["resourceSpans"], list),
             "OTLP traces export unavailable")
     for path, expected in (("logs?call_sid=CA_UNKNOWN", 404), ("logs?call_sid=CA_TEST2&after=-1", 400), ("traces?after=0", 400)):
         require(get(base_url, "/admin/api/otlp/v1/" + path, operator_headers)[0] == expected,
@@ -742,6 +746,8 @@ def main() -> int:
             "8787",
             "--ip",
             "127.0.0.1",
+            "--var",
+            "DEPLOYMENT_ENVIRONMENT:local-test",
             "--var",
             f"TWILIO_AUTH_TOKEN:{LOCAL_TOKEN}",
             "--var",

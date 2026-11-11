@@ -548,7 +548,15 @@ within one Agent Connection. Both use the operator gate; spans are matched over 
 known; receipt is `observedTimeUnixNano`. Log records are row-local: each depends only
 on its own row, so a page fetched during a live call never changes later. A start row
 names its span's trace and span ID at once; if the end never arrives, that span is
-simply never exported. Attributes come from a server-side allowlist: content,
+simply never exported. Every journal row records its producer when written: the
+Worker Version ID (`version_metadata` binding, exported as `service.version`) and
+`DEPLOYMENT_ENVIRONMENT` (`deployment.environment.name`; `production` in
+`wrangler.toml`, overridden by the integration tests and worth overriding for a manual
+`wrangler dev`). The export groups records into one Resource per recorded producer;
+older rows keep a Resource without either, rather than borrowing today's build.
+Orchestrator tools record their own outcome (`ok`, `error_result` for `ok:false`,
+`returned` with no flag, or `threw`, which emits `tool.failed`), and tool span status
+follows it. `tool.completed` rows from before outcomes were recorded stay `Unset`. Attributes come from a server-side allowlist: content,
 Aliases, error strings, and thought tails are dropped and counted in
 `droppedAttributesCount`, whatever the page's Show content setting.
 

@@ -15,6 +15,7 @@ import {
   revokeInvitation, setInvitationRecipient, speakablePhone,
 } from "./invitations";
 import { PAIR_BUILD } from "./pair_page";
+import { producerFields } from "./otlp";
 
 const ACP_PORT = 8765;
 const WORKSPACE = "/home/daytona";
@@ -874,6 +875,8 @@ export class VoiceSession {
   private timingTimer: ReturnType<typeof setTimeout> | null = null;
   private timingSequence = 0;
   private timingClockId = crypto.randomUUID();
+  // The build and environment observing each row, as OTel Resource identity.
+  private get producer() { return producerFields(this.env); }
   private transcriptCutMs = 0;
   private transcriptSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private acpMessageChain: Promise<void> = Promise.resolve();
@@ -2833,10 +2836,18 @@ export class VoiceSession {
     const started = Date.now();
     const metadata = { tool_call_id: item.call_id, name: item.name };
     this.timing("tool.started", metadata);
+    // Outcome as the tool itself reported it: `ok` when it said ok:true, `error_result` when it
+    // returned ok:false, `returned` when its result carries no ok flag, `threw` on an exception.
+    // There is no cancellation path for Orchestrator tools, so none is recorded.
     try {
-      return await this.executeOrchestratorToolInner(item);
-    } finally {
-      this.timing("tool.completed", { ...metadata, ms: Date.now() - started });
+      const result = await this.executeOrchestratorToolInner(item);
+      const ok = result && typeof result === "object" ? (result as { ok?: unknown }).ok : undefined;
+      this.timing("tool.completed", { ...metadata, ms: Date.now() - started,
+        outcome: ok === true ? "ok" : ok === false ? "error_result" : "returned" });
+      return result;
+    } catch (error) {
+      this.timing("tool.failed", { ...metadata, ms: Date.now() - started, outcome: "threw" });
+      throw error;
     }
   }
 
@@ -4216,7 +4227,7 @@ export class VoiceSession {
     this.timingRows.push({
       callSid: scope.callSid, ts: Math.floor(tsMs / 1000),
       detail: JSON.stringify({ ...detail, event, ts_ms: tsMs, clock_id: this.timingClockId,
-        seq: ++this.timingSequence, live_session_id: scope.liveSessionId }),
+        seq: ++this.timingSequence, live_session_id: scope.liveSessionId, ...this.producer }),
     });
     if (this.timingRows.length >= 50) this.state.waitUntil(this.flushTiming());
     else if (!this.timingTimer) this.timingTimer = setTimeout(() => {
@@ -4247,7 +4258,7 @@ export class VoiceSession {
     if (!scope.callSid || !this.phone) return;
     const tsMs = Date.now();
     const now = Math.floor(tsMs / 1000);
-    detail = { ...detail, ts_ms: tsMs, live_session_id: scope.liveSessionId };
+    detail = { ...detail, ts_ms: tsMs, live_session_id: scope.liveSessionId, ...this.producer };
     try {
       await this.env.DB.batch([
         this.env.DB.prepare(
