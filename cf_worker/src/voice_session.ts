@@ -927,17 +927,7 @@ export class VoiceSession {
   constructor(private state: DurableObjectState, private env: Env) {
     state.blockConcurrencyWhile(async () => {
       const stored = await state.storage.get<ManagedSession[]>("managed_sessions");
-      for (const session of stored ?? []) {
-        // One-time back-patch (pending cleanup in AGENTS.md): activity strings became
-        // structured tool calls and a failure field.
-        const legacy = session as ManagedSession & { activity?: string[] };
-        if (legacy.activity) {
-          legacy.failure = legacy.turnState === "failed" || legacy.sessionState === "unavailable" ? legacy.activity.at(-1) ?? null : null;
-          delete legacy.activity;
-          Object.assign(legacy, { toolCalls: [], plan: [], unsaid: "", remark: null });
-        }
-        this.sessions.set(session.id, session);
-      }
+      for (const session of stored ?? []) this.sessions.set(session.id, session);
       this.attachedSandboxId = await state.storage.get<string>("sandbox_id") ?? null;
       this.orchestratorContext = await state.storage.get<unknown[]>("orchestrator_context") ?? [];
       this.orchestratorQueue = await state.storage.get<string[]>("orchestrator_queue") ?? [];
