@@ -117,6 +117,16 @@ The realtime speech component of the Voice Agent. It owns turn-taking, interrupt
 
 **Not:** An engineering authority or a source of session state.
 
+The Android on-device prototype also offers an optional **text mode** for the same
+conversational component and Handoff boundary. Typed User turns are input, not ASR
+observations. A **text-display receipt** records that a specific output was appended to
+the active chat surface, not that it was spoken, read, understood, or authorized. Each
+receipt binds to exactly one originating request, independently of other queued requests.
+Displaying a request retires its pending delivery, so switching to voice does not replay
+it. Undisplayed requests remain pending across mode changes. Brief and Following context
+remain background, not chat turns. This optional rich-client path changes neither the
+ordinary-telephone minimum nor the read-only authority of a Paired Browser.
+
 ### Session Orchestrator
 
 **Context:** Session Management and Voice Interaction
@@ -806,7 +816,7 @@ The following language appears in Git history and is not canonical for productio
 - Should the Session Orchestrator ever act without a live User utterance, for example starting a follow-up Prompt Turn after a failure? That is an authorization question first, and the current answer is no.
 - Resolved: the Session Orchestrator's persistent context is compacted voluntarily into its Memory (see Memory), readable on a Paired Browser. Still open: should parts of the Memory also become notes in the Workspace, the way a coworker's notebook would be, and should a Sandbox replacement reset it?
 - When a newer Handoff arrives while work for an older one is in flight, which supersession rules belong in deterministic code rather than Orchestrator judgment?
-- The on-device Android Voice Frontend prototype (`prototypes/android_on_device_frontend`) speaks the existing Handoff, brief and say shapes but has been exercised only against a fixture Orchestrator; main exposes no route for a non-PSTN Voice Frontend. What identity, authentication and capability negotiation should such a frontend use, given that it lacks audio clips, Recordings, Pairing Tones, the keypad and Theme voice switches? It delivers each speech request separately and retires one only by its own completed playback, so without authoritative replacement metadata from the Session Orchestrator it can speak obsolete progress or a withdrawn question. Should speech requests carry explicit supersedes or replaceable markers?
+- The on-device Android Voice Frontend prototype (`prototypes/android_on_device_frontend`) uses the existing Handoff, brief and say shapes but has been exercised only against a fixture Orchestrator; main exposes no route for a non-PSTN Voice Frontend. What identity, authentication and capability negotiation should such a frontend use, given that it lacks audio clips, Recordings, Pairing Tones, the keypad and Theme voice switches? It delivers each request separately and retires one only by its own completed playback or text-display receipt, so without authoritative replacement metadata from the Session Orchestrator it can present obsolete progress or a withdrawn question. Should speech requests carry explicit supersedes or replaceable markers?
 
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Invitations: should a successful Registration by Invitation continue straight into the new User's first call rather than hanging up? Should the Diagnostics Surface draw the invitation graph, and should an operator be able to raise or lower a User's active-Invitation limit?

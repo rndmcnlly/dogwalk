@@ -11,12 +11,14 @@ package dogwalk.ondevice
  * - Playback completion means the words played, not that the request's meaning was conveyed.
  *   Interrupted playback records only the heard prefix and leaves the request pending.
  * - An epoch counter discards stale generations after new caller input or a local stop.
- * - No request is ever retired except by its own completed playback. There is no supersession:
+ * - No request is retired except by its own completed playback or explicit text-display receipt.
+ *   Display is not hearing, reading or understanding. There is no supersession:
  *   the remote contract carries no authoritative replacement IDs, and small-model supersession
  *   dropped live Permission Request questions in the archived experiments (PR #10).
  */
 
-enum class RequestStatus { PENDING, PLAYBACK_COMPLETE }
+enum class RequestStatus { PENDING, PLAYBACK_COMPLETE, TEXT_DISPLAYED }
+enum class InteractionMode { TEXT, VOICE }
 
 class SpeechRequest(val id: String, val delegationId: String?, val text: String) {
     var status = RequestStatus.PENDING
@@ -50,6 +52,8 @@ sealed interface Decision {
 
 /** What the caller actually heard of one utterance, for the remote output transcript. */
 data class Heard(val utterance: Utterance, val text: String, val complete: Boolean)
+/** Display is evidence of presentation only, never of reading, understanding or hearing. */
+data class Displayed(val utterance: Utterance)
 
 object Policy {
     /** Spoken deterministically for every Handoff; the model never authors action claims. */
@@ -152,7 +156,7 @@ Your task: your thinking gives you one message to tell the caller now. Rephrase 
             append("Speech guidance from your thinking:\n")
             guidance.forEach { append("- \"").append(it).append("\"\n") }
         }
-        append("Conversation the caller has heard so far, oldest first:\n")
+        append("Conversation so far, oldest first (typed/displayed entries are not speech):\n")
         if (heard.isEmpty()) append("(nothing yet)\n") else heard.forEach { append(it).append('\n') }
     }
 
@@ -169,6 +173,27 @@ Your task: your thinking gives you one message to tell the caller now. Rephrase 
 }
 
 class FrontendCore {
+    var mode = InteractionMode.TEXT
+        private set
+    val voiceEnabled get() = mode == InteractionMode.VOICE
+
+    /** All audio-start adapters are opt-in. Also useful with fake audio in JVM tests. */
+    fun voiceOnly(action: () -> Unit) { if (voiceEnabled) action() }
+
+    fun deliver(utterance: Utterance, display: (Utterance) -> Boolean, voice: (Utterance) -> Unit): Displayed? {
+        if (playing?.id != utterance.id) return null
+        if (voiceEnabled) { voice(utterance); return null }
+        return if (display(utterance)) textDisplayed(utterance.id) else null
+    }
+
+    /** Invalidates generations and an undelivered utterance, not its source request. */
+    fun switchMode(next: InteractionMode) {
+        if (mode == next) return
+        mode = next
+        epoch++
+        playing = null
+        held = false
+    }
     private var requestSeq = 0
     private var utteranceSeq = 0
     private var handoffSeq = 0
@@ -201,12 +226,12 @@ class FrontendCore {
     fun onGuidance(content: String) = bounded(guidance, content, 4)
 
     /** A final caller transcript. Any in-flight or queued generation becomes stale. */
-    fun onCaller(text: String): CallerRoute {
+    fun onCaller(text: String, typed: Boolean = false): CallerRoute {
         val speechActive = playing != null || pendingRequests().isNotEmpty()
         epoch++
         held = false
         pendingCaller = null
-        bounded(heard, "Caller: \"${text.take(300)}\"", 10)
+        bounded(heard, "Caller${if (typed) " (typed)" else ""}: \"${text.take(300)}\"", 10)
         return when (Policy.route(text, speechActive)) {
             "local_stop" -> { held = true; CallerRoute.LocalStop }
             "guard" -> CallerRoute.Handoff(nextHandoff(), "deterministic guard")
@@ -261,6 +286,7 @@ class FrontendCore {
 
     /** One terminal receipt per utterance. Unknown, duplicate or late receipts change nothing. */
     fun playbackFinished(utteranceId: String, completed: Boolean, spokenChars: Int?): Heard? {
+        if (!voiceEnabled) return null
         val utterance = playing?.takeIf { it.id == utteranceId } ?: return null
         playing = null
         val request = utterance.requestId?.let { requests[it] }
@@ -274,6 +300,19 @@ class FrontendCore {
         if (prefix.isNotEmpty()) bounded(heard, "You, cut off: \"${prefix.take(300)}\"", 10)
         return Heard(utterance, prefix, false)
     }
+
+    /** Distinct from playback: only the exact currently presented text can be acknowledged. */
+    fun textDisplayed(utteranceId: String): Displayed? {
+        if (mode != InteractionMode.TEXT) return null
+        val utterance = playing?.takeIf { it.id == utteranceId } ?: return null
+        playing = null
+        utterance.requestId?.let { requests[it]?.status = RequestStatus.TEXT_DISPLAYED }
+        bounded(heard, "You (displayed text, not known read): \"${utterance.text.take(300)}\"", 10)
+        return Displayed(utterance)
+    }
+
+    /** New input can interrupt visible-but-not-yet-presented text without a fake audio receipt. */
+    fun abandonUndeliveredText() { if (mode == InteractionMode.TEXT) playing = null }
 
     private fun nextHandoff() = "android_${++handoffSeq}"
 

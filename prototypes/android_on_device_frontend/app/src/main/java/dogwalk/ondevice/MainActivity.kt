@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
+import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -15,8 +17,8 @@ import android.widget.TextView
 import kotlin.concurrent.thread
 
 /**
- * One-time setup (permissions, model provisioning, Orchestrator address) and a diagnostic log.
- * Normal voice use runs in VoiceService and does not need this screen.
+ * Silent text chat, plus optional voice setup, model provisioning and diagnostics.
+ * Explicit voice use runs in VoiceService and does not need this screen.
  */
 class MainActivity : Activity() {
     private lateinit var log: TextView
@@ -24,6 +26,11 @@ class MainActivity : Activity() {
     private lateinit var e2b: RadioButton
     private lateinit var e4b: RadioButton
     private lateinit var gpu: CheckBox
+    private lateinit var chatColumn: LinearLayout
+    private lateinit var chatScroll: ScrollView
+    private lateinit var status: TextView
+    private lateinit var compose: EditText
+    private val rendered = HashSet<String>()
     private val prefs by lazy { getSharedPreferences("setup", MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,12 +57,51 @@ class MainActivity : Activity() {
         button("Download selected model (pinned, about 2.6 to 3.7 GB)") { provision(download = true) }
         button("Verify model file (after adb push)") { provision(download = false) }
         button("Run local model self-test (no audio)") { save(); modelSelfTest() }
-        button("Start voice") { save(); startForegroundService(serviceIntent()) }
+        button("Enable voice explicitly (microphone and speaker)") {
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                append("Grant microphone permission first. Text chat does not need it.")
+            } else { save(); startForegroundService(serviceIntent().setAction(VoiceService.ACTION_VOICE)) }
+        }
         button("Stop speaking") { startService(Intent(this, VoiceService::class.java).setAction(VoiceService.ACTION_STOP_SPEAKING)) }
-        button("Stop voice") { stopService(Intent(this, VoiceService::class.java)) }
+        button("Stop frontend") { stopService(Intent(this, VoiceService::class.java)) }
         log = TextView(this).apply { setTextIsSelectable(true); textSize = 12f }
         column.addView(log)
-        setContentView(ScrollView(this).apply { addView(column) })
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(16, 24, 16, 16) }
+        root.setOnApplyWindowInsetsListener { view, insets ->
+            val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
+            view.setPadding(16 + bars.left, 24 + bars.top, 16 + bars.right, 16 + bars.bottom)
+            insets
+        }
+        root.addView(TextView(this).apply { text = "Dogwalk: on-device text chat"; textSize = 20f })
+        status = TextView(this).apply { text = VoiceService.status; setTextIsSelectable(true) }
+        root.addView(status)
+        root.addView(Button(this).apply {
+            text = "Start / switch to silent text"
+            setOnClickListener { save(); startForegroundService(serviceIntent().setAction(VoiceService.ACTION_TEXT)) }
+        })
+        chatColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        chatScroll = ScrollView(this).apply { addView(chatColumn) }
+        root.addView(chatScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        val inputRow = LinearLayout(this)
+        compose = EditText(this).apply {
+            hint = "Message Dogwalk"; maxLines = 4
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            imeOptions = EditorInfo.IME_ACTION_SEND
+            setOnEditorActionListener { _, action, _ -> if (action == EditorInfo.IME_ACTION_SEND) { sendText(); true } else false }
+        }
+        inputRow.addView(compose, LinearLayout.LayoutParams(0, -2, 1f))
+        inputRow.addView(Button(this).apply { text = "Send"; setOnClickListener { sendText() } })
+        root.addView(inputRow)
+        val setup = ScrollView(this).apply { addView(column); visibility = View.GONE }
+        root.addView(Button(this).apply { text = "Setup / voice / diagnostics"; setOnClickListener { setup.visibility = if (setup.visibility == View.GONE) View.VISIBLE else View.GONE } })
+        root.addView(setup, LinearLayout.LayoutParams(-1, 260))
+        setContentView(root)
+        fun silenceClicks(view: View) {
+            view.isSoundEffectsEnabled = false
+            if (view is android.view.ViewGroup) for (i in 0 until view.childCount) silenceClicks(view.getChildAt(i))
+        }
+        silenceClicks(root)
+        VoiceService.chat.forEach(::renderTurn)
         append("Model folder for adb push: ${getExternalFilesDir("models")}")
         synchronized(VoiceService.lines) { VoiceService.lines.forEach(::append) }
         VoiceService.listener_ = { line -> runOnUiThread { append(line) } }
@@ -70,7 +116,8 @@ class MainActivity : Activity() {
         intent.getStringExtra("endpoint")?.let { endpoint.setText(it) }
         intent.getStringExtra("model")?.let(::choose)
         if (intent.getBooleanExtra("selftest", false)) modelSelfTest()
-        if (intent.getBooleanExtra("start", false)) { save(); startForegroundService(serviceIntent()) }
+        // Legacy start intents are deliberately silent. Voice requires the explicit UI action.
+        if (intent.getBooleanExtra("start", false)) { save(); startForegroundService(serviceIntent().setAction(VoiceService.ACTION_TEXT)) }
         if (intent.getBooleanExtra("stop_speaking", false)) startService(Intent(this, VoiceService::class.java).setAction(VoiceService.ACTION_STOP_SPEAKING))
         // Debug builds only: injected caller text, labelled by the service as not speech.
         val text = intent.getStringExtra("inject")
@@ -120,14 +167,14 @@ class MainActivity : Activity() {
                 val decide = cases[0] as DecideJob
                 val decision = core.completeDecide(decide, run(decide))
                 report("decision: $decision")
-                if (decision is Decision.Reply) core.playbackFinished(decision.utterance.id, true, null)
+                if (decision is Decision.Reply) core.textDisplayed(decision.utterance.id)
                 for (text in listOf("Fir wants permission to delete the build folder before rebuilding. Should I allow it once, or deny it?",
                                     "Oak finished the test suite, and all forty tests passed.")) {
                     core.onSay(null, text)
                     val job = core.nextJob() as PhraseJob
                     val u = core.completePhrase(job, run(job))!!
                     report("${u.kind}${u.note?.let { " [$it]" } ?: ""} for ${u.requestId}: ${u.text}")
-                    core.playbackFinished(u.id, true, null)
+                    core.textDisplayed(u.id)
                 }
             } catch (e: Throwable) {
                 report("failed: ${e.javaClass.simpleName} ${e.message?.take(200)}")
@@ -136,6 +183,44 @@ class MainActivity : Activity() {
     }
 
     private fun append(line: String) { log.append(line + "\n") }
+
+    private fun sendText() {
+        val text = compose.text.toString().trim()
+        if (text.isEmpty()) return
+        if (!VoiceService.status.startsWith("Text ready")) {
+            status.text = "Start silent text and wait for readiness before sending. Your message is kept here."
+            return
+        }
+        startService(Intent(this, VoiceService::class.java).setAction(VoiceService.ACTION_SEND).putExtra("text", text))
+        compose.setText("")
+    }
+
+    private fun renderTurn(turn: VoiceService.Companion.ChatTurn) {
+        if (!rendered.add(turn.id)) return
+        chatColumn.addView(TextView(this).apply {
+            text = "${turn.role}\n${turn.text}"; textSize = 17f
+            setPadding(16, 16, 16, 24); setTextIsSelectable(true)
+            setBackgroundColor(if (turn.role == "You") 0xffe8eef4.toInt() else 0xfff3f3f3.toInt())
+        })
+        chatScroll.post { chatScroll.smoothScrollTo(0, chatColumn.height) }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        VoiceService.chat.forEach(::renderTurn)
+        status.text = VoiceService.status
+        VoiceService.chatListener = ::renderTurn
+        VoiceService.stateListener = { status.text = it }
+        // Merely opening/restoring the app must silence an existing voice service as well.
+        startService(Intent(this, VoiceService::class.java).setAction(VoiceService.ACTION_RESTORE_TEXT))
+        startService(Intent(this, VoiceService::class.java).setAction(VoiceService.ACTION_REFRESH))
+    }
+
+    override fun onPause() {
+        VoiceService.chatListener = null
+        VoiceService.stateListener = null
+        super.onPause()
+    }
 
     override fun onDestroy() { VoiceService.listener_ = null; super.onDestroy() }
 }

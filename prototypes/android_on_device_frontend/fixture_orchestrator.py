@@ -16,6 +16,7 @@ uv run --script fixture_orchestrator.py test       # self-test with a scripted c
 
 import asyncio
 import json
+import os
 import re
 import sys
 import time
@@ -23,7 +24,7 @@ from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
-HOST, PORT = "127.0.0.1", 8770
+HOST, PORT = "127.0.0.1", int(os.environ.get("DOGWALK_FIXTURE_PORT", "8770"))
 LOG_DIR = Path(__file__).resolve().parent / ".tools"
 
 
@@ -105,7 +106,8 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
         if m.get("type") in ("session.input_transcript.delta", "session.output_transcript.delta"):
             role = "caller" if m["type"].startswith("session.input") else "voice"
             call.transcript.append({"role": role, "text": m["delta"], "start": m["start_ms"], "end": m["end_ms"]})
-            log({"in": role, "text": m["delta"], "start_ms": m["start_ms"], "end_ms": m["end_ms"]})
+            log({"in": role, "text": m["delta"], "start_ms": m["start_ms"], "end_ms": m["end_ms"],
+                 "delivery": m.get("delivery", "speech")})
         elif m.get("type") == "session.delegation.created" and m.get("delegation", {}).get("target") == "client":
             log({"in": "handoff", "delegation_id": m["delegation"]["id"], "offset_ms": m.get("offset_ms")})
             task = asyncio.create_task(call.handoff(m["delegation"]["id"], float(m.get("offset_ms", 1e12))))
