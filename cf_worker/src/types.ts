@@ -43,6 +43,8 @@ export type SpeakerAudio = { audio: ArrayBuffer; format: "pcm_s16le"; sampleRate
 export type SpeakerReference = { embedding: number[]; embeddingSpace: string };
 export interface SpeakerVerifier {
   embed(input: SpeakerAudio): Promise<SpeakerReference & { audioSeconds: number; speechSeconds: number }>;
+  // Loads the model in the instance on this machine; cold is true when this call did the work.
+  warm(): Promise<{ cold: boolean }>;
   verify(input: SpeakerAudio & { reference: SpeakerReference }): Promise<{
     cosineSimilarity: number; embeddingSpace: string; audioSeconds: number; speechSeconds: number;
   }>;

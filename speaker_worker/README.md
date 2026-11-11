@@ -20,6 +20,7 @@ embed(input: Audio): Promise<Reference & { audioSeconds: number; speechSeconds: 
 verify(input: Audio & { reference: Reference }): Promise<{
   cosineSimilarity: number; embeddingSpace: string; audioSeconds: number; speechSeconds: number;
 }>;
+warm(): Promise<{ cold: boolean }>;
 ```
 
 Mono signed 16-bit little-endian PCM, 3.5–30 s. Failures throw an `Error` whose
@@ -27,6 +28,13 @@ message starts with a code: `invalid-input`, `insufficient-audio` (under 3.5 s, 
 under 1 s of detected speech), `incompatible-reference` (another embedding space,
 or not 192 finite numbers), `busy` (more than four requests queued in one
 isolate), or `inference-failed`. There is never a placeholder score.
+
+`warm()` loads the model and runs one inference on a fixed signal, once per
+isolate; later calls on a warm isolate return in about a millisecond. `cold` says
+whether this call did the work. `dogwalk` calls it in the background (`warmSpeaker`)
+when a User with a Voice Reference calls and at each Challenge Practice take (see
+Latency), and its health endpoint calls it first so a probe can tell a model
+load from queueing.
 
 ## Embedding space
 
@@ -51,6 +59,7 @@ Weights, the upstream source, the ONNX export, and the bundle are gitignored.
 ```sh
 uv run --script speaker_worker/export.py            # from the repository root
 uv run --script speaker_worker/check_preprocess.py  # preprocess.js against scipy; optional WAV paths
+node speaker_worker/worker_test.mjs                 # warm() state against a stubbed ORT; no model needed
 cd speaker_worker && npm ci && npm run build
 ```
 
@@ -74,15 +83,45 @@ Deploy this Worker before a `dogwalk` version that binds it. The upload is about
 
 ## Calibration
 
-`dogwalk` serves operator-only `GET /admin/api/voice-verify/health` (embeds a
-synthetic signal: warms the model, reports `ms`) and `POST
+`dogwalk` serves operator-only `GET /admin/api/voice-verify/health` (calls
+`warm()`, then embeds a synthetic signal; reports `cold`, `warm_ms`, and total `ms`) and `POST
 /admin/api/voice-verify?user=<id>` with a mono 16-bit 8 or 16 kHz WAV body,
 returning `{cosine_similarity, embedding_space, audio_seconds, speech_seconds, ms}`.
 Without the binding (local dev, tests) both answer 503.
+
+## Latency
+
+Measured from production on 2026-11-11 with `latency_probe.py` (health probes
+through `dogwalk`, timing the SPEAKER RPC alone). These runs predate health's
+`cold` flag, so they count requests over 2 s as slow: a model load, or, with
+concurrency, a wait behind other requests in one serialized isolate.
+
+- Sequential requests over 2 s: 2.1–8.8 s (median 3.5 s); the rest 0.6–1.4 s
+  (median about 0.65 s). Analytics put a cold request at about 3.6 s of CPU (P99
+  up to 4.3 s), a warm one at 0.7 s, so sequential slowness is model loads.
+- Warmth belongs to a machine. 13 of 30 back-to-back probes on fresh connections
+  were slow (alternating SJC and LAX); 0 of 30 on one kept-alive connection.
+  Scoring 8 synthetic clips one at a time after a quiet spell: 6 of 8 slow. Four
+  concurrent probes: 6 of 16 slow, but four requests queued on one warm isolate
+  already take about 2.6 s, so these are not all loads; rerun with the flag.
+- On one pinned connection an instance stayed warm after 60 s and 120 s idle and
+  was slow after 300 s and 600 s (one sample each, same socket). Pinning is
+  imperfect: one probe 30 s after a warm-up was also slow.
+- Locally (`load_bench.mjs`, Node, a fresh process per level) ORT session
+  creation takes 198–286 ms across graph optimization levels and the first
+  inference about 230 ms, a small part of production's roughly 2.9 s cold
+  penalty. Most of a cold request is isolate and WASM instantiation, which no
+  ORT setting changes.
+
+So warm close to the scoring in both place and time: `dogwalk` calls `warm()`
+when a User with a Voice Reference calls, seconds before an Identity Challenge,
+from the invocation handling the call. A keep-warm cron would warm one arbitrary
+machine, and Smart Placement has nothing to act on (no subrequests, RPC only).
 
 ## Limits
 
 128 MB per isolate, shared by JS and WASM; the experiment observed 112 MiB of WASM
 linear memory after warm inferences, so headroom is thin. Inference is serialized
-per isolate. A model load in a fresh isolate takes about 3–4 s; a warm 3 s window
-about 0.6–0.8 s end to end through the binding.
+per isolate. Peak isolate memory has never been measured in production: Workers
+analytics has no memory metric and observability is off here, but 172 invocations
+on 2026-11-11, including four concurrent, ended with no resource-limit status.

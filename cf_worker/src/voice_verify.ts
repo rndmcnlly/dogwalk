@@ -1,8 +1,9 @@
 // Operator calibration tooling for the speaker verification Worker (SPEAKER).
 // POST /admin/api/voice-verify?user=<id> scores a mono 16-bit WAV against that
-// User's Voice Reference; GET /admin/api/voice-verify/health warms the model on a
-// synthetic signal. Neither returns nor logs audio or embeddings, and neither
+// User's Voice Reference; GET /admin/api/voice-verify/health warms the model and embeds a
+// synthetic signal, reporting whether that request loaded the model. Neither returns nor logs audio or embeddings, and neither
 // authorizes anything: thresholds and decisions belong to the Identity Check.
+// warmSpeaker readies the verifier when a call arrives.
 import type { Env, SpeakerAudio } from "./types";
 
 const MAX_WAV_BYTES = 1 << 20; // 30 s at 16 kHz is 960,000 bytes of samples.
@@ -47,8 +48,8 @@ export function parseWav(bytes: ArrayBuffer): SpeakerAudio | string {
 }
 
 // Four seconds of a voiced, gated 16 kHz tone: enough "speech" to pass the
-// Worker's activity check, so the health probe (and a warm-up) runs a real inference.
-export function syntheticAudio(): SpeakerAudio {
+// Worker's activity check, so the health probe runs a real inference.
+function syntheticAudio(): SpeakerAudio {
   const rate = 16000, samples = new Int16Array(rate * 4);
   let phase = 0;
   for (let i = 0; i < samples.length; i++) {
@@ -62,16 +63,47 @@ export function syntheticAudio(): SpeakerAudio {
   return { audio: samples.buffer, format: "pcm_s16le", sampleRate: rate };
 }
 
+/**
+ * Starts loading the verifier in the background ahead of scoring (a Home call, Challenge
+ * Practice), so a challenge later in the call skips the 3–5 s model load. With a userId it
+ * first checks that the User has a Voice Reference; without one the caller already has. A
+ * verifier instance is warm only on the machine that ran it (speaker_worker/README.md,
+ * Latency), so this helps scoring that runs where the call's webhooks run. Returns nothing
+ * to await: the work goes to waitUntil and never delays TwiML, and every failure, including
+ * an unbound SPEAKER, is logged and dropped.
+ */
+export function warmSpeaker(env: Env, ctx: Pick<ExecutionContext, "waitUntil">, userId?: number): void {
+  const speaker = env.SPEAKER;
+  if (!speaker) return;
+  ctx.waitUntil((async () => {
+    try {
+      if (userId !== undefined) {
+        const enrolled = await env.DB.prepare("SELECT 1 AS ok FROM voice_references WHERE user_id = ?").bind(userId).first();
+        if (!enrolled) return;
+      }
+      const started = Date.now();
+      const { cold } = await speaker.warm();
+      console.log("speaker warm", { cold, ms: Date.now() - started });
+    } catch (error) {
+      console.error("speaker warm failed", error instanceof Error ? error.message : String(error));
+    }
+  })());
+}
+
 export async function handleVoiceVerify(req: Request, env: Env, url: URL, json: Json): Promise<Response> {
   const health = url.pathname === "/admin/api/voice-verify/health";
   if (req.method !== (health ? "GET" : "POST")) return json({ error: "method not allowed" }, 405);
   if (!env.SPEAKER) return json({ error: "speaker verification is not bound" }, 503);
   if (health) {
+    // warm() first, so the response says whether this request loaded the model (cold) apart
+    // from time spent queued behind other requests in the same isolate.
     const started = Date.now();
     try {
+      const { cold } = await env.SPEAKER.warm();
+      const warmMs = Date.now() - started;
       const result = await env.SPEAKER.embed(syntheticAudio());
       return json({ ok: true, embedding_space: result.embeddingSpace, audio_seconds: result.audioSeconds,
-        ms: Date.now() - started });
+        cold, warm_ms: warmMs, ms: Date.now() - started });
     } catch (error) {
       return speakerFailure(error, json);
     }

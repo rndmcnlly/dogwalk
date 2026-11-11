@@ -7,8 +7,10 @@ import * as ort from "onnxruntime-web";
 import { MODEL_RATE, SpeakerError, WINDOW_SECONDS, modelInput } from "./preprocess.js";
 
 // Names the weights, exported graph, input contract, frontend, and normalization.
-// The hashes are checked at build time against the bundled model (build.mjs).
-export const EMBEDDING_SPACE =
+// The hashes are checked at build time against the bundled model (build.mjs). Not
+// exported: workerd treats every module export as an entrypoint, and local dev refuses a
+// string one.
+const EMBEDDING_SPACE =
   "redimnet2-b3-vox2-lm@02d14efdc1845738/onnx-waveform@c2653e3df4e2f5e3/pcm16k-mono-f32-48000/tfmelbanks-native/l2-cosine";
 const DIMENSION = 192;
 const MAX_SECONDS = 30;
@@ -22,6 +24,8 @@ ort.env.logLevel = "error";
 let sessionPromise;
 let queue = Promise.resolve();
 let queued = 0;
+// Settles once this isolate has run an inference, so a later warm() costs nothing.
+let warmed;
 
 function session() {
   sessionPromise ??= ort.InferenceSession.create(new Uint8Array(globalThis.__modelBytes), {
@@ -46,12 +50,18 @@ async function embedWaveform(waveform) {
     const outputs = await model.run({ waveform: new ort.Tensor("float32", waveform, [1, waveform.length]) }, ["embedding"]);
     const raw = Array.from(outputs.embedding.data);
     outputs.embedding.dispose();
+    warmed ??= Promise.resolve();
     const norm = Math.hypot(...raw);
     if (raw.length !== DIMENSION || !Number.isFinite(norm) || norm === 0) throw new Error("degenerate embedding");
     return raw.map((v) => v / norm);
   } catch (error) {
     throw new SpeakerError("inference-failed", String(error?.message ?? error).slice(0, 200));
   }
+}
+
+// A fixed voiced-like window for warm(): not speech, but a full-length model input.
+function primer() {
+  return Float32Array.from({ length: WINDOW_SECONDS * MODEL_RATE }, (_, i) => 0.1 * Math.sin(i / 7) * Math.sin(i / 3000));
 }
 
 function checkAudio(input) {
@@ -81,6 +91,17 @@ export class SpeakerVerifier extends WorkerEntrypoint {
     const { waveform, audioSeconds, speechSeconds } = checkAudio(input);
     const embedding = await serialized(() => embedWaveform(waveform));
     return { embedding, embeddingSpace: EMBEDDING_SPACE, audioSeconds, speechSeconds };
+  }
+
+  /**
+   * Loads the model and runs one inference on a fixed signal, once per isolate, so a later
+   * request on this machine skips the model load. `cold` says whether this call did the work.
+   */
+  async warm() {
+    const cold = !warmed;
+    warmed ??= serialized(() => embedWaveform(primer())).catch((error) => { warmed = undefined; throw error; });
+    await warmed;
+    return { cold };
   }
 
   /** Cosine similarity between the audio and a reference in the same embedding space. */

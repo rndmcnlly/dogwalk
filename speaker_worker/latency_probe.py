@@ -1,0 +1,258 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Measure the deployed speaker verifier's cold and warm latency through dogwalk's operator endpoints.
+
+    uv run --script speaker_worker/latency_probe.py sequential [-n 20] [--keepalive]
+    uv run --script speaker_worker/latency_probe.py concurrent [-k 2 4] [--rounds 3]
+    uv run --script speaker_worker/latency_probe.py idle [--gaps 30 60 120 300 600 1200] [--repeats 1]
+    uv run --script speaker_worker/latency_probe.py verify WAV [-n 5] [--user 1]
+    uv run --script speaker_worker/latency_probe.py analytics [--hours 24]
+
+Each probe is `GET /admin/api/voice-verify/health`, which runs one real inference on a synthetic
+signal; its `ms` is the SPEAKER RPCs alone, measured inside dogwalk, so client network time is
+excluded. A probe over SLOW_MS is slow; health also reports the verifier's own `cold` flag (from
+warm()), which separates a model load from waiting behind other requests in one isolate. Requests from this
+laptop reach a nearby colo, which is not necessarily the one serving Twilio's webhooks. `verify`
+scores a local WAV (8 or 16 kHz mono 16-bit) against a User's Voice Reference; use synthetic audio
+(macOS `say`), never commit it. `analytics` reads dogwalk-speaker's invocation metrics (status,
+CPU and wall time quantiles) from the GraphQL Analytics API, read-only, with the personal profile.
+Prints one JSON line per probe and a summary; nothing is written to disk.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import math
+import os
+import statistics
+import subprocess
+import sys
+import http.client
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ORIGIN = "https://dogwalk.tools"
+# Over SLOW_MS is slow: a model load, or a wait behind other requests in a serialized
+# isolate. Only the Worker's own `cold` flag (health reports it) says a load happened.
+SLOW_MS = 2000
+ACCOUNT_ID = "890753ccd6f0bbbfbe2c030cc44f6a87"  # Adam's personal Cloudflare account
+ANALYTICS_LIMIT = 1000  # groups per query, each an hour and a status
+CF_PROFILE = Path.home() / "Library/Preferences/cloudflare/config/personal.json"
+
+
+def auth() -> str:
+    password = subprocess.run(["security", "find-generic-password", "-a", "adam", "-s", "dogwalk-admin", "-w"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+    return "Basic " + base64.b64encode(f"adam:{password}".encode()).decode()
+
+
+def finite(value) -> float | None:
+    """A measurement as a finite number, or None: json.loads accepts NaN and Infinity, and
+    json.dumps would write them back out as JSON no strict reader accepts."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return value
+
+
+def call(authorization: str, path: str, body: bytes | None = None,
+         connection: http.client.HTTPSConnection | None = None) -> dict:
+    """One request on a fresh connection, or on `connection` (kept alive across calls).
+
+    Never raises: a transport failure is a sample with status 0 and its exception as the
+    error (and closes `connection`, so the next request reconnects and reports it), and a
+    body that is not a JSON object is an empty payload.
+    """
+    headers = {"authorization": authorization, "user-agent": "dogwalk-research/1"}
+    if body is not None:
+        headers["content-type"] = "audio/wav"
+    started = time.monotonic()
+    status, raw, ray, transport_error = 0, b"", "", None
+    try:
+        if connection is not None:
+            connection.request("POST" if body else "GET", path, body=body, headers=headers)
+            resp = connection.getresponse()
+            status, raw, ray = resp.status, resp.read(), resp.headers.get("cf-ray", "")
+        else:
+            req = urllib.request.Request(ORIGIN + path, data=body, headers=headers, method="POST" if body else "GET")
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    status, raw, ray = resp.status, resp.read(), resp.headers.get("cf-ray", "")
+            except urllib.error.HTTPError as error:
+                status, raw, ray = error.code, error.read(), error.headers.get("cf-ray", "")
+    except (OSError, http.client.HTTPException) as error:  # URLError is an OSError
+        transport_error = f"transport: {type(error).__name__}: {error}"[:200]
+        if connection is not None:
+            connection.close()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    total = round((time.monotonic() - started) * 1000)
+    ms = finite(payload.get("ms"))
+    return {"status": status, "rpc_ms": ms, "total_ms": total, "colo": ray.rpartition("-")[2],
+            "slow": ms is not None and ms > SLOW_MS, "cold": payload.get("cold"), "warm_ms": finite(payload.get("warm_ms")),
+            "error": transport_error or payload.get("error")}
+
+
+def probe(authorization: str, connection: http.client.HTTPSConnection | None = None, **extra) -> dict:
+    result = {**extra, **call(authorization, "/admin/api/voice-verify/health", connection=connection)}
+    print(json.dumps(result), flush=True)
+    return result
+
+
+def summarize(label: str, results: list[dict]) -> None:
+    ok = [r for r in results if r["rpc_ms"] is not None]
+
+    def spread(values: list[int]) -> str:
+        if not values:
+            return "none"
+        values = sorted(values)
+        return f"n={len(values)} min={values[0]} median={statistics.median(values):.0f} max={values[-1]}"
+
+    errors = {}
+    for r in results:
+        if r["rpc_ms"] is None:
+            errors[f"{r['status']} {r['error']}"] = errors.get(f"{r['status']} {r['error']}", 0) + 1
+    flagged = [r for r in ok if r["cold"] is not None]
+    print(json.dumps({
+        "summary": label, "requests": len(results), "slow": sum(r["slow"] for r in ok),
+        "slow_ms": spread([r["rpc_ms"] for r in ok if r["slow"]]),
+        "fast_ms": spread([r["rpc_ms"] for r in ok if not r["slow"]]),
+        # From the Worker's flag, so queueing is not counted; null against a verifier without warm().
+        "cold": sum(r["cold"] for r in flagged) if flagged else None,
+        "cold_ms": spread([r["rpc_ms"] for r in flagged if r["cold"]]),
+        "queued_slow": sum(r["slow"] and not r["cold"] for r in flagged) if flagged else None,
+        "errors": errors, "colos": sorted({r["colo"] for r in results})}), flush=True)
+
+
+def sequential(args, authorization: str) -> None:
+    # --keepalive sends every probe on one TCP connection, so they reach one Cloudflare machine.
+    connection = http.client.HTTPSConnection(ORIGIN.removeprefix("https://"), timeout=60) if args.keepalive else None
+    mode = "keepalive" if args.keepalive else "sequential"
+    summarize(mode, [probe(authorization, connection, mode=mode, i=i) for i in range(args.n)])
+
+
+def concurrent(args, authorization: str) -> None:
+    for k in args.k:
+        results = []
+        for round_ in range(args.rounds):
+            with ThreadPoolExecutor(k) as pool:
+                results += list(pool.map(lambda i: probe(authorization, mode="concurrent", k=k, round=round_, i=i), range(k)))
+        summarize(f"concurrent k={k}", results)
+
+
+def idle(args, authorization: str) -> None:
+    # One connection pins every probe to one machine, so a cold probe after a gap means the
+    # instance was evicted, not that routing chose another machine. /healthz every 20 s keeps
+    # the connection open without touching the verifier. If the socket was replaced (the
+    # server closed it and http.client reconnected), the sample says nothing about retention
+    # and is reported apart.
+    connection = http.client.HTTPSConnection(ORIGIN.removeprefix("https://"), timeout=60)
+    results, failed_warmups = [], []
+    for repeat in range(args.repeats):
+        for gap in args.gaps:
+            warmup = probe(authorization, connection, mode="idle-warmup", gap=gap, repeat=repeat)
+            if warmup["rpc_ms"] is None:
+                # No inference, so the instance may never have loaded: a later cold probe
+                # would be the first load, not an eviction. Skip the gap and report it.
+                failed_warmups.append(warmup)
+                continue
+            sock = connection.sock
+            deadline = time.monotonic() + gap
+            while (left := deadline - time.monotonic()) > 0:
+                time.sleep(min(20, left))
+                try:
+                    connection.request("GET", "/healthz", headers={"user-agent": "dogwalk-research/1"})
+                    connection.getresponse().read()
+                except (OSError, http.client.HTTPException):
+                    # The next request reconnects, so the sample reports same_connection=false
+                    # and stays out of the retention summary.
+                    connection.close()
+            results.append(probe(authorization, connection, mode="idle", gap=gap, repeat=repeat,
+                                 same_connection=sock is not None and connection.sock is sock))
+    for gap in args.gaps:
+        summarize(f"idle gap={gap}s", [r for r in results if r["gap"] == gap and r["same_connection"]])
+        reconnected = [r for r in results if r["gap"] == gap and not r["same_connection"]]
+        if reconnected:
+            summarize(f"idle gap={gap}s reconnected (not retention evidence)", reconnected)
+        failed = [r for r in failed_warmups if r["gap"] == gap]
+        if failed:
+            summarize(f"idle gap={gap}s failed warm-up (gap skipped)", failed)
+
+
+def verify(args, authorization: str) -> None:
+    wav = Path(args.wav).read_bytes()
+    results = []
+    for i in range(args.n):
+        result = {"mode": "verify", "i": i, **call(authorization, f"/admin/api/voice-verify?user={args.user}", wav)}
+        print(json.dumps(result), flush=True)
+        results.append(result)
+    summarize("verify", results)
+
+
+def analytics(args, _authorization: str) -> None:
+    # A real CLI call refreshes the personal profile's OAuth bearer before we read it.
+    env = {**os.environ, "CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID}
+    subprocess.run(["cf", "workers", "list", "--profile", "personal"], env=env, capture_output=True, check=True)
+    token = json.loads(CF_PROFILE.read_text())["oauth_token"]
+    until = datetime.now(timezone.utc)
+    since = until - timedelta(hours=args.hours)
+    query = """query($account: string!, $since: Time!, $until: Time!, $limit: uint64!) { viewer { accounts(filter: {accountTag: $account}) {
+      workersInvocationsAdaptive(limit: $limit, filter: {scriptName: "dogwalk-speaker", datetime_geq: $since, datetime_leq: $until},
+                                 orderBy: [datetimeHour_DESC]) {
+        sum { requests errors subrequests }
+        quantiles { cpuTimeP50 cpuTimeP99 wallTimeP50 wallTimeP99 }
+        dimensions { datetimeHour status }
+      } } } }"""
+    body = json.dumps({"query": query, "variables": {
+        "account": ACCOUNT_ID, "limit": ANALYTICS_LIMIT, "since": since.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "until": until.isoformat(timespec="seconds").replace("+00:00", "Z")}}).encode()
+    req = urllib.request.Request("https://api.cloudflare.com/client/v4/graphql", data=body, headers={
+        "authorization": f"Bearer {token}", "content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        payload = json.loads(resp.read())
+    if payload.get("errors"):
+        sys.exit(json.dumps(payload["errors"]))
+    # Newest first, so a limit drops the oldest groups (one per hour and status), never the
+    # most recent; printed oldest first, with a warning when the window was cut short.
+    rows = payload["data"]["viewer"]["accounts"][0]["workersInvocationsAdaptive"]
+    if len(rows) >= ANALYTICS_LIMIT:
+        print(f"warning: {ANALYTICS_LIMIT} groups returned, the limit; groups at or before "
+              f"{rows[-1]['dimensions']['datetimeHour']} may be missing, so shorten --hours", file=sys.stderr)
+    for row in reversed(rows):
+        print(json.dumps({**row["dimensions"], **row["sum"], **row["quantiles"]}))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("sequential")
+    p.add_argument("-n", type=int, default=20)
+    p.add_argument("--keepalive", action="store_true")
+    p = sub.add_parser("concurrent")
+    p.add_argument("-k", type=int, nargs="+", default=[2, 4])
+    p.add_argument("--rounds", type=int, default=3)
+    p = sub.add_parser("idle")
+    p.add_argument("--gaps", type=int, nargs="+", default=[30, 60, 120, 300, 600, 1200])
+    p.add_argument("--repeats", type=int, default=1)
+    p = sub.add_parser("verify")
+    p.add_argument("wav")
+    p.add_argument("-n", type=int, default=5)
+    p.add_argument("--user", type=int, default=1)
+    sub.add_parser("analytics").add_argument("--hours", type=int, default=24)
+    args = parser.parse_args()
+    globals()[args.command](args, None if args.command == "analytics" else auth())
+
+
+if __name__ == "__main__":
+    main()
