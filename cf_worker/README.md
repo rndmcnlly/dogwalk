@@ -104,7 +104,7 @@ each is an `invite_codes` row with `max_uses = 1` and a 24-hour expiry, plus an
 `invitations` row naming the inviter, an optional bound recipient, and
 revocation, hiding, and redemption times. A User holds at most three active
 Invitations. Operator codes are unaffected. Nothing is deleted; trace the
-invitation graph in `/admin` under Access Control. Select a Registration to see
+invitation graph in `/admin` under Access Control. Select a User to see
 who invited them and the Invitations they created, or select an Invitation to
 follow its inviter and registered invitee. Hidden and revoked history remains
 visible. The default view masks all phone numbers and omits Invite Code words;
@@ -112,13 +112,31 @@ the operator's verbose toggle reveals them. This is read-only and unavailable
 to Paired Browsers. The same graph can be queried with:
 
 ```sql
-SELECT v.inviter_phone, v.code_words, r.phone_number AS invitee, r.registered_at,
-       v.recipient_phone, v.revoked_at, v.hidden_at
-  FROM invitations v LEFT JOIN registrations r ON r.phone_number = v.redeemed_by
- ORDER BY v.inviter_phone, r.registered_at;
+SELECT inviter.handle AS inviter, v.code_words, invitee.handle AS invitee,
+       v.redeemed_from, invitee.registered_at, v.recipient_phone, v.revoked_at, v.hidden_at
+  FROM invitations v JOIN users inviter ON inviter.id = v.inviter_user_id
+  LEFT JOIN users invitee ON invitee.id = v.redeemed_by_user_id
+ ORDER BY inviter.handle, invitee.registered_at;
 ```
 
-Apply `migrations/2026-11-08-invitations.sql` before deploying this feature.
+## Users, Handles, and Homes
+
+A User (`users`) is a two-word Handle (`src/handles.ts`), an opaque
+`identity_hash` that keys their VoiceSession and TerminalRelay Durable Objects
+and their Daytona label `identity-v1:<hash>`, Registration provenance, and at
+most one Home number. Registration assigns a random Handle and speaks it twice.
+Until the Identity Check exists, an unexpired Home (used within 90 days) admits
+its caller as the phone number alone did before; `voice_calls.user_id` records
+which User a call reached. `voice_references` holds enrolled speaker embeddings
+(never audio) for the coming Identity Check.
+
+`migrations/2026-11-11-users.sql` converted the phone-keyed `registrations`
+table, keeping each existing `identity_hash` so Durable Objects, Sandboxes, and
+pairing tokens survived. It was followed by a one-time operator back-patch, kept
+out of Git because it names Handles: relabel each Sandbox from
+`phone-hmac-v1:` to `identity-v1:` (Daytona's label PUT replaces all labels, so
+read and write back the rest), assign Handles to migrated Users, and store the
+operator's Voice Reference.
 
 ## Verification
 

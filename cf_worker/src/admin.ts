@@ -120,22 +120,27 @@ function renderTree(){
   const started=DATA.registrations.filter((r)=>r.state==="started").length;
   t.append(node(0,{root:true,icon:"\\u25eb",label:"Sandbox Assignments",count:started+" started",tag:"hosting"}));
   DATA.registrations.filter((r)=>r.provider_id).forEach((r)=>{
-    t.append(node(1,{kind:"sandbox",id:r.phone_number,icon:"\\u25eb",cls:"mut",label:sandboxLabel(r),state:r.state||"unknown",onSelect:true}));
+    t.append(node(1,{kind:"sandbox",id:r.diagnostic_id,icon:"\\u25eb",cls:"mut",label:userLabel(r)+" \\u00b7 "+sandboxLabel(r),state:r.state||"unknown",onSelect:true}));
   });
 
-  // ROOT: Access Control, including historical Invitations and their Registration edges.
+  // ROOT: Access Control: Users, and historical Invitations and their Registration edges.
   t.append(node(0,{root:true,icon:"\\u2691",label:"Access Control",count:DATA.registrations.length,tag:"access"}));
   DATA.registrations.forEach((r)=>{
-    t.append(node(1,{kind:"registration",id:r.diagnostic_id,icon:"\\u260e",cls:"blu",label:r.phone_number,onSelect:true}));
+    t.append(node(1,{kind:"registration",id:r.diagnostic_id,icon:"\\u260e",cls:r.reaped_at?"mut":"blu",label:userLabel(r),onSelect:true}));
   });
   t.append(node(1,{root:true,label:"Invitations (including hidden)",count:DATA.invitations.length}));
   DATA.invitations.forEach((v)=>{
-    t.append(node(2,{kind:"invitation",id:v.diagnostic_id,label:v.inviter_phone+" \\u2192 "+(v.invitee_phone||"not registered")+(v.hidden_at?" (hidden)":""),state:v.status,onSelect:true}));
+    t.append(node(2,{kind:"invitation",id:v.diagnostic_id,label:inviterLabel(v)+" \\u2192 "+inviteeLabel(v)+(v.hidden_at?" (hidden)":""),state:v.status,onSelect:true}));
   });
 
   // ROOT: Event Log (wired via audit)
   t.append(node(0,{kind:"eventlog",id:"all",root:true,icon:"\\u2630",label:"Event Log",count:DATA.audit.length,tag:"audit",onSelect:true}));
 }
+// A User is named by Handle; one without a Handle shows its Home, or that it was reaped.
+function userLabel(r){return r.handle||r.phone_number||(r.reaped_at?"reaped":"no handle")}
+function userById(id){return DATA.registrations.find((r)=>r.diagnostic_id===id)}
+function inviterLabel(v){const r=userById(v.inviter_id);return v.inviter_handle||(r?userLabel(r):"reaped")}
+function inviteeLabel(v){if(!v.invitee_id)return "not registered";const r=userById(v.invitee_id);return v.invitee_handle||(r?userLabel(r):"reaped")}
 function sandboxLabel(r){return r.provider_id==="assigned"?"assigned":(r.provider_id?String(r.provider_id).slice(0,10)+"\\u2026":"unassigned")}
 
 // --- detail -------------------------------------------------------------
@@ -143,7 +148,7 @@ function renderDetail(){
   const d=q("#detail");d.replaceChildren();
   if(!SEL){d.append(el("div","select a node","standby"));return}
   if(SEL.kind==="call")return renderCall(d,DATA.live_calls.find((c)=>c.call_sid===SEL.id));
-  if(SEL.kind==="sandbox"||SEL.kind==="registration")return renderReg(d,DATA.registrations.find((r)=>(SEL.kind==="registration"?r.diagnostic_id:r.phone_number)===SEL.id),SEL.kind);
+  if(SEL.kind==="sandbox"||SEL.kind==="registration")return renderReg(d,DATA.registrations.find((r)=>r.diagnostic_id===SEL.id),SEL.kind);
   if(SEL.kind==="eventlog")return renderAudit(d);
   if(SEL.kind==="invitation")return renderInvitation(d,DATA.invitations.find((v)=>v.diagnostic_id===SEL.id));
   d.append(el("div","select a node","standby"));
@@ -170,11 +175,17 @@ function renderCall(d,c){
 function renderReg(d,r,kind){
   if(!r){d.append(el("div","not found","standby"));return}
   if(kind==="sandbox"){
-    head(d,["Sandbox Assignments",r.phone_number],sandboxLabel(r),"mut",
-      "phone "+r.phone_number+" \\u00b7 state "+(r.state||"unknown")+(r.desired_state?" \\u2192 "+r.desired_state:""));
+    head(d,["Sandbox Assignments",userLabel(r)],sandboxLabel(r),"mut",
+      "user "+userLabel(r)+" \\u00b7 state "+(r.state||"unknown")+(r.desired_state?" \\u2192 "+r.desired_state:""));
   }else{
-    head(d,["Access Control",r.phone_number],r.phone_number,"blu",
+    head(d,["Access Control",userLabel(r)],userLabel(r),r.reaped_at?"mut":"blu",
       "registered "+when(r.registered_at)+" \\u00b7 last seen "+when(r.last_seen_at));
+    const u=el("div",undefined,"sec");u.append(el("h4","User"));
+    const ut=el("table"),ub=el("tbody");
+    [["Handle",r.handle||"\\u2014"],["Home",r.phone_number||"none"],["Home last used",when(r.home_used_at)],
+     ["Voice enrolled",r.voice_enrolled?"yes":"no"],["Reaped",when(r.reaped_at)]]
+      .forEach(([k,v])=>{const tr=el("tr");tr.append(el("th",k),el("td",v));ub.append(tr)});
+    ut.append(ub);u.append(ut);d.append(u);
   }
   const s=el("div",undefined,"sec");s.append(el("h4","Assignment"));
   const tb=el("table"),body=el("tbody");
@@ -185,10 +196,10 @@ function renderReg(d,r,kind){
     const graph=el("div",undefined,"sec");graph.append(el("h4","Invitation provenance"));
     const incoming=DATA.invitations.filter((v)=>v.invitee_id===r.diagnostic_id);
     if(!incoming.length)graph.append(el("div","No User-created Invitation recorded for this Registration.","standby"));
-    incoming.forEach((v)=>graph.append(invitationLink(v,"Invited by "+v.inviter_phone)));
+    incoming.forEach((v)=>graph.append(invitationLink(v,"Invited by "+inviterLabel(v))));
     const outgoing=DATA.invitations.filter((v)=>v.inviter_id===r.diagnostic_id);
     graph.append(el("h4","Invitations created (including hidden): "+outgoing.length));
-    outgoing.forEach((v)=>graph.append(invitationLink(v,(v.invitee_phone||"not registered")+" / "+v.status+(v.hidden_at?" / hidden":""))));
+    outgoing.forEach((v)=>graph.append(invitationLink(v,inviteeLabel(v)+" / "+v.status+(v.hidden_at?" / hidden":""))));
     d.append(graph);
   }
   const nw=el("div",undefined,"sec");nw.append(el("h4","Managed Sessions on this sandbox"),el("div","Session Management telemetry not wired yet.","standby"));d.append(nw);
@@ -205,12 +216,12 @@ function renderInvitation(d,v){
   if(!v){d.append(el("div","Invitation not found","standby"));return}
   head(d,["Access Control","Invitations"],v.code_words||"Invitation","blu",v.status+(v.hidden_at?" / hidden from inviter's list":""));
   const s=el("div",undefined,"sec");s.append(el("h4","Inviter \\u2192 Invitation \\u2192 registered invitee"));
-  s.append(registrationLink(v.inviter_id,"Inviter: "+v.inviter_phone));
-  if(v.invitee_phone)s.append(registrationLink(v.invitee_id,"Registered invitee: "+v.invitee_phone));
+  s.append(registrationLink(v.inviter_id,"Inviter: "+inviterLabel(v)));
+  if(v.invitee_id)s.append(registrationLink(v.invitee_id,"Registered invitee: "+inviteeLabel(v)));
   else s.append(el("div","No registered invitee. An intended recipient is not a verified User.","standby"));
   const tb=el("table"),body=el("tbody");
   const rows=[["Invite Code words",v.code_words||"hidden (enable verbose)"],["Status",v.status],["Created",when(v.minted_at)],["Expires",when(v.expires_at)],
-    ["Intended recipient",v.recipient_phone||"unbound"],["Recipient readback confirmed",when(v.recipient_confirmed_at)],
+    ["Intended recipient",v.recipient_phone||"unbound"],["Redeemed from",v.invitee_phone||"\\u2014"],["Recipient readback confirmed",when(v.recipient_confirmed_at)],
     ["Redeemed",when(v.redeemed_at)],["Registered",when(v.registered_at)],["Revoked",when(v.revoked_at)],["Hidden",when(v.hidden_at)]];
   rows.forEach(([k,value])=>{const tr=el("tr");tr.append(el("th",k),el("td",value));body.append(tr)});
   tb.append(body);s.append(tb);s.append(el("div","Read-only history: hiding or revoking an Invitation does not remove a Registration or invitation edge.","standby"));d.append(s);

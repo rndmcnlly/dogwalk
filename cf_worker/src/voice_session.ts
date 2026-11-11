@@ -684,7 +684,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "inspect_registration",
-    description: "Read-only: the caller's own Registration: how long ago, and whether an invitation or an operator's Invite Code admitted them; if an invitation, the inviter's number.",
+    description: "Read-only: the caller's own Registration: their Handle (the two words that name them on Dogwalk from any phone), how long ago they registered, and whether an invitation or an operator's Invite Code admitted them; if an invitation, the inviter's Handle.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -817,7 +817,10 @@ export class VoiceSession {
   // The Voice Call's trace context, from the front door's `traceparent`. Operations snapshot it
   // when they start; nothing reads it back at completion.
   private callTrace: TraceContext | null = null;
+  // The calling number (call facts, the caller's country) and the User Access Control resolved
+  // the call to (whose invitations and history these are). Only the User is identity.
   private phone: string | null = null;
+  private userId: number | null = null;
   private sandboxId: string | null = null;
   private attachedSandboxId: string | null = null;
   // The Worker's routing key for this object, which Paired Browser credentials carry.
@@ -964,13 +967,15 @@ export class VoiceSession {
       // Fire-and-forget from the Twilio webhook: start reaching the Agent while the call is
       // still being set up. Idempotent, and a no-op beside an attached call.
       const phone = request.headers.get("x-dogwalk-phone");
+      const user = Number(request.headers.get("x-dogwalk-user"));
       const sandboxId = request.headers.get("x-dogwalk-sandbox-id");
-      if (!phone || !sandboxId) return new Response("missing sandbox context", { status: 400 });
+      if (!phone || !user || !sandboxId) return new Response("missing sandbox context", { status: 400 });
       if (this.attachedSandboxId && this.attachedSandboxId !== sandboxId) {
         if (this.liveAttached) return new Response("sandbox already has an active voice call", { status: 409 });
         await this.resetSandboxProjection();
       }
       this.phone ??= phone;
+      this.userId ??= user;
       this.sandboxId = sandboxId;
       this.attachedSandboxId = sandboxId;
       await this.state.storage.put("sandbox_id", sandboxId);
@@ -978,13 +983,14 @@ export class VoiceSession {
       return new Response(null, { status: 202 });
     }
     this.phone = request.headers.get("x-dogwalk-phone");
+    this.userId = Number(request.headers.get("x-dogwalk-user")) || null;
     const previousCallSid = this.callSid;
     this.callSid = request.headers.get("x-dogwalk-call-sid");
     const incomingTrace = parseTraceparent(request.headers.get("traceparent"));
     if (incomingTrace || this.callSid !== previousCallSid) this.callTrace = incomingTrace;
     const incomingSandboxId = request.headers.get("x-dogwalk-sandbox-id");
     const incomingLiveSessionId = request.headers.get("x-dogwalk-live-session-id");
-    if (!this.phone || !this.callSid || !incomingSandboxId || !incomingLiveSessionId) {
+    if (!this.phone || !this.userId || !this.callSid || !incomingSandboxId || !incomingLiveSessionId) {
       return new Response("missing call context", { status: 400 });
     }
     if (this.live?.readyState === WebSocket.OPEN && this.liveSessionId !== incomingLiveSessionId) {
@@ -3013,27 +3019,27 @@ export class VoiceSession {
         case "close_managed_session":
           result = await this.closeManagedSession(requiredString(args, "alias"));
           break;
-        // Invitations act for the authenticated caller (this.phone), never a model-named one.
+        // Invitations act for the call's User (this.userId), never a model-named one.
         case "create_invitation": {
           const recipient = await this.confirmedRecipient(args);
-          result = "readback" in recipient ? recipient : await createInvitation(this.env.DB, this.callerPhone(), recipient.phone);
+          result = "readback" in recipient ? recipient : await createInvitation(this.env.DB, this.callerUser(), recipient.phone);
           break;
         }
         case "list_invitations":
-          result = await listInvitations(this.env.DB, this.callerPhone());
+          result = await listInvitations(this.env.DB, this.callerUser());
           break;
         case "set_invitation_recipient": {
           const recipient = await this.confirmedRecipient(args);
           result = "readback" in recipient
             ? recipient
-            : await setInvitationRecipient(this.env.DB, this.callerPhone(), requiredString(args, "invitation"), recipient.phone);
+            : await setInvitationRecipient(this.env.DB, this.callerUser(), requiredString(args, "invitation"), recipient.phone);
           break;
         }
         case "revoke_invitation":
-          result = await revokeInvitation(this.env.DB, this.callerPhone(), requiredString(args, "invitation"));
+          result = await revokeInvitation(this.env.DB, this.callerUser(), requiredString(args, "invitation"));
           break;
         case "inspect_registration":
-          result = await inspectRegistration(this.env.DB, this.callerPhone());
+          result = await inspectRegistration(this.env.DB, this.callerUser());
           break;
         // The hangup waits long enough for the farewell said in the same response to play.
         case "open_recovery_menu":
@@ -3058,9 +3064,9 @@ export class VoiceSession {
     return result;
   }
 
-  private callerPhone(): string {
-    if (!this.phone || !this.liveAttached) throw new Error("invitations need a live call from the registered caller");
-    return this.phone;
+  private callerUser(): number {
+    if (!this.userId || !this.liveAttached) throw new Error("invitations need a live call from the registered caller");
+    return this.userId;
   }
 
   // A recipient number is bound only after a readback the caller confirmed: without the
@@ -3070,7 +3076,7 @@ export class VoiceSession {
     if (raw === null || raw === undefined || String(raw).trim() === "") return { phone: null };
     const callerInUs = (await this.callerCountry().catch(() => null)) === "US";
     const { phone, assumedCountryCode } = normalizeRecipient(String(raw), callerInUs);
-    if (phone === this.callerPhone()) throw new Error("that is the caller's own number");
+    if (phone === this.phone) throw new Error("that is the caller's own number");
     if (args.caller_confirmed_readback === true) return { phone };
     return {
       ok: false,
@@ -3093,10 +3099,11 @@ export class VoiceSession {
   private async mentionsKnownPhone(prompt: string): Promise<boolean> {
     if (!this.phone) return false;
     const rows = await this.env.DB.prepare(
-      `SELECT recipient_phone AS phone FROM invitations WHERE inviter_phone = ?1
-       UNION SELECT redeemed_by FROM invitations WHERE inviter_phone = ?1
-       UNION SELECT inviter_phone FROM invitations WHERE redeemed_by = ?1`,
-    ).bind(this.phone).all<{ phone: string | null }>();
+      `SELECT recipient_phone AS phone FROM invitations WHERE inviter_user_id = ?1
+       UNION SELECT redeemed_from FROM invitations WHERE inviter_user_id = ?1
+       UNION SELECT home_phone FROM users WHERE id = ?1
+       UNION SELECT u.home_phone FROM invitations v JOIN users u ON u.id = v.inviter_user_id WHERE v.redeemed_by_user_id = ?1`,
+    ).bind(this.userId).all<{ phone: string | null }>();
     const digits = prompt.replace(/(?<=\d)[\s().-]+(?=\d)/g, "");
     return [this.phone, ...rows.results.map((row) => row.phone)]
       .some((phone) => phone && digits.includes(phone.slice(-10)));
@@ -3457,10 +3464,14 @@ export class VoiceSession {
     const last = await this.state.storage.get<LastCall>("last_call");
     if (!last) return null;
     let recovery: string[] = [];
-    if (this.phone) {
+    if (this.userId) {
       const rows = await this.env.DB.prepare(
-        `SELECT event FROM audit_log WHERE phone_number = ? AND ts >= ? AND event LIKE 'sandbox.%' ORDER BY id`,
-      ).bind(this.phone, Math.floor(last.ended_at / 1000)).all<{ event: string }>();
+        `SELECT a.event FROM audit_log a
+          WHERE a.ts >= ?2 AND a.event LIKE 'sandbox.%'
+            AND (json_extract(a.detail, '$.user_id') = ?1
+                 OR a.call_sid IN (SELECT call_sid FROM voice_calls WHERE user_id = ?1))
+          ORDER BY a.id`,
+      ).bind(this.userId, Math.floor(last.ended_at / 1000)).all<{ event: string }>();
       recovery = rows.results.map((row) => row.event).filter((event) => event !== "sandbox.ready" && event !== "sandbox.waking");
     }
     const failed = Array.from(this.sessions.values())
@@ -3479,10 +3490,10 @@ export class VoiceSession {
   }
 
   private async inspectCallActivity(): Promise<Record<string, unknown>> {
-    if (!this.phone) throw new Error("Registered phone is unavailable");
+    if (!this.userId) throw new Error("the call's User is unavailable");
     const calls = await this.env.DB.prepare(
-      `SELECT call_sid, started_at, ended_at, status FROM voice_calls WHERE phone_number = ? ORDER BY started_at DESC LIMIT 3`,
-    ).bind(this.phone).all<{ call_sid: string; started_at: number; ended_at: number | null; status: string }>();
+      `SELECT call_sid, started_at, ended_at, status FROM voice_calls WHERE user_id = ? ORDER BY started_at DESC LIMIT 3`,
+    ).bind(this.userId).all<{ call_sid: string; started_at: number; ended_at: number | null; status: string }>();
     const noise = new Set(["orchestrator.model", "orchestrator.tool", "orchestrator.say", "voice.delegation.received", "voice.timing"]);
     const now = Math.floor(Date.now() / 1000);
     return {

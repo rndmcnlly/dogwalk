@@ -30,20 +30,26 @@ def main():
         "const m=await import('data:text/javascript;base64,'+Buffer.from(s).toString('base64'));"
         "process.stdout.write(m.ADMIN_HTML);",
     ], cwd=ROOT, text=True)
-    # Deliberately identical masked suffixes: navigation must use identity, not labels.
+    # Users 1 and 2 predate Handles (labelled by Home), User 3 has one, and User 4 was reaped.
+    # Users 1 and 2 have deliberately identical masked suffixes: navigation must use identity,
+    # not labels.
     phones = ["+15555550101", "+15556660101", "+15557770101"]
+    handles = [None, None, "amber falcon", None]
     registrations = [
-        {"diagnostic_id": f"registration-{i + 1}", "phone_number": phone,
-         "registered_at": T0 + i, "last_seen_at": T0 + i}
-        for i, phone in enumerate(phones)
+        {"diagnostic_id": f"user-{i + 1}", "user_id": i + 1, "handle": handles[i],
+         "phone_number": phones[i] if i < 3 else None, "home_used_at": T0 + i if i < 3 else None,
+         "registered_at": T0 + i, "last_seen_at": T0 + i, "reaped_at": T0 + 50 if i == 3 else None,
+         "voice_enrolled": 1 if i == 2 else 0}
+        for i in range(4)
     ]
     invitations = []
     for i in range(3):
         redeemed = i < 2
         invitations.append({
             "diagnostic_id": f"invitation-{i + 1}", "code_words": f"synthetic invitation {i}",
-            "inviter_id": f"registration-{i + 1}", "inviter_phone": phones[i],
-            "invitee_id": f"registration-{i + 2}" if redeemed else None,
+            "inviter_id": f"user-{i + 1}", "inviter_handle": handles[i],
+            "invitee_id": f"user-{i + 2}" if redeemed else None,
+            "invitee_handle": handles[i + 1] if redeemed else None,
             "invitee_phone": phones[i + 1] if redeemed else None,
             "recipient_phone": None if redeemed else "+15558880101",
             "recipient_confirmed_at": None if redeemed else T0,
@@ -74,10 +80,11 @@ def main():
                         "invitations": copy.deepcopy(invitations), "live_calls": [], "audit": []}
                 if not verbose:
                     for r in data["registrations"]:
-                        r["phone_number"] = "********0101"
+                        if r["phone_number"]:
+                            r["phone_number"] = "********0101"
                     for v in data["invitations"]:
                         del v["code_words"]
-                        for key in ("inviter_phone", "invitee_phone", "recipient_phone"):
+                        for key in ("invitee_phone", "recipient_phone"):
                             if v[key]:
                                 v[key] = "********0101"
                 request.fulfill(body="event: state\ndata: " + json.dumps(data) + "\n\n",
@@ -95,9 +102,12 @@ def main():
         assert "no registered invitee" in detail.inner_text().lower(), (detail.inner_text(), errors)
         assert "hidden (enable verbose)" in detail.inner_text()
         page.locator("#verbose").check()
-        page.get_by_role("button", name="Inviter: " + phones[2], exact=True).wait_for()
-        assert "+15558880101" in detail.inner_text()
-        page.get_by_role("button", name="Inviter: " + phones[2], exact=True).click()
+        # Handles are not masked, so wait for something only the verbose lens shows.
+        detail.get_by_text("+15558880101", exact=True).wait_for()
+        page.get_by_role("button", name="Inviter: amber falcon", exact=True).click()
+        assert "amber falcon" in detail.locator(".dhead").inner_text()
+        assert "voice enrolled\tyes" in detail.inner_text().lower(), detail.inner_text()
+        assert phones[2] in detail.inner_text()
         detail.get_by_role("button", name="Invited by " + phones[1], exact=True).click()
         detail.get_by_role("button", name="Inviter: " + phones[1], exact=True).click()
         detail.get_by_role("button", name="Invited by " + phones[0], exact=True).click()
@@ -105,12 +115,16 @@ def main():
         assert invitations[0]["code_words"] in detail.inner_text()
         assert page.evaluate("window.__injected") is None
         assert detail.locator("img").count() == 0
+        assert page.locator("#tree button").filter(has_text="reaped").count() == 1
+        assert page.locator("#tree button").filter(has_text=phones[0] + " \u2192 " + phones[1]).count() == 1
+        assert page.locator("#tree button").filter(has_text=phones[1] + " \u2192 amber falcon").count() == 1
         # Masked labels collide, but links still reach the correct generation.
         page.locator("#verbose").uncheck()
         detail.get_by_text("hidden (enable verbose)", exact=True).wait_for()
         detail.get_by_role("button", name="Registered invitee: ********0101", exact=True).click()
         assert detail.get_by_role("button", name="Invited by ********0101", exact=True).count() == 1
-        assert detail.get_by_role("button", name="********0101 / redeemed / hidden", exact=True).count() == 1
+        assert detail.get_by_role("button", name="amber falcon / redeemed / hidden", exact=True).count() == 1
+        assert not any(phone in page.locator("body").inner_text() for phone in phones)
         assert requests[:3] == [False, True, False], requests
         assert not errors, errors
         browser.close()

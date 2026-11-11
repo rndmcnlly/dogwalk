@@ -23,6 +23,7 @@ import type { Env } from "./types";
 import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
 import { TerminalRelay } from "./terminal_relay";
 import { INVITATION_STATUS_SQL, redemptionStatements, USABLE_FOR_PHONE_SQL } from "./invitations";
+import { newHandle } from "./handles";
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
 export { TerminalRelay, VoiceSession };
@@ -290,10 +291,16 @@ interface DaytonaSandbox {
   toolboxProxyUrl?: string;
 }
 
-interface SandboxAssignment {
-  phone_number: string;
-  provider_id: string | null;
+/** A User as Access Control resolves one for a call: by Home today, by Identity Check later. */
+interface User {
+  id: number;
   identity_hash: string;
+  handle: string | null;
+}
+
+interface SandboxAssignment {
+  user_id: number;
+  provider_id: string | null;
   state: string;
   error: string | null;
   provisioning_started_at: number;
@@ -322,80 +329,91 @@ async function daytonaFetch<T>(env: Env, path: string, init: RequestInit = {}): 
   return response.json<T>();
 }
 
-async function identityHash(env: Env, phone: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(env.DOGWALK_IDENTITY_SECRET),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const bytes = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(phone)));
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+// An opaque, stable key for a new User's Durable Objects and provider label. It derives from
+// nothing, so re-homing or roaming never changes which Sandbox and history a User reaches.
+function newIdentityHash(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function getAssignment(env: Env, phone: string): Promise<SandboxAssignment | null> {
+const USER_COLUMNS = "u.id, u.identity_hash, u.handle";
+const HOME_TTL_SECONDS = 90 * 86400;
+
+/** The User whose unexpired Home this number is. */
+async function homeUser(env: Env, phone: string): Promise<User | null> {
   return env.DB.prepare(
-    `SELECT phone_number, provider_id, identity_hash, state, error,
-            provisioning_started_at, last_checked_at
-       FROM sandbox_assignments WHERE phone_number = ?`,
-  ).bind(phone).first<SandboxAssignment>();
+    `SELECT ${USER_COLUMNS} FROM users u
+      WHERE u.home_phone = ? AND u.reaped_at IS NULL AND u.home_used_at > unixepoch() - ?`,
+  ).bind(phone, HOME_TTL_SECONDS).first<User>();
 }
 
-async function updateAssignment(env: Env, phone: string, sandbox: DaytonaSandbox): Promise<void> {
+/** The User this Voice Call was resolved to when it entered. */
+async function callUser(env: Env, callSid: string): Promise<User | null> {
+  return env.DB.prepare(
+    `SELECT ${USER_COLUMNS} FROM voice_calls c JOIN users u ON u.id = c.user_id
+      WHERE c.call_sid = ? AND u.reaped_at IS NULL`,
+  ).bind(callSid).first<User>();
+}
+
+async function getAssignment(env: Env, user: User): Promise<SandboxAssignment | null> {
+  return env.DB.prepare(
+    `SELECT user_id, provider_id, state, error, provisioning_started_at, last_checked_at
+       FROM sandbox_assignments WHERE user_id = ?`,
+  ).bind(user.id).first<SandboxAssignment>();
+}
+
+async function updateAssignment(env: Env, user: User, sandbox: DaytonaSandbox): Promise<void> {
   await env.DB.prepare(
     `UPDATE sandbox_assignments
         SET provider_id = ?, state = ?, error = ?, last_checked_at = ?
-      WHERE phone_number = ?`,
+      WHERE user_id = ?`,
   ).bind(
     sandbox.id,
     sandbox.state,
     sandbox.errorReason ?? null,
     Math.floor(Date.now() / 1000),
-    phone,
+    user.id,
   ).run();
 }
 
 async function findDaytonaSandboxes(env: Env, hash: string): Promise<DaytonaSandbox[]> {
   const labels = JSON.stringify({
     [DAYTONA_LABEL_MANAGED]: "dogwalk",
-    [DAYTONA_LABEL_IDENTITY]: `phone-hmac-v1:${hash}`,
+    [DAYTONA_LABEL_IDENTITY]: `identity-v1:${hash}`,
   });
   const query = new URLSearchParams({ labels, limit: "3" });
   const result = await daytonaFetch<{ items: DaytonaSandbox[] }>(env, `/sandbox?${query}`);
   return result.items;
 }
 
-async function ensureSandboxAssignment(env: Env, phone: string): Promise<SandboxAssignment> {
-  const hash = await identityHash(env, phone);
+async function ensureSandboxAssignment(env: Env, user: User): Promise<SandboxAssignment> {
+  const hash = user.identity_hash;
   const now = Math.floor(Date.now() / 1000);
   const inserted = await env.DB.prepare(
-    `INSERT OR IGNORE INTO sandbox_assignments
-       (phone_number, identity_hash, state, provisioning_started_at)
-     VALUES (?, ?, 'provisioning', ?)`,
-  ).bind(phone, hash, now).run();
-  let assignment = await getAssignment(env, phone);
+    `INSERT OR IGNORE INTO sandbox_assignments (user_id, state, provisioning_started_at)
+     VALUES (?, 'provisioning', ?)`,
+  ).bind(user.id, now).run();
+  let assignment = await getAssignment(env, user);
   if (!assignment) throw new Error("sandbox assignment insert failed");
   if (assignment.provider_id) return assignment;
 
   const discovered = await findDaytonaSandboxes(env, hash);
   if (discovered.length > 1) {
     await env.DB.prepare(
-      "UPDATE sandbox_assignments SET state = 'conflict', error = ? WHERE phone_number = ?",
-    ).bind("multiple matching Daytona sandboxes", phone).run();
+      "UPDATE sandbox_assignments SET state = 'conflict', error = ? WHERE user_id = ?",
+    ).bind("multiple matching Daytona sandboxes", user.id).run();
     throw new Error("multiple matching Daytona sandboxes");
   }
   if (discovered.length === 1) {
-    await updateAssignment(env, phone, discovered[0]);
-    return (await getAssignment(env, phone))!;
+    await updateAssignment(env, user, discovered[0]);
+    return (await getAssignment(env, user))!;
   }
 
   let ownsProvisioning = inserted.meta.changes === 1;
   if (!ownsProvisioning && now - assignment.provisioning_started_at >= 30) {
     const claimed = await env.DB.prepare(
       `UPDATE sandbox_assignments SET provisioning_started_at = ?, state = 'provisioning', error = NULL
-        WHERE phone_number = ? AND provider_id IS NULL AND provisioning_started_at = ?`,
-    ).bind(now, phone, assignment.provisioning_started_at).run();
+        WHERE user_id = ? AND provider_id IS NULL AND provisioning_started_at = ?`,
+    ).bind(now, user.id, assignment.provisioning_started_at).run();
     ownsProvisioning = claimed.meta.changes === 1;
   }
   if (!ownsProvisioning) return assignment;
@@ -412,7 +430,7 @@ async function ensureSandboxAssignment(env: Env, phone: string): Promise<Sandbox
       ...(env.DAYTONA_AGENT_SECRET ? { secrets: [{ OPENAI_API_KEY: env.DAYTONA_AGENT_SECRET }] } : {}),
       labels: {
         [DAYTONA_LABEL_MANAGED]: "dogwalk",
-        [DAYTONA_LABEL_IDENTITY]: `phone-hmac-v1:${hash}`,
+        [DAYTONA_LABEL_IDENTITY]: `identity-v1:${hash}`,
       },
       public: false,
       autoStopInterval: 15,
@@ -420,8 +438,8 @@ async function ensureSandboxAssignment(env: Env, phone: string): Promise<Sandbox
       autoDeleteInterval: -1,
     }),
   });
-  await updateAssignment(env, phone, sandbox);
-  return (await getAssignment(env, phone))!;
+  await updateAssignment(env, user, sandbox);
+  return (await getAssignment(env, user))!;
 }
 
 async function getDaytonaSandbox(env: Env, providerId: string): Promise<DaytonaSandbox> {
@@ -447,10 +465,10 @@ async function executeInSandbox(
 
 async function resolveSandbox(
   env: Env,
-  phone: string,
+  user: User,
   replaceMissing = true,
 ): Promise<{ assignment: SandboxAssignment; sandbox?: DaytonaSandbox }> {
-  const assignment = await ensureSandboxAssignment(env, phone);
+  const assignment = await ensureSandboxAssignment(env, user);
   if (!assignment.provider_id) return { assignment };
   const now = Math.floor(Date.now() / 1000);
   if (
@@ -469,15 +487,15 @@ async function resolveSandbox(
       `UPDATE sandbox_assignments
           SET provider_id = NULL, state = 'missing', error = NULL,
               provisioning_started_at = 0, last_checked_at = ?
-        WHERE phone_number = ? AND provider_id = ?`,
-    ).bind(now, phone, assignment.provider_id).run();
+        WHERE user_id = ? AND provider_id = ?`,
+    ).bind(now, user.id, assignment.provider_id).run();
     if (cleared.meta.changes === 1) {
-      await audit(env, "sandbox.missing", phone, null, { provider_id: assignment.provider_id });
+      await audit(env, "sandbox.missing", null, null, { user_id: user.id, provider_id: assignment.provider_id });
     }
-    return resolveSandbox(env, phone, false);
+    return resolveSandbox(env, user, false);
   }
-  await updateAssignment(env, phone, sandbox);
-  return { assignment: (await getAssignment(env, phone))!, sandbox };
+  await updateAssignment(env, user, sandbox);
+  return { assignment: (await getAssignment(env, user))!, sandbox };
 }
 
 // --- Diagnostics --------------------------------------------------------
@@ -530,30 +548,32 @@ const jsonResponse = (value: unknown, status = 200, extra: Record<string, string
 });
 
 async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<string, unknown>> {
+  // One row per User (its Registration, Home, and Sandbox Assignment). Stable, non-capability
+  // diagnostic ids preserve graph identity when masked numbers collide or a Home is gone.
   const registrationResult = await env.DB.prepare(
-    `SELECT 'registration-' || r.rowid AS diagnostic_id, r.phone_number, r.registered_at, r.last_seen_at,
-            s.provider_id, s.identity_hash, s.state, s.error,
-            s.created_at AS sandbox_created_at, s.last_checked_at
-       FROM registrations r
-       LEFT JOIN sandbox_assignments s ON s.phone_number = r.phone_number
-      ORDER BY r.registered_at DESC`,
+    `SELECT 'user-' || u.id AS diagnostic_id, u.id AS user_id, u.handle, u.home_phone AS phone_number,
+            u.home_used_at, u.registered_at, u.last_seen_at, u.reaped_at, u.identity_hash,
+            s.provider_id, s.state, s.error, s.created_at AS sandbox_created_at, s.last_checked_at,
+            EXISTS (SELECT 1 FROM voice_references vr WHERE vr.user_id = u.id) AS voice_enrolled
+       FROM users u
+       LEFT JOIN sandbox_assignments s ON s.user_id = u.id
+      ORDER BY u.registered_at DESC`,
   ).all<Record<string, unknown>>();
   const registrations = registrationResult.results ?? [];
-  // Stable, non-capability references preserve graph identity when masked numbers collide.
-  const registrationIds = new Map(registrations.map((row) => [String(row.phone_number), row.diagnostic_id]));
   const invitationResult = await env.DB.prepare(
-    `SELECT 'invitation-' || v.rowid AS diagnostic_id, v.code_words, v.inviter_phone, v.recipient_phone, v.recipient_confirmed_at,
+    `SELECT 'invitation-' || v.rowid AS diagnostic_id, v.code_words,
+            'user-' || v.inviter_user_id AS inviter_id, inviter.handle AS inviter_handle,
+            CASE WHEN v.redeemed_by_user_id IS NULL THEN NULL ELSE 'user-' || v.redeemed_by_user_id END AS invitee_id,
+            invitee.handle AS invitee_handle, v.redeemed_from AS invitee_phone,
+            v.recipient_phone, v.recipient_confirmed_at,
             v.redeemed_at, v.revoked_at, v.hidden_at, i.minted_at, i.expires_at,
-            r.phone_number AS invitee_phone, r.registered_at, ${INVITATION_STATUS_SQL} AS status
+            invitee.registered_at, ${INVITATION_STATUS_SQL} AS status
        FROM invitations v JOIN invite_codes i ON i.code_words = v.code_words
-       LEFT JOIN registrations r ON r.invite_code = v.code_words AND r.phone_number = v.redeemed_by
+       JOIN users inviter ON inviter.id = v.inviter_user_id
+       LEFT JOIN users invitee ON invitee.id = v.redeemed_by_user_id
       ORDER BY i.minted_at DESC, v.code_words`,
   ).all<Record<string, unknown>>();
-  const invitations = (invitationResult.results ?? []).map<Record<string, unknown>>((row) => ({
-    ...row,
-    inviter_id: registrationIds.get(String(row.inviter_phone)),
-    invitee_id: row.invitee_phone ? registrationIds.get(String(row.invitee_phone)) : null,
-  }));
+  const invitations = invitationResult.results ?? [];
 
   await Promise.all(registrations.map(async (row) => {
     const providerId = row.provider_id;
@@ -563,7 +583,7 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
       row.state = sandbox.state;
       row.error = sandbox.errorReason ?? null;
       row.desired_state = sandbox.desiredState ?? null;
-      await updateAssignment(env, String(row.phone_number), sandbox);
+      await updateAssignment(env, { id: Number(row.user_id), identity_hash: String(row.identity_hash), handle: null }, sandbox);
     } catch (error) {
       row.error = error instanceof Error ? error.message : String(error);
     }
@@ -610,7 +630,7 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
     ...snapshot,
     registrations: registrations.map((row) => ({
       ...row,
-      phone_number: maskPhone(String(row.phone_number)),
+      phone_number: row.phone_number ? maskPhone(String(row.phone_number)) : null,
       provider_id: row.provider_id ? "assigned" : null,
       identity_hash: undefined,
       error: row.error ? "operator attention required" : null,
@@ -618,7 +638,6 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
     invitations: invitations.map((row) => ({
       ...row,
       code_words: undefined,
-      inviter_phone: maskPhone(String(row.inviter_phone)),
       recipient_phone: row.recipient_phone ? maskPhone(String(row.recipient_phone)) : null,
       invitee_phone: row.invitee_phone ? maskPhone(String(row.invitee_phone)) : null,
     })),
@@ -825,7 +844,9 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
   if (pathname === "/admin/api/conversations") {
     // Conversation content is never part of the redacted default lens.
     if (!verbose) return new Response("conversations require verbose=1", { status: 400 });
-    const assignments = await env.DB.prepare("SELECT identity_hash FROM sandbox_assignments").all<{ identity_hash: string }>();
+    const assignments = await env.DB.prepare(
+      "SELECT u.identity_hash FROM sandbox_assignments s JOIN users u ON u.id = s.user_id",
+    ).all<{ identity_hash: string }>();
     const conversations = await Promise.all(assignments.results.map(async ({ identity_hash }) => {
       const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(identity_hash));
       return (await object.fetch("https://voice-session/conversation")).json();
@@ -955,7 +976,9 @@ async function handlePair(req: Request, env: Env, url: URL): Promise<Response> {
 
 // Only identities with a Sandbox Assignment get a VoiceSession; random ones never create objects.
 async function knownIdentity(env: Env, identity: string): Promise<boolean> {
-  const row = await env.DB.prepare("SELECT 1 AS ok FROM sandbox_assignments WHERE identity_hash = ?").bind(identity).first();
+  const row = await env.DB.prepare(
+    "SELECT 1 AS ok FROM users u JOIN sandbox_assignments s ON s.user_id = u.id WHERE u.identity_hash = ?",
+  ).bind(identity).first();
   return Boolean(row);
 }
 
@@ -1067,22 +1090,26 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
     });
   }
 
-  if (await isRegistered(env, from)) {
-    await env.DB.prepare("UPDATE registrations SET last_seen_at = ? WHERE phone_number = ?")
-      .bind(Math.floor(Date.now() / 1000), from)
-      .run();
-    await audit(env, "caller.registered", from, callSid, {});
+  // Caller ID selects the User whose Home this is. The Identity Check will ask for evidence
+  // here; until it exists, the Home alone admits the caller, as the phone number did before.
+  const user = await homeUser(env, from);
+  if (user) {
+    await env.DB.batch([
+      env.DB.prepare("UPDATE users SET last_seen_at = unixepoch(), home_used_at = unixepoch() WHERE id = ?").bind(user.id),
+      env.DB.prepare("UPDATE voice_calls SET user_id = ? WHERE call_sid = ?").bind(user.id, callSid),
+    ]);
+    await audit(env, "caller.registered", from, callSid, { user_id: user.id, via: "home" });
     // Talk first: the caller reaches the Voice Agent at once while the Sandbox wakes in
     // parallel. Only a Sandbox the provider reports broken goes to deterministic recovery.
     try {
-      const { assignment, sandbox } = await resolveSandbox(env, from);
+      const { assignment, sandbox } = await resolveSandbox(env, user);
       if (sandbox && ["error", "build_failed", "destroyed"].includes(sandbox.state)) {
         await audit(env, "sandbox.unavailable", from, callSid, { state: sandbox.state });
         return recoveryMenu("Workspace unavailable. ");
       }
       if (sandbox && ["stopped", "archived", "paused"].includes(sandbox.state)) {
         const started = await daytonaFetch<DaytonaSandbox>(env, `/sandbox/${encodeURIComponent(sandbox.id)}/start`, { method: "POST" });
-        await updateAssignment(env, from, started);
+        await updateAssignment(env, user, started);
         await audit(env, "sandbox.start.requested", from, callSid, { state: sandbox.state });
       } else {
         const state = sandbox?.state ?? assignment.state;
@@ -1090,7 +1117,7 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
       }
       // The VoiceSession starts reaching the Agent while Twilio and GPT-Live set up the call.
       if (assignment.provider_id) {
-        ctx.waitUntil(prewarmVoiceSession(env, assignment.identity_hash, from, assignment.provider_id));
+        ctx.waitUntil(prewarmVoiceSession(env, user, from, assignment.provider_id));
       }
       if (!env.OPENAI_PROJECT_ID) throw new Error("OPENAI_PROJECT_ID is not configured");
       const context = await sipContextCapability(env, callSid);
@@ -1112,12 +1139,15 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
   ));
 }
 
-async function prewarmVoiceSession(env: Env, identity: string, phone: string, sandboxId: string): Promise<void> {
+async function prewarmVoiceSession(env: Env, user: User, phone: string, sandboxId: string): Promise<void> {
   try {
-    const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(identity));
+    const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(user.identity_hash));
     await object.fetch("https://voice-session/prewarm", {
       method: "POST",
-      headers: { "x-dogwalk-phone": phone, "x-dogwalk-sandbox-id": sandboxId, "x-dogwalk-identity": identity },
+      headers: {
+        "x-dogwalk-phone": phone, "x-dogwalk-user": String(user.id),
+        "x-dogwalk-sandbox-id": sandboxId, "x-dogwalk-identity": user.identity_hash,
+      },
     });
   } catch (error) {
     console.error("voice session prewarm failed", error);
@@ -1167,7 +1197,8 @@ async function handleRecovery(req: Request, env: Env): Promise<Response> {
   const from = normalizePhone(form.get("From"));
   const callSid = String(form.get("CallSid") ?? "");
   const digit = String(form.get("Digits") ?? "");
-  if (!from || !(await isRegistered(env, from))) return twiml(Hangup());
+  const user = from && callSid ? await callUser(env, callSid) : null;
+  if (!from || !user) return twiml(Hangup());
   if (digit === "9") return twiml(Hangup());
   if (digit === "1" || digit === "0") return twiml(Redirect("/voice"));
   if (digit === "3") {
@@ -1179,7 +1210,7 @@ async function handleRecovery(req: Request, env: Env): Promise<Response> {
     );
   }
   if (digit === "2") {
-    const assignment = await getAssignment(env, from);
+    const assignment = await getAssignment(env, user);
     if (!assignment?.provider_id) return twiml(Redirect("/voice"));
     try {
       await daytonaFetch(env, `/sandbox/${encodeURIComponent(assignment.provider_id)}/stop`, { method: "POST" });
@@ -1198,10 +1229,11 @@ async function handleRecoveryConfirm(req: Request, env: Env): Promise<Response> 
   const form = await req.clone().formData();
   const from = normalizePhone(form.get("From"));
   const callSid = String(form.get("CallSid") ?? "");
-  if (!from || String(form.get("Digits") ?? "") !== "3" || !(await isRegistered(env, from))) {
+  const user = from && callSid ? await callUser(env, callSid) : null;
+  if (!from || String(form.get("Digits") ?? "") !== "3" || !user) {
     return recoveryMenu("Cancelled. ");
   }
-  const assignment = await getAssignment(env, from);
+  const assignment = await getAssignment(env, user);
   if (assignment?.provider_id) {
     try {
       await daytonaFetch(env, `/sandbox/${encodeURIComponent(assignment.provider_id)}`, { method: "DELETE" });
@@ -1210,8 +1242,8 @@ async function handleRecoveryConfirm(req: Request, env: Env): Promise<Response> 
     }
     await env.DB.prepare(
       `UPDATE sandbox_assignments SET provider_id = NULL, state = 'missing', error = NULL,
-         provisioning_started_at = 0, last_checked_at = unixepoch() WHERE phone_number = ?`,
-    ).bind(from).run();
+         provisioning_started_at = 0, last_checked_at = unixepoch() WHERE user_id = ?`,
+    ).bind(user.id).run();
     await audit(env, "sandbox.replacement.confirmed", from, callSid, {});
   }
   return twiml(Say("Replacing.") + Pause(5) + Redirect("/voice"));
@@ -1249,33 +1281,31 @@ async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response
 
   // Any assigned Sandbox will do, started or not: the Durable Object waits for the Agent
   // in the background while the caller talks.
-  const assignment = await env.DB.prepare(
-    `SELECT s.phone_number, s.provider_id, s.identity_hash
-       FROM voice_calls c
-       JOIN sandbox_assignments s ON s.phone_number = c.phone_number
-       JOIN registrations r ON r.phone_number = s.phone_number
-      WHERE c.call_sid = ?`,
-  ).bind(context.callSid).first<{ phone_number: string; provider_id: string | null; identity_hash: string }>();
-  if (assignment && !assignment.provider_id) {
+  const user = await callUser(env, context.callSid);
+  const caller = await env.DB.prepare("SELECT phone_number FROM voice_calls WHERE call_sid = ?")
+    .bind(context.callSid).first<{ phone_number: string }>();
+  const assignment = user ? await getAssignment(env, user) : null;
+  if (user && caller && assignment && !assignment.provider_id) {
     // Another request may have been provisioning when /voice ran; it has had a few seconds.
     try {
-      assignment.provider_id = (await resolveSandbox(env, assignment.phone_number)).assignment.provider_id;
+      assignment.provider_id = (await resolveSandbox(env, user)).assignment.provider_id;
     } catch (error) {
       console.error("sandbox resolution at accept failed", error);
     }
   }
-  if (!assignment?.provider_id) {
+  if (!user || !caller || !assignment?.provider_id) {
     await decideLiveCall(env, liveSessionId, "reject", { status_code: 486 });
     return new Response(null, { status: 204 });
   }
 
-  const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(assignment.identity_hash));
+  const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(user.identity_hash));
   const headers = new Headers({
-    "x-dogwalk-phone": assignment.phone_number,
+    "x-dogwalk-phone": caller.phone_number,
+    "x-dogwalk-user": String(user.id),
     "x-dogwalk-sandbox-id": assignment.provider_id,
     "x-dogwalk-call-sid": context.callSid,
     "x-dogwalk-live-session-id": liveSessionId,
-    "x-dogwalk-identity": assignment.identity_hash,
+    "x-dogwalk-identity": user.identity_hash,
   });
   const traceparent = await callTraceparent(env, context.callSid);
   if (traceparent) headers.set("traceparent", traceparent);
@@ -1303,13 +1333,13 @@ async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response
   const attached = await object.fetch("https://voice-session/attach", { method: "POST", headers });
   if (!attached.ok) {
     await decideLiveCall(env, liveSessionId, "hangup");
-    await audit(env, "voice.live.attach.failed", assignment.phone_number, context.callSid, {
+    await audit(env, "voice.live.attach.failed", caller.phone_number, context.callSid, {
       status: attached.status,
       detail: (await attached.text()).slice(0, 200),
     });
     return new Response("sideband attach failed", { status: 500 });
   }
-  await audit(env, "voice.live.accepted", assignment.phone_number, context.callSid, { live_session_id: liveSessionId });
+  await audit(env, "voice.live.accepted", caller.phone_number, context.callSid, { live_session_id: liveSessionId });
   return new Response(null, { status: 204 });
 }
 
@@ -1412,9 +1442,9 @@ async function handleCallStatus(req: Request, env: Env, ctx: ExecutionContext): 
     // The telephone call is over: make sure the VoiceSession has noticed, even if the
     // GPT-Live sideband ended without telling it.
     try {
-      const assignment = await getAssignment(env, from);
-      if (assignment?.identity_hash) {
-        const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(assignment.identity_hash));
+      const user = await callUser(env, callSid);
+      if (user) {
+        const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(user.identity_hash));
         await object.fetch("https://voice-session/telephone-ended", {
           method: "POST", headers: { "x-dogwalk-call-sid": callSid },
         });
@@ -1580,7 +1610,8 @@ async function handleMenu(req: Request, env: Env): Promise<Response> {
   const form = await req.clone().formData();
   const from = normalizePhone(form.get("From"));
   const callSid = String(form.get("CallSid") ?? "");
-  if (!from || !(await isRegistered(env, from))) {
+  const user = from && callSid ? await callUser(env, callSid) : null;
+  if (!from || !user) {
     return twiml(Say("Dogwalk could not verify this registration. Goodbye.") + Hangup());
   }
   const attempts = attemptsFromRequest(req);
@@ -1592,7 +1623,7 @@ async function handleMenu(req: Request, env: Env): Promise<Response> {
   }
   if (command === "status") {
     try {
-      const assignment = await getAssignment(env, from);
+      const assignment = await getAssignment(env, user);
       if (!assignment?.provider_id) return twiml(Redirect("/voice"));
       const sandbox = await getDaytonaSandbox(env, assignment.provider_id);
       if (sandbox.state !== "started") return twiml(Redirect("/voice"));
@@ -1629,17 +1660,33 @@ async function bindClaim(
   const clearPendingStatement = env.DB.prepare(
     "DELETE FROM claim_attempt WHERE call_sid = ? AND phone_number = ?",
   ).bind(callSid, from);
-  const [registration, redeemed] = await env.DB.batch([...redemptionStatements(env.DB, from, codeWords, now), clearPendingStatement]);
+  // A fresh Handle can collide with a taken one; the UNIQUE failure rolls the batch back.
+  let handle = "";
+  let results: D1Result[] = [];
+  for (let attempt = 0; attempt < 5 && !results.length; attempt++) {
+    handle = newHandle();
+    try {
+      results = await env.DB.batch([
+        ...redemptionStatements(env.DB, from, codeWords, now, handle, newIdentityHash()),
+        clearPendingStatement,
+      ]);
+    } catch (error) {
+      if (!String(error).includes("UNIQUE")) throw error;
+    }
+  }
+  if (!results.length) throw new Error("could not choose an unused Handle");
+  const [registration, , , redeemed] = results;
 
   if (registration.meta.changes === 0) {
     await audit(env, "registration.rejected", from, callSid, {});
-    return twiml(Say("That invite is no longer available, or this phone is already registered. Goodbye.") + Hangup());
+    return twiml(Say("That invite is no longer available. Goodbye.") + Hangup());
   }
 
   await audit(env, "registration.success", from, callSid, { invitation: redeemed.meta.changes > 0 });
 
+  // The Handle is how the User will name themselves from any other phone: say it twice.
   return twiml(
-    Say("Registered. This phone number can now use Dogwalk. Goodbye.") + Hangup(),
+    Say(`Registered. Your name on Dogwalk is ${handle}. Again: ${handle}. This phone is now your home. Goodbye.`) + Hangup(),
   );
 }
 
@@ -1668,16 +1715,10 @@ async function retryOrHangup(
   );
 }
 
-async function isRegistered(env: Env, phone: string): Promise<boolean> {
-  return (await env.DB.prepare("SELECT 1 FROM registrations WHERE phone_number = ?")
-    .bind(phone)
-    .first()) !== null;
-}
-
 async function audit(
   env: Env,
   event: string,
-  phone: string,
+  phone: string | null,
   callSid: string | null,
   detail: Record<string, unknown>,
 ): Promise<void> {

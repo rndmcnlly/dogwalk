@@ -247,6 +247,22 @@ def first_sse_event(
         return response.status, event, json.loads(data)
 
 
+def spoken_handle(body: str) -> str:
+    """The Handle a Registration's TwiML speaks: two words, said twice."""
+    match = re.search(r"Your name on Dogwalk is ([a-z]+ [a-z]+)\. Again: ([a-z]+ [a-z]+)\.", body)
+    require(match is not None and match[1] == match[2], f"registration did not speak a Handle twice: {body}")
+    require("This phone is now your home" in body, f"registration did not name the Home: {body}")
+    return match[1]
+
+
+def d1_local(sql: str) -> list[dict]:
+    result = subprocess.run(
+        [project_wrangler(), "d1", "execute", "dogwalk", "--local", "--json", "--command", sql],
+        cwd=WORKER_DIR, check=True, capture_output=True, text=True,
+    )
+    return json.loads(result.stdout)[0]["results"]
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -355,6 +371,11 @@ def run_tests(
         token,
     )
     require(status == 200 and "Registered" in body, f"confirmation: {status} {body}")
+    # Registration assigns a two-word Handle and speaks it twice; the number becomes its Home.
+    handle = spoken_handle(body)
+    if mock_daytona:
+        users = d1_local(f"SELECT handle, home_phone FROM users WHERE invite_code = '{invite}'")
+        require(users == [{"handle": handle, "home_phone": TEST_PHONE}], f"registered User: {users}")
 
     # Talk first: a registered caller is dialed straight to the Voice Agent while the new
     # Sandbox is still being created; there is no wake-up loop.
@@ -575,6 +596,12 @@ def run_tests(
         "safe SSE exposed phone number",
     )
     require(
+        [row["handle"] for row in safe_state["registrations"]] == [handle]
+        and all(row["diagnostic_id"].startswith("user-") and row["voice_enrolled"] == 0
+                for row in safe_state["registrations"]),
+        f"safe SSE Users lack Handle or diagnostic id: {safe_state['registrations']}",
+    )
+    require(
         all("identity_hash" not in row for row in safe_state["registrations"]),
         "safe SSE exposed identity hash",
     )
@@ -642,9 +669,31 @@ def run_tests(
     )
 
     if mock_daytona:
+        rehome_checks(base_url, token, invite, handle)
         provider_route_checks(base_url, token, operator_headers)
-    print("31 core checks plus operator/provider timing checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
+    print("33 core checks plus operator/provider timing checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
     return 0
+
+
+def rehome_checks(base_url: str, token: str, invite: str, first_handle: str) -> None:
+    """Registering from a number that is already a Home displaces that Home: the old User
+    keeps its row (and Sandbox Assignment) without a Home, and the new User takes the number."""
+    status, body = post(base_url, "/voice/claim?attempts=1",
+                        {"From": TEST_PHONE, "CallSid": "CA_REHOME", "SpeechResult": invite, "Confidence": "0.9"}, token)
+    require(status == 200 and "I heard" in body, f"Home number could not claim again: {status} {body}")
+    status, body = post(base_url, "/voice/confirm?attempts=1",
+                        {"From": TEST_PHONE, "CallSid": "CA_REHOME", "SpeechResult": "yes", "Confidence": "0.9"}, token)
+    require(status == 200 and "Registered" in body, f"re-registration: {status} {body}")
+    handle = spoken_handle(body)
+    require(handle != first_handle, "re-registration reused the displaced User's Handle")
+    users = d1_local(f"""SELECT u.handle, u.home_phone, u.home_used_at, s.provider_id FROM users u
+        LEFT JOIN sandbox_assignments s ON s.user_id = u.id WHERE u.invite_code = '{invite}' ORDER BY u.id""")
+    require([(u["handle"], u["home_phone"]) for u in users] == [(first_handle, None), (handle, TEST_PHONE)],
+            f"Home not displaced: {users}")
+    require(users[0]["home_used_at"] is None and users[0]["provider_id"], f"displaced User lost its row: {users}")
+    _, _, state = first_sse_event(base_url, "adam", LOCAL_ADMIN_PASSWORD, verbose=True)
+    homes = {row["handle"]: row["phone_number"] for row in state["registrations"]}
+    require(homes == {first_handle: None, handle: TEST_PHONE}, f"snapshot Homes: {homes}")
 
 
 def provider_route_checks(base_url: str, token: str, headers: dict) -> None:
@@ -699,17 +748,25 @@ def project_wrangler() -> str | None:
 
 
 def prepare_local_fixture(wrangler: str) -> None:
+    # Test Users are those whose Home, calls, or redemption used a test number, plus any the
+    # local invite admitted (a displaced Home leaves no number on the User). Deleting them
+    # first, with foreign keys deferred, lets everything that referred to them go as orphans.
     sql = f"""
+PRAGMA defer_foreign_keys = true;
+DELETE FROM users WHERE home_phone LIKE '{TEST_NUMBERS}' OR invite_code = '{LOCAL_INVITE}'
+  OR id IN (SELECT user_id FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}')
+  OR id IN (SELECT redeemed_by_user_id FROM invitations WHERE redeemed_from LIKE '{TEST_NUMBERS}');
+DELETE FROM invitations WHERE inviter_user_id NOT IN (SELECT id FROM users)
+  OR redeemed_by_user_id NOT IN (SELECT id FROM users);
+DELETE FROM sandbox_assignments WHERE user_id NOT IN (SELECT id FROM users);
+DELETE FROM voice_references WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM provider_call_jobs WHERE root_call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
 DELETE FROM call_activity WHERE call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
 DELETE FROM call_handoffs WHERE phone_number LIKE '{TEST_NUMBERS}';
-DELETE FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}';
-DELETE FROM invitations WHERE inviter_phone LIKE '{TEST_NUMBERS}' OR redeemed_by LIKE '{TEST_NUMBERS}';
-DELETE FROM sandbox_assignments WHERE phone_number LIKE '{TEST_NUMBERS}';
-DELETE FROM registrations WHERE phone_number LIKE '{TEST_NUMBERS}';
+DELETE FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}' OR user_id NOT IN (SELECT id FROM users);
 DELETE FROM claim_attempt WHERE phone_number LIKE '{TEST_NUMBERS}';
 DELETE FROM invite_codes WHERE max_uses = 1
-  AND code_words NOT IN (SELECT invite_code FROM registrations)
+  AND code_words NOT IN (SELECT invite_code FROM users)
   AND code_words NOT IN (SELECT code_words FROM invitations);
 INSERT INTO invite_codes (code_words, expires_at, max_uses)
 VALUES ('{LOCAL_INVITE}', unixepoch('now', '+1 hour'), NULL)

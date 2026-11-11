@@ -32,11 +32,11 @@ function parsed(value: unknown): Record<string, any> {
 // Reading the Durable Object does not ensure/wake a Sandbox or establish ACP.
 export async function operatorCallContent(env: Env, callSid: string): Promise<{ entries: ContentEntry[]; note?: string } | null> {
   const call = await env.DB.prepare(
-    `SELECT s.identity_hash FROM voice_calls c
-     LEFT JOIN sandbox_assignments s ON s.phone_number = c.phone_number WHERE c.call_sid = ?`,
+    `SELECT u.identity_hash FROM voice_calls c
+     LEFT JOIN users u ON u.id = c.user_id WHERE c.call_sid = ?`,
   ).bind(callSid).first<{ identity_hash: string | null }>();
   if (!call) return null;
-  if (!call.identity_hash) return { entries: [], note: "No retained Sandbox Assignment maps this call to conversation history." };
+  if (!call.identity_hash) return { entries: [], note: "No User maps this call to conversation history." };
   let history: Record<string, any>;
   try {
     const session = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(call.identity_hash));

@@ -9,48 +9,63 @@ CREATE TABLE IF NOT EXISTS invite_codes (
   max_uses   INTEGER CHECK (max_uses IS NULL OR max_uses > 0)
 );
 
--- A phone number is the User's identity at the PSTN boundary. Each number can
--- register once, while one invite may authorize multiple registrations.
-CREATE TABLE IF NOT EXISTS registrations (
-  phone_number TEXT PRIMARY KEY,
-  invite_code  TEXT NOT NULL REFERENCES invite_codes(code_words),
+-- A User (DOMAIN.md, Access Control): a spoken Handle, an opaque identity_hash that keys the
+-- User's Durable Objects and provider label, Registration provenance (invite_code,
+-- registered_at), and at most one Home number, which is Home to at most one User. A reaped
+-- User keeps its row as provenance with handle and home_phone cleared.
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY,
+  handle TEXT UNIQUE,
+  identity_hash TEXT NOT NULL UNIQUE,
+  invite_code TEXT NOT NULL REFERENCES invite_codes(code_words),
   registered_at INTEGER NOT NULL,
-  last_seen_at  INTEGER
+  last_seen_at INTEGER,
+  home_phone TEXT UNIQUE,
+  home_used_at INTEGER,
+  reaped_at INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS idx_registrations_invite ON registrations(invite_code);
+CREATE INDEX IF NOT EXISTS idx_users_invite ON users(invite_code);
 
--- Invitations: a registered User invites another person by voice. Each Invitation extends one
+-- Invitations: a User invites another person by voice. Each Invitation extends one
 -- single-use Invite Code row (same words, so the registration ritual is unchanged) with its
 -- inviter, an optional bound recipient number, revocation, and hiding. Rows are never deleted:
--- the redeeming Registration (registrations.invite_code = code_words, and redeemed_by) is the
--- inviter -> invitation -> invitee edge.
+-- redeemed_by_user_id is the inviter -> invitation -> invitee edge, and redeemed_from the
+-- number that redeemed it.
 CREATE TABLE IF NOT EXISTS invitations (
   code_words TEXT PRIMARY KEY REFERENCES invite_codes(code_words),
-  inviter_phone TEXT NOT NULL REFERENCES registrations(phone_number),
+  inviter_user_id INTEGER NOT NULL REFERENCES users(id),
   recipient_phone TEXT,
   recipient_confirmed_at INTEGER,
   revoked_at INTEGER,
   hidden_at INTEGER,
-  redeemed_by TEXT UNIQUE REFERENCES registrations(phone_number),
+  redeemed_by_user_id INTEGER UNIQUE REFERENCES users(id),
+  redeemed_from TEXT,
   redeemed_at INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS idx_invitations_inviter ON invitations(inviter_phone);
+CREATE INDEX IF NOT EXISTS idx_invitations_inviter ON invitations(inviter_user_id);
 
--- Agent Hosting projection, separate from access Registration. provider_id is
--- NULL while one caller owns provisioning; identity_hash is an HMAC-derived,
--- non-reversible provider label.
+-- Agent Hosting projection, separate from Registration. provider_id is NULL while one caller
+-- owns provisioning; the provider label derives from users.identity_hash.
 CREATE TABLE IF NOT EXISTS sandbox_assignments (
-  phone_number TEXT PRIMARY KEY REFERENCES registrations(phone_number),
+  user_id INTEGER PRIMARY KEY REFERENCES users(id),
   provider TEXT NOT NULL DEFAULT 'daytona' CHECK (provider = 'daytona'),
   provider_id TEXT UNIQUE,
-  identity_hash TEXT NOT NULL UNIQUE,
   state TEXT NOT NULL DEFAULT 'provisioning',
   error TEXT,
   provisioning_started_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   last_checked_at INTEGER
+);
+
+-- A User's enrolled speaker embedding (JSON array), never audio, tagged with the embedding
+-- space (weights, preprocessing, normalization) that produced it.
+CREATE TABLE IF NOT EXISTS voice_references (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id),
+  embedding_space TEXT NOT NULL,
+  embedding TEXT NOT NULL,
+  enrolled_at INTEGER NOT NULL
 );
 
 -- Transient state between speech recognition and confirmation.
@@ -83,9 +98,12 @@ CREATE TABLE IF NOT EXISTS voice_calls (
   duration_seconds INTEGER,
   -- W3C trace context minted when the call begins; see migrations/2026-11-10-voice-call-trace.sql.
   trace_id TEXT,
-  span_id TEXT
+  span_id TEXT,
+  -- The call's User once known; a roaming call's number will not identify it.
+  user_id INTEGER REFERENCES users(id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_voice_calls_user ON voice_calls(user_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_voice_calls_live
   ON voice_calls(ended_at, last_activity_at);
 

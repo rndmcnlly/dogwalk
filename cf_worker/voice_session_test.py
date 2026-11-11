@@ -39,6 +39,7 @@ from smoke_test import (
     TEST_PHONE,
     ThreadingHTTPServer,
     prepare_local_fixture,
+    spoken_handle,
     post,
     project_wrangler,
     wait_port,
@@ -420,6 +421,7 @@ ORCHESTRATOR_SCRIPT = [
 # Invitation fixtures (test numbers only). SEED_INVITER invited TEST_PHONE; FOREIGN is
 # SEED_INVITER's own, unbound and active; EXPIRED is TEST_PHONE's and lapsed.
 SEED_INVITER = "+15555550109"
+SEED_HANDLE, CALLER_HANDLE = "gecko lantern", "walrus kayak"
 WELCOME_WORDS = "acme bravado cobra"
 FOREIGN_WORDS = "absurd caravan tiger"
 EXPIRED_WORDS = "adult escapade tonic"
@@ -560,21 +562,22 @@ INSERT INTO invite_codes (code_words, expires_at, max_uses)
 VALUES ('{WELCOME_WORDS}', unixepoch() + 86400, 1), ('{FOREIGN_WORDS}', unixepoch() + 86400, 1),
        ('{EXPIRED_WORDS}', unixepoch() - 60, 1)
 ON CONFLICT(code_words) DO UPDATE SET expires_at = excluded.expires_at, max_uses = 1;
-INSERT INTO registrations (phone_number, invite_code, registered_at, last_seen_at)
-VALUES ('{SEED_INVITER}', 'ahead almighty apple', unixepoch() - 86400, NULL),
-       ('{TEST_PHONE}', '{WELCOME_WORDS}', unixepoch(), unixepoch());
-INSERT INTO invitations (code_words, inviter_phone, redeemed_by, redeemed_at)
-VALUES ('{WELCOME_WORDS}', '{SEED_INVITER}', '{TEST_PHONE}', unixepoch()),
-       ('{FOREIGN_WORDS}', '{SEED_INVITER}', NULL, NULL),
-       ('{EXPIRED_WORDS}', '{TEST_PHONE}', NULL, NULL);
-INSERT INTO sandbox_assignments
-  (phone_number, provider_id, identity_hash, state, provisioning_started_at, last_checked_at)
-VALUES ('{TEST_PHONE}', 'mock-sandbox-1', '{identity}', 'started', unixepoch(), unixepoch());
+INSERT INTO users (handle, identity_hash, invite_code, registered_at, last_seen_at, home_phone, home_used_at)
+VALUES ('{SEED_HANDLE}', 'seed-inviter-{identity}', 'ahead almighty apple', unixepoch() - 86400, NULL, '{SEED_INVITER}', unixepoch() - 86400),
+       ('{CALLER_HANDLE}', '{identity}', '{WELCOME_WORDS}', unixepoch(), unixepoch(), '{TEST_PHONE}', unixepoch());
+INSERT INTO invitations (code_words, inviter_user_id, redeemed_by_user_id, redeemed_from, redeemed_at)
+VALUES ('{WELCOME_WORDS}', (SELECT id FROM users WHERE handle = '{SEED_HANDLE}'),
+        (SELECT id FROM users WHERE handle = '{CALLER_HANDLE}'), '{TEST_PHONE}', unixepoch()),
+       ('{FOREIGN_WORDS}', (SELECT id FROM users WHERE handle = '{SEED_HANDLE}'), NULL, NULL, NULL),
+       ('{EXPIRED_WORDS}', (SELECT id FROM users WHERE handle = '{CALLER_HANDLE}'), NULL, NULL, NULL);
+INSERT INTO sandbox_assignments (user_id, provider_id, state, provisioning_started_at, last_checked_at)
+VALUES ((SELECT id FROM users WHERE identity_hash = '{identity}'), 'mock-sandbox-1', 'started', unixepoch(), unixepoch());
 -- CA_VOICE_TEST carries front-door trace context; the others are calls from before it existed.
-INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at, trace_id, span_id)
-VALUES ('CA_VOICE_TEST', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch(), '{CALL_TRACE_ID}', '{CALL_SPAN_ID}'),
-       ('CA_VOICE_TEST2', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch(), NULL, NULL),
-       ('CA_VOICE_TEST3', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch(), NULL, NULL);
+INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at, trace_id, span_id, user_id)
+SELECT call_sid, '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch(), trace_id, span_id,
+       (SELECT id FROM users WHERE identity_hash = '{identity}')
+  FROM (SELECT 'CA_VOICE_TEST' AS call_sid, '{CALL_TRACE_ID}' AS trace_id, '{CALL_SPAN_ID}' AS span_id
+        UNION ALL SELECT 'CA_VOICE_TEST2', NULL, NULL UNION ALL SELECT 'CA_VOICE_TEST3', NULL, NULL);
 INSERT INTO call_activity (call_sid, ts, source, direction, event, detail)
 VALUES ('CA_VOICE_TEST2', unixepoch(), 'voice', 'inbound', 'call.attestation',
         '{{"stir_verstat":"TN-Validation-Passed-A","caller_name_present":false,"from_country":"US","parameters":[]}}');
@@ -1663,8 +1666,7 @@ async def run_invitations(mocks: SocketMocks) -> None:
     assert len(first["words"].split()) == 3 and first["words"].replace(" ", "").isalpha(), first
     # The caller learns who invited them; another User's invitation is not theirs to touch.
     assert out("i1-who") == {
-        "ok": True, "registered_days_ago": 0, "via": "invitation",
-        "invited_by": {"phone": SEED_INVITER, "spoken": "plus one, five five five, five five five, zero one zero nine"},
+        "ok": True, "handle": CALLER_HANDLE, "registered_days_ago": 0, "via": "invitation", "invited_by": SEED_HANDLE,
     }, out("i1-who")
     assert out("i1-foreign")["ok"] is False and "no such invitation" in out("i1-foreign")["error"]
     # Without a confirmed readback nothing is created; the call is answered with what to read back.
@@ -1696,11 +1698,11 @@ async def run_invitations(mocks: SocketMocks) -> None:
     assert "no longer available" in await asyncio.to_thread(confirm_claim, RACE_PHONE, "CA_INV_RACE")
 
     # Unbound: any unregistered phone redeems it, once.
-    assert "Registered" in await asyncio.to_thread(ritual, INVITEE_PHONE, "CA_INV_1", first["words"])
+    invitee_handle = spoken_handle(await asyncio.to_thread(ritual, INVITEE_PHONE, "CA_INV_1", first["words"]))
     assert "don't match" in await asyncio.to_thread(ritual, LATE_PHONE, "CA_INV_2", first["words"])
     # Bound: the wrong number cannot even claim it; the right one registers.
     assert "don't match" in await asyncio.to_thread(ritual, REBOUND_PHONE, "CA_INV_3", bound["words"])
-    assert "Registered" in await asyncio.to_thread(ritual, BOUND_PHONE, "CA_INV_4", bound["words"])
+    bound_handle = spoken_handle(await asyncio.to_thread(ritual, BOUND_PHONE, "CA_INV_4", bound["words"]))
     assert "don't match" in await asyncio.to_thread(ritual, LATE_PHONE, "CA_INV_5", EXPIRED_WORDS)
     # Two claims on one single-use invitation, confirmed at once: exactly one registers.
     assert "I heard" in await asyncio.to_thread(ritual, LATE_PHONE, "CA_INV_6", FOREIGN_WORDS, False)
@@ -1711,15 +1713,19 @@ async def run_invitations(mocks: SocketMocks) -> None:
     )
     assert sorted("Registered" in body for body in raced) == [False, True], raced
     winner = LATE_PHONE if "Registered" in raced[0] else RIVAL_PHONE
+    winner_handle = spoken_handle(raced[0] if winner == LATE_PHONE else raced[1])
 
     await mocks.send_live(transcript("input", "Did my friends make it in?", 34000, 35500))
     await mocks.send_live(delegation("del-i3", 35600))
     await wait_for(outputs_back("i-relist"), 15)
     listed = {item["words"]: item for item in out("i-list")["invitations"]}
     assert FOREIGN_WORDS not in listed and set(listed) == {first["words"], bound["words"], third, EXPIRED_WORDS}, listed
-    assert listed[first["words"]]["status"] == "redeemed" and listed[first["words"]]["redeemed_by"]["phone"] == INVITEE_PHONE
+    # redeemed_by names the invitee by Handle; redeemed_from is the number that redeemed it.
+    assert listed[first["words"]]["status"] == "redeemed" and listed[first["words"]]["redeemed_by"] == invitee_handle
+    assert listed[first["words"]]["redeemed_from"]["phone"] == INVITEE_PHONE, listed[first["words"]]
     assert listed[first["words"]]["matched_recipient"] is None and listed[first["words"]]["redeemed_minutes_ago"] == 0
-    assert listed[bound["words"]]["redeemed_by"]["phone"] == BOUND_PHONE and listed[bound["words"]]["matched_recipient"] is True
+    assert listed[bound["words"]]["redeemed_by"] == bound_handle and listed[bound["words"]]["matched_recipient"] is True
+    assert listed[bound["words"]]["redeemed_from"]["phone"] == BOUND_PHONE
     assert listed[third]["status"] == "active" and listed[third]["recipient"]["phone"] == REBOUND_PHONE
     assert listed[EXPIRED_WORDS]["status"] == "expired"
     assert out("i-list")["active"] == 1, out("i-list")
@@ -1730,14 +1736,19 @@ async def run_invitations(mocks: SocketMocks) -> None:
     assert "don't match" in await asyncio.to_thread(ritual, REBOUND_PHONE, "CA_INV_8", third)
 
     # Hiding and revoking keep the graph: every edge, across generations.
-    edges = await asyncio.to_thread(d1, """SELECT v.inviter_phone AS inviter, r.phone_number AS invitee
-        FROM invitations v JOIN registrations r ON r.invite_code = v.code_words AND r.phone_number = v.redeemed_by
-        ORDER BY r.phone_number""")
-    assert sorted((e["inviter"], e["invitee"]) for e in edges if e["invitee"].startswith("+1555555")) == sorted([
-        (TEST_PHONE, BOUND_PHONE), (TEST_PHONE, INVITEE_PHONE), (SEED_INVITER, TEST_PHONE), (SEED_INVITER, winner),
+    edges = await asyncio.to_thread(d1, """SELECT inviter.handle AS inviter, invitee.handle AS invitee,
+               invitee.home_phone AS home, v.redeemed_from
+        FROM invitations v JOIN users inviter ON inviter.id = v.inviter_user_id
+        JOIN users invitee ON invitee.id = v.redeemed_by_user_id""")
+    edges = [e for e in edges if e["redeemed_from"].startswith("+1555555")]
+    assert all(e["home"] == e["redeemed_from"] for e in edges), edges
+    assert sorted((e["inviter"], e["invitee"]) for e in edges) == sorted([
+        (CALLER_HANDLE, bound_handle), (CALLER_HANDLE, invitee_handle), (SEED_HANDLE, CALLER_HANDLE), (SEED_HANDLE, winner_handle),
     ]), edges
-    unredeemed = await asyncio.to_thread(d1, f"SELECT redeemed_by, revoked_at, hidden_at FROM invitations WHERE code_words = '{third}'")
-    assert unredeemed[0]["redeemed_by"] is None and unredeemed[0]["revoked_at"] and unredeemed[0]["hidden_at"], unredeemed
+    assert next(e for e in edges if e["invitee"] == winner_handle)["redeemed_from"] == winner
+    unredeemed = await asyncio.to_thread(d1, f"SELECT redeemed_by_user_id, redeemed_from, revoked_at, hidden_at FROM invitations WHERE code_words = '{third}'")
+    assert unredeemed[0]["redeemed_by_user_id"] is None and unredeemed[0]["redeemed_from"] is None, unredeemed
+    assert unredeemed[0]["revoked_at"] and unredeemed[0]["hidden_at"], unredeemed
 
     # Operator-only graph projection includes hidden history across generations. The
     # intended recipient of an unused Invitation is not presented as a registered invitee.
@@ -1750,20 +1761,24 @@ async def run_invitations(mocks: SocketMocks) -> None:
     registrations = {r["diagnostic_id"]: r for r in state["registrations"]}
     projected_edges = []
     for v in invitations.values():
-        assert registrations[v["inviter_id"]]["phone_number"] == v["inviter_phone"]
+        assert v["inviter_id"].startswith("user-") and registrations[v["inviter_id"]]["handle"] == v["inviter_handle"]
         if v["invitee_id"]:
+            assert registrations[v["invitee_id"]]["handle"] == v["invitee_handle"]
             assert registrations[v["invitee_id"]]["phone_number"] == v["invitee_phone"]
-            projected_edges.append((v["inviter_phone"], v["invitee_phone"]))
-    assert sorted(projected_edges) == sorted((e["inviter"], e["invitee"]) for e in edges)
+            projected_edges.append((v["inviter_handle"], v["invitee_handle"]))
+    assert sorted(e for e in projected_edges if None not in e) == sorted((e["inviter"], e["invitee"]) for e in edges)
     safe = await asyncio.to_thread(operator_access_state)
     assert not safe["verbose"]
     assert {v["diagnostic_id"] for v in safe["invitations"]} == {v["diagnostic_id"] for v in invitations.values()}
     for v in safe["invitations"]:
         assert "code_words" not in v
-        assert all(v[field] is None or "*" in v[field] for field in ("inviter_phone", "recipient_phone", "invitee_phone"))
+        assert "inviter_phone" not in v
+        assert all(v[field] is None or "*" in v[field] for field in ("recipient_phone", "invitee_phone"))
     safe_json = json.dumps(safe)
     assert all(words not in safe_json for words in invitations)
-    assert all(r["phone_number"] not in safe_json for r in registrations.values())
+    assert all(r["phone_number"] not in safe_json for r in registrations.values() if r["phone_number"])
+    # Handles are not masked: the safe lens names Users by them.
+    assert {CALLER_HANDLE, SEED_HANDLE, invitee_handle} <= {r["handle"] for r in safe["registrations"]}
 
 
 async def run_unobserved_end(restart) -> None:
