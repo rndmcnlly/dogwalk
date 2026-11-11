@@ -84,7 +84,7 @@ class MainActivity : Activity() {
             WindowInsets.CONSUMED
         }
         val header = row()
-        val title = stack().apply { addView(text("Dogwalk", 20f)); addView(text("Development · scripted fixture", 12f).apply { setTextColor(0xff665132.toInt()) }) }
+        val title = stack().apply { addView(text("Dogwalk", 20f)); addView(text("Development · on-device frontend", 12f).apply { setTextColor(0xff665132.toInt()) }) }
         header.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
         menu = button("Menu") { settings() }; header.addView(menu); content.addView(header)
         val readiness = row().apply { setBackgroundColor(0xffedf2f6.toInt()) }
@@ -145,7 +145,7 @@ class MainActivity : Activity() {
                 addView(text("Install a local model to begin", 20f))
                 addView(text("Gemma E2B needs about 2.6 GB. Text uses no microphone or speech output. You can also verify a file already on this device."))
                 addView(button("Set up model", true) { settings() })
-            } else addView(text("Your conversation stays here while this process runs. Start text to prepare the local model and connect. No real coding runs through this fixture."))
+            } else addView(text("Your conversation stays here while this process runs. Start text to prepare the local model and connect using the transport configured in Setup. Fixture mode is isolated testing; real mode can operate your sessions."))
         })
         handleExtras(intent)
     }
@@ -181,7 +181,7 @@ class MainActivity : Activity() {
         activity.text = if (s.link != LinkState.CONNECTED) "Voice unavailable · link disconnected\nAudio may still be active. Switch to text turns audio off." else "${s.activity}\nMicrophone ${if (s.microphone) "listening (callback confirmed)" else "not confirmed listening"} · speaker ${if (s.speaker) "playing (callback confirmed)" else "not confirmed playing"}"
         send.isEnabled = s.canSend
         send.alpha = if (s.canSend) 1f else .5f
-        hint.text = when { s.problem != null -> s.problem; s.canSend -> "Silent text. Fixture only, no real coding."; s.local == LocalState.MISSING -> "Set up a local model to send. Your draft stays here."; !s.running -> "Start text to load the model. Your draft stays here."; s.local != LocalState.READY -> "Local model preparing. Your draft stays here."; else -> "Connect to send. Your draft stays here." }
+        hint.text = when { s.problem != null -> s.problem; s.canSend -> "Silent text. Connection details show transport and Agent readiness."; s.local == LocalState.MISSING -> "Set up a local model to send. Your draft stays here."; !s.running -> "Start text to load the model. Your draft stays here."; s.local != LocalState.READY -> "Local model preparing. Your draft stays here."; else -> "Connect to send. Your draft stays here." }
     }
     private fun sendText() {
         val value = compose.text.toString().trim()
@@ -226,7 +226,7 @@ class MainActivity : Activity() {
     private fun confirmVoice() {
         modal = true
         AlertDialog.Builder(this).setTitle("Enable voice?")
-            .setMessage("Enable microphone and offline speech output. Only text goes to the development fixture. Opening or restoring this screen switches back to silent text. Stop speaking never cancels Agent work.")
+            .setMessage("Enable microphone and offline speech output. Only text crosses the network, using the transport configured in Setup. Opening or restoring this screen switches back to silent text. Stop speaking never cancels Agent work.")
             .setNegativeButton("Cancel", null).setPositiveButton("Enable microphone and speaker") { _, _ ->
                 if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 7)
                 else startForegroundService(config(VoiceService.ACTION_VOICE))

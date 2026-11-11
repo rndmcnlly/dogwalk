@@ -13,7 +13,7 @@ caller needs. Explicit voice use runs in a microphone foreground service and kee
 with the screen locked. Optional silent text chat uses the screen and a non-microphone service.
 
 **Status: Adam-only authenticated real-Orchestrator adapter implemented locally, not deployed.**
-Fixture mode remains available. No production credential, live WSS session, real Sandbox
+Fixture mode remains available. No production credential, deployed WSS session, real Sandbox
 trial or physical-phone verification is claimed. See the [operator runbook](../../cf_worker/README.md#adam-only-on-device-trial-not-deployed-by-this-change).
 
 ## Adam-only trial (0.5, versionCode 5)
@@ -58,7 +58,7 @@ neither transport steals the other's active attachment. Disconnect never cancels
 closes Managed Sessions, deletes history, or stops the existing Sandbox.
 
 Local verification for v5: 33 JVM tests and debug APK build pass; lint has 0 errors and
-15 warnings (English-only UI copy and conservative free-space checking). The Worker has a
+17 warnings (English-only UI copy and conservative free-space checking). The Worker has a
 new Node fake-socket integration test exercising its actual Orchestrator loop, session
 tools and ACP Permission Request/response, plus auth/owner binding, dedupe, provenance,
 lease expiry, concurrent frontend exclusion, startup order, stale output rejection and
@@ -67,9 +67,43 @@ and Gateway suites. Several runs made while watched Worker sources were still be
 different points (invitations, a completion Say, and pairing), with mock sockets closing
 without a close frame. Verification must hold those sources fixed while Wrangler runs.
 Both v4 and v5 APKs verify with the same v2 signing certificate (fingerprint below).
-No new emulator, phone, real WSS,
-Android Keystore runtime or real-hosting test was performed for v5. Existing v4 emulator
-evidence below is historical, not evidence for this transport.
+
+### Narrow runtime followup (2026-11-11)
+
+Three instrumentation tests pass on the existing API 35 ARM64 AVD, explicitly selected
+as `emulator-5562`, launched with `-no-audio -no-window` and without wiping or downloading
+models. `TransportRuntimeTest.kt` runs only from the separate test APK:
+
+- Actual Android Keystore encryption, save/load through a new store instance, endpoint
+  binding (wrong port, cleartext and query URL fail), no plaintext in its private
+  nonbackup ciphertext, and clear. Test storage is an isolated child directory, not the
+  app's saved credential. No production token was generated or used.
+- Actual `OrchestratorLink` connecting to an ephemeral IPv4-loopback HTTPS/WSS server
+  inside the emulator. Shipping-default TLS rejects the self-signed test certificate.
+  Only the injected test client trusts the test CA, compiled exclusively in the test APK:
+  no CA installation, production trust override or network-security resource changes.
+- Socket-open is not ready; ready with `agent_ready:false` reports Agent connecting.
+  Real input envelopes and ID acknowledgments, authenticated HTTP heartbeat, unsolicited
+  Say source binding, text-display receipt, and unknown unacknowledged delivery at
+  disconnect all traverse real sockets. Fixture transport remains raw and sends no auth.
+
+Reproduce with the toolchain/signing environment below and an explicitly selected,
+already-running silent emulator: `uv run --script runtime_test.py --serial emulator-5562`.
+The helper checks emulator identity, builds/updates without uninstalling, and treats
+instrumentation's textual test result as authoritative (adb alone can exit zero on test
+failure). No microphone, ASR or TTS is constructed by these tests. An initial harness
+attempt bound IPv6 loopback while the certificate/debug cleartext allowlist expected
+IPv4; explicit `127.0.0.1` binding corrected it, and all three tests then passed.
+
+The existing silent UI smoke also passes against isolated fixture port **18776** with
+the existing E2B model: actual typed greeting/inference, work Handoff, two independent
+replies, permission question and typed answer, disconnect and explicit Retry. No voice
+or injection logs appeared; microphone permission stayed denied. Existing model bytes,
+verification marker and first-install time survived the signing-compatible update.
+
+These are local emulator/client-boundary proofs, not a deployed Worker/Daytona trial.
+Physical-phone behavior, locked-screen heartbeat/audio, real hosting and a production
+WSS-to-ACP exchange remain untested. Earlier v4 emulator evidence below is historical.
 
 ## Native conversation UI (0.4, versionCode 4)
 

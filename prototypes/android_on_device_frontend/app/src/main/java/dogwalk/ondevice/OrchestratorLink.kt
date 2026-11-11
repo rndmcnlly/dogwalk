@@ -37,8 +37,8 @@ class OrchestratorLink(
     private val real: Boolean = false,
     private val credential: String? = null,
     private val clientId: String = UUID.randomUUID().toString(),
+    private val client: OkHttpClient = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).pingInterval(20, TimeUnit.SECONDS).build(),
 ) {
-    private val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).pingInterval(20, TimeUnit.SECONDS).build()
     private val heartbeat = Executors.newSingleThreadScheduledExecutor()
     private val connectionId = UUID.randomUUID().toString()
     private var sequence = 0L
