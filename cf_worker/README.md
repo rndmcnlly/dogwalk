@@ -74,9 +74,76 @@ reference and starts idempotent replacement provisioning. The Registration is
 retained; the deleted sandbox's files and ACP Session history are not.
 
 Normal user sandboxes are not disposable. They auto-stop after 15 idle minutes,
-auto-archive after 7 days, and never auto-delete. A call starts or restores that
-same Sandbox, preserving its filesystem and Agent-held session history across
-months. Replacement occurs only after explicit provider-side deletion.
+auto-archive after 7 days, and never auto-delete in Daytona. A call starts or
+restores that same Sandbox, preserving its filesystem and Agent-held session
+history until Dogwalk reaps it (below). Replacement otherwise occurs only after
+explicit provider-side deletion or the caller's confirmed recovery replacement.
+
+### Sandbox Reaping
+
+A daily cron pass (`17 10 * * *`, `SANDBOX_REAP_CRON` in `src/index.ts`) looks
+for Sandbox Assignments whose User has made no Voice Call for
+`SANDBOX_REAP_AGE_DAYS` (default 30, minimum 1; the assignment's creation counts
+when there are no calls) and none in progress. It handles at most ten per pass,
+oldest first. `SANDBOX_REAP_MODE` ships as `dry-run`: the pass only audits
+`sandbox.reap.candidate`. Any value other than `delete` is a dry run.
+
+In `delete` mode, reaping is one D1 batch that rechecks idleness (counting an
+in-progress call from the User's Home that `/voice` has not yet linked): it
+inserts the Sandbox into `sandbox_deletions` and clears the assignment
+(`provider_id` NULL, state `reaped`), auditing `sandbox.reap.started`. The old
+Sandbox is out of service from that moment: the User's next call provisions a
+fresh one through the ordinary path, and discovery by label skips every
+provider ID in `sandbox_deletions` (and anything Daytona lists as destroying or
+destroyed). A call never deletes anything.
+
+Only the scheduled pass sends Daytona DELETE. In the same pass, and every later
+one, it works through due `sandbox_deletions` rows (20 per pass, oldest due
+first). On success or 404 it sets `deleted_at` and audits `sandbox.reaped` once
+(`already_gone`, `attempts`). On failure it audits `sandbox.reap.failed`, counts
+`attempts`, and backs off (`next_attempt_at` 1, 2, 4, 8, then 16 days on). At
+the third failure it also audits `sandbox.reap.stuck` for operator attention,
+and keeps retrying. A stuck Sandbox never returns to service. Rows stay after
+deletion: as tombstones, because Daytona's label listing is eventually
+consistent, and as the notice the User's next Opening consumes (`noticed_at`),
+which says the sandbox was cleared exactly once, independent of when the
+deletion finished. The VoiceSession drops the old projection when the fresh
+Sandbox arrives, as on replacement; its Memory stays. Every assignment refresh
+from Daytona (`updateAssignment`) writes only while the assignment still names
+the Sandbox it read, so a slow diagnostics refresh cannot restore a reaped or
+replaced Sandbox.
+
+Apply `migrations/2026-11-12-sandbox-deletions.sql` remotely before deploying
+reaping:
+
+```sh
+npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-12-sandbox-deletions.sql
+```
+
+Deletions not yet confirmed:
+
+```sh
+npx wrangler d1 execute dogwalk --remote --command \
+  "SELECT provider_id, user_id, attempts, datetime(next_attempt_at, 'unixepoch') AS next, last_error
+     FROM sandbox_deletions WHERE deleted_at IS NULL"
+```
+
+See the candidates before turning deletion on:
+
+```sh
+npx wrangler d1 execute dogwalk --remote --command \
+  "SELECT datetime(ts, 'unixepoch') AS at, event, detail FROM audit_log
+    WHERE event LIKE 'sandbox.reap%' ORDER BY id DESC LIMIT 50"
+```
+
+Each row's `detail` names `user_id`, `provider_id`, `last_call_at`, and
+`idle_days`. Join `user_id` to `users.handle` to recognize whose Sandbox it is.
+To turn deletion on, set `SANDBOX_REAP_MODE = "delete"` under `[vars]` in
+`wrangler.toml` and deploy (or change the variable in the Cloudflare dashboard,
+which the next `wrangler deploy` overwrites with the file's value). In production a pass
+runs only on that schedule, so the first candidates appear after the next 10:17
+UTC following a deploy. Locally, `wrangler dev --test-scheduled` exposes
+`/__scheduled?cron=17+10+*+*+*`, which the smoke test uses.
 
 ## Deploying Changes
 

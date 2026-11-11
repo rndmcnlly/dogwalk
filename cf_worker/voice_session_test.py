@@ -267,6 +267,7 @@ FIRST_OPENING = (
 RETURN_OPENING = (
     f"Verified. Dogwalk. {NEXT_GREETING} Since then, Juniper asked for permission. Where to?"
 )
+REAPED_CLAUSE = "Your sandbox was cleared after a long time without calls, so this one starts fresh."
 WORK_BRIEF = "Starting Juniper on a tiny verified artifact."
 AGENT_PROMPT = (
     "Goal: create a tiny artifact and verify it. Finish with a short summary "
@@ -1879,10 +1880,19 @@ async def run_unobserved_end(restart) -> None:
     mocks = SocketMocks()
     mocks.advertise_resume = True
     spoken = ["Is the brake noise worth worrying about?", "Let me think that over."]
+    # Since the last call, a reap took an old Sandbox out of service (and its deletion is done):
+    # this Opening says so, once, in place of the welcome written about the old Sandbox.
+    await asyncio.to_thread(d1, f"""INSERT INTO sandbox_deletions (provider_id, user_id, reaped_at, next_attempt_at, deleted_at)
+        SELECT 'mock-reaped-old', id, unixepoch() - 60, unixepoch(), unixepoch() FROM users WHERE home_phone = '{TEST_PHONE}'""")
     async with serve(mocks.handler, "127.0.0.1", SOCKET_PORT):
         body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST3", "live-test-4")
         assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
         await asyncio.wait_for(mocks.live_connected.wait(), 8)
+        cleared = await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append"
+                                      and REAPED_CLAUSE in item.get("content", ""))
+        assert cleared["content"].endswith(f"{REAPED_CLAUSE} Welcome back. Where to?"), cleared["content"]
+        notice = await asyncio.to_thread(d1, "SELECT noticed_at FROM sandbox_deletions WHERE provider_id = 'mock-reaped-old'")
+        assert notice[0]["noticed_at"] is not None, "the reap notice was not consumed, so a later Opening would repeat it"
         await mocks.send_live(transcript("input", spoken[0], 0, 1500))
         await mocks.send_live(transcript("output", spoken[1], 1600, 2400))
         async with asyncio.timeout(10):

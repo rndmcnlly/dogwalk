@@ -10,6 +10,9 @@ export interface Env {
   DAYTONA_SNAPSHOT: string;
   DAYTONA_AGENT_SECRET?: string;
   DAYTONA_API_BASE?: string;
+  // Sandbox reaping (index.ts, reapSandboxes): days without a Voice Call, and dry-run or delete.
+  SANDBOX_REAP_AGE_DAYS?: string;
+  SANDBOX_REAP_MODE?: string;
   OPENAI_PROJECT_ID: string;
   OPENAI_WEBHOOK_SECRET: string;
   OPENAI_LIVE_MODEL?: string;
