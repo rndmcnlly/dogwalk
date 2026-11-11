@@ -60,7 +60,10 @@ class ModelStore(private val dir: File) {
     fun download(spec: ModelSpec, progress: (String) -> Unit): String? {
         dir.mkdirs()
         val part = File(dir, spec.file + ".part")
+        if (dir.usableSpace < (spec.bytes - part.length()).coerceAtLeast(0) + 64_000_000) return "Insufficient storage. Free space for the selected model plus 64 MB, then retry."
         val connection = URL(spec.url).openConnection() as HttpURLConnection
+        connection.connectTimeout = 30_000
+        connection.readTimeout = 30_000
         if (part.exists()) connection.setRequestProperty("Range", "bytes=${part.length()}-")
         connection.connect()
         val append = connection.responseCode == 206

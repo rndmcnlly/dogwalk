@@ -11,8 +11,8 @@ android {
         applicationId 'as.adamsmith.dogwalk.ondevice.dev'
         minSdk 33
         targetSdk 35
-        versionCode 3
-        versionName '0.3-tailnet-dev'
+        versionCode 4
+        versionName '0.4-native-conversation-dev'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
