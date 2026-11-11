@@ -988,7 +988,7 @@ def practice_checks(base_url: str, token: str) -> None:
     def round_of(body: str, number: int, take: int = 0) -> tuple[str, str]:
         name = f"practice-round-{number:02d}" + (f"-{take}" if take else "")
         stream = re.search(rf'<Start><Stream name="{name}" url="wss://dogwalk\.tools(/voice/practice/stream/[^"]+)" track="inbound_track">', body)
-        action = re.search(rf'action="(/voice/practice/heard\?round={number}&amp;take={take}&amp;silent=\d)"', body)
+        action = re.search(rf'action="(/voice/practice/heard\?round={number}&amp;take={take}&amp;silent=\d&amp;judged=\d+)"', body)
         require(stream and action and "<Play>https://dogwalk.tools/voice/practice/tone.wav</Play>" in body, f"round {number}: {body}")
         phrase = d1_local(f"SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]["phrase"]
         require(f">{phrase}</Say></Gather>" in body, f"round {number} does not say its phrase: {body}")
@@ -1001,12 +1001,15 @@ def practice_checks(base_url: str, token: str) -> None:
     def scored(number: int, body: str, seconds: float, first_sample: int) -> str:
         stream, action = round_of(body, number)
         phrase = d1_local(f"SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]["phrase"]
+        redirect = []
         def heard() -> None:
             _, twiml = post(base_url, action, {**call, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)
-            require(twiml == f'<Response><Stop><Stream name="practice-round-{number:02d}"/></Stop>'
-                    f'<Redirect method="POST">/voice/practice/result?round={number}</Redirect></Response>', f"matched phrase: {twiml}")
+            match = re.fullmatch(rf'<Response><Stop><Stream name="practice-round-{number:02d}"/></Stop>'
+                                 rf'<Redirect method="POST">(/voice/practice/result\?round={number}&amp;judged=\d+)</Redirect></Response>', twiml)
+            require(match is not None, f"matched phrase: {twiml}")
+            redirect.append(match[1].replace("&amp;", "&"))
         practice_stream(base_url, stream, token, number, seconds, first_sample, heard)
-        status, result = post(base_url, f"/voice/practice/result?round={number}", call, token)
+        status, result = post(base_url, redirect[0], call, token)
         require(status == 200, f"result {number}: {status} {result}")
         return result
 
@@ -1075,6 +1078,9 @@ def practice_checks(base_url: str, token: str) -> None:
     require(rounds[5]["cosine"] is None and rounds[5]["error"] == "insufficient-audio", f"insufficient audio detail: {rounds[5]}")
     require(rounds[6]["speech_seconds"] == 30.0, f"long answer was not trimmed to 30 s: {rounds[6]}")
     require(all("transcript" not in r and "phrase" not in r for r in rounds), "Call Activity kept practice speech")
+    # Only scored rounds count toward the round limit: four of the first practice's eight judged.
+    ended = [json.loads(row["detail"]) for row in rows if row["event"] == "practice.ended"]
+    require(ended[0]["reason"] == "stop" and ended[0]["judged"] == 4 and ended[0]["attempts"] == 8, f"practice.ended: {ended[0]}")
     events = [row["event"] for row in rows]
     require(events.count("practice.started") == 3 and events.count("practice.ended") == 3 and "practice.unavailable" in events
             and events.count("practice.repeat") == 1,

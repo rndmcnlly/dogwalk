@@ -27,7 +27,7 @@ import { availableHandles } from "./handles";
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
 import { handleVoiceVerify } from "./voice_verify";
-import { handlePracticeHeard, handlePracticeResult, handlePracticeStream, practiceTone, startPractice } from "./challenge_practice";
+import { handlePracticeHeard, handlePracticeResult, handlePracticeStream, practiceStreamStop, practiceTone, startPractice } from "./challenge_practice";
 import { asksToDonate, donationConsent, donationTone, handleDonationConsent, handleDonationRound, handleDonationStream } from "./voice_donation";
 export { TerminalRelay, VoiceSession };
 
@@ -1529,7 +1529,9 @@ async function handlePractice(req: Request, env: Env, ctx: ExecutionContext, url
     if (url.pathname === "/voice/practice/result") return twiml(await handlePracticeResult(env, url, form, log));
   } catch (error) {
     await log("practice.error", { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
-    return twiml(Say("Challenge practice stopped because of an error. Back to Dogwalk.") + Redirect("/voice"));
+    // A failed round webhook still stops its stream, which would otherwise keep listening.
+    const stop = url.pathname === "/voice/practice/heard" ? practiceStreamStop(url) : "";
+    return twiml(stop + Say("Challenge practice stopped because of an error. Back to Dogwalk.") + Redirect("/voice"));
   }
   return new Response("not found", { status: 404 });
 }

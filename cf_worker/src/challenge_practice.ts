@@ -34,7 +34,11 @@ export const MIN_SPEECH_SECONDS = 2.0;
  * the answer while the head holds the tone and the spoken prompt.
  */
 export const MAX_VERIFY_SECONDS = 30;
-const MAX_ROUNDS = 10;
+// Scored rounds before practice ends. Rounds that judge nothing (a wrong phrase, silence, too
+// little speech) do not count toward it, but every round counts toward MAX_ATTEMPTS, which
+// bounds the loop on a line that never yields a judgment.
+const MAX_JUDGED_ROUNDS = 10;
+const MAX_ATTEMPTS = 20;
 // Empty transcripts in a row before practice gives up and returns to the Voice Agent.
 const MAX_SILENT_ROUNDS = 2;
 // Replays of one phrase on request ("say that again") before practice moves to a fresh one.
@@ -64,6 +68,12 @@ interface RoundRow {
 
 // Each replay of a phrase is a new take with its own stream, so a stopped take's late audio
 // can never be scored for a later one.
+// Carried in each round's signed webhook URLs: empty transcripts in a row, and rounds judged.
+interface Progress { attempts: number; silent: number; judged: number }
+const progressOf = (url: URL, attempts: number): Progress => ({
+  attempts, silent: Number(url.searchParams.get("silent") ?? "0") || 0, judged: Number(url.searchParams.get("judged") ?? "0") || 0,
+});
+
 const roundName = (round: number, take: number) =>
   `practice-round-${String(round).padStart(2, "0")}${take ? `-${take}` : ""}`;
 
@@ -90,39 +100,41 @@ async function readRound(env: Env, callSid: string, round: number): Promise<Roun
   ).bind(callSid, round).first<RoundRow>();
 }
 
-async function endPractice(env: Env, callSid: string, log: Log, reason: string, rounds: number, spoken: string): Promise<string> {
+async function endPractice(env: Env, callSid: string, log: Log, reason: string, progress: Progress, spoken: string): Promise<string> {
   await env.DB.prepare("DELETE FROM practice_rounds WHERE call_sid = ?").bind(callSid).run();
-  await log("practice.ended", { reason, rounds });
+  await log("practice.ended", { reason, attempts: progress.attempts, judged: progress.judged });
   return Say(`${spoken} Back to Dogwalk.`) + RETURN;
 }
 
-async function roundTwiml(env: Env, url: URL, callSid: string, round: number, account: string, silent: number): Promise<string> {
+async function roundTwiml(env: Env, url: URL, callSid: string, round: number, account: string, progress: Progress): Promise<string> {
   const phrase = challengePhrase();
   await env.DB.prepare(
     `INSERT INTO practice_rounds (call_sid, round, phrase, state, created_at) VALUES (?, ?, ?, 'listening', unixepoch())
      ON CONFLICT(call_sid, round) DO UPDATE SET phrase = excluded.phrase, take = 0, state = 'listening', streamed = 0,
        cosine = NULL, speech_seconds = NULL, error = NULL, created_at = excluded.created_at`,
   ).bind(callSid, round, phrase).run();
-  return takeTwiml(env, url, callSid, round, 0, phrase, account, silent);
+  return takeTwiml(env, url, callSid, round, 0, phrase, account, progress);
 }
 
 // One take of a round: a stream, the tone, and the phrase inside a Gather hinted with its words.
 async function takeTwiml(
-  env: Env, url: URL, callSid: string, round: number, take: number, phrase: string, account: string, silent: number,
+  env: Env, url: URL, callSid: string, round: number, take: number, phrase: string, account: string, progress: Progress,
 ): Promise<string> {
   const host = originHost(env, url);
   const capability = await streamCapability(env, STREAM_PURPOSE, [callSid, String(round), String(take)], account);
   return StartStream(roundName(round, take), `wss://${host}/voice/practice/stream/${capability}`, { round: String(round), take: String(take) }) +
     `<Play>https://${host}/voice/practice/tone.wav</Play>` +
-    GatherSpeech(phrase, `/voice/practice/heard?round=${round}&take=${take}&silent=${silent}`, 'speechTimeout="auto" timeout="6"',
+    GatherSpeech(phrase, `/voice/practice/heard?round=${round}&take=${take}&silent=${progress.silent}&judged=${progress.judged}`, 'speechTimeout="auto" timeout="6"',
       contentWords(phrase));
 }
 
 async function nextRound(
-  env: Env, url: URL, callSid: string, account: string, log: Log, round: number, silent: number, spoken: string,
+  env: Env, url: URL, callSid: string, account: string, log: Log, round: number, progress: Progress, spoken: string,
 ): Promise<string> {
-  if (round >= MAX_ROUNDS) return endPractice(env, callSid, log, "round_limit", round, `${spoken} That was the last round.`);
-  return Say(`${spoken} Here's another.`) + await roundTwiml(env, url, callSid, round + 1, account, silent);
+  if (progress.judged >= MAX_JUDGED_ROUNDS || round >= MAX_ATTEMPTS) {
+    return endPractice(env, callSid, log, "round_limit", progress, `${spoken} That was the last round.`);
+  }
+  return Say(`${spoken} Here's another.`) + await roundTwiml(env, url, callSid, round + 1, account, { ...progress, attempts: round + 1 });
 }
 
 /** /voice/practice: check the Voice Reference and the verifier, warm it, and start round one. */
@@ -142,10 +154,10 @@ export async function startPractice(env: Env, ctx: ExecutionContext, url: URL, f
   ctx.waitUntil(speaker.embed(syntheticAudio()).then(() => undefined, () => undefined));
   // Rows outlive a call that hung up mid-round; any practice start clears those too.
   await env.DB.prepare("DELETE FROM practice_rounds WHERE call_sid = ? OR created_at < unixepoch() - 3600").bind(callSid).run();
-  await log("practice.started", { max_rounds: MAX_ROUNDS });
+  await log("practice.started", { max_judged_rounds: MAX_JUDGED_ROUNDS, max_attempts: MAX_ATTEMPTS });
   return Say("Challenge practice. After each tone, repeat the sentence once in your normal voice, " +
     "and you will hear how well your voice matched. Nothing is recorded. Say stop to finish.") +
-    await roundTwiml(env, url, callSid, 1, account, 0);
+    await roundTwiml(env, url, callSid, 1, account, { attempts: 1, silent: 0, judged: 0 });
 }
 
 /** /voice/practice/heard: the round's transcript decides whether its audio is scored at all. */
@@ -154,42 +166,49 @@ export async function handlePracticeHeard(env: Env, url: URL, form: FormData, lo
   const account = String(form.get("AccountSid") ?? "");
   const round = Number(url.searchParams.get("round"));
   const take = Number(url.searchParams.get("take") ?? "0") || 0;
-  const silent = Number(url.searchParams.get("silent") ?? "0") || 0;
-  if (!CALL_SID.test(callSid) || !Number.isInteger(round) || round < 1 || round > MAX_ROUNDS) return RETURN;
+  if (!CALL_SID.test(callSid) || !Number.isInteger(round) || round < 1 || round > MAX_ATTEMPTS) return RETURN;
+  const progress = progressOf(url, round);
   const stop = StopStream(roundName(round, take));
   const row = await readRound(env, callSid, round);
   if (!row || row.state !== "listening" || row.take !== take || !isAccountSid(account)) {
-    return stop + await endPractice(env, callSid, log, "lost_round", round - 1, "Challenge practice stopped.");
+    return stop + await endPractice(env, callSid, log, "lost_round", progress, "Challenge practice stopped.");
   }
   const transcript = String(form.get("SpeechResult") ?? "");
   const heard = speechWords(transcript);
-  if (saidStop(heard)) return stop + await endPractice(env, callSid, log, "stop", round - 1, "Practice over.");
+  if (saidStop(heard)) return stop + await endPractice(env, callSid, log, "stop", progress, "Practice over.");
   if (heard.length === 0) {
     await log("practice.round", { round, outcome: "silent" satisfies Outcome });
-    if (silent + 1 >= MAX_SILENT_ROUNDS) {
-      return stop + await endPractice(env, callSid, log, "silence", round, "I didn't hear anything.");
+    if (progress.silent + 1 >= MAX_SILENT_ROUNDS) {
+      return stop + await endPractice(env, callSid, log, "silence", progress, "I didn't hear anything.");
     }
     await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
-    return stop + await nextRound(env, url, callSid, account, log, round, silent + 1, "I didn't hear the sentence.");
+    return stop + await nextRound(env, url, callSid, account, log, round, { ...progress, silent: progress.silent + 1 }, "I didn't hear the sentence.");
   }
   // "Say that again": the same phrase in a fresh take, counted as neither a round nor a miss.
   if (askedToRepeat(heard) && take < MAX_REPEATS) {
     await env.DB.prepare("UPDATE practice_rounds SET take = ?, streamed = 0 WHERE call_sid = ? AND round = ? AND take = ?")
       .bind(take + 1, callSid, round, take).run();
     await log("practice.repeat", { round, take: take + 1 });
-    return stop + Say("Again.") + await takeTwiml(env, url, callSid, round, take + 1, row.phrase, account, silent);
+    return stop + Say("Again.") + await takeTwiml(env, url, callSid, round, take + 1, row.phrase, account, progress);
   }
   // Every content word, in order: a misheard prompt or a misrecognized word is a wrong phrase,
   // never a voice failure.
   if (!phraseMatches(row.phrase, transcript)) {
     await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
     await log("practice.round", { round, outcome: "wrong_phrase" satisfies Outcome });
-    return stop + await nextRound(env, url, callSid, account, log, round, 0, "That wasn't the sentence.");
+    return stop + await nextRound(env, url, callSid, account, log, round, { ...progress, silent: 0 }, "That wasn't the sentence.");
   }
   // Committed before the response that stops the stream, so the stream's end sees it.
   await env.DB.prepare("UPDATE practice_rounds SET state = 'scoring' WHERE call_sid = ? AND round = ? AND state = 'listening'")
     .bind(callSid, round).run();
-  return stop + `<Redirect method="POST">/voice/practice/result?round=${round}</Redirect>`;
+  return stop + `<Redirect method="POST">/voice/practice/result?round=${round}&amp;judged=${progress.judged}</Redirect>`;
+}
+
+/** The Stop for the stream a /voice/practice/heard request's round and take started, so an error path can stop it. */
+export function practiceStreamStop(url: URL): string {
+  const round = Number(url.searchParams.get("round")), take = Number(url.searchParams.get("take") ?? "0");
+  return Number.isInteger(round) && round >= 1 && round <= MAX_ATTEMPTS && Number.isInteger(take) && take >= 0
+    ? StopStream(roundName(round, take)) : "";
 }
 
 /** /voice/practice/result: wait for the round's score, speak its level, and go on. */
@@ -197,7 +216,8 @@ export async function handlePracticeResult(env: Env, url: URL, form: FormData, l
   const callSid = String(form.get("CallSid") ?? "");
   const account = String(form.get("AccountSid") ?? "");
   const round = Number(url.searchParams.get("round"));
-  if (!CALL_SID.test(callSid) || !Number.isInteger(round) || round < 1 || round > MAX_ROUNDS || !isAccountSid(account)) return RETURN;
+  if (!CALL_SID.test(callSid) || !Number.isInteger(round) || round < 1 || round > MAX_ATTEMPTS || !isAccountSid(account)) return RETURN;
+  const progress = { ...progressOf(url, round), silent: 0 };
   const deadline = Date.now() + RESULT_WAIT_MS;
   let row = await readRound(env, callSid, round);
   while (row?.state === "scoring" && Date.now() < deadline) {
@@ -205,26 +225,26 @@ export async function handlePracticeResult(env: Env, url: URL, form: FormData, l
     row = await readRound(env, callSid, round);
   }
   if (!row || (row.state !== "scoring" && row.state !== "scored")) {
-    return endPractice(env, callSid, log, "lost_round", round - 1, "Challenge practice stopped.");
+    return endPractice(env, callSid, log, "lost_round", progress, "Challenge practice stopped.");
   }
   await env.DB.prepare("DELETE FROM practice_rounds WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
   if (row.state === "scoring") {
     await log("practice.round", { round, outcome: "unscored" satisfies Outcome });
-    return nextRound(env, url, callSid, account, log, round, 0, "I couldn't score that one.");
+    return nextRound(env, url, callSid, account, log, round, progress, "I couldn't score that one.");
   }
   if (row.error && row.error !== "insufficient-audio") {
     await log("practice.round", { round, outcome: "unscored" satisfies Outcome, error: row.error });
-    return endPractice(env, callSid, log, "verifier_error", round, "Challenge practice is not available right now.");
+    return endPractice(env, callSid, log, "verifier_error", progress, "Challenge practice is not available right now.");
   }
   if (row.error || row.cosine === null || (row.speech_seconds ?? 0) < MIN_SPEECH_SECONDS) {
     // The score is kept for calibration even though no level is spoken.
     await log("practice.round", { round, outcome: "not_enough_speech" satisfies Outcome, cosine: row.cosine,
       speech_seconds: row.speech_seconds, ...(row.error ? { error: row.error } : {}) });
-    return nextRound(env, url, callSid, account, log, round, 0, "Not enough to judge.");
+    return nextRound(env, url, callSid, account, log, round, progress, "Not enough to judge.");
   }
   const level = matchLevel(row.cosine);
   await log("practice.round", { round, outcome: level.outcome, cosine: row.cosine, speech_seconds: row.speech_seconds });
-  return nextRound(env, url, callSid, account, log, round, 0, level.spoken);
+  return nextRound(env, url, callSid, account, log, round, { ...progress, judged: progress.judged + 1 }, level.spoken);
 }
 
 /** The round cue, the same tone Voice Donation plays. */

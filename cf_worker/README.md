@@ -212,7 +212,8 @@ waits up to 10 seconds for them. Under 2 seconds of speech, or the verifier's
 `insufficient-audio`, earns another phrase; otherwise the caller hears "Strong
 voice match." (cosine at least `STRONG_MATCH_COSINE`, 0.7), "Voice matched."
 (`MATCH_COSINE`, 0.5), or "Voice not matched.", never the number. A short "stop",
-ten rounds, two silent rounds, or a verifier error ends practice and redirects
+ten scored rounds (unjudged rounds do not count; twenty attempts in all), two
+silent rounds, or a verifier error ends practice and redirects
 to `/voice`, reconnecting the Voice Agent. Audio is never written anywhere; each
 round's row is deleted once spoken, and Call Activity keeps `practice.round`
 events for every round (`outcome`: `strong_match`, `match`, `no_match`,
