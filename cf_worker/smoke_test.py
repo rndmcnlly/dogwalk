@@ -1208,6 +1208,7 @@ def practice_stream(base_url: str, path: str, token: str, round_number: int, sec
 def practice_checks(base_url: str, token: str) -> None:
     """Challenge Practice: a deterministic loop of phrases, transcript first, then a spoken level
     from the verifier, never the number; every exit returns the call to /voice."""
+    received_cue = re.escape("<Play>https://dogwalk.tools/voice/practice/received.wav</Play>")
     user = d1_local(f"SELECT id, home_phone FROM users WHERE home_phone LIKE '{TEST_NUMBERS}' AND reaped_at IS NULL LIMIT 1")[0]
     phone = user["home_phone"]
     call = {"From": phone, "CallSid": "CA_PRACTICE", "AccountSid": TEST_ACCOUNT}
@@ -1255,7 +1256,8 @@ def practice_checks(base_url: str, token: str) -> None:
         redirect = []
         def heard() -> None:
             _, twiml = post(base_url, action, {**call, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)
-            match = re.fullmatch(rf'<Response><Stop><Stream name="practice-round-{number:02d}"/></Stop>'
+            # The received cue plays before the wait for the level.
+            match = re.fullmatch(rf'<Response><Stop><Stream name="practice-round-{number:02d}"/></Stop>{received_cue}'
                                  rf'<Redirect method="POST">(/voice/practice/result\?round={number}&amp;judged=\d+)</Redirect></Response>', twiml)
             require(match is not None, f"matched phrase: {twiml}")
             redirect.append(match[1].replace("&amp;", "&"))
@@ -1270,7 +1272,7 @@ def practice_checks(base_url: str, token: str) -> None:
     phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 1")[0]["phrase"]
     misheard = phrase.rstrip(".").rsplit(" ", 1)[0] + " cow"
     status, body = post(base_url, action, {**call, "SpeechResult": misheard, "Confidence": "0.9"}, token)
-    require(body.startswith('<Response><Stop><Stream name="practice-round-01"/></Stop>') and "That wasn't the sentence. Here's another." in body
+    require(re.match(rf'<Response><Stop><Stream name="practice-round-01"/></Stop>{received_cue}<Say[^>]*>That wasn\'t the sentence\. Here\'s another\.', body)
             and "/voice/practice/result" not in body, f"wrong phrase: {body}")
     require(stream_rejection(base_url, stream, token) == 409, "a skipped round accepted a stream")
     # Each level, said as words and never as a number.
@@ -1295,23 +1297,31 @@ def practice_checks(base_url: str, token: str) -> None:
     phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 8")[0]["phrase"]
     status, body = post(base_url, action, {**call, "SpeechResult": "Say that again?", "Confidence": "0.9"}, token)
     require(body.startswith('<Response><Stop><Stream name="practice-round-08"/></Stop><Say voice="Polly.Joanna">Again.</Say>')
-            and f">{phrase}</Say></Gather>" in body and "Here's another" not in body, f"repeat: {body}")
+            and f">{phrase}</Say></Gather>" in body and "Here's another" not in body and "received.wav" not in body, f"repeat: {body}")
     _, action = round_of(body, 8, take=1)
     require(stream_rejection(base_url, old_stream, token) == 409, "a replaced take accepted a stream")
+    # Past three replays a repeat request moves to a fresh phrase, still without the received cue.
+    for take in (2, 3):
+        status, body = post(base_url, action, {**call, "SpeechResult": "Again.", "Confidence": "0.9"}, token)
+        _, action = round_of(body, 8, take=take)
+    status, body = post(base_url, action, {**call, "SpeechResult": "Pardon?", "Confidence": "0.9"}, token)
+    require(body.startswith('<Response><Stop><Stream name="practice-round-08-3"/></Stop><Say voice="Polly.Joanna">No more repeats of that one. '
+                            "Here's another.</Say>") and "received.wav" not in body, f"repeat limit: {body}")
+    _, action = round_of(body, 9)
     # A short stop returns the call to the Voice Agent and clears the rounds.
     status, body = post(base_url, action, {**call, "SpeechResult": "Stop.", "Confidence": "0.9"}, token)
-    require(body.startswith('<Response><Stop><Stream name="practice-round-08-1"/></Stop>') and "Practice over. Back to Dogwalk." in body
-            and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'), f"stop: {body}")
+    require(body.startswith('<Response><Stop><Stream name="practice-round-09"/></Stop>') and "Practice over. Back to Dogwalk." in body
+            and "received.wav" not in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'), f"stop: {body}")
     require(d1_local("SELECT COUNT(*) AS n FROM practice_rounds WHERE call_sid = 'CA_PRACTICE'")[0]["n"] == 0, "rounds kept after stop")
 
     # An empty transcript moves on; a second in a row ends practice. Both are logged as silent.
     status, body = post(base_url, "/voice/practice", call, token)
     _, action = round_of(body, 1)
     status, body = post(base_url, action, {**call, "SpeechResult": ""}, token)
-    require("I didn't hear the sentence. Here's another." in body, f"first silence: {body}")
+    require("I didn't hear the sentence. Here's another." in body and "received.wav" not in body, f"first silence: {body}")
     _, action = round_of(body, 2)
     status, body = post(base_url, action, {**call, "SpeechResult": ""}, token)
-    require("I didn't hear anything. Back to Dogwalk." in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'),
+    require("I didn't hear anything. Back to Dogwalk." in body and "received.wav" not in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'),
             f"second silence: {body}")
 
     # A verifier error ends practice as unavailable and returns.
@@ -1320,10 +1330,18 @@ def practice_checks(base_url: str, token: str) -> None:
     require("not available right now. Back to Dogwalk." in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'),
             f"verifier error: {body}")
 
+    # Both cues are public 8 kHz WAVs Twilio can cache; the received cue is 210 ms, unlike the 150 ms tone.
+    for path, ms in (("/voice/practice/tone.wav", 150), ("/voice/practice/received.wav", 210)):
+        with urllib.request.urlopen(base_url + path, timeout=5) as response:
+            audio = response.read()
+            require(response.headers["content-type"] == "audio/wav" and response.headers["cache-control"] == "public, max-age=86400"
+                    and audio[:4] == b"RIFF" and int.from_bytes(audio[24:28], "little") == 8000 and len(audio) == 44 + ms * 16,
+                    f"{path}: {response.headers} {len(audio)} bytes")
+
     rows = d1_local("SELECT event, detail FROM call_activity WHERE call_sid = 'CA_PRACTICE' AND event LIKE 'practice.%' ORDER BY id")
     rounds = [json.loads(row["detail"]) for row in rows if row["event"] == "practice.round"]
     require([r["outcome"] for r in rounds] == ["wrong_phrase", "strong_match", "match", "no_match", "not_enough_speech",
-                                               "not_enough_speech", "match", "silent", "silent", "unscored"], f"practice rounds: {rounds}")
+                                               "not_enough_speech", "match", "repeat_limit", "silent", "silent", "unscored"], f"practice rounds: {rounds}")
     require(rounds[1]["speech_seconds"] == 3.0 and 0.79 < rounds[1]["cosine"] < 0.82 and isinstance(rounds[1].get("wait_ms"), int),
             f"scored round detail: {rounds[1]}")
     # Too little speech keeps the verifier's score for calibration; insufficient audio has none.
@@ -1331,12 +1349,12 @@ def practice_checks(base_url: str, token: str) -> None:
     require(rounds[5]["cosine"] is None and rounds[5]["error"] == "insufficient-audio", f"insufficient audio detail: {rounds[5]}")
     require(rounds[6]["speech_seconds"] == 30.0, f"long answer was not trimmed to 30 s: {rounds[6]}")
     require(all("transcript" not in r and "phrase" not in r for r in rounds), "Call Activity kept practice speech")
-    # Only scored rounds count toward the round limit: four of the first practice's eight judged.
+    # Only scored rounds count toward the round limit: four of the first practice's nine judged.
     ended = [json.loads(row["detail"]) for row in rows if row["event"] == "practice.ended"]
-    require(ended[0]["reason"] == "stop" and ended[0]["judged"] == 4 and ended[0]["attempts"] == 8, f"practice.ended: {ended[0]}")
+    require(ended[0]["reason"] == "stop" and ended[0]["judged"] == 4 and ended[0]["attempts"] == 9, f"practice.ended: {ended[0]}")
     events = [row["event"] for row in rows]
     require(events.count("practice.started") == 3 and events.count("practice.ended") == 3 and "practice.unavailable" in events
-            and events.count("practice.repeat") == 1,
+            and events.count("practice.repeat") == 3,
             f"practice activity: {events}")
 
 

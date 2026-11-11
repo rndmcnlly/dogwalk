@@ -107,18 +107,43 @@ export function wav(samples: Int16Array): ArrayBuffer {
   return buffer;
 }
 
-let toneWav: ArrayBuffer | null = null;
-/** The round cue: 150 ms of 880 Hz with short fades. Public, since it carries nothing personal. */
-export function roundTone(): Response {
-  if (!toneWav) {
-    const samples = new Int16Array(SAMPLE_RATE * 0.15);
-    for (let i = 0; i < samples.length; i++) {
-      const fade = Math.min(1, i / 80, (samples.length - i) / 80);
-      samples[i] = Math.round(9000 * fade * Math.sin(2 * Math.PI * 880 * i / SAMPLE_RATE));
+// Pure sine blips, each with 10 ms fades, at a peak amplitude out of 32767.
+interface Blip { hz: number; at: number; ms: number } // at and ms in milliseconds
+function blips(notes: Blip[], peak: number): ArrayBuffer {
+  const end = Math.max(...notes.map((note) => note.at + note.ms));
+  const samples = new Int16Array(SAMPLE_RATE * end / 1000);
+  for (const note of notes) {
+    const start = SAMPLE_RATE * note.at / 1000, length = SAMPLE_RATE * note.ms / 1000;
+    for (let i = 0; i < length; i++) {
+      const fade = Math.min(1, i / 80, (length - i) / 80);
+      samples[start + i] = Math.round(peak * fade * Math.sin(2 * Math.PI * note.hz * i / SAMPLE_RATE));
     }
-    toneWav = wav(samples);
   }
-  return new Response(toneWav, { headers: { "content-type": "audio/wav", "cache-control": "public, max-age=86400" } });
+  return wav(samples);
+}
+
+// Both cues are public, since they carry nothing personal, and cached a day by Twilio.
+const cue = (body: ArrayBuffer) =>
+  new Response(body, { headers: { "content-type": "audio/wav", "cache-control": "public, max-age=86400" } });
+
+let toneWav: ArrayBuffer | null = null;
+/** The round cue: 150 ms of 880 Hz. */
+export function roundTone(): Response {
+  toneWav ??= blips([{ hz: 880, at: 0, ms: 150 }], 9000);
+  return cue(toneWav);
+}
+
+let receivedWav: ArrayBuffer | null = null;
+/**
+ * The answer-received cue, played the moment an Identity Challenge answer is captured so the
+ * wait for its level is not silent: C6 then G5, a falling fourth in two blips (70 ms, a 30 ms
+ * gap, 110 ms), 210 ms in all. It follows the earcon lab's code for the caller's own take
+ * ending (recording_saved: caller family, nearly pure, offset falls by a fourth from C6), and
+ * its falling pair cannot be mistaken for the single 880 Hz round tone.
+ */
+export function answerReceivedCue(): Response {
+  receivedWav ??= blips([{ hz: 1046.5, at: 0, ms: 70 }, { hz: 784, at: 100, ms: 110 }], 8000);
+  return cue(receivedWav);
 }
 
 // --- Media Stream -------------------------------------------------------

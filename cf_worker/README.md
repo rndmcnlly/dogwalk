@@ -271,11 +271,17 @@ wrong phrase and is not scored. Every phrase Gather (donation rounds too) passes
 the phrase's content words as speech `hints`. A short "repeat", "say that
 again", "again", "what", or "pardon" replays the phrase as a new take (its own
 stream and capability, `practice_rounds.take`), up to three times per round,
-without counting it. A match marks the row `scoring` and stops the stream; the
+without counting it; a fourth request moves to a fresh phrase (`repeat_limit`). A captured answer, matched or a wrong phrase (never
+silence, "stop", or a repeat request), first plays the received cue,
+`/voice/practice/received.wav` (`answerReceivedCue` in `src/caller_stream.ts`:
+C6 for 70 ms, 30 ms of silence, G5 for 110 ms, 8 kHz mono, public and cached a
+day like the tone), so the caller hears their answer arrive instead of four to
+seven seconds of silence before the level; on a match it plays while the
+verifier scores. A match marks the row `scoring` and stops the stream; the
 stream's stop event then sends the in-memory 8 kHz PCM (its last 30 s,
 `MAX_VERIFY_SECONDS`, the verifier's limit) to `SPEAKER.verify` and
 writes back only the cosine and speech seconds, while `/voice/practice/result`
-waits up to 10 seconds for them. Under 2 seconds of speech, or the verifier's
+waits up to 10 seconds for them. Under 1.5 seconds of speech, or the verifier's
 `insufficient-audio`, earns another phrase; otherwise the caller hears "Strong
 voice match." (cosine at least `STRONG_MATCH_COSINE`, 0.7), "Voice matched."
 (`MATCH_COSINE`, 0.5), or "Voice not matched.", never the number. A short "stop",
@@ -285,7 +291,7 @@ to `/voice`, reconnecting the Voice Agent. Audio is never written anywhere; each
 round's row is deleted once spoken, and Call Activity keeps `practice.round`
 events for every round (`outcome`: `strong_match`, `match`, `no_match`,
 `not_enough_speech` with the score when the verifier gave one, `wrong_phrase`,
-`silent`, or `unscored`; `cosine` and `speech_seconds` when available) plus
+`repeat_limit`, `silent`, or `unscored`; `cosine` and `speech_seconds` when available) plus
 `practice.started`, `practice.repeat`, `practice.ended`, and
 `practice.unavailable`.
 

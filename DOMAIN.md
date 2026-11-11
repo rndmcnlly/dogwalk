@@ -381,7 +381,16 @@ is never a voice failure. The recognizer is hinted with the phrase's words, so a
 correct repetition comes back as them while a different word still comes
 through. A caller who asks to hear the sentence again ("repeat", "say that
 again", "pardon") in a short utterance hears the same phrase again, counted as
-neither an answer nor a failure. Fresh phrases defeat replayed recordings, not voice cloning. The
+neither an answer nor a failure; past a few replays the request earns a fresh
+phrase instead, still not an answer. Every Identity Challenge has the same spoken
+shape: a tone, the sentence, the caller's answer, a received cue the moment an
+answer is captured, then the verdict. The received cue (two falling blips, unlike
+the single tone) tells the caller their answer arrived, so the seconds spent
+judging it are not silence. It follows every captured answer, scored or a wrong
+phrase, so the ritual never changes shape, and never silence or a request to
+repeat, which are not answers. Like the recording beep, it belongs to the ritual
+rather than to the Earcon Style, so it plays even when earcons are off. Fresh
+phrases defeat replayed recordings, not voice cloning. The
 similarity threshold is configuration, not a domain rule. It starts at a cosine
 of 0.5: synthetic impostors through a telephone path scored at most 0.40, and
 the operator's own voice in an unenrolled setting (car hands-free) at least
@@ -395,6 +404,7 @@ A User's rehearsal of Identity Challenges, asked for in conversation ("challenge
 me", "test my voice"): the Voice Agent hands the call to a deterministic,
 speech-only loop that offers fresh phrases until the caller says stop or a round
 limit is reached, then returns the call to the Voice Agent. Each round follows
+the Identity Challenge's shape (tone, sentence, answer, received cue, level) and
 the Identity Check's rules: a transcript that does not match the phrase is not
 scored, too little speech to judge earns another phrase without counting, a
 request to hear the sentence again replays it, and a

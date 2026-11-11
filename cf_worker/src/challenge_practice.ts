@@ -6,14 +6,16 @@
 //
 // Deterministic TwiML, no model. Each round inserts a practice_rounds row with a fresh
 // phrase, starts a caller-only Media Stream (caller_stream.ts), plays a tone, and says the
-// phrase inside a speech Gather hinted with the phrase's words. The Gather's action checks the
+// phrase inside a speech Gather hinted with the phrase's words. Every answer the Gather captures
+// (scored or a wrong phrase, never silence or a repeat request) first hears the received cue,
+// so the wait for its verdict is never silent. The Gather's action checks the
 // transcript first: every content word, in order, or the round is a wrong phrase and is not
 // scored. A short "say that again" replays the phrase as a fresh take with its own stream. A matched phrase marks the row 'scoring' and stops the stream, so the
 // stream's stop event (which can only follow that response) scores the audio in memory with
 // SPEAKER and writes back only the cosine and speech seconds. The action redirects to
 // /voice/practice/result, which waits for that score and speaks a level, never the number.
 import {
-  acceptCallerStream, GatherSpeech, isAccountSid, originHost, roundTone, SAMPLE_RATE, saidStop, Say, speechWords, StartStream,
+  acceptCallerStream, answerReceivedCue, GatherSpeech, isAccountSid, originHost, roundTone, SAMPLE_RATE, saidStop, Say, speechWords, StartStream,
   StopStream, streamCapability, verifyStreamCapability,
 } from "./caller_stream";
 import { askedToRepeat, challengePhrase, contentWords, phraseMatches } from "./challenge_phrases";
@@ -63,7 +65,7 @@ const CALL_SID = /^[A-Za-z0-9_]{1,64}$/;
 const RETURN = '<Redirect method="POST">/voice</Redirect>';
 
 type Log = (event: string, detail: Record<string, unknown>) => Promise<void>;
-type Outcome = "strong_match" | "match" | "no_match" | "not_enough_speech" | "wrong_phrase" | "silent" | "unscored";
+type Outcome = "strong_match" | "match" | "no_match" | "not_enough_speech" | "wrong_phrase" | "repeat_limit" | "silent" | "unscored";
 
 interface RoundRow {
   phrase: string;
@@ -197,23 +199,31 @@ export async function handlePracticeHeard(env: Env, ctx: ExecutionContext, url: 
     return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: progress.silent + 1 }, "I didn't hear the sentence.");
   }
   // "Say that again": the same phrase in a fresh take, counted as neither a round nor a miss.
-  if (askedToRepeat(heard) && take < MAX_REPEATS) {
-    await env.DB.prepare("UPDATE practice_rounds SET take = ?, streamed = 0 WHERE call_sid = ? AND round = ? AND take = ?")
-      .bind(take + 1, callSid, round, take).run();
-    await log("practice.repeat", { round, take: take + 1 });
-    return stop + Say("Again.") + await takeTwiml(env, ctx, url, callSid, round, take + 1, row.phrase, account, progress);
+  if (askedToRepeat(heard)) {
+    if (take < MAX_REPEATS) {
+      await env.DB.prepare("UPDATE practice_rounds SET take = ?, streamed = 0 WHERE call_sid = ? AND round = ? AND take = ?")
+        .bind(take + 1, callSid, round, take).run();
+      await log("practice.repeat", { round, take: take + 1 });
+      return stop + Say("Again.") + await takeTwiml(env, ctx, url, callSid, round, take + 1, row.phrase, account, progress);
+    }
+    // Past the replay limit the request is still not an answer: no received cue, a fresh phrase.
+    await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
+    await log("practice.round", { round, outcome: "repeat_limit" satisfies Outcome });
+    return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: 0 }, "No more repeats of that one.");
   }
   // Every content word, in order: a misheard prompt or a misrecognized word is a wrong phrase,
   // never a voice failure.
+  const received = `<Play>https://${originHost(env, url)}/voice/practice/received.wav</Play>`;
   if (!phraseMatches(row.phrase, transcript)) {
     await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
     await log("practice.round", { round, outcome: "wrong_phrase" satisfies Outcome });
-    return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: 0 }, "That wasn't the sentence.");
+    return stop + received + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: 0 }, "That wasn't the sentence.");
   }
   // Committed before the response that stops the stream, so the stream's end sees it.
   await env.DB.prepare("UPDATE practice_rounds SET state = 'scoring' WHERE call_sid = ? AND round = ? AND state = 'listening'")
     .bind(callSid, round).run();
-  return stop + `<Redirect method="POST">/voice/practice/result?round=${round}&amp;judged=${progress.judged}</Redirect>`;
+  // The cue plays while the verifier scores, so it costs the caller no extra wait.
+  return stop + received + `<Redirect method="POST">/voice/practice/result?round=${round}&amp;judged=${progress.judged}</Redirect>`;
 }
 
 /** The Stop for the stream a /voice/practice/heard request's round and take started, so an error path can stop it. */
@@ -268,6 +278,8 @@ function warmVerifier(env: Env, ctx: ExecutionContext): void {
 
 /** The round cue, the same tone Voice Donation plays. */
 export const practiceTone = roundTone;
+/** The answer-received cue, which the Identity Check will share. */
+export const practiceReceived = answerReceivedCue;
 
 /**
  * /voice/practice/stream/<capability>: one round's caller-only Media Stream. The caller has

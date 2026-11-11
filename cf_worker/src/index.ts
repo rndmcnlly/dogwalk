@@ -27,7 +27,7 @@ import { availableHandles } from "./handles";
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
 import { handleVoiceVerify } from "./voice_verify";
-import { handlePracticeHeard, handlePracticeResult, handlePracticeStream, practiceStreamStop, practiceTone, startPractice } from "./challenge_practice";
+import { handlePracticeHeard, handlePracticeResult, handlePracticeStream, practiceReceived, practiceStreamStop, practiceTone, startPractice } from "./challenge_practice";
 import { asksToDonate, donationConsent, donationTone, handleDonationConsent, handleDonationRound, handleDonationStream } from "./voice_donation";
 export { TerminalRelay, VoiceSession };
 
@@ -1665,6 +1665,7 @@ async function handleDonation(req: Request, env: Env, ctx: ExecutionContext, url
 // The call's User practices against their own Voice Reference; every path ends back at /voice.
 async function handlePractice(req: Request, env: Env, ctx: ExecutionContext, url: URL): Promise<Response> {
   if (url.pathname === "/voice/practice/tone.wav" && req.method === "GET") return practiceTone();
+  if (url.pathname === "/voice/practice/received.wav" && req.method === "GET") return practiceReceived();
   const stream = /^\/voice\/practice\/stream\/([A-Za-z0-9._-]{1,300})$/.exec(url.pathname);
   if (stream && req.method === "GET") {
     const signed = (await twilioSignatureValid(req, env, "wss")).valid || (await twilioSignatureValid(req, env)).valid;
