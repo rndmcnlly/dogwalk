@@ -77,7 +77,10 @@ export function warmSpeaker(env: Env, ctx: Pick<ExecutionContext, "waitUntil">, 
   ctx.waitUntil((async () => {
     try {
       const enrolled = await env.DB.prepare("SELECT 1 AS ok FROM voice_references WHERE user_id = ?").bind(userId).first();
-      if (enrolled) await speaker.warm();
+      if (!enrolled) return;
+      const started = Date.now();
+      const { cold } = await speaker.warm();
+      console.log("speaker warm", { cold, ms: Date.now() - started });
     } catch (error) {
       console.error("speaker warm failed", error instanceof Error ? error.message : String(error));
     }

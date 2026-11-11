@@ -29,8 +29,8 @@ function harness(options: { bound?: boolean; enrolled?: boolean; warm?: () => Pr
   return { env, ctx, calls, pending };
 }
 
-const quiet = console.error;
-console.error = () => {};
+const quiet = { error: console.error, log: console.log };
+console.error = console.log = () => {};
 try {
   // Unbound (local dev, tests, or before the speaker Worker is deployed): nothing scheduled.
   {
@@ -74,6 +74,6 @@ try {
     await assert.doesNotReject(Promise.all(pending));
   }
 } finally {
-  console.error = quiet;
+  Object.assign(console, quiet);
 }
 console.log("voice_verify_test: ok");

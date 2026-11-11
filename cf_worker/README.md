@@ -199,7 +199,10 @@ which User a call reached. `voice_references` holds enrolled speaker embeddings
 the separately deployed `dogwalk-speaker` Worker (`../speaker_worker/`), which
 scores audio against them; operator-only `/admin/api/voice-verify` routes expose
 it for calibration and answer 503 when it is unbound or unreachable. Local tests
-bind `speaker_mock.js` in its place (see Verification).
+bind `speaker_mock.js` in its place (see Verification). A Home call from a User
+with a Voice Reference, and the start of Challenge Practice, warm the verifier in
+the background (`warmSpeaker`, a `waitUntil` that never delays TwiML and drops
+every failure), so a later challenge on the same machine skips the 3–5 s model load.
 
 `migrations/2026-11-11-users.sql` converted the phone-keyed `registrations`
 table, keeping each existing `identity_hash` so Durable Objects, Sandboxes, and
@@ -306,6 +309,7 @@ uv run --script voice_session_test.py
 uv run --script admin_test.py
 uv run --script ../sandbox_acp_gateway.py test
 node --experimental-strip-types challenge_phrases_test.ts
+node --experimental-strip-types voice_verify_test.ts
 ```
 
 The local suites listen on 8787 (Worker), 8790-8792 (mocks), and 10229 (inspector).
