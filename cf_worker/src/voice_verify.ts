@@ -48,8 +48,8 @@ export function parseWav(bytes: ArrayBuffer): SpeakerAudio | string {
 }
 
 // Four seconds of a voiced, gated 16 kHz tone: enough "speech" to pass the
-// Worker's activity check, so the health probe (and a warm-up) runs a real inference.
-export function syntheticAudio(): SpeakerAudio {
+// Worker's activity check, so the health probe runs a real inference.
+function syntheticAudio(): SpeakerAudio {
   const rate = 16000, samples = new Int16Array(rate * 4);
   let phase = 0;
   for (let i = 0; i < samples.length; i++) {
@@ -64,20 +64,23 @@ export function syntheticAudio(): SpeakerAudio {
 }
 
 /**
- * Starts loading the verifier in the background when a User with a Voice Reference calls,
- * so an Identity Challenge later in the call skips the 3–5 s model load. A verifier instance
- * is warm only on the machine that ran it (speaker_worker/README.md, Latency), so this helps
- * scoring that runs where the call's webhooks run. Returns nothing to await: the work goes
- * to waitUntil and never delays TwiML, and every failure, including an unbound SPEAKER,
- * is logged and dropped.
+ * Starts loading the verifier in the background ahead of scoring (a Home call, Challenge
+ * Practice), so a challenge later in the call skips the 3–5 s model load. With a userId it
+ * first checks that the User has a Voice Reference; without one the caller already has. A
+ * verifier instance is warm only on the machine that ran it (speaker_worker/README.md,
+ * Latency), so this helps scoring that runs where the call's webhooks run. Returns nothing
+ * to await: the work goes to waitUntil and never delays TwiML, and every failure, including
+ * an unbound SPEAKER, is logged and dropped.
  */
-export function warmSpeaker(env: Env, ctx: Pick<ExecutionContext, "waitUntil">, userId: number): void {
+export function warmSpeaker(env: Env, ctx: Pick<ExecutionContext, "waitUntil">, userId?: number): void {
   const speaker = env.SPEAKER;
   if (!speaker) return;
   ctx.waitUntil((async () => {
     try {
-      const enrolled = await env.DB.prepare("SELECT 1 AS ok FROM voice_references WHERE user_id = ?").bind(userId).first();
-      if (!enrolled) return;
+      if (userId !== undefined) {
+        const enrolled = await env.DB.prepare("SELECT 1 AS ok FROM voice_references WHERE user_id = ?").bind(userId).first();
+        if (!enrolled) return;
+      }
       const started = Date.now();
       const { cold } = await speaker.warm();
       console.log("speaker warm", { cold, ms: Date.now() - started });

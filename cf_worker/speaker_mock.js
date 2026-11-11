@@ -3,12 +3,22 @@
 // SPEAKER Service Binding resolves to it. Its answers are a function of the audio, so a test
 // chooses an outcome by what it streams: the first sample over 10,000 is the cosine, a negative
 // first sample fails inference, under half a second is insufficient audio, and the audio's
-// length is its speech seconds. Like the real verifier, it refuses more than 30 seconds.
+// length is its speech seconds. Like the real verifier, it refuses more than 30 seconds. Its
+// first warm() takes three seconds, like a model load, so a test can show that warming never
+// delays TwiML and, through health's cold flag, that an earlier call did the warming.
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 const SPACE = "mock-speaker-space";
+let warmed = false;
 
 export class SpeakerVerifier extends WorkerEntrypoint {
+  async warm() {
+    const cold = !warmed;
+    warmed = true;
+    if (cold) await new Promise((resolve) => setTimeout(resolve, 3000));
+    return { cold };
+  }
+
   async embed(input) {
     const seconds = new Int16Array(input.audio).length / input.sampleRate;
     return { embedding: new Array(192).fill(1 / Math.sqrt(192)), embeddingSpace: SPACE, audioSeconds: seconds, speechSeconds: seconds };

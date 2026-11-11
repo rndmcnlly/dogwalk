@@ -48,6 +48,13 @@ try {
     await Promise.all(pending);
     assert.deepEqual(calls, { queries: [7], warms: 1 });
   }
+  // Without a userId the caller (Challenge Practice) has checked the Voice Reference: no query.
+  {
+    const { env, ctx, calls, pending } = harness({ enrolled: false });
+    warmSpeaker(env, ctx);
+    await Promise.all(pending);
+    assert.deepEqual(calls, { queries: [], warms: 1 });
+  }
   // No Voice Reference: no RPC.
   {
     const { env, ctx, calls, pending } = harness({ enrolled: false });

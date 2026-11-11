@@ -438,15 +438,19 @@ def run_tests(
         # Re-entering /voice in the same call (as the in-call menu does) keeps the first
         # caller-ID attestation rather than recording one without StirVerstat. The User now
         # has a Voice Reference, so the call also warms the speaker verifier in the
-        # background; with no verifier running locally that fails quietly and the call dials.
+        # background: speaker_mock.js takes three seconds over its first warm, and the call
+        # must dial without waiting for it (health below shows the warm happened).
         d1_local(
             "INSERT INTO voice_references (user_id, embedding_space, embedding, enrolled_at) "
             f"SELECT id, 'local-test', '[]', unixepoch() FROM users WHERE home_phone = '{TEST_PHONE}'"
         )
+        started = time.monotonic()
         status, body = post(
             base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_TEST2"}, token
         )
+        elapsed = time.monotonic() - started
         require(status == 200 and "<Dial" in body, f"voice re-entry: {status} {body}")
+        require(elapsed < 2.5, f"the verifier warm delayed TwiML: {elapsed:.2f} s")
         d1_local(f"DELETE FROM voice_references WHERE user_id IN (SELECT id FROM users WHERE home_phone = '{TEST_PHONE}')")
 
         # A stopped Sandbox is started without waiting, and the call is dialed at once.
@@ -557,6 +561,9 @@ def run_tests(
     require(voice_verify(b"RIFF", {})[0] == 401, "voice verify is public")
     status, body = get(base_url, "/admin/api/voice-verify/health", operator_headers)
     require(status == 200 and json.loads(body)["ok"], f"voice verify health: {status} {body}")
+    if mock_daytona:
+        # The enrolled Home call above already warmed the verifier in the background.
+        require(json.loads(body)["cold"] is False, f"the Home call did not warm the verifier: {body}")
     require(get(base_url, "/admin/api/voice-verify?user=1", operator_headers)[0] == 405, "voice verify accepted GET")
     status, _ = voice_verify(b"not a wav file", operator_headers)
     require(status in (400, 503), f"voice verify accepted a non-WAV body: {status}")

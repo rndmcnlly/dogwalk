@@ -20,7 +20,7 @@ import {
 } from "./caller_stream";
 import { askedToRepeat, challengePhrase, contentWords, phraseMatches } from "./challenge_phrases";
 import type { Env, SpeakerReference } from "./types";
-import { syntheticAudio } from "./voice_verify";
+import { warmSpeaker } from "./voice_verify";
 
 // Configuration (DOMAIN.md, Identity Check: thresholds are configuration, not domain rules).
 /** At or above this cosine, a round is a strong match. */
@@ -135,7 +135,7 @@ async function takeTwiml(
   env: Env, ctx: ExecutionContext, url: URL, callSid: string, round: number, take: number, phrase: string, account: string,
   progress: Progress,
 ): Promise<string> {
-  warmVerifier(env, ctx);
+  warmSpeaker(env, ctx);
   const host = originHost(env, url);
   const capability = await streamCapability(env, STREAM_PURPOSE, [callSid, String(round), String(take)], account);
   return StartStream(roundName(round, take), `wss://${host}/voice/practice/stream/${capability}`, { round: String(round), take: String(take) }) +
@@ -269,11 +269,6 @@ export async function handlePracticeResult(env: Env, ctx: ExecutionContext, url:
   const level = matchLevel(row.cosine);
   await log("practice.round", { round, outcome: level.outcome, cosine: row.cosine, speech_seconds: row.speech_seconds, wait_ms });
   return nextRound(env, ctx, url, callSid, account, log, round, { ...progress, judged: progress.judged + 1 }, level.spoken);
-}
-
-/** Load the verifier's model now, off the call's path, so the take it will score is not kept waiting on a fresh instance. */
-function warmVerifier(env: Env, ctx: ExecutionContext): void {
-  if (env.SPEAKER) ctx.waitUntil(env.SPEAKER.embed(syntheticAudio()).then(() => undefined, () => undefined));
 }
 
 /** The round cue, the same tone Voice Donation plays. */

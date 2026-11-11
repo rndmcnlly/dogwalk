@@ -43,6 +43,7 @@ ORIGIN = "https://dogwalk.tools"
 # isolate. Only the Worker's own `cold` flag (health reports it) says a load happened.
 SLOW_MS = 2000
 ACCOUNT_ID = "890753ccd6f0bbbfbe2c030cc44f6a87"  # Adam's personal Cloudflare account
+ANALYTICS_LIMIT = 1000  # groups per query, each an hour and a status
 CF_PROFILE = Path.home() / "Library/Preferences/cloudflare/config/personal.json"
 
 
@@ -175,15 +176,15 @@ def analytics(args, _authorization: str) -> None:
     token = json.loads(CF_PROFILE.read_text())["oauth_token"]
     until = datetime.now(timezone.utc)
     since = until - timedelta(hours=args.hours)
-    query = """query($account: string!, $since: Time!, $until: Time!) { viewer { accounts(filter: {accountTag: $account}) {
-      workersInvocationsAdaptive(limit: 100, filter: {scriptName: "dogwalk-speaker", datetime_geq: $since, datetime_leq: $until},
-                                 orderBy: [datetimeHour_ASC]) {
+    query = """query($account: string!, $since: Time!, $until: Time!, $limit: uint64!) { viewer { accounts(filter: {accountTag: $account}) {
+      workersInvocationsAdaptive(limit: $limit, filter: {scriptName: "dogwalk-speaker", datetime_geq: $since, datetime_leq: $until},
+                                 orderBy: [datetimeHour_DESC]) {
         sum { requests errors subrequests }
         quantiles { cpuTimeP50 cpuTimeP99 wallTimeP50 wallTimeP99 }
         dimensions { datetimeHour status }
       } } } }"""
     body = json.dumps({"query": query, "variables": {
-        "account": ACCOUNT_ID, "since": since.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "account": ACCOUNT_ID, "limit": ANALYTICS_LIMIT, "since": since.isoformat(timespec="seconds").replace("+00:00", "Z"),
         "until": until.isoformat(timespec="seconds").replace("+00:00", "Z")}}).encode()
     req = urllib.request.Request("https://api.cloudflare.com/client/v4/graphql", data=body, headers={
         "authorization": f"Bearer {token}", "content-type": "application/json"})
@@ -191,7 +192,13 @@ def analytics(args, _authorization: str) -> None:
         payload = json.loads(resp.read())
     if payload.get("errors"):
         sys.exit(json.dumps(payload["errors"]))
-    for row in payload["data"]["viewer"]["accounts"][0]["workersInvocationsAdaptive"]:
+    # Newest first, so a limit drops the oldest groups (one per hour and status), never the
+    # most recent; printed oldest first, with a warning when the window was cut short.
+    rows = payload["data"]["viewer"]["accounts"][0]["workersInvocationsAdaptive"]
+    if len(rows) >= ANALYTICS_LIMIT:
+        print(f"warning: {ANALYTICS_LIMIT} groups returned, the limit; groups at or before "
+              f"{rows[-1]['dimensions']['datetimeHour']} may be missing, so shorten --hours", file=sys.stderr)
+    for row in reversed(rows):
         print(json.dumps({**row["dimensions"], **row["sum"], **row["quantiles"]}))
 
 
