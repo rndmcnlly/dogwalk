@@ -351,8 +351,8 @@ challenge phrase (its audio is then scored against the Voice Reference), a
 Handle (switch to that identity), an Invite Code or a mention of an invite
 (Registration), a mention of donating (Voice Donation), or anything else (ask again). Only a matched phrase in the
 wrong voice counts as a failure, so noise and bad lines never lock a caller
-out. A matched phrase with too little speech to judge (about two seconds, as
-the verifier measures it) is neither a pass nor a failure: the caller gets
+out. A matched phrase with too little speech to judge (as the verifier measures
+it; the floor is configuration) is neither a pass nor a failure: the caller gets
 another phrase. A User whose Home check fails moves to the three-challenge path, never to
 a dead end. Repeated failures for one Handle pause checks for that Handle for a
 while, and the User hears about the attempts in their next Opening. The check

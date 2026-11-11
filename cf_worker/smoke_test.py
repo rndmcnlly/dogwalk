@@ -990,6 +990,8 @@ def practice_checks(base_url: str, token: str) -> None:
         stream = re.search(rf'<Start><Stream name="{name}" url="wss://dogwalk\.tools(/voice/practice/stream/[^"]+)" track="inbound_track">', body)
         action = re.search(rf'action="(/voice/practice/heard\?round={number}&amp;take={take}&amp;silent=\d&amp;judged=\d+)"', body)
         require(stream and action and "<Play>https://dogwalk.tools/voice/practice/tone.wav</Play>" in body, f"round {number}: {body}")
+        # A one-second pause ends the answer: "auto" waited up to four seconds after a car caller's last word.
+        require('<Gather input="speech" speechTimeout="1" timeout="5" ' in body, f"round {number} Gather timing: {body}")
         phrase = d1_local(f"SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]["phrase"]
         require(f">{phrase}</Say></Gather>" in body, f"round {number} does not say its phrase: {body}")
         hints = re.search(r'hints="([^"]*)"', body)[1].split(",")
@@ -1025,12 +1027,13 @@ def practice_checks(base_url: str, token: str) -> None:
     # Each level, said as words and never as a number.
     body = scored(2, body, 3.0, 8000)
     require("Strong voice match. Here's another." in body and not any(re.search(r"\d", said) for said in re.findall(r"<Say[^>]*>([^<]*)</Say>", body)), f"strong: {body}")
-    body = scored(3, body, 3.0, 6000)
+    # MIN_SPEECH_SECONDS itself is enough to judge.
+    body = scored(3, body, 1.5, 6000)
     require("Voice matched. Here's another." in body, f"match: {body}")
     body = scored(4, body, 3.0, 3000)
     require("Voice not matched. Here's another." in body, f"no match: {body}")
     # Too little speech, by the verifier's measure and by its insufficient-audio error.
-    body = scored(5, body, 1.5, 8000)
+    body = scored(5, body, 1.2, 8000)
     require("Not enough to judge. Here's another." in body, f"short speech: {body}")
     body = scored(6, body, 0.3, 8000)
     require("Not enough to judge. Here's another." in body, f"insufficient audio: {body}")
@@ -1072,9 +1075,10 @@ def practice_checks(base_url: str, token: str) -> None:
     rounds = [json.loads(row["detail"]) for row in rows if row["event"] == "practice.round"]
     require([r["outcome"] for r in rounds] == ["wrong_phrase", "strong_match", "match", "no_match", "not_enough_speech",
                                                "not_enough_speech", "match", "silent", "silent", "unscored"], f"practice rounds: {rounds}")
-    require(rounds[1]["speech_seconds"] == 3.0 and 0.79 < rounds[1]["cosine"] < 0.82, f"scored round detail: {rounds[1]}")
+    require(rounds[1]["speech_seconds"] == 3.0 and 0.79 < rounds[1]["cosine"] < 0.82 and isinstance(rounds[1].get("wait_ms"), int),
+            f"scored round detail: {rounds[1]}")
     # Too little speech keeps the verifier's score for calibration; insufficient audio has none.
-    require(rounds[4]["speech_seconds"] == 1.5 and 0.79 < rounds[4]["cosine"] < 0.82, f"short speech detail: {rounds[4]}")
+    require(rounds[4]["speech_seconds"] == 1.2 and 0.79 < rounds[4]["cosine"] < 0.82, f"short speech detail: {rounds[4]}")
     require(rounds[5]["cosine"] is None and rounds[5]["error"] == "insufficient-audio", f"insufficient audio detail: {rounds[5]}")
     require(rounds[6]["speech_seconds"] == 30.0, f"long answer was not trimmed to 30 s: {rounds[6]}")
     require(all("transcript" not in r and "phrase" not in r for r in rounds), "Call Activity kept practice speech")
