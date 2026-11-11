@@ -368,16 +368,14 @@ async function getAssignment(env: Env, user: User): Promise<SandboxAssignment | 
 
 /**
  * Project the provider's view of a Sandbox onto the assignment, only while the assignment still
- * names `expected` (null when adopting or creating one), is not being reaped, and `sandbox` is
- * not awaiting deletion. False means a concurrent replacement, reap, or provisioning won, and
- * `sandbox` is no longer this User's.
+ * names `expected` (null when adopting or creating one). False means a concurrent replacement,
+ * reap, or provisioning won, and `sandbox` is no longer this User's.
  */
 async function updateAssignment(env: Env, user: User, sandbox: DaytonaSandbox, expected: string | null): Promise<boolean> {
   const result = await env.DB.prepare(
     `UPDATE sandbox_assignments
         SET provider_id = ?, state = ?, error = ?, last_checked_at = ?
-      WHERE user_id = ? AND provider_id IS ? AND state <> 'reaping'
-        AND NOT EXISTS (SELECT 1 FROM sandbox_deletions WHERE provider_id = ?)`,
+      WHERE user_id = ? AND provider_id IS ?`,
   ).bind(
     sandbox.id,
     sandbox.state,
@@ -385,7 +383,6 @@ async function updateAssignment(env: Env, user: User, sandbox: DaytonaSandbox, e
     Math.floor(Date.now() / 1000),
     user.id,
     expected,
-    sandbox.id,
   ).run();
   return result.meta.changes === 1;
 }
@@ -411,8 +408,9 @@ async function ensureSandboxAssignment(env: Env, user: User): Promise<SandboxAss
   if (!assignment) throw new Error("sandbox assignment insert failed");
   if (assignment.provider_id) return assignment;
 
-  // Never adopt a Sandbox being deleted: one the provider lists as destroying (after a replacement
-  // or reap), or one a reap decided to delete that Daytona has not yet confirmed.
+  // Never adopt a reaped Sandbox, pending deletion or already deleted (Daytona's label listing is
+  // eventually consistent and can show a deleted Sandbox as running for a while), nor one the
+  // provider lists as destroying after a replacement.
   const pending = await env.DB.prepare("SELECT provider_id FROM sandbox_deletions WHERE user_id = ?")
     .bind(user.id).all<{ provider_id: string }>();
   const doomed = new Set(pending.results.map((row) => row.provider_id));
@@ -494,13 +492,6 @@ async function resolveSandbox(
   if (attempt > 3) throw new Error("sandbox assignment kept changing");
   const assignment = await ensureSandboxAssignment(env, user);
   if (!assignment.provider_id) return { assignment };
-  // Reaping was decided before this call reached the User (the pass checks idleness atomically),
-  // and the deletion may already be in flight, so the call tries to finish it. Either way it
-  // then gets a fresh Sandbox: one it could not delete stays pending for the pass.
-  if (assignment.state === "reaping") {
-    await finishReaping(env, assignment.provider_id, "call", { user_id: user.id, provider_id: assignment.provider_id, via: "call" });
-    return resolveSandbox(env, user, replaceMissing, attempt + 1);
-  }
   const now = Math.floor(Date.now() / 1000);
   if (
     assignment.last_checked_at &&
@@ -518,7 +509,7 @@ async function resolveSandbox(
       `UPDATE sandbox_assignments
           SET provider_id = NULL, state = 'missing', error = NULL,
               provisioning_started_at = 0, last_checked_at = ?
-        WHERE user_id = ? AND provider_id = ? AND state <> 'reaping'`,
+        WHERE user_id = ? AND provider_id = ?`,
     ).bind(now, user.id, assignment.provider_id).run();
     if (cleared.meta.changes === 1) {
       await audit(env, "sandbox.missing", null, null, { user_id: user.id, provider_id: assignment.provider_id });
@@ -535,19 +526,22 @@ async function resolveSandbox(
 // --- Sandbox reaping ----------------------------------------------------
 
 // Identity and Hosting Lifecycle (DOMAIN.md): a Sandbox is reaped once its User has made no
-// Voice Call for SANDBOX_REAP_AGE_DAYS. A daily pass handles a bounded batch. Anything but
-// SANDBOX_REAP_MODE=delete is a dry run that only audits sandbox.reap.candidate.
+// Voice Call for SANDBOX_REAP_AGE_DAYS. Anything but SANDBOX_REAP_MODE=delete is a dry run that
+// only audits sandbox.reap.candidate.
 //
-// Deciding to reap records a pending deletion (sandbox_deletions) and marks the assignment
-// `reaping`, in one transaction that rechecks idleness. The pending row is the durable truth: it
-// keeps the provider ID until Daytona accepts a DELETE or answers 404, no adoption path takes that
-// Sandbox back, and the next delete pass retries it if this one is interrupted or refused. A call
-// that arrives while its assignment is `reaping` tries the DELETE too; if that fails it detaches
-// the doomed Sandbox and provisions fresh, leaving the deletion pending. Only the pass gives up,
-// after REAP_MAX_ATTEMPTS refusals, and only while the assignment still names the Sandbox.
+// The daily pass is the only party that ever deletes a Sandbox. Reaping takes it out of service
+// at once: one transaction, which rechecks idleness, records it in sandbox_deletions and clears
+// the assignment, so the User's next call provisions a fresh Sandbox by the ordinary path and
+// discovery never adopts the old one. Deleting it at the provider is then cleanup the pass works
+// through, this pass and later ones, retrying failures with backoff. The row stays afterwards as
+// a tombstone (Daytona's label listing can still show a deleted Sandbox) and as the notice the
+// User's next Opening consumes (VoiceSession.sinceLastCall).
 const SANDBOX_REAP_CRON = "17 10 * * *";
 const SANDBOX_REAP_BATCH = 10;
-const REAP_MAX_ATTEMPTS = 3;
+const SANDBOX_DELETE_BATCH = 20;
+// Failed deletions are retried after 1, 2, 4, 8, then 16 days; at this many failures the
+// operator is told (sandbox.reap.stuck), and retries go on.
+const REAP_STUCK_ATTEMPTS = 3;
 // A call row without an end is in progress only while it is younger than this; an older one
 // lost its status report (Twilio ends any call within four hours).
 const CALL_IN_PROGRESS_SECONDS = 86400;
@@ -558,9 +552,11 @@ interface ReapCandidate {
   last_call_at: number;
 }
 
-// No Voice Call by this User started at or after the cutoff (?1), and none is in progress.
+// No Voice Call by this User started at or after the cutoff (?1), and none is in progress. A call
+// from the User's Home counts before /voice has linked it to the User.
 const userIdleSince = (user: string) => `NOT EXISTS (
-  SELECT 1 FROM voice_calls c WHERE c.user_id = ${user}
+  SELECT 1 FROM voice_calls c
+   WHERE (c.user_id = ${user} OR (c.user_id IS NULL AND c.phone_number = (SELECT home_phone FROM users WHERE id = ${user})))
      AND (c.started_at >= ?1 OR (c.ended_at IS NULL AND c.started_at >= unixepoch() - ${CALL_IN_PROGRESS_SECONDS})))`;
 
 async function reapSandboxes(env: Env): Promise<void> {
@@ -572,116 +568,83 @@ async function reapSandboxes(env: Env): Promise<void> {
   const mode = env.SANDBOX_REAP_MODE === "delete" ? "delete" : "dry-run";
   const now = Math.floor(Date.now() / 1000);
   const cutoff = now - Math.round(days * 86400);
-  const lastCall = (user: string, fallback: string) =>
-    `COALESCE((SELECT MAX(c.started_at) FROM voice_calls c WHERE c.user_id = ${user}), ${fallback})`;
-  let budget = SANDBOX_REAP_BATCH;
-  if (mode === "delete") {
-    // Deletions an earlier pass or call decided but Daytona has not confirmed come first.
-    const { results: pending } = await env.DB.prepare(
-      `SELECT d.user_id, d.provider_id, ${lastCall("d.user_id", "d.requested_at")} AS last_call_at
-         FROM sandbox_deletions d ORDER BY d.requested_at LIMIT ?`,
-    ).bind(budget).all<ReapCandidate>();
-    for (const row of pending) {
-      await finishReaping(env, row.provider_id, "pass", reapDetail(row, mode, now, true));
-    }
-    budget -= pending.length;
-    if (budget <= 0) return;
-  }
   const { results } = await env.DB.prepare(
-    `SELECT s.user_id, s.provider_id, ${lastCall("s.user_id", "s.created_at")} AS last_call_at
+    `SELECT s.user_id, s.provider_id,
+            COALESCE((SELECT MAX(c.started_at) FROM voice_calls c WHERE c.user_id = s.user_id), s.created_at) AS last_call_at
        FROM sandbox_assignments s
-      WHERE s.provider_id IS NOT NULL AND s.state <> 'reaping' AND s.created_at < ?1 AND ${userIdleSince("s.user_id")}
+      WHERE s.provider_id IS NOT NULL AND s.created_at < ?1 AND ${userIdleSince("s.user_id")}
       ORDER BY last_call_at LIMIT ?2`,
-  ).bind(cutoff, budget).all<ReapCandidate>();
+  ).bind(cutoff, SANDBOX_REAP_BATCH).all<ReapCandidate>();
   for (const candidate of results) {
-    const detail = reapDetail(candidate, mode, now, false);
+    const detail = {
+      user_id: candidate.user_id, provider_id: candidate.provider_id, mode,
+      last_call_at: candidate.last_call_at, idle_days: Math.floor((now - candidate.last_call_at) / 86400),
+    };
     if (mode === "dry-run") {
       await audit(env, "sandbox.reap.candidate", null, null, detail);
       continue;
     }
-    // One transaction: both statements see the same idleness, so a call arriving now either
-    // blocks the decision or finds the assignment `reaping` with its deletion recorded.
-    const decide = `user_id = ?2 AND provider_id = ?3 AND state <> 'reaping' AND ${userIdleSince("?2")}`;
-    const [, marked] = await env.DB.batch([
+    // Both statements see the same idleness: a call arriving now either blocks the reap or finds
+    // the assignment already cleared and provisions fresh.
+    const reap = `user_id = ?2 AND provider_id = ?3 AND ${userIdleSince("?2")}`;
+    const [, cleared] = await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO sandbox_deletions (provider_id, user_id, requested_at)
-         SELECT ?3, ?2, unixepoch() WHERE EXISTS (SELECT 1 FROM sandbox_assignments WHERE ${decide})`,
+        `INSERT INTO sandbox_deletions (provider_id, user_id, reaped_at, next_attempt_at)
+         SELECT ?3, ?2, unixepoch(), unixepoch() WHERE EXISTS (SELECT 1 FROM sandbox_assignments WHERE ${reap})`,
       ).bind(cutoff, candidate.user_id, candidate.provider_id),
       env.DB.prepare(
-        `UPDATE sandbox_assignments SET state = 'reaping', error = NULL, last_checked_at = unixepoch() WHERE ${decide}`,
+        `UPDATE sandbox_assignments
+            SET provider_id = NULL, state = 'reaped', error = NULL, provisioning_started_at = 0, last_checked_at = unixepoch()
+          WHERE ${reap}`,
       ).bind(cutoff, candidate.user_id, candidate.provider_id),
     ]);
-    if (marked.meta.changes === 1) await finishReaping(env, candidate.provider_id, "pass", detail);
+    if (cleared.meta.changes === 1) await audit(env, "sandbox.reap.started", null, null, detail);
   }
+  if (mode === "delete") await deleteReapedSandboxes(env);
 }
 
-function reapDetail(row: ReapCandidate, mode: string, now: number, resumed: boolean): Record<string, unknown> {
-  return {
-    user_id: row.user_id, provider_id: row.provider_id, mode, resumed,
-    last_call_at: row.last_call_at, idle_days: Math.floor((now - row.last_call_at) / 86400),
-  };
+interface SandboxDeletion {
+  provider_id: string;
+  user_id: number;
+  attempts: number;
 }
 
-// Try to delete a Sandbox with a pending deletion. The pass and a call may both be here at once,
-// so every outcome is written conditionally and no failure undoes another party's work:
-// - deleted (or 404): the pending row goes, and an assignment still naming the Sandbox, in any
-//   state, is cleared to `reaped`; whoever removed the row audits sandbox.reaped.
-// - a call fails: the deletion stays pending and the assignment lets go of the Sandbox, so the
-//   call provisions fresh instead of using it.
-// - the pass fails: the deletion stays pending with one more attempt counted; after
-//   REAP_MAX_ATTEMPTS, if the assignment still names the Sandbox, the reap is abandoned and the
-//   Sandbox stays the User's as `reap_failed`. A detached Sandbox is never abandoned.
-async function finishReaping(env: Env, providerId: string, by: "pass" | "call", detail: Record<string, unknown>): Promise<void> {
-  let alreadyGone = false;
-  try {
-    await daytonaFetch(env, `/sandbox/${encodeURIComponent(providerId)}`, { method: "DELETE" });
-  } catch (error) {
-    if (error instanceof DaytonaApiError && error.status === 404) {
-      alreadyGone = true;
-    } else {
-      const message = (error instanceof Error ? error.message : String(error)).slice(0, 200);
-      await reapAttemptFailed(env, providerId, by, message, detail);
-      return;
+// Delete reaped Sandboxes at the provider, oldest due first. Nothing here affects any User: the
+// Sandboxes are already out of service, so a failure only delays cleanup.
+async function deleteReapedSandboxes(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `SELECT provider_id, user_id, attempts FROM sandbox_deletions
+      WHERE deleted_at IS NULL AND next_attempt_at <= unixepoch() ORDER BY next_attempt_at LIMIT ?`,
+  ).bind(SANDBOX_DELETE_BATCH).all<SandboxDeletion>();
+  for (const row of results) {
+    const detail = { user_id: row.user_id, provider_id: row.provider_id };
+    let alreadyGone = false;
+    try {
+      await daytonaFetch(env, `/sandbox/${encodeURIComponent(row.provider_id)}`, { method: "DELETE" });
+    } catch (error) {
+      if (error instanceof DaytonaApiError && error.status === 404) {
+        alreadyGone = true;
+      } else {
+        const message = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+        const attempts = row.attempts + 1;
+        // Due at the daily pass 1, 2, 4, 8, then 16 days on (an hour early, so the pass finds it due).
+        const delay = 86400 * (1 << Math.min(attempts - 1, 4)) - 3600;
+        await env.DB.prepare(
+          `UPDATE sandbox_deletions SET attempts = ?, last_error = ?, next_attempt_at = unixepoch() + ?
+            WHERE provider_id = ? AND deleted_at IS NULL`,
+        ).bind(attempts, message, delay, row.provider_id).run();
+        await audit(env, "sandbox.reap.failed", null, null, { ...detail, attempts, message });
+        if (attempts === REAP_STUCK_ATTEMPTS) await audit(env, "sandbox.reap.stuck", null, null, { ...detail, attempts, message });
+        continue;
+      }
+    }
+    const done = await env.DB.prepare(
+      "UPDATE sandbox_deletions SET deleted_at = unixepoch(), last_error = NULL WHERE provider_id = ? AND deleted_at IS NULL",
+    ).bind(row.provider_id).run();
+    if (done.meta.changes === 1) {
+      await audit(env, "sandbox.reaped", null, null, { ...detail, attempts: row.attempts, already_gone: alreadyGone });
     }
   }
-  const [removed] = await env.DB.batch([
-    env.DB.prepare("DELETE FROM sandbox_deletions WHERE provider_id = ?").bind(providerId),
-    env.DB.prepare(
-      `UPDATE sandbox_assignments
-          SET provider_id = NULL, state = 'reaped', error = NULL, provisioning_started_at = 0, last_checked_at = unixepoch()
-        WHERE provider_id = ?`,
-    ).bind(providerId),
-  ]);
-  if (removed.meta.changes === 1) await audit(env, "sandbox.reaped", null, null, { ...detail, already_gone: alreadyGone });
-}
-
-async function reapAttemptFailed(
-  env: Env, providerId: string, by: "pass" | "call", message: string, detail: Record<string, unknown>,
-): Promise<void> {
-  if (by === "call") {
-    await env.DB.prepare(
-      `UPDATE sandbox_assignments
-          SET provider_id = NULL, state = 'reaped', error = NULL, provisioning_started_at = 0, last_checked_at = unixepoch()
-        WHERE provider_id = ?1 AND EXISTS (SELECT 1 FROM sandbox_deletions WHERE provider_id = ?1)`,
-    ).bind(providerId).run();
-    // Not a quiet failure: the caller's Workspace is now a fresh one (the Opening says so).
-    await audit(env, "sandbox.reap.detached", null, null, { ...detail, message });
-    return;
-  }
-  const counted = await env.DB.prepare(
-    "UPDATE sandbox_deletions SET attempts = attempts + 1, last_error = ? WHERE provider_id = ? RETURNING attempts",
-  ).bind(message, providerId).first<{ attempts: number }>();
-  if (!counted) return;
-  let outcome = "pending";
-  if (counted.attempts >= REAP_MAX_ATTEMPTS) {
-    const still = `provider_id = ?1 AND state = 'reaping'`;
-    const [, reverted] = await env.DB.batch([
-      env.DB.prepare(`DELETE FROM sandbox_deletions WHERE provider_id = ?1 AND EXISTS (SELECT 1 FROM sandbox_assignments WHERE ${still})`).bind(providerId),
-      env.DB.prepare(`UPDATE sandbox_assignments SET state = 'reap_failed', error = ?2 WHERE ${still}`).bind(providerId, message),
-    ]);
-    if (reverted.meta.changes === 1) outcome = "abandoned";
-  }
-  await audit(env, "sandbox.reap.failed", null, null, { ...detail, message, attempts: counted.attempts, outcome });
 }
 
 // --- Diagnostics --------------------------------------------------------
@@ -1183,7 +1146,11 @@ function voiceSessionFor(env: Env, identity: string): DurableObjectStub {
 export default {
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     if (event.cron === SANDBOX_REAP_CRON) {
-      ctx.waitUntil(reapSandboxes(env).catch((error) => console.error("sandbox reaping failed", error)));
+      // Rethrown so the cron invocation records the failure, not just the log.
+      ctx.waitUntil(reapSandboxes(env).catch((error) => {
+        console.error("sandbox reaping failed", error);
+        throw error;
+      }));
       return;
     }
     ctx.waitUntil(processTwilioJobs(env));

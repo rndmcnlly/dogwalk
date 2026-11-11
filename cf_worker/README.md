@@ -88,28 +88,30 @@ when there are no calls) and none in progress. It handles at most ten per pass,
 oldest first. `SANDBOX_REAP_MODE` ships as `dry-run`: the pass only audits
 `sandbox.reap.candidate`. Any value other than `delete` is a dry run.
 
-In `delete` mode, deciding to reap inserts a `sandbox_deletions` row and marks
-the assignment `reaping` (keeping its `provider_id`) in one D1 batch that
-rechecks idleness. The pending row is the durable record until Daytona accepts a
-DELETE or answers 404; then the row goes, an assignment still naming that
-Sandbox becomes `reaped` with no `provider_id` (whatever its state), and
-whoever removed the row audits `sandbox.reaped` (`already_gone`, `resumed`, or
-`via: "call"`). `updateAssignment` never writes a Sandbox with a pending
-deletion, writes only while the assignment still names the Sandbox it read, and
-skips `reaping` rows, so neither adoption nor the operator diagnostics refresh
-can bring one back.
+In `delete` mode, reaping is one D1 batch that rechecks idleness (counting an
+in-progress call from the User's Home that `/voice` has not yet linked): it
+inserts the Sandbox into `sandbox_deletions` and clears the assignment
+(`provider_id` NULL, state `reaped`), auditing `sandbox.reap.started`. The old
+Sandbox is out of service from that moment: the User's next call provisions a
+fresh one through the ordinary path, and discovery by label skips every
+provider ID in `sandbox_deletions` (and anything Daytona lists as destroying or
+destroyed). A call never deletes anything.
 
-A call that arrives while its assignment is `reaping` tries the DELETE itself.
-If that fails, it lets go of the Sandbox (the assignment becomes `reaped`, the
-deletion stays pending) and provisions fresh, auditing
-`sandbox.reap.detached`, which the Opening treats like `sandbox.reaped`. Each delete pass first retries pending
-deletions; a dry run leaves them alone. The pass counts its own refusals in
-`sandbox_deletions.attempts`, and after three, if the assignment still names
-the Sandbox, abandons the reap (`outcome: "abandoned"`, state `reap_failed`, the
-Sandbox stays usable, and a later pass decides again if the User is still idle).
-A Sandbox a call has let go of is never abandoned. The User's next call
-provisions a fresh Sandbox, the VoiceSession drops the old projection as on
-replacement (its Memory stays), and the Opening says the sandbox was cleared.
+Only the scheduled pass sends Daytona DELETE. In the same pass, and every later
+one, it works through due `sandbox_deletions` rows (20 per pass, oldest due
+first). On success or 404 it sets `deleted_at` and audits `sandbox.reaped` once
+(`already_gone`, `attempts`). On failure it audits `sandbox.reap.failed`, counts
+`attempts`, and backs off (`next_attempt_at` 1, 2, 4, 8, then 16 days on). At
+the third failure it also audits `sandbox.reap.stuck` for operator attention,
+and keeps retrying. A stuck Sandbox never returns to service. Rows stay after
+deletion: as tombstones, because Daytona's label listing is eventually
+consistent, and as the notice the User's next Opening consumes (`noticed_at`),
+which says the sandbox was cleared exactly once, independent of when the
+deletion finished. The VoiceSession drops the old projection when the fresh
+Sandbox arrives, as on replacement; its Memory stays. Every assignment refresh
+from Daytona (`updateAssignment`) writes only while the assignment still names
+the Sandbox it read, so a slow diagnostics refresh cannot restore a reaped or
+replaced Sandbox.
 
 Apply `migrations/2026-11-12-sandbox-deletions.sql` remotely before deploying
 reaping:
@@ -118,10 +120,12 @@ reaping:
 npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-12-sandbox-deletions.sql
 ```
 
-Pending deletions, if any linger:
+Deletions not yet confirmed:
 
 ```sh
-npx wrangler d1 execute dogwalk --remote --command "SELECT * FROM sandbox_deletions"
+npx wrangler d1 execute dogwalk --remote --command \
+  "SELECT provider_id, user_id, attempts, datetime(next_attempt_at, 'unixepoch') AS next, last_error
+     FROM sandbox_deletions WHERE deleted_at IS NULL"
 ```
 
 See the candidates before turning deletion on:
