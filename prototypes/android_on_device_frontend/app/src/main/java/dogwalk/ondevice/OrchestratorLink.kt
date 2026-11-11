@@ -42,7 +42,7 @@ class OrchestratorLink(
             override fun onMessage(webSocket: WebSocket, text: String) { parse(text)?.let(onMessage) }
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(1000, null) }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { finish("closed: $reason") }
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { finish("failed: ${t.javaClass.simpleName}") }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { finish(failureReason(t)) }
         })
     }
 
@@ -70,6 +70,11 @@ class OrchestratorLink(
     fun close() { socket?.close(1000, "frontend stopped"); socket = null; open = false; client.dispatcher.executorService.shutdown() }
 
     companion object {
+        fun failureReason(error: Throwable): String =
+            if (error is java.net.UnknownServiceException && error.message.orEmpty().contains("cleartext", ignoreCase = true))
+                "failed: Android blocked cleartext traffic. Use wss:// or an approved debug fixture host."
+            else "failed: ${error.javaClass.simpleName}"
+
         fun transcript(direction: String, text: String, startMs: Long, endMs: Long, delivery: String) =
             JSONObject().put("type", "session.${direction}_transcript.delta").put("delta", text)
                 .put("start_ms", startMs).put("end_ms", endMs).put("delivery", delivery)
