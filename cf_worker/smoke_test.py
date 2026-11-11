@@ -959,6 +959,7 @@ def practice_stream(base_url: str, path: str, token: str, round_number: int, sec
 def practice_checks(base_url: str, token: str) -> None:
     """Challenge Practice: a deterministic loop of phrases, transcript first, then a spoken level
     from the verifier, never the number; every exit returns the call to /voice."""
+    received_cue = re.escape("<Play>https://dogwalk.tools/voice/practice/received.wav</Play>")
     user = d1_local(f"SELECT id, home_phone FROM users WHERE home_phone LIKE '{TEST_NUMBERS}' AND reaped_at IS NULL LIMIT 1")[0]
     phone = user["home_phone"]
     call = {"From": phone, "CallSid": "CA_PRACTICE", "AccountSid": TEST_ACCOUNT}
@@ -1006,7 +1007,8 @@ def practice_checks(base_url: str, token: str) -> None:
         redirect = []
         def heard() -> None:
             _, twiml = post(base_url, action, {**call, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)
-            match = re.fullmatch(rf'<Response><Stop><Stream name="practice-round-{number:02d}"/></Stop>'
+            # The received cue plays before the wait for the level.
+            match = re.fullmatch(rf'<Response><Stop><Stream name="practice-round-{number:02d}"/></Stop>{received_cue}'
                                  rf'<Redirect method="POST">(/voice/practice/result\?round={number}&amp;judged=\d+)</Redirect></Response>', twiml)
             require(match is not None, f"matched phrase: {twiml}")
             redirect.append(match[1].replace("&amp;", "&"))
@@ -1021,7 +1023,7 @@ def practice_checks(base_url: str, token: str) -> None:
     phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 1")[0]["phrase"]
     misheard = phrase.rstrip(".").rsplit(" ", 1)[0] + " cow"
     status, body = post(base_url, action, {**call, "SpeechResult": misheard, "Confidence": "0.9"}, token)
-    require(body.startswith('<Response><Stop><Stream name="practice-round-01"/></Stop>') and "That wasn't the sentence. Here's another." in body
+    require(re.match(rf'<Response><Stop><Stream name="practice-round-01"/></Stop>{received_cue}<Say[^>]*>That wasn\'t the sentence\. Here\'s another\.', body)
             and "/voice/practice/result" not in body, f"wrong phrase: {body}")
     require(stream_rejection(base_url, stream, token) == 409, "a skipped round accepted a stream")
     # Each level, said as words and never as a number.
@@ -1046,23 +1048,23 @@ def practice_checks(base_url: str, token: str) -> None:
     phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 8")[0]["phrase"]
     status, body = post(base_url, action, {**call, "SpeechResult": "Say that again?", "Confidence": "0.9"}, token)
     require(body.startswith('<Response><Stop><Stream name="practice-round-08"/></Stop><Say voice="Polly.Joanna">Again.</Say>')
-            and f">{phrase}</Say></Gather>" in body and "Here's another" not in body, f"repeat: {body}")
+            and f">{phrase}</Say></Gather>" in body and "Here's another" not in body and "received.wav" not in body, f"repeat: {body}")
     _, action = round_of(body, 8, take=1)
     require(stream_rejection(base_url, old_stream, token) == 409, "a replaced take accepted a stream")
     # A short stop returns the call to the Voice Agent and clears the rounds.
     status, body = post(base_url, action, {**call, "SpeechResult": "Stop.", "Confidence": "0.9"}, token)
     require(body.startswith('<Response><Stop><Stream name="practice-round-08-1"/></Stop>') and "Practice over. Back to Dogwalk." in body
-            and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'), f"stop: {body}")
+            and "received.wav" not in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'), f"stop: {body}")
     require(d1_local("SELECT COUNT(*) AS n FROM practice_rounds WHERE call_sid = 'CA_PRACTICE'")[0]["n"] == 0, "rounds kept after stop")
 
     # An empty transcript moves on; a second in a row ends practice. Both are logged as silent.
     status, body = post(base_url, "/voice/practice", call, token)
     _, action = round_of(body, 1)
     status, body = post(base_url, action, {**call, "SpeechResult": ""}, token)
-    require("I didn't hear the sentence. Here's another." in body, f"first silence: {body}")
+    require("I didn't hear the sentence. Here's another." in body and "received.wav" not in body, f"first silence: {body}")
     _, action = round_of(body, 2)
     status, body = post(base_url, action, {**call, "SpeechResult": ""}, token)
-    require("I didn't hear anything. Back to Dogwalk." in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'),
+    require("I didn't hear anything. Back to Dogwalk." in body and "received.wav" not in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'),
             f"second silence: {body}")
 
     # A verifier error ends practice as unavailable and returns.
@@ -1070,6 +1072,14 @@ def practice_checks(base_url: str, token: str) -> None:
     body = scored(1, body, 3.0, -8000)
     require("not available right now. Back to Dogwalk." in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'),
             f"verifier error: {body}")
+
+    # Both cues are public 8 kHz WAVs Twilio can cache; the received cue is 210 ms, unlike the 150 ms tone.
+    for path, ms in (("/voice/practice/tone.wav", 150), ("/voice/practice/received.wav", 210)):
+        with urllib.request.urlopen(base_url + path, timeout=5) as response:
+            audio = response.read()
+            require(response.headers["content-type"] == "audio/wav" and response.headers["cache-control"] == "public, max-age=86400"
+                    and audio[:4] == b"RIFF" and int.from_bytes(audio[24:28], "little") == 8000 and len(audio) == 44 + ms * 16,
+                    f"{path}: {response.headers} {len(audio)} bytes")
 
     rows = d1_local("SELECT event, detail FROM call_activity WHERE call_sid = 'CA_PRACTICE' AND event LIKE 'practice.%' ORDER BY id")
     rounds = [json.loads(row["detail"]) for row in rows if row["event"] == "practice.round"]
