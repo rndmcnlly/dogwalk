@@ -32,7 +32,7 @@ isolate), or `inference-failed`. There is never a placeholder score.
 `warm()` loads the model and runs one inference on a fixed signal, once per
 isolate; later calls on a warm isolate return in about a millisecond. `cold` says
 whether this call did the work. `dogwalk` calls it in the background (`warmSpeaker`)
-when a User with a Voice Reference calls and when Challenge Practice starts (see
+when a User with a Voice Reference calls and at each Challenge Practice take (see
 Latency), and its health endpoint calls it first so a probe can tell a model
 load from queueing.
 

@@ -200,7 +200,7 @@ the separately deployed `dogwalk-speaker` Worker (`../speaker_worker/`), which
 scores audio against them; operator-only `/admin/api/voice-verify` routes expose
 it for calibration and answer 503 when it is unbound or unreachable. Local tests
 bind `speaker_mock.js` in its place (see Verification). A Home call from a User
-with a Voice Reference, and the start of Challenge Practice, warm the verifier in
+with a Voice Reference, and each Challenge Practice take, warm the verifier in
 the background (`warmSpeaker`, a `waitUntil` that never delays TwiML and drops
 every failure), so a later challenge on the same machine skips the 3–5 s model load.
 
