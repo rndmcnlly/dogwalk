@@ -14,7 +14,7 @@ import {
   StopStream, streamCapability, verifyStreamCapability, wav,
 } from "./caller_stream";
 import type { StreamedAudio } from "./caller_stream";
-import { challengePhrases } from "./challenge_phrases";
+import { challengePhrases, contentWords } from "./challenge_phrases";
 import type { Env } from "./types";
 
 export const CONSENT_VERSION = "voice-donation-consent-2026-11-11";
@@ -170,7 +170,8 @@ async function roundTwiml(env: Env, url: URL, ref: SessionRef, round: DonationRo
   return StartStream(roundName(round.round), `wss://${host}/voice/donation/stream/${capability}`,
     { session: ref.session, round: String(round.round) }) +
     `<Play>https://${host}/voice/donation/tone.wav</Play>` +
-    GatherSpeech(round.kind === "phrase" ? round.prompt : `Now talk freely. ${round.prompt}`, action, timing);
+    GatherSpeech(round.kind === "phrase" ? round.prompt : `Now talk freely. ${round.prompt}`, action, timing,
+      round.kind === "phrase" ? contentWords(round.prompt) : []);
 }
 
 /** /voice/donation/consent: a spoken yes starts a Donation Session; anything else records nothing. */

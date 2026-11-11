@@ -17,8 +17,14 @@ export const isAccountSid = (value: string) => ACCOUNT_SID.test(value);
 export const escapeXml = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 export const Say = (text: string) => `<Say voice="Polly.Joanna">${escapeXml(text)}</Say>`;
-export const GatherSpeech = (prompt: string, action: string, timing: string) =>
-  `<Gather input="speech" ${timing} actionOnEmptyResult="true" profanityFilter="false" hints="stop" ` +
+/**
+ * A speech Gather around a spoken prompt. Hints bias recognition toward words the caller is
+ * expected to say (a phrase's content words), so a correct repetition comes back as those
+ * words, while a genuinely different word still comes through as itself.
+ */
+export const GatherSpeech = (prompt: string, action: string, timing: string, hints: string[] = []) =>
+  `<Gather input="speech" ${timing} actionOnEmptyResult="true" profanityFilter="false" ` +
+  `hints="${escapeXml(["stop", ...new Set(hints)].join(","))}" ` +
   `action="${escapeXml(action)}" method="POST" language="en-US">${Say(prompt)}</Gather>`;
 /** Start a round's caller-only stream; its custom parameters must come back in the start event. */
 export const StartStream = (name: string, url: string, parameters: Record<string, string>) =>

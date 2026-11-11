@@ -198,8 +198,13 @@ with a spoken reason when either is missing, warms the verifier with a synthetic
 per-round machinery as Voice Donations, in `src/caller_stream.ts`), plays the
 tone, and says the phrase inside a speech `<Gather>`. Its action,
 `/voice/practice/heard`, checks the transcript first (`phraseMatches` in
-`src/challenge_phrases.ts`, shared with the coming Identity Check): a wrong
-phrase is not scored. A match marks the row `scoring` and stops the stream; the
+`src/challenge_phrases.ts`, shared with the coming Identity Check): every
+content word in order, plurals forgiven, insertions allowed, or the round is a
+wrong phrase and is not scored. Every phrase Gather (donation rounds too) passes
+the phrase's content words as speech `hints`. A short "repeat", "say that
+again", "again", "what", or "pardon" replays the phrase as a new take (its own
+stream and capability, `practice_rounds.take`), up to three times per round,
+without counting it. A match marks the row `scoring` and stops the stream; the
 stream's stop event then sends the in-memory 8 kHz PCM to `SPEAKER.verify` and
 writes back only the cosine and speech seconds, while `/voice/practice/result`
 waits up to 10 seconds for them. Under 2 seconds of speech, or the verifier's

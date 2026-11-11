@@ -937,12 +937,12 @@ def ulaw_byte(target: int) -> int:
     return min(range(256), key=lambda encoded: abs(decode(encoded) - target))
 
 
-def practice_stream(base_url: str, path: str, token: str, round_number: int, seconds: float, first_sample: int, heard) -> None:
+def practice_stream(base_url: str, path: str, token: str, round_number: int, seconds: float, first_sample: int, heard, take: int = 0) -> None:
     """One round's caller-only stream: constant audio whose first sample tells speaker_mock.js
     what to answer, then the Gather's action (heard), then the stop event its <Stop> produces."""
     start = {"event": "start", "start": {"accountSid": TEST_ACCOUNT, "callSid": "CA_PRACTICE",
              "mediaFormat": {"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1},
-             "customParameters": {"round": str(round_number)}}}
+             "customParameters": {"round": str(round_number), "take": str(take)}}}
     payload = base64.b64encode(bytes([ulaw_byte(first_sample)] * 160)).decode()
     with open_stream(base_url, path, token, scheme="wss") as ws:
         ws.send(json.dumps(start))
@@ -985,12 +985,17 @@ def practice_checks(base_url: str, token: str) -> None:
     status, body = post(base_url, "/voice/practice", call, token)
     require(status == 200 and "Nothing is recorded" in body, f"practice intro: {body}")
 
-    def round_of(body: str, number: int) -> tuple[str, str]:
-        stream = re.search(rf'<Start><Stream name="practice-round-{number:02d}" url="wss://dogwalk\.tools(/voice/practice/stream/[^"]+)" track="inbound_track">', body)
-        action = re.search(rf'action="(/voice/practice/heard\?round={number}&amp;silent=\d)"', body)
+    def round_of(body: str, number: int, take: int = 0) -> tuple[str, str]:
+        name = f"practice-round-{number:02d}" + (f"-{take}" if take else "")
+        stream = re.search(rf'<Start><Stream name="{name}" url="wss://dogwalk\.tools(/voice/practice/stream/[^"]+)" track="inbound_track">', body)
+        action = re.search(rf'action="(/voice/practice/heard\?round={number}&amp;take={take}&amp;silent=\d)"', body)
         require(stream and action and "<Play>https://dogwalk.tools/voice/practice/tone.wav</Play>" in body, f"round {number}: {body}")
         phrase = d1_local(f"SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]["phrase"]
         require(f">{phrase}</Say></Gather>" in body, f"round {number} does not say its phrase: {body}")
+        hints = re.search(r'hints="([^"]*)"', body)[1].split(",")
+        require(hints[0] == "stop" and all(word.rstrip(".").lower() in hints for word in phrase.split()
+                                           if word.lower() not in ("a", "the", "my", "your", "our", "his", "her", "me", "we", "was", "this")),
+                f"round {number} hints: {hints} for {phrase}")
         return stream[1], action[1].replace("&amp;", "&")
 
     def scored(number: int, body: str, seconds: float, first_sample: int) -> str:
@@ -1005,9 +1010,12 @@ def practice_checks(base_url: str, token: str) -> None:
         require(status == 200, f"result {number}: {status} {result}")
         return result
 
-    # Round 1: a wrong phrase is not scored, and the stream is stopped.
+    # Round 1: one wrong content word (a misheard prompt) is a wrong phrase, not scored, and the
+    # stream is stopped.
     stream, action = round_of(body, 1)
-    status, body = post(base_url, action, {**call, "SpeechResult": "hello there how are you", "Confidence": "0.9"}, token)
+    phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 1")[0]["phrase"]
+    misheard = phrase.rstrip(".").rsplit(" ", 1)[0] + " cow"
+    status, body = post(base_url, action, {**call, "SpeechResult": misheard, "Confidence": "0.9"}, token)
     require(body.startswith('<Response><Stop><Stream name="practice-round-01"/></Stop>') and "That wasn't the sentence. Here's another." in body
             and "/voice/practice/result" not in body, f"wrong phrase: {body}")
     require(stream_rejection(base_url, stream, token) == 409, "a skipped round accepted a stream")
@@ -1023,10 +1031,18 @@ def practice_checks(base_url: str, token: str) -> None:
     require("Not enough to judge. Here's another." in body, f"short speech: {body}")
     body = scored(6, body, 0.3, 8000)
     require("Not enough to judge. Here's another." in body, f"insufficient audio: {body}")
+    # "Say that again" replays the same phrase as a new take with its own stream, counting nothing;
+    # the stopped take refuses a late stream.
+    old_stream, action = round_of(body, 7)
+    phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 7")[0]["phrase"]
+    status, body = post(base_url, action, {**call, "SpeechResult": "Say that again?", "Confidence": "0.9"}, token)
+    require(body.startswith('<Response><Stop><Stream name="practice-round-07"/></Stop><Say voice="Polly.Joanna">Again.</Say>')
+            and f">{phrase}</Say></Gather>" in body and "Here's another" not in body, f"repeat: {body}")
+    _, action = round_of(body, 7, take=1)
+    require(stream_rejection(base_url, old_stream, token) == 409, "a replaced take accepted a stream")
     # A short stop returns the call to the Voice Agent and clears the rounds.
-    _, action = round_of(body, 7)
     status, body = post(base_url, action, {**call, "SpeechResult": "Stop.", "Confidence": "0.9"}, token)
-    require(body.startswith('<Response><Stop><Stream name="practice-round-07"/></Stop>') and "Practice over. Back to Dogwalk." in body
+    require(body.startswith('<Response><Stop><Stream name="practice-round-07-1"/></Stop>') and "Practice over. Back to Dogwalk." in body
             and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'), f"stop: {body}")
     require(d1_local("SELECT COUNT(*) AS n FROM practice_rounds WHERE call_sid = 'CA_PRACTICE'")[0]["n"] == 0, "rounds kept after stop")
 

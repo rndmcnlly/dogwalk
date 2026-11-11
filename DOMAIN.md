@@ -372,7 +372,16 @@ voice, such as "The golden kettle belongs in the kitchen." Nothing is remembered
 for later. Phrases use familiar syntax and concrete words, and avoid digit
 strings, tongue twisters, disturbing content, Handle words, and escape words.
 Phrase correctness and speaker similarity are separate signals, and both must
-pass. Fresh phrases defeat replayed recordings, not voice cloning. The
+pass. Correctness is deterministic and strict: every content word of the phrase
+(all but articles, possessives, and auxiliaries; prepositions count) must appear
+in the transcript, in order, with only plural inflection forgiven and extra
+words allowed between them. A mismatch, whether the caller misheard the prompt
+or the recognizer misheard the caller, is a wrong phrase: it is not scored and
+is never a voice failure. The recognizer is hinted with the phrase's words, so a
+correct repetition comes back as them while a different word still comes
+through. A caller who asks to hear the sentence again ("repeat", "say that
+again", "pardon") in a short utterance hears the same phrase again, counted as
+neither an answer nor a failure. Fresh phrases defeat replayed recordings, not voice cloning. The
 similarity threshold is configuration, not a domain rule. It starts at a cosine
 of 0.5: synthetic impostors through a telephone path scored at most 0.40, and
 the operator's own voice in an unenrolled setting (car hands-free) at least
@@ -387,7 +396,8 @@ me", "test my voice"): the Voice Agent hands the call to a deterministic,
 speech-only loop that offers fresh phrases until the caller says stop or a round
 limit is reached, then returns the call to the Voice Agent. Each round follows
 the Identity Check's rules: a transcript that does not match the phrase is not
-scored, too little speech to judge earns another phrase without counting, and a
+scored, too little speech to judge earns another phrase without counting, a
+request to hear the sentence again replays it, and a
 scored round is spoken only as a level of voice match (strong, matched, or not
 matched), never as the raw score. The levels come from configured thresholds, the
 lower one being the Identity Check's. Practice never gates entry, keeps no audio

@@ -164,13 +164,15 @@ CREATE TABLE IF NOT EXISTS call_handoffs (
 );
 
 -- Transient state of one Challenge Practice round, shared by the round's webhooks and its
--- Media Stream: the phrase, whether its transcript matched, and the verifier's result. Never
+-- Media Stream: the phrase, the current take (each replay of the phrase on request gets a new
+-- stream), whether its transcript matched, and the verifier's result. Never
 -- audio or an embedding. A round's row is deleted once its result is spoken, and every row of
 -- a call when practice ends.
 CREATE TABLE IF NOT EXISTS practice_rounds (
   call_sid TEXT NOT NULL,
   round INTEGER NOT NULL,
   phrase TEXT NOT NULL,
+  take INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL CHECK (state IN ('listening', 'scoring', 'scored', 'skipped')),
   streamed INTEGER NOT NULL DEFAULT 0,
   cosine REAL,

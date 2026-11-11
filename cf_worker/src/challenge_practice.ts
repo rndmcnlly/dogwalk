@@ -6,8 +6,9 @@
 //
 // Deterministic TwiML, no model. Each round inserts a practice_rounds row with a fresh
 // phrase, starts a caller-only Media Stream (caller_stream.ts), plays a tone, and says the
-// phrase inside a speech Gather. The Gather's action checks the transcript first: a wrong
-// phrase is not scored. A matched phrase marks the row 'scoring' and stops the stream, so the
+// phrase inside a speech Gather hinted with the phrase's words. The Gather's action checks the
+// transcript first: every content word, in order, or the round is a wrong phrase and is not
+// scored. A short "say that again" replays the phrase as a fresh take with its own stream. A matched phrase marks the row 'scoring' and stops the stream, so the
 // stream's stop event (which can only follow that response) scores the audio in memory with
 // SPEAKER and writes back only the cosine and speech seconds. The action redirects to
 // /voice/practice/result, which waits for that score and speaks a level, never the number.
@@ -15,7 +16,7 @@ import {
   acceptCallerStream, GatherSpeech, isAccountSid, originHost, roundTone, SAMPLE_RATE, saidStop, Say, speechWords, StartStream,
   StopStream, streamCapability, verifyStreamCapability,
 } from "./caller_stream";
-import { challengePhrase, phraseMatches } from "./challenge_phrases";
+import { askedToRepeat, challengePhrase, contentWords, phraseMatches } from "./challenge_phrases";
 import type { Env, SpeakerReference } from "./types";
 import { syntheticAudio } from "./voice_verify";
 
@@ -29,6 +30,8 @@ export const MIN_SPEECH_SECONDS = 2.0;
 const MAX_ROUNDS = 10;
 // Empty transcripts in a row before practice gives up and returns to the Voice Agent.
 const MAX_SILENT_ROUNDS = 2;
+// Replays of one phrase on request ("say that again") before practice moves to a fresh one.
+const MAX_REPEATS = 3;
 // A speech Gather listens for at most a minute; anything past this is a stuck stream.
 const MAX_ROUND_SECONDS = 90;
 // How long the result step waits for the verifier: Twilio gives a webhook 15 seconds, and a
@@ -45,13 +48,17 @@ type Outcome = "strong_match" | "match" | "no_match" | "not_enough_speech" | "wr
 
 interface RoundRow {
   phrase: string;
+  take: number;
   state: "listening" | "scoring" | "scored" | "skipped";
   cosine: number | null;
   speech_seconds: number | null;
   error: string | null;
 }
 
-const roundName = (round: number) => `practice-round-${String(round).padStart(2, "0")}`;
+// Each replay of a phrase is a new take with its own stream, so a stopped take's late audio
+// can never be scored for a later one.
+const roundName = (round: number, take: number) =>
+  `practice-round-${String(round).padStart(2, "0")}${take ? `-${take}` : ""}`;
 
 /** The spoken level for a scored round; the cosine itself is never spoken. */
 export function matchLevel(cosine: number): { outcome: Outcome; spoken: string } {
@@ -72,7 +79,7 @@ async function callReference(env: Env, callSid: string): Promise<SpeakerReferenc
 
 async function readRound(env: Env, callSid: string, round: number): Promise<RoundRow | null> {
   return env.DB.prepare(
-    "SELECT phrase, state, cosine, speech_seconds, error FROM practice_rounds WHERE call_sid = ? AND round = ?",
+    "SELECT phrase, take, state, cosine, speech_seconds, error FROM practice_rounds WHERE call_sid = ? AND round = ?",
   ).bind(callSid, round).first<RoundRow>();
 }
 
@@ -86,14 +93,22 @@ async function roundTwiml(env: Env, url: URL, callSid: string, round: number, ac
   const phrase = challengePhrase();
   await env.DB.prepare(
     `INSERT INTO practice_rounds (call_sid, round, phrase, state, created_at) VALUES (?, ?, ?, 'listening', unixepoch())
-     ON CONFLICT(call_sid, round) DO UPDATE SET phrase = excluded.phrase, state = 'listening', streamed = 0,
+     ON CONFLICT(call_sid, round) DO UPDATE SET phrase = excluded.phrase, take = 0, state = 'listening', streamed = 0,
        cosine = NULL, speech_seconds = NULL, error = NULL, created_at = excluded.created_at`,
   ).bind(callSid, round, phrase).run();
+  return takeTwiml(env, url, callSid, round, 0, phrase, account, silent);
+}
+
+// One take of a round: a stream, the tone, and the phrase inside a Gather hinted with its words.
+async function takeTwiml(
+  env: Env, url: URL, callSid: string, round: number, take: number, phrase: string, account: string, silent: number,
+): Promise<string> {
   const host = originHost(env, url);
-  const capability = await streamCapability(env, STREAM_PURPOSE, [callSid, String(round)], account);
-  return StartStream(roundName(round), `wss://${host}/voice/practice/stream/${capability}`, { round: String(round) }) +
+  const capability = await streamCapability(env, STREAM_PURPOSE, [callSid, String(round), String(take)], account);
+  return StartStream(roundName(round, take), `wss://${host}/voice/practice/stream/${capability}`, { round: String(round), take: String(take) }) +
     `<Play>https://${host}/voice/practice/tone.wav</Play>` +
-    GatherSpeech(phrase, `/voice/practice/heard?round=${round}&silent=${silent}`, 'speechTimeout="auto" timeout="6"');
+    GatherSpeech(phrase, `/voice/practice/heard?round=${round}&take=${take}&silent=${silent}`, 'speechTimeout="auto" timeout="6"',
+      contentWords(phrase));
 }
 
 async function nextRound(
@@ -131,11 +146,12 @@ export async function handlePracticeHeard(env: Env, url: URL, form: FormData, lo
   const callSid = String(form.get("CallSid") ?? "");
   const account = String(form.get("AccountSid") ?? "");
   const round = Number(url.searchParams.get("round"));
+  const take = Number(url.searchParams.get("take") ?? "0") || 0;
   const silent = Number(url.searchParams.get("silent") ?? "0") || 0;
   if (!CALL_SID.test(callSid) || !Number.isInteger(round) || round < 1 || round > MAX_ROUNDS) return RETURN;
-  const stop = StopStream(roundName(round));
+  const stop = StopStream(roundName(round, take));
   const row = await readRound(env, callSid, round);
-  if (!row || row.state !== "listening" || !isAccountSid(account)) {
+  if (!row || row.state !== "listening" || row.take !== take || !isAccountSid(account)) {
     return stop + await endPractice(env, callSid, log, "lost_round", round - 1, "Challenge practice stopped.");
   }
   const transcript = String(form.get("SpeechResult") ?? "");
@@ -148,6 +164,14 @@ export async function handlePracticeHeard(env: Env, url: URL, form: FormData, lo
     await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
     return stop + await nextRound(env, url, callSid, account, log, round, silent + 1, "I didn't hear the sentence.");
   }
+  // "Say that again": the same phrase in a fresh take, counted as neither a round nor a miss.
+  if (askedToRepeat(heard) && take < MAX_REPEATS) {
+    await env.DB.prepare("UPDATE practice_rounds SET take = ?, streamed = 0 WHERE call_sid = ? AND round = ? AND take = ?")
+      .bind(take + 1, callSid, round, take).run();
+    return stop + Say("Again.") + await takeTwiml(env, url, callSid, round, take + 1, row.phrase, account, silent);
+  }
+  // Every content word, in order: a misheard prompt or a misrecognized word is a wrong phrase,
+  // never a voice failure.
   if (!phraseMatches(row.phrase, transcript)) {
     await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
     await log("practice.round", { round, outcome: "wrong_phrase" satisfies Outcome });
@@ -202,19 +226,21 @@ export const practiceTone = roundTone;
  */
 export async function handlePracticeStream(req: Request, env: Env, ctx: ExecutionContext, capability: string): Promise<Response> {
   if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("expected websocket", { status: 426 });
-  const claim = await verifyStreamCapability(env, STREAM_PURPOSE, capability, 2);
-  const [callSid, roundRaw] = claim?.fields ?? [];
-  const round = Number(roundRaw);
-  if (!claim || !CALL_SID.test(callSid) || !Number.isInteger(round) || round < 1) return new Response("forbidden", { status: 403 });
+  const claim = await verifyStreamCapability(env, STREAM_PURPOSE, capability, 3);
+  const [callSid, roundRaw, takeRaw] = claim?.fields ?? [];
+  const round = Number(roundRaw), take = Number(takeRaw);
+  if (!claim || !CALL_SID.test(callSid) || !Number.isInteger(round) || round < 1 || !Number.isInteger(take) || take < 0) {
+    return new Response("forbidden", { status: 403 });
+  }
   const claimed = await env.DB.prepare(
-    "UPDATE practice_rounds SET streamed = 1 WHERE call_sid = ? AND round = ? AND state = 'listening' AND streamed = 0",
-  ).bind(callSid, round).run();
+    "UPDATE practice_rounds SET streamed = 1 WHERE call_sid = ? AND round = ? AND take = ? AND state = 'listening' AND streamed = 0",
+  ).bind(callSid, round, take).run();
   if (!claimed.meta.changes) return new Response("round not listening", { status: 409 });
 
-  return acceptCallerStream(ctx, { account: claim.account, parameters: { round: String(round) }, maxSeconds: MAX_ROUND_SECONDS },
+  return acceptCallerStream(ctx, { account: claim.account, parameters: { round: String(round), take: String(take) }, maxSeconds: MAX_ROUND_SECONDS },
     async ({ samples }) => {
       const row = await readRound(env, callSid, round);
-      if (row?.state !== "scoring") return;
+      if (row?.state !== "scoring" || row.take !== take) return;
       const reference = await callReference(env, callSid);
       let result: { cosine: number | null; speech: number | null; error: string | null };
       try {
@@ -227,7 +253,7 @@ export async function handlePracticeStream(req: Request, env: Env, ctx: Executio
       }
       await env.DB.prepare(
         `UPDATE practice_rounds SET state = 'scored', cosine = ?, speech_seconds = ?, error = ?
-          WHERE call_sid = ? AND round = ? AND state = 'scoring'`,
-      ).bind(result.cosine, result.speech, result.error, callSid, round).run();
+          WHERE call_sid = ? AND round = ? AND take = ? AND state = 'scoring'`,
+      ).bind(result.cosine, result.speech, result.error, callSid, round, take).run();
     });
 }
