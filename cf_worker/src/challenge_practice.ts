@@ -27,6 +27,13 @@ export const STRONG_MATCH_COSINE = 0.7;
 export const MATCH_COSINE = 0.5;
 /** Less speech than this in a round is not enough to judge. */
 export const MIN_SPEECH_SECONDS = 2.0;
+/**
+ * The most audio the verifier accepts (speaker_worker MAX_SECONDS). A longer round sends its
+ * last this-many seconds: the verifier still picks the most speech-active 3 s window inside
+ * what it gets, and the Gather closes on the caller's end of speech, so the tail always holds
+ * the answer while the head holds the tone and the spoken prompt.
+ */
+export const MAX_VERIFY_SECONDS = 30;
 const MAX_ROUNDS = 10;
 // Empty transcripts in a row before practice gives up and returns to the Voice Agent.
 const MAX_SILENT_ROUNDS = 2;
@@ -44,7 +51,7 @@ const CALL_SID = /^[A-Za-z0-9_]{1,64}$/;
 const RETURN = '<Redirect method="POST">/voice</Redirect>';
 
 type Log = (event: string, detail: Record<string, unknown>) => Promise<void>;
-type Outcome = "strong_match" | "match" | "no_match" | "not_enough_speech" | "wrong_phrase" | "unscored";
+type Outcome = "strong_match" | "match" | "no_match" | "not_enough_speech" | "wrong_phrase" | "silent" | "unscored";
 
 interface RoundRow {
   phrase: string;
@@ -158,6 +165,7 @@ export async function handlePracticeHeard(env: Env, url: URL, form: FormData, lo
   const heard = speechWords(transcript);
   if (saidStop(heard)) return stop + await endPractice(env, callSid, log, "stop", round - 1, "Practice over.");
   if (heard.length === 0) {
+    await log("practice.round", { round, outcome: "silent" satisfies Outcome });
     if (silent + 1 >= MAX_SILENT_ROUNDS) {
       return stop + await endPractice(env, callSid, log, "silence", round, "I didn't hear anything.");
     }
@@ -168,6 +176,7 @@ export async function handlePracticeHeard(env: Env, url: URL, form: FormData, lo
   if (askedToRepeat(heard) && take < MAX_REPEATS) {
     await env.DB.prepare("UPDATE practice_rounds SET take = ?, streamed = 0 WHERE call_sid = ? AND round = ? AND take = ?")
       .bind(take + 1, callSid, round, take).run();
+    await log("practice.repeat", { round, take: take + 1 });
     return stop + Say("Again.") + await takeTwiml(env, url, callSid, round, take + 1, row.phrase, account, silent);
   }
   // Every content word, in order: a misheard prompt or a misrecognized word is a wrong phrase,
@@ -208,7 +217,9 @@ export async function handlePracticeResult(env: Env, url: URL, form: FormData, l
     return endPractice(env, callSid, log, "verifier_error", round, "Challenge practice is not available right now.");
   }
   if (row.error || row.cosine === null || (row.speech_seconds ?? 0) < MIN_SPEECH_SECONDS) {
-    await log("practice.round", { round, outcome: "not_enough_speech" satisfies Outcome, speech_seconds: row.speech_seconds });
+    // The score is kept for calibration even though no level is spoken.
+    await log("practice.round", { round, outcome: "not_enough_speech" satisfies Outcome, cosine: row.cosine,
+      speech_seconds: row.speech_seconds, ...(row.error ? { error: row.error } : {}) });
     return nextRound(env, url, callSid, account, log, round, 0, "Not enough to judge.");
   }
   const level = matchLevel(row.cosine);
@@ -245,7 +256,9 @@ export async function handlePracticeStream(req: Request, env: Env, ctx: Executio
       let result: { cosine: number | null; speech: number | null; error: string | null };
       try {
         if (!env.SPEAKER || !reference) throw new Error("unavailable: no verifier or Voice Reference");
-        const verified = await env.SPEAKER.verify({ audio: samples.buffer as ArrayBuffer, format: "pcm_s16le", sampleRate: SAMPLE_RATE, reference });
+        const tail = samples.subarray(Math.max(0, samples.length - MAX_VERIFY_SECONDS * SAMPLE_RATE));
+        const audio = tail.buffer.slice(tail.byteOffset, tail.byteOffset + tail.byteLength) as ArrayBuffer;
+        const verified = await env.SPEAKER.verify({ audio, format: "pcm_s16le", sampleRate: SAMPLE_RATE, reference });
         result = { cosine: verified.cosineSimilarity, speech: verified.speechSeconds, error: null };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

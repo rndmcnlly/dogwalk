@@ -1031,20 +1031,33 @@ def practice_checks(base_url: str, token: str) -> None:
     require("Not enough to judge. Here's another." in body, f"short speech: {body}")
     body = scored(6, body, 0.3, 8000)
     require("Not enough to judge. Here's another." in body, f"insufficient audio: {body}")
+    # A 35 s answer is judged on its last 30 s, the verifier's maximum (the mock refuses more).
+    body = scored(7, body, 35.0, 6000)
+    require("Voice matched. Here's another." in body, f"long answer: {body}")
     # "Say that again" replays the same phrase as a new take with its own stream, counting nothing;
     # the stopped take refuses a late stream.
-    old_stream, action = round_of(body, 7)
-    phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 7")[0]["phrase"]
+    old_stream, action = round_of(body, 8)
+    phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 8")[0]["phrase"]
     status, body = post(base_url, action, {**call, "SpeechResult": "Say that again?", "Confidence": "0.9"}, token)
-    require(body.startswith('<Response><Stop><Stream name="practice-round-07"/></Stop><Say voice="Polly.Joanna">Again.</Say>')
+    require(body.startswith('<Response><Stop><Stream name="practice-round-08"/></Stop><Say voice="Polly.Joanna">Again.</Say>')
             and f">{phrase}</Say></Gather>" in body and "Here's another" not in body, f"repeat: {body}")
-    _, action = round_of(body, 7, take=1)
+    _, action = round_of(body, 8, take=1)
     require(stream_rejection(base_url, old_stream, token) == 409, "a replaced take accepted a stream")
     # A short stop returns the call to the Voice Agent and clears the rounds.
     status, body = post(base_url, action, {**call, "SpeechResult": "Stop.", "Confidence": "0.9"}, token)
-    require(body.startswith('<Response><Stop><Stream name="practice-round-07-1"/></Stop>') and "Practice over. Back to Dogwalk." in body
+    require(body.startswith('<Response><Stop><Stream name="practice-round-08-1"/></Stop>') and "Practice over. Back to Dogwalk." in body
             and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'), f"stop: {body}")
     require(d1_local("SELECT COUNT(*) AS n FROM practice_rounds WHERE call_sid = 'CA_PRACTICE'")[0]["n"] == 0, "rounds kept after stop")
+
+    # An empty transcript moves on; a second in a row ends practice. Both are logged as silent.
+    status, body = post(base_url, "/voice/practice", call, token)
+    _, action = round_of(body, 1)
+    status, body = post(base_url, action, {**call, "SpeechResult": ""}, token)
+    require("I didn't hear the sentence. Here's another." in body, f"first silence: {body}")
+    _, action = round_of(body, 2)
+    status, body = post(base_url, action, {**call, "SpeechResult": ""}, token)
+    require("I didn't hear anything. Back to Dogwalk." in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'),
+            f"second silence: {body}")
 
     # A verifier error ends practice as unavailable and returns.
     status, body = post(base_url, "/voice/practice", call, token)
@@ -1055,11 +1068,16 @@ def practice_checks(base_url: str, token: str) -> None:
     rows = d1_local("SELECT event, detail FROM call_activity WHERE call_sid = 'CA_PRACTICE' AND event LIKE 'practice.%' ORDER BY id")
     rounds = [json.loads(row["detail"]) for row in rows if row["event"] == "practice.round"]
     require([r["outcome"] for r in rounds] == ["wrong_phrase", "strong_match", "match", "no_match", "not_enough_speech",
-                                               "not_enough_speech", "unscored"], f"practice rounds: {rounds}")
+                                               "not_enough_speech", "match", "silent", "silent", "unscored"], f"practice rounds: {rounds}")
     require(rounds[1]["speech_seconds"] == 3.0 and 0.79 < rounds[1]["cosine"] < 0.82, f"scored round detail: {rounds[1]}")
+    # Too little speech keeps the verifier's score for calibration; insufficient audio has none.
+    require(rounds[4]["speech_seconds"] == 1.5 and 0.79 < rounds[4]["cosine"] < 0.82, f"short speech detail: {rounds[4]}")
+    require(rounds[5]["cosine"] is None and rounds[5]["error"] == "insufficient-audio", f"insufficient audio detail: {rounds[5]}")
+    require(rounds[6]["speech_seconds"] == 30.0, f"long answer was not trimmed to 30 s: {rounds[6]}")
     require(all("transcript" not in r and "phrase" not in r for r in rounds), "Call Activity kept practice speech")
     events = [row["event"] for row in rows]
-    require(events.count("practice.started") == 2 and events.count("practice.ended") == 2 and "practice.unavailable" in events,
+    require(events.count("practice.started") == 3 and events.count("practice.ended") == 3 and "practice.unavailable" in events
+            and events.count("practice.repeat") == 1,
             f"practice activity: {events}")
 
 

@@ -205,7 +205,8 @@ the phrase's content words as speech `hints`. A short "repeat", "say that
 again", "again", "what", or "pardon" replays the phrase as a new take (its own
 stream and capability, `practice_rounds.take`), up to three times per round,
 without counting it. A match marks the row `scoring` and stops the stream; the
-stream's stop event then sends the in-memory 8 kHz PCM to `SPEAKER.verify` and
+stream's stop event then sends the in-memory 8 kHz PCM (its last 30 s,
+`MAX_VERIFY_SECONDS`, the verifier's limit) to `SPEAKER.verify` and
 writes back only the cosine and speech seconds, while `/voice/practice/result`
 waits up to 10 seconds for them. Under 2 seconds of speech, or the verifier's
 `insufficient-audio`, earns another phrase; otherwise the caller hears "Strong
@@ -214,8 +215,11 @@ voice match." (cosine at least `STRONG_MATCH_COSINE`, 0.7), "Voice matched."
 ten rounds, two silent rounds, or a verifier error ends practice and redirects
 to `/voice`, reconnecting the Voice Agent. Audio is never written anywhere; each
 round's row is deleted once spoken, and Call Activity keeps `practice.round`
-events (`outcome`, `cosine`, `speech_seconds`) plus `practice.started`,
-`practice.ended`, and `practice.unavailable`.
+events for every round (`outcome`: `strong_match`, `match`, `no_match`,
+`not_enough_speech` with the score when the verifier gave one, `wrong_phrase`,
+`silent`, or `unscored`; `cosine` and `speech_seconds` when available) plus
+`practice.started`, `practice.repeat`, `practice.ended`, and
+`practice.unavailable`.
 
 ## Verification
 
