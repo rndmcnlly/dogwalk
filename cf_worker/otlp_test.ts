@@ -1,0 +1,162 @@
+// Synthetic OTLP projection test: node --experimental-strip-types cf_worker/otlp_test.ts [out_dir]
+// With out_dir, also writes fixture logs.json and traces.json for `otlp_send.py --file`.
+import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { logsRequest, msToNanos, projectCall, tracesRequest } from "./src/otlp.ts";
+
+const CALL_A = "CAfixture000000000000000000000000a";
+const CALL_B = "CAfixture000000000000000000000000b";
+const T0 = 1_790_000_000_000; // Synthetic epoch milliseconds.
+const LIVE = "rtc_fixture", CLOCK = "clock-1";
+let id = 0;
+const timing = (event: string, ms: number, detail: Record<string, unknown> = {}) => ({
+  id: ++id, ts: Math.floor(ms / 1000), source: "voice", event: "voice.timing",
+  detail: JSON.stringify({ ...detail, event, ts_ms: ms, clock_id: CLOCK, seq: id, live_session_id: LIVE }),
+});
+const record = (event: string, ms: number, detail: Record<string, unknown>) => ({
+  id: ++id, ts: Math.floor(ms / 1000), source: event.startsWith("acp.") ? "acp" : "voice", event,
+  detail: JSON.stringify({ ...detail, ts_ms: ms, live_session_id: LIVE }),
+});
+const twilio = (event: string, received: number, occurred: number | null, extra: Record<string, unknown> = {}) => ({
+  id: ++id, ts: Math.floor(received / 1000), source: "voice", event,
+  detail: JSON.stringify({ provider: "twilio", provider_call_sid: CALL_A, root_call_sid: CALL_A, parent_call_sid: null,
+    leg: "pstn", clock_id: "twilio", provider_event_key: "f".repeat(64), occurred_at_ms: occurred,
+    received_at_ms: received, ts_ms: received, timestamp_precision_ms: occurred === null ? null : 1000,
+    event_time_source: occurred === null ? "unknown" : "callback.Timestamp", ...extra }),
+});
+
+const SECRET = "https://example.invalid/signed?X-Amz-Signature=deadbeef";
+const turnStart = T0 + 9000;
+const rowsA = [
+  timing("live.received", T0 + 100, { type: "conversation.item.input_audio_transcription.delta",
+    content_text: "please open my repo", content_kind: "caller", start_ms: 1200, end_ms: 1900, provider_session_id: LIVE }),
+  timing("model.started", T0 + 1000, { request_id: "req-1", context_items: 4 }),
+  timing("model.headers", T0 + 1800, { request_id: "req-1", status: 200, ms: 800 }),
+  timing("model.completed", T0 + 2000, { request_id: "req-1", ms: 1000, tool_call_ids: ["call-1", "call-2"] }),
+  record("orchestrator.model", T0 + 2001, { request_id: "req-1", usage: { input_tokens: 1234, output_tokens: 56 } }),
+  timing("tool.started", T0 + 2010, { tool_call_id: "call-1", name: "send_prompt" }),
+  timing("tool.completed", T0 + 2500, { tool_call_id: "call-1", name: "send_prompt", ms: 490 }),
+  timing("tool.started", T0 + 2020, { tool_call_id: "call-2", name: "say" }), // Never completes.
+  timing("model.started", T0 + 3000, { request_id: "req-2" }),
+  timing("model.failed", T0 + 3500, { request_id: "req-2", ms: 500 }),
+  // Same rpc_id on two Agent Connections must not cross-match.
+  timing("acp.sent", T0 + 4000, { rpc_id: 7, method: "session/prompt", session_id: "ses_1", agent_connection_id: "conn-a",
+    content_text: "do the thing", content_kind: "acp_prompt" }),
+  timing("acp.sent", T0 + 4100, { rpc_id: 7, method: "session/prompt", session_id: "ses_2", agent_connection_id: "conn-b" }),
+  timing("acp.received", T0 + 4300, { rpc_id: 7, agent_connection_id: "conn-b", error: false }),
+  timing("acp.received", T0 + 4600, { rpc_id: 7, agent_connection_id: "conn-a", error: true }),
+  // Legacy rows without connection identity stay logs.
+  timing("acp.sent", T0 + 4700, { rpc_id: 8, method: "session/cancel" }),
+  timing("acp.received", T0 + 4800, { rpc_id: 8 }),
+  timing("acp.received", T0 + 4900, { method: "session/update", session_id: "ses_1", update: "agent_message_chunk",
+    content_text: "I changed three files", content_kind: "agent_report", agent_connection_id: "conn-a" }),
+  record("acp.turn.started", turnStart, { alias: "biscuit", acp_session_id: "ses_1", started_ms: turnStart }),
+  record("orchestrator.failed", T0 + 9500, { message: `fetch ${SECRET} failed` }),
+  { id: ++id, ts: Math.floor((T0 + 9600) / 1000), source: "voice", event: "call.connected", detail: JSON.stringify({ alias: "biscuit" }) }, // Second-only legacy.
+  twilio("provider.twilio.callback.ringing", T0 + 400, null, { status: "ringing" }), // Missing occurrence.
+  twilio("provider.twilio.callback.completed", T0 + 60_000, T0 + 58_000, { status: "completed" }), // Whole-second.
+  twilio("provider.twilio.callback.in-progress", T0 + 1000, T0 + 1600, { status: "in-progress" }), // Negative lag.
+  twilio("provider.twilio.webhook.exchange", T0 + 20 * 60_000, T0 + 500, { method: "POST", request_path: "/voice",
+    response_code: 200, request_duration_ms: 87 }), // Late backfill, earlier event time, later row id.
+];
+const rowsB = [
+  record("acp.turn.stopped", turnStart + 120_000, { alias: "biscuit", acp_session_id: "ses_1", started_ms: turnStart,
+    ended_ms: turnStart + 120_000, ms: 120_000, stop_reason: "end_turn", thoughts: { chunks: 3, chars: 90, tail: "secret thought" } }),
+];
+
+const a = await projectCall({ call_sid: CALL_A, started_at: Math.floor(T0 / 1000), ended_at: Math.floor(T0 / 1000) + 60, status: "completed" }, rowsA);
+const b = await projectCall({ call_sid: CALL_B, started_at: Math.floor(T0 / 1000) + 100, ended_at: null, status: "in-progress" }, rowsB);
+
+const attr = (x: { attributes: { key: string; value: any }[] }, key: string) => {
+  const v = x.attributes.find((kv) => kv.key === key)?.value;
+  return v === undefined ? undefined : v.stringValue ?? v.boolValue ?? v.intValue ?? v.doubleValue ?? v.arrayValue;
+};
+const logFor = (p: typeof a, rowId: number) => p.logs.find((l) => l.rowId === rowId)!;
+const spanNamed = (p: typeof a, name: string) => p.spans.filter((s) => s.name === name);
+
+// Nanoseconds are exact BigInt strings.
+assert.equal(msToNanos(T0 + 1), "1790000000001000000");
+assert.equal(msToNanos(0), null);
+assert.equal(msToNanos(1.5), null);
+
+// Every row is a log; insertion order is preserved for paging.
+assert.equal(a.logs.length, rowsA.length);
+assert.deepEqual(a.logs.map((l) => l.rowId), rowsA.map((r) => r.id));
+
+// Source versus observed time.
+const missing = logFor(a, rowsA[20].id);
+assert.equal(missing.timeUnixNano, undefined, "unknown provider occurrence time is omitted");
+assert.equal(missing.observedTimeUnixNano, msToNanos(T0 + 400));
+assert.equal(attr(missing, "dogwalk.timestamp.source"), "unknown");
+const whole = logFor(a, rowsA[21].id);
+assert.equal(whole.timeUnixNano, msToNanos(T0 + 58_000));
+assert.equal(attr(whole, "dogwalk.timestamp.precision_ms"), "1000");
+const negative = logFor(a, rowsA[22].id);
+assert.ok(BigInt(negative.timeUnixNano!) > BigInt(negative.observedTimeUnixNano), "negative lag kept, not calibrated");
+const late = logFor(a, rowsA[23].id);
+assert.ok(BigInt(late.timeUnixNano!) < BigInt(logFor(a, rowsA[1].id).observedTimeUnixNano), "backfill keeps earlier event time");
+assert.equal(late.rowId, rowsA[23].id, "backfill keeps its later insertion cursor");
+const legacy = logFor(a, rowsA[19].id);
+assert.equal(attr(legacy, "dogwalk.timestamp.precision_ms"), "1000");
+assert.equal(attr(legacy, "dogwalk.timestamp.source"), "worker.journal_seconds");
+
+// Spans: model OK, model failed, tool status unset, open tool not a span.
+const call = spanNamed(a, "voice_call")[0];
+assert.ok(call && spanNamed(b, "voice_call").length === 0, "live call gets no completed call span");
+const models = spanNamed(a, "orchestrator.model_request");
+assert.deepEqual(models.map((s) => s.status.code), [1, 2]);
+assert.equal(models[0].events?.[0].name, "model.headers");
+assert.equal(attr(models[0].events![0], "http.response.status_code"), "200");
+assert.ok(models.every((s) => s.parentSpanId === call.spanId && s.traceId === call.traceId));
+const tools = spanNamed(a, "orchestrator.tool");
+assert.equal(tools.length, 1, "tool without completion is not a span");
+assert.equal(tools[0].status.code, 0, "finally-completion does not imply success");
+assert.equal(tools[0].links?.[0].spanId, models[0].spanId, "tool links to the model response that requested it");
+assert.equal(attr(logFor(a, rowsA[7].id), "dogwalk.interval.state"), "end_not_observed");
+
+// RPC roundtrips are scoped by Agent Connection.
+const rpcs = spanNamed(a, "acp session/prompt");
+assert.equal(rpcs.length, 2);
+const byConn = Object.fromEntries(rpcs.map((s) => [attr(s, "dogwalk.agent_connection.id"), s]));
+assert.equal(byConn["conn-a"].endTimeUnixNano, msToNanos(T0 + 4600));
+assert.equal(byConn["conn-a"].status.code, 2);
+assert.equal(byConn["conn-b"].endTimeUnixNano, msToNanos(T0 + 4300));
+assert.equal(spanNamed(a, "acp session/cancel").length, 0, "legacy rows without connection identity stay logs");
+
+// Prompt Turn begun in Call A, ended in Call B: same deterministic identity, never fabricated.
+assert.equal(spanNamed(a, "acp.prompt_turn").length, 0);
+assert.equal(attr(logFor(a, rowsA[17].id), "dogwalk.interval.state"), "end_not_observed");
+assert.equal(attr(logFor(b, rowsB[0].id), "dogwalk.interval.state"), "start_not_observed");
+const crossCall = await projectCall({ call_sid: CALL_A, started_at: Math.floor(T0 / 1000), ended_at: Math.floor(T0 / 1000) + 60,
+  status: "completed" }, [...rowsA, ...rowsB]);
+const turn = spanNamed(crossCall, "acp.prompt_turn")[0];
+assert.ok(turn && turn.traceId !== call.traceId, "Prompt Turn is its own work trace");
+assert.equal(turn.links?.[0].spanId, call.spanId, "linked to the initiating call, not parented by it");
+assert.equal(turn.status.code, 1);
+assert.equal(turn.startTimeUnixNano, msToNanos(turnStart));
+
+// Deterministic IDs and valid lengths.
+const again = await projectCall({ call_sid: CALL_A, started_at: Math.floor(T0 / 1000), ended_at: Math.floor(T0 / 1000) + 60, status: "completed" }, rowsA);
+assert.deepEqual(again.spans.map((s) => s.spanId), a.spans.map((s) => s.spanId));
+for (const s of a.spans) {
+  assert.match(s.traceId, /^[0-9a-f]{32}$/); assert.match(s.spanId, /^[0-9a-f]{16}$/);
+  assert.notEqual(s.traceId, "0".repeat(32)); assert.equal(attr(s, "dogwalk.reconstructed"), true);
+}
+
+// Metadata only: no content, alias, error text, thought tail, or signed URL anywhere.
+const exported = JSON.stringify([logsRequest(a.logs), tracesRequest(a.spans), logsRequest(b.logs), tracesRequest(b.spans)]);
+for (const leak of ["please open my repo", "do the thing", "I changed three files", "biscuit", "secret thought", "X-Amz-Signature", "rowId"]) {
+  assert.ok(!exported.includes(leak), `export leaked ${leak}`);
+}
+assert.ok(logFor(a, rowsA[0].id).droppedAttributesCount! >= 1, "dropped content is counted");
+assert.equal(attr(logFor(a, rowsA[0].id), "dogwalk.content.kind"), "caller");
+
+const out = process.argv[2];
+if (out) {
+  mkdirSync(out, { recursive: true });
+  writeFileSync(join(out, "logs.json"), JSON.stringify(logsRequest([...crossCall.logs])));
+  writeFileSync(join(out, "traces.json"), JSON.stringify(tracesRequest(crossCall.spans)));
+  console.log(`wrote ${out}/logs.json and ${out}/traces.json`);
+}
+console.log("otlp projection: ok");

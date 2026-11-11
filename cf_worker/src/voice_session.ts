@@ -819,6 +819,8 @@ export class VoiceSession {
   private feedTimer: ReturnType<typeof setTimeout> | null = null;
   private boardDraws: Promise<void> = Promise.resolve();
   private rpcId = 1;
+  // Agent Connection identity for telemetry: JSON-RPC IDs repeat across reconnects.
+  private acpConnectionId: string | null = null;
   private pendingRpc = new Map<string | number, PendingRpc>();
   private sessions = new Map<string, ManagedSession>();
   // agent_thought_chunk traffic per session's current turn, recorded at its end and otherwise
@@ -1167,12 +1169,14 @@ export class VoiceSession {
     if (this.acpReady && this.acp?.readyState === WebSocket.OPEN) return;
     if (!this.sandboxId) throw new Error("sandbox ID is unavailable");
     const acp = await this.openAcpSocket(this.sandboxId);
+    const connectionId = crypto.randomUUID();
     this.acp = acp;
+    this.acpConnectionId = connectionId;
     acp.accept();
     acp.addEventListener("message", (event) => {
       const receivedMs = Date.now();
       this.acpMessageChain = this.acpMessageChain
-        .then(() => this.handleAcpMessage(event, receivedMs))
+        .then(() => this.handleAcpMessage(event, receivedMs, connectionId))
         .catch((error) => this.record("acp.message.failed", { message: errorMessage(error) }));
     });
     acp.addEventListener("close", (event) => {
@@ -3566,7 +3570,7 @@ export class VoiceSession {
     return { ok: true, alias: session.alias, selected_option_id: optionId };
   }
 
-  private async handleAcpMessage(event: MessageEvent, receivedMs = Date.now()): Promise<void> {
+  private async handleAcpMessage(event: MessageEvent, receivedMs = Date.now(), connectionId: string | null = null): Promise<void> {
     if (typeof event.data !== "string") return;
     let message: JsonRpcMessage;
     try {
@@ -3576,7 +3580,7 @@ export class VoiceSession {
     }
     const update = message.params?.update as { sessionUpdate?: unknown; content?: { type?: unknown; text?: unknown } } | undefined;
     this.timing("acp.received", {
-      rpc_id: message.id, method: message.method,
+      rpc_id: message.id, method: message.method, agent_connection_id: connectionId,
       session_id: message.params?.sessionId,
       update: (message.params?.update as { sessionUpdate?: unknown } | undefined)?.sessionUpdate,
       tool_call_id: (message.params?.update as { toolCallId?: unknown } | undefined)?.toolCallId,
@@ -3922,6 +3926,7 @@ export class VoiceSession {
       ? rpc.params.prompt.filter((block: any) => block?.type === "text" && typeof block.text === "string")
         .map((block: any) => block.text).join("\n") : undefined;
     this.timing("acp.sent", { rpc_id: rpc.id, method: rpc.method, session_id: rpc.params?.sessionId,
+      agent_connection_id: this.acpConnectionId,
       ...(prompt !== undefined ? { content_text: prompt, content_kind: "acp_prompt" } : {}) });
   }
 

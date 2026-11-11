@@ -10,6 +10,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { ADMIN_HTML } from "./admin";
 import { OPERATOR_TIMING_HTML } from "./operator_timing";
 import { operatorCallContent } from "./operator_content";
+import { type ActivityRow, type CallRow, logsRequest, projectCall, tracesRequest } from "./otlp";
 import { observeTwilio, processTwilioJobs } from "./provider_timing";
 import { LANDING_HTML } from "./landing";
 import { PAIR_HTML } from "./pair_page";
@@ -522,9 +523,9 @@ function constantTimeEqual(left: string, right: string): boolean {
   return difference === 0;
 }
 
-const jsonResponse = (value: unknown, status = 200) => new Response(JSON.stringify(value), {
+const jsonResponse = (value: unknown, status = 200, extra: Record<string, string> = {}) => new Response(JSON.stringify(value), {
   status,
-  headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+  headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extra },
 });
 
 async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<string, unknown>> {
@@ -678,6 +679,39 @@ function diagnosticsEvents(env: Env, verbose: boolean): Response {
   });
 }
 
+// Bounds for the operator OTLP export. Spans are matched across the whole call (up to the
+// cap), so a log page and the trace body agree on trace and span IDs.
+const OTLP_MAX_ROWS = 20_000;
+const OTLP_LOG_PAGE = 500;
+
+/**
+ * Metadata-only OTLP/JSON bodies, ready to POST unchanged to a receiver's /v1/logs or
+ * /v1/traces. Paging and truncation travel in headers so the body stays pure OTLP.
+ */
+async function otlpExport(env: Env, params: URLSearchParams, signal: "logs" | "traces"): Promise<Response> {
+  const callSid = params.get("call_sid") ?? "";
+  const rawAfter = params.get("after") ?? "0";
+  const after = Number(rawAfter);
+  if (!/^CA[\w-]{1,78}$/.test(callSid) || !/^\d+$/.test(rawAfter) || !Number.isSafeInteger(after)) {
+    return jsonResponse({ error: "valid call_sid and nonnegative integer after are required" }, 400);
+  }
+  const call = await env.DB.prepare("SELECT call_sid, status, started_at, ended_at FROM voice_calls WHERE call_sid = ?")
+    .bind(callSid).first<CallRow>();
+  if (!call) return jsonResponse({ error: "unknown call" }, 404);
+  const rows = await env.DB.prepare(
+    "SELECT id, ts, source, event, detail FROM call_activity WHERE call_sid = ? ORDER BY id LIMIT ?",
+  ).bind(callSid, OTLP_MAX_ROWS + 1).all<ActivityRow>();
+  const truncated = rows.results.length > OTLP_MAX_ROWS;
+  const { logs, spans } = await projectCall(call, rows.results.slice(0, OTLP_MAX_ROWS));
+  const headers: Record<string, string> = { "cache-control": "no-store", "x-dogwalk-truncated": String(truncated) };
+  if (signal === "traces") return jsonResponse(tracesRequest(spans), 200, headers);
+  const page = logs.filter((log) => log.rowId > after).slice(0, OTLP_LOG_PAGE);
+  const remaining = logs.filter((log) => log.rowId > after).length > page.length;
+  headers["x-dogwalk-cursor"] = String(page.at(-1)?.rowId ?? after);
+  headers["x-dogwalk-has-more"] = String(remaining);
+  return jsonResponse(logsRequest(page), 200, headers);
+}
+
 async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Response> {
   if (!(await adminAuthorized(req, env))) {
     const headers: Record<string, string> = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
@@ -706,6 +740,9 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
     } catch {
       return jsonResponse({ error: "saved content is temporarily unavailable" }, 503);
     }
+  }
+  if (pathname === "/admin/api/otlp/v1/logs" || pathname === "/admin/api/otlp/v1/traces") {
+    return otlpExport(env, new URL(req.url).searchParams, pathname.endsWith("/logs") ? "logs" : "traces");
   }
   if (pathname === "/admin/api/timing") {
     const params = new URL(req.url).searchParams;

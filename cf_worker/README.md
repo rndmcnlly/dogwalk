@@ -534,6 +534,29 @@ exact timing correlations. Retention/compaction may leave gaps, which the page
 reports rather than inventing content or timestamps. New calls also retain
 bounded content at the instrumented boundaries; truncation is explicitly marked.
 
+### OpenTelemetry export (issue #4, Phase 1)
+
+`src/otlp.ts` projects one call's journal into standard OTLP/JSON, metadata only.
+`GET /admin/api/otlp/v1/logs?call_sid=CA...&after=0` returns an
+`ExportLogsServiceRequest` (every journal row is one LogRecord, 500 per page; paging
+travels in `x-dogwalk-cursor` / `x-dogwalk-has-more` so the body stays pure OTLP).
+`GET /admin/api/otlp/v1/traces?call_sid=CA...` returns an `ExportTraceServiceRequest`
+of reconstructed spans: the ended Voice Call, Orchestrator model requests and tools,
+Prompt Turns (their own trace, linked to the call), and ACP RPC roundtrips matched
+within one Agent Connection. Both use the operator gate and cap a call at 20,000 rows
+(`x-dogwalk-truncated`). Provider occurrence time maps to `timeUnixNano` only when
+known; receipt is `observedTimeUnixNano`. Unmatched starts and ends stay logs marked
+`dogwalk.interval.state`. Attributes come from a server-side allowlist: content,
+Aliases, error strings, and thought tails are dropped and counted in
+`droppedAttributesCount`, whatever the page's Show content setting.
+
+`uv run --script otlp_send.py CA...` fetches both and POSTs them unchanged to an
+OTLP/HTTP receiver (default `http://localhost:4318`), honouring partial success and
+retrying 429/502/503/504. `--file DIR` sends synthetic fixtures written by
+`node --experimental-strip-types cf_worker/otlp_test.ts DIR`, which also checks the
+projection's provenance, matching, and redaction rules. A stock `otelcol-contrib`
+with the `debug` exporter is enough to verify ingestion; no Collector is deployed.
+
 Browser regression checks use synthetic events and mocked API requests only:
 `uv run --script cf_worker/operator_timing_test.py` (requires local Google Chrome).
 They cover incremental pagination, timing spans, packet-noise reduction, safe
