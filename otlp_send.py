@@ -8,6 +8,7 @@
     uv run --script otlp_send.py CAxxxxxxxx --save /tmp/otlp   # also keep the fetched bodies locally
     uv run --script otlp_send.py --file /tmp/dogwalk-otlp-fixture   # POST synthetic fixture bodies
     uv run --script otlp_send.py ... --endpoint http://localhost:4318
+    uv run --script otlp_send.py ... --signals traces                 # traces-only receivers (Jaeger)
 
 The Worker builds the bodies (cf_worker/src/otlp.ts); this script is only transport. It posts
 them unchanged to /v1/logs and /v1/traces, honours OTLP partial success, and retries
@@ -97,6 +98,7 @@ def main() -> None:
     parser.add_argument("--file", type=pathlib.Path, help="directory holding logs.json and traces.json")
     parser.add_argument("--save", type=pathlib.Path, help="write fetched bodies here")
     parser.add_argument("--endpoint", default="http://localhost:4318")
+    parser.add_argument("--signals", default="logs,traces", help="comma-separated subset of logs,traces")
     args = parser.parse_args()
     if bool(args.call_sid) == bool(args.file):
         parser.error("give exactly one of CALL_SID or --file")
@@ -110,11 +112,14 @@ def main() -> None:
             for i, page in enumerate(log_pages):
                 (args.save / f"logs-{i:03}.json").write_text(json.dumps(page))
             (args.save / "traces.json").write_text(json.dumps(traces))
+    signals = set(args.signals.split(","))
+    if not signals or signals - {"logs", "traces"}:
+        parser.error("--signals takes logs, traces, or both")
     sent = rejected = 0
-    for page in log_pages:
+    for page in log_pages if "logs" in signals else []:
         sent += count(page, "logs")
         rejected += post(args.endpoint, "logs", page)
-    spans = count(traces, "traces")
+    spans = count(traces, "traces") if "traces" in signals else 0
     rejected_spans = post(args.endpoint, "traces", traces) if spans else 0
     print(f"logs: {sent} sent, {rejected} rejected · spans: {spans} sent, {rejected_spans} rejected")
 

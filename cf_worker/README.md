@@ -617,6 +617,10 @@ retrying 429/502/503/504. `--file DIR` sends synthetic fixtures written by
 `node --experimental-strip-types cf_worker/otlp_test.ts DIR`, which also checks the
 projection's provenance, matching, and redaction rules. A stock `otelcol-contrib`
 with the `debug` exporter is enough to verify ingestion; no Collector is deployed.
+For a browsable waterfall, run a stock Jaeger v2 binary (it listens on `localhost:4318`
+and serves its UI on `localhost:16686`) and send with `--signals traces`, since Jaeger
+accepts traces but not logs. Jaeger 2.23.0 rendered the fixture's call and Prompt Turn
+traces, with every parent resolved and the turn linked to its call.
 
 Browser regression checks use synthetic events and mocked API requests only:
 `uv run --script cf_worker/operator_timing_test.py` (requires local Google Chrome).
