@@ -19,10 +19,18 @@ yet (see Gaps).
 ## Silent text chat (default in 0.2)
 
 Install the updated APK **over the existing app**, without uninstalling or clearing data.
-The application ID and debug signing configuration are unchanged; versionCode is now 2.
+The application ID and debug signing configuration are unchanged; versionCode is now 3.
 Existing model weights, verification markers and saved endpoint/backend choices remain.
 Android's package installer should offer **Update**. If it instead reports a signing
 conflict, stop: do not uninstall to get past it.
+
+Version 3 fixes the physical-phone tailnet fixture connection: debug builds permit
+cleartext WebSockets to the specific laptop host `100.85.3.93`, in addition to
+loopback/emulator addresses. Use `ws://100.85.3.93:8770/ws` when the fixture is running
+and Tailscale is connected. The main/release resource does not gain this exception;
+arbitrary cleartext destinations remain blocked. Production connections need `wss://`
+and the still-unimplemented authenticated app adapter. Cleartext-policy failures now
+show an actionable message without exposing endpoint URLs or tokens.
 
 1. Open the app. Opening/restoring the Activity silences any existing voice service;
    legacy `--ez start true` intents now start **text**, never voice.
