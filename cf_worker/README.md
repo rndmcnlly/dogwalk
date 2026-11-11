@@ -317,6 +317,96 @@ that window, but a completely silent long Prompt Turn could still lose its Agent
 Connection. A sandbox-initiated inbound ACP connection is the hardening path for
 strictly durable unattended turns.
 
+## Adam-only on-device trial (not deployed by this change)
+
+`GET /app/frontend` accepts an authenticated WSS frontend directly on the same
+assignment-keyed VoiceSession and real ACP Gateway used by PSTN. No relay, second
+Orchestrator, or new sandbox is created. The route wakes only the configured owner's
+existing assignment; missing Registration, missing/deleted assignment, and broken
+sandbox fail clearly. Registration/assignment must already exist. PSTN and app
+attachments are mutually exclusive (409); conflicting requests reserve before awaits
+and cannot overwrite the active call identity. Paired Browser authority is unchanged.
+
+Operator setup, **only after separate deployment approval**:
+
+1. Verify the intended existing registered owner's assignment and sandbox. Stop any
+   frontend before deployment/DO refresh. The usual deploy script can stop a sandbox:
+   do not treat this document as authorization to interrupt running work.
+2. On a trusted operator machine, generate at least 32 cryptographically random bytes,
+   encoded as unpadded base64url (43–128 characters). Retain that app token privately.
+   Compute SHA-256 of its exact ASCII bytes, no newline, as 64 lowercase hex digits.
+   Do not put the token in Git, shell arguments/history, diagnostics, QR URLs, or logs.
+3. Store **only the hash** as Worker secret `APP_FRONTEND_TOKEN_SHA256`, and the fixed
+   normalized registered phone as secret `APP_FRONTEND_OWNER_PHONE`. Set
+   `APP_FRONTEND_ENABLED="true"` in operator-controlled Worker configuration. All three
+   are required; absent/false gate returns 404. Use normal `wrangler secret put NAME`
+   interactive input, not command-line secret literals. No D1 migration is needed.
+4. Deploy the reviewed Worker and refresh its old DO code using the existing runbook,
+   taking care not to interrupt active Prompt Turns. No production changes were made
+   or credentials generated while implementing this trial.
+5. In Android Setup select **Real Orchestrator · authenticated WSS**, set
+   `wss://dogwalk.tools/app/frontend` (or the reviewed deployment origin), manually
+   paste the app token in **Replace app credential**, then Save. The blank field keeps
+   the saved value; it never reads it back. Stop/start text explicitly. The same
+   credential is AEAD-bound to the exact saved endpoint: changing endpoint requires
+   re-entering it. Android Keystore AES-GCM encrypts a private nonbackup file. No
+   admin, provider, inference, or Daytona credentials belong on the phone.
+
+Rotation/revocation: replace the server hash, or disable the gate, then deploy that
+configuration. Subsequent attachments and heartbeat requests fail. Each app attachment
+has a 60-second lease, renewed by an authenticated **new Worker HTTP request** every
+20 seconds: `POST /app/heartbeat`, `Authorization: Bearer …`, and
+`X-Dogwalk-Attachment: <ready attachment>`. It routes only to the configured owner.
+This avoids trusting a resident DO's old environment after secret rotation. No new
+heartbeat can renew after the changed configuration reaches the Worker; an existing
+socket closes within 60 seconds of its last successful renewal (plus platform event
+scheduling/deployment propagation), not instantly on `secret put`. A network outage
+also detaches. Local credential clearing is not server revocation; stop the running
+frontend too. Work continues independently of that detachment.
+
+Protocol v1 (JSON, text frames only):
+
+- Upgrade uses a Bearer **header**, HTTPS/WSS only, no query string or Basic/admin
+  authentication. The Worker ignores caller-selected identity headers. The app disables
+  redirects and never sends app auth on fixture transport or to cleartext endpoints.
+- First server message: `{v:1,type:"frontend.ready",attachment,agent_ready,lease_ms}`.
+  This means frontend accepted, **not necessarily Agent ready**. Agent changes arrive
+  wrapped as `frontend.agent_status` events (`connected`, `reconnecting`, `unavailable`).
+- Input: `{v:1,attachment,id,event}`. IDs are stable for that event, formed from a
+  private installation client ID, connection ID, and counter. `event` is an existing
+  `session.input_transcript.delta`, `session.output_transcript.delta`, or
+  `session.delegation.created` (target `client`, ID, offset). Unknown/invalid event,
+  binary frame, stale generation, oversized frame (>32,768 UTF-8 bytes), invalid
+  offsets or provenance closes the socket. Transcript deltas are at most 16,384 chars.
+- A processed event receives `{v:1,type:"frontend.accepted",attachment,id}`. Identical
+  repeats of the same ID on this live attachment receive the same acceptance without
+  processing again; reusing an ID for different content fails. The attachment is
+  limited to 4096 accepted events, then requires explicit reconnection. No process-crash
+  or cross-attachment deduplication is promised. Acceptance is not completion or consent.
+- Output: `{v:1,type:"frontend.event",attachment,id,event}` wraps existing Brief/Say/
+  guidance shapes. Each Say has its own server `id`, even with `delegation_id:null`.
+  The app binds that source to its code-owned local request, never model-generated IDs.
+- Input provenance is `delivery:"text_typed"` or `"speech_recognized"`. Output is
+  `"text_displayed"` or `"speech_played"`, with `request_id` (server source ID, null
+  only for a local reply), and `complete` boolean. Interrupted playback has `false`.
+  Text uses a point timestamp and no audio completion event. Complete receipts retire
+  only their own live request. Neither receipts nor delivery metadata resolve permissions:
+  User answers still go through Handoff, Orchestrator, and the existing ACP choices.
+
+The UI reports pending/accepted events and unknown acceptance on connection loss. Retry
+is explicit and never replays prior input. Remote work may already have executed before
+a lost ack: inspect state before repeating consequential requests. Pending remote speech
+and delivery state are process-local, not a durable inbox; reconnect drops old undelivered
+requests, and a fresh Orchestrator snapshot includes pending Permission Requests. Brief/
+Following remain background. Unsupported recording, clips, earcons, acoustic pairing,
+telephone menu/recovery, Theme/provider voice switching fail without performing them.
+
+Local verification: `node app_frontend_test.mjs` (from `cf_worker`) tests auth, fixed
+owner routing, frame validation, synchronous competition guards, real Orchestrator tool
+dispatch and ACP Permission Request/response with fake socket/model/hosting adapters,
+deduplication, receipt provenance, lease expiry, stale requests/model responses, and work
+completion after disconnect. It is not evidence of a deployed WSS connection or a phone trial.
+
 ## Paired Browser
 
 An optional, read-only second surface (`../DOMAIN.md`, Paired Browser). The

@@ -67,6 +67,11 @@ sandbox hosts are adapters, not identity authorities. Phone numbers and the
 invitation graph stay here and in the caller's Voice Session state: they never
 reach ACP Agents, Sandbox files, or hosting-provider labels.
 
+The Adam-only on-device trial adds one manually provisioned app bearer capability,
+bound by server configuration to an existing Registration and Sandbox Assignment.
+The app supplies neither identity nor sandbox selection. This is not enrollment,
+a second identity authority, or permission for the app to act as an ACP Agent.
+
 ## Context Map
 
 ```text
@@ -126,6 +131,19 @@ Displaying a request retires its pending delivery, so switching to voice does no
 it. Undisplayed requests remain pending across mode changes. Brief and Following context
 remain background, not chat turns. This optional rich-client path changes neither the
 ordinary-telephone minimum nor the read-only authority of a Paired Browser.
+
+An authenticated app attachment may supply this Voice Frontend directly to the
+existing Session Orchestrator, mutually exclusively with a PSTN frontend. Socket
+upgrade, frontend acceptance, and Agent Connection readiness are separate facts.
+Each accepted input has an attachment-local event identity; acceptance is not
+execution, completion, display, or authorization. Lost acceptance is unknown and
+is never automatically replayed on reconnect. Speech/display receipts bind by
+code to an originating request, including unsolicited requests, and preserve typed,
+recognized, displayed, and locally played provenance. Detachment discards undelivered
+attachment-local speech, but does not cancel Prompt Turns, close Managed Sessions,
+delete history, or stop the Sandbox. Process/network crashes provide no exactly-once
+guarantee. The app lacks cloud audio clips, Recordings, Pairing Tones, telephone menu,
+and provider voice switching; these are explicit adapter limitations.
 
 ### Session Orchestrator
 
@@ -816,7 +834,7 @@ The following language appears in Git history and is not canonical for productio
 - Should the Session Orchestrator ever act without a live User utterance, for example starting a follow-up Prompt Turn after a failure? That is an authorization question first, and the current answer is no.
 - Resolved: the Session Orchestrator's persistent context is compacted voluntarily into its Memory (see Memory), readable on a Paired Browser. Still open: should parts of the Memory also become notes in the Workspace, the way a coworker's notebook would be, and should a Sandbox replacement reset it?
 - When a newer Handoff arrives while work for an older one is in flight, which supersession rules belong in deterministic code rather than Orchestrator judgment?
-- The on-device Android Voice Frontend prototype (`prototypes/android_on_device_frontend`) uses the existing Handoff, brief and say shapes but has been exercised only against a fixture Orchestrator; main exposes no route for a non-PSTN Voice Frontend. What identity, authentication and capability negotiation should such a frontend use, given that it lacks audio clips, Recordings, Pairing Tones, the keypad and Theme voice switches? It delivers each request separately and retires one only by its own completed playback or text-display receipt, so without authoritative replacement metadata from the Session Orchestrator it can present obsolete progress or a withdrawn question. Should speech requests carry explicit supersedes or replaceable markers?
+- The Adam-only app adapter uses a server-bound bearer capability and explicit capability limitations, not general enrollment. Its FIFO still lacks authoritative replacement metadata within an attachment, so it can present obsolete progress or a withdrawn question. Should speech requests carry explicit supersedes or replaceable markers? A broader identity/enrollment design remains deferred, not implied by this trial.
 
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Invitations: should a successful Registration by Invitation continue straight into the new User's first call rather than hanging up? Should the Diagnostics Surface draw the invitation graph, and should an operator be able to raise or lower a User's active-Invitation limit?

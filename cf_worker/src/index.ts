@@ -25,6 +25,7 @@ import { TerminalRelay } from "./terminal_relay";
 import { INVITATION_STATUS_SQL, redemptionStatements, USABLE_FOR_PHONE_SQL } from "./invitations";
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
+import { appAuthorized } from "./app_frontend";
 export { TerminalRelay, VoiceSession };
 
 // --- env ----------------------------------------------------------------
@@ -972,6 +973,8 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
+    if (url.pathname === "/app/frontend" || url.pathname === "/app/heartbeat") return handleAppFrontend(req, env, url.pathname);
+
     if (url.pathname === "/" && req.method === "GET") {
       return new Response(LANDING_HTML, {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=300" },
@@ -1110,6 +1113,38 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
     "This is Dogwalk, a voice line for supervising coding agents. If you have an invite, say your three invite words now.",
     "/voice/claim", 1, invites.map((i) => i.code_words),
   ));
+}
+
+async function handleAppFrontend(req: Request, env: Env, path: string): Promise<Response> {
+  if (env.APP_FRONTEND_ENABLED !== "true") return new Response("not found", { status: 404 });
+  if (!await appAuthorized(req, env)) return new Response("unauthorized", { status: 401 });
+  const phone = env.APP_FRONTEND_OWNER_PHONE!;
+  if (!await isRegistered(env, phone)) return new Response("configured owner is not registered", { status: 409 });
+  // Deliberately do not call ensureSandboxAssignment/resolveSandbox: those can provision
+  // replacements. This trial may only wake an existing assignment.
+  const assignment = await getAssignment(env, phone);
+  if (!assignment?.provider_id) return new Response("configured owner has no existing sandbox", { status: 409 });
+  const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(assignment.identity_hash));
+  const headers = new Headers({ "x-dogwalk-phone": phone, "x-dogwalk-sandbox-id": assignment.provider_id,
+    "x-dogwalk-identity": assignment.identity_hash });
+  if (path === "/app/heartbeat") {
+    if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+    const attachment = req.headers.get("x-dogwalk-attachment") ?? "";
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(attachment)) return new Response("invalid attachment", { status: 400 });
+    headers.set("x-dogwalk-attachment", attachment);
+    return object.fetch("https://voice-session/app/heartbeat", { method: "POST", headers });
+  }
+  if (req.method !== "GET" || req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("websocket required", { status: 426 });
+  try {
+    const sandbox = await getDaytonaSandbox(env, assignment.provider_id);
+    if (["error", "build_failed", "destroyed"].includes(sandbox.state)) return new Response("existing sandbox unavailable", { status: 409 });
+    if (["stopped", "archived", "paused"].includes(sandbox.state)) {
+      const started = await daytonaFetch<DaytonaSandbox>(env, `/sandbox/${encodeURIComponent(sandbox.id)}/start`, { method: "POST" });
+      await updateAssignment(env, phone, started);
+    }
+  } catch { return new Response("existing sandbox unavailable; no replacement created", { status: 503 }); }
+  headers.set("upgrade", "websocket");
+  return object.fetch("https://voice-session/app/frontend", { headers });
 }
 
 async function prewarmVoiceSession(env: Env, identity: string, phone: string, sandboxId: string): Promise<void> {

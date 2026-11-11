@@ -12,9 +12,64 @@ GPT-Live cost. It does not change the ordinary-telephone path or the minimum equ
 caller needs. Explicit voice use runs in a microphone foreground service and keeps working
 with the screen locked. Optional silent text chat uses the screen and a non-microphone service.
 
-**Status: development prototype, tested only against a scripted fixture Orchestrator.**
-Main's Worker has no route that accepts this app, so it cannot reach the real Orchestrator
-yet (see Gaps).
+**Status: Adam-only authenticated real-Orchestrator adapter implemented locally, not deployed.**
+Fixture mode remains available. No production credential, live WSS session, real Sandbox
+trial or physical-phone verification is claimed. See the [operator runbook](../../cf_worker/README.md#adam-only-on-device-trial-not-deployed-by-this-change).
+
+## Adam-only trial (0.5, versionCode 5)
+
+This update preserves native UI v4, package/signing, endpoint/backend/model settings,
+existing weights and verification markers, local Gemma prompts and inference, silent
+text default and explicit voice enable. Install as an update, never uninstall to resolve
+a signing conflict. **Nothing has been deployed or installed on a phone by this change.**
+
+Setup now has an explicit **Real Orchestrator · authenticated WSS** switch (off means
+unauthenticated fixture transport). Real mode requires `wss://<reviewed-host>/app/frontend`
+and the separately provisioned app bearer token. Paste it into **Replace app credential**
+and Save. Blank keeps the saved value; Clear removes it locally. It is never read back
+into a widget, intent, timeline, diagnostic, log or backup. Built-in Android Keystore
+AES-GCM encrypts a private nonbackup file, authenticated against the exact endpoint.
+Changing endpoint requires re-entering the token. Fixture mode never loads/sends it,
+and real mode refuses cleartext, URL credentials, query strings, fragments and redirects.
+Do not use admin, provider, inference or hosting keys as the app credential.
+
+Start text explicitly. Link waits for `frontend.ready`, not just the WebSocket upgrade.
+It reports **frontend accepted** separately from **Agent connecting/connected/unavailable**.
+You may converse while the Agent starts; session tools that need it fail fast until ready.
+Permission answers remain Handoffs through the existing Orchestrator and ACP path, not
+buttons or receipt metadata that authorize tools. Brief and Following stay background.
+
+Pending and accepted network events appear in diagnostics. **Server acceptance is not
+execution, completion, display, or authorization.** A disconnect reports unacknowledged
+events as unknown and never resends them. Retry is explicit: inspect existing work before
+repeating consequential input. Old remote requests are discarded on detach, so replacement
+connections never replay stale speech; work and Permission Requests remain server-side.
+Each Say, including unsolicited ones, binds to its own server request ID for display or
+local-playback receipts. Recognized/typed/displayed/played provenance reaches the real
+Orchestrator. There is no exactly-once promise across process/network crashes and no
+durable speech inbox. FIFO within an attachment still has no supersession metadata.
+
+The app renews its server lease with an authenticated HTTPS heartbeat every 20 seconds.
+Rotation/disable prevents new attachments and heartbeats; existing sockets detach within
+60 seconds of their last successful renewal, subject to deployment propagation/platform
+scheduling. Clearing the local saved credential does not revoke a copy elsewhere or stop
+an already-running frontend. Stop it separately. App/PSTN competition fails with HTTP 409;
+neither transport steals the other's active attachment. Disconnect never cancels work,
+closes Managed Sessions, deletes history, or stops the existing Sandbox.
+
+Local verification for v5: 33 JVM tests and debug APK build pass; lint has 0 errors and
+15 warnings (English-only UI copy and conservative free-space checking). The Worker has a
+new Node fake-socket integration test exercising its actual Orchestrator loop, session
+tools and ACP Permission Request/response, plus auth/owner binding, dedupe, provenance,
+lease expiry, concurrent frontend exclusion, startup order, stale output rejection and
+work after detach. The final stable-source run passes the normal smoke, PSTN session,
+and Gateway suites. Several runs made while watched Worker sources were still being edited timed out at
+different points (invitations, a completion Say, and pairing), with mock sockets closing
+without a close frame. Verification must hold those sources fixed while Wrangler runs.
+Both v4 and v5 APKs verify with the same v2 signing certificate (fingerprint below).
+No new emulator, phone, real WSS,
+Android Keystore runtime or real-hosting test was performed for v5. Existing v4 emulator
+evidence below is historical, not evidence for this transport.
 
 ## Native conversation UI (0.4, versionCode 4)
 
@@ -62,8 +117,8 @@ color alone. Real emulator evidence and remaining test-matrix gaps are recorded 
 ## Silent text chat
 
 Install the updated APK **over the existing app**, without uninstalling or clearing data.
-The application ID and debug signing configuration are unchanged; versionCode is now 4
-(`0.4-native-conversation-dev`).
+The application ID and debug signing configuration are unchanged; versionCode is now 5
+(`0.5-operator-trial-dev`).
 Existing model weights, verification markers and saved endpoint/backend choices remain.
 Android's package installer should offer **Update**. If it instead reports a signing
 conflict, stop: do not uninstall to get past it.
@@ -72,8 +127,8 @@ Version 3 fixes the physical-phone tailnet fixture connection: debug builds perm
 cleartext WebSockets to the specific laptop host `100.85.3.93`, in addition to
 loopback/emulator addresses. Use `ws://100.85.3.93:8770/ws` when the fixture is running
 and Tailscale is connected. The main/release resource does not gain this exception;
-arbitrary cleartext destinations remain blocked. Production connections need `wss://`
-and the still-unimplemented authenticated app adapter. Cleartext-policy failures now
+arbitrary cleartext destinations remain blocked. Real connections need `wss://`
+and the authenticated app adapter described above. Cleartext-policy failures now
 show an actionable message without exposing endpoint URLs or tokens.
 
 1. Open the app. Opening/restoring the Activity silences any existing voice service;
@@ -117,7 +172,7 @@ open for active text interaction; it holds a special-use foreground service for 
 and the socket, but Android/process death loses this local history/queue. Errors are shown
 in the readiness line; your unsent draft is kept if Send is pressed before readiness. To
 change model/backend after starting, stop the frontend in Setup, then start again.
-There is still no real Orchestrator route/authentication: the configured fixture does no real work.
+Fixture mode still does no real work; real mode requires separate operator setup/deployment.
 
 ## Pieces and provenance
 
@@ -185,12 +240,19 @@ archived audio probe's bootstrapped `.tools` (this prototype never accepts SDK l
 
 ```sh
 export DOGWALK_ANDROID_TOOLS=/path/to/android_voice_probe/.tools
+export DOGWALK_ANDROID_DEBUG_KEYSTORE=/path/to/existing/android_on_device_frontend/.tools/android-user/debug.keystore
 uv run --script build.py               # unit tests, assembleDebug, lintDebug
 uv run --script fixture_orchestrator.py test   # fixture self-test
 uv run --script fixture_orchestrator.py        # FIXTURE Orchestrator on 127.0.0.1:8770
 adb reverse tcp:8770 tcp:8770          # phone or emulator reaches the fixture over USB/loopback
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+The v5 build verifies the APK certificate against native v4 and refuses installation
+on a mismatch. A fresh worktree otherwise creates a new debug key. Point
+`DOGWALK_ANDROID_DEBUG_KEYSTORE` at the existing prototype's key, never commit/copy
+it into tracked files. The expected public certificate SHA-256 is
+`770c6f0b86fa8f1de880a8f60a3f4c937733335f17e3ba8667b97bc331959b92`.
 
 The development package is `as.adamsmith.dogwalk.ondevice.dev` and coexists with the
 archived audio probe. Provision the model either with the app's pinned download button, or
@@ -317,10 +379,9 @@ This is emulated Android, **not Pixel hardware**: latency is not phone latency.
 
 ## Gaps and limits
 
-- **No route to the real Orchestrator.** Main's Worker accepts a Voice Frontend only as a
-  GPT-Live sideband; the archive's `/dev/voice-frontend` route was not ported. Adding a
-  route, plus a production identity and authentication for a non-PSTN client, needs an
-  operator decision. Operator-admin credentials must never go in the app.
+- **Real transport not deployed or live-tested.** The Adam-only `/app/frontend` route
+  requires separate deployment approval and manual credential provisioning. The archived
+  admin-plus-phone development route was not ported. No general enrollment service exists.
 - **No authoritative supersession.** FIFO speaks every request, including obsolete ones.
 - **Voice evidence above is not a Pixel test.** No physical device was attached for these checks. The GPU backend, real
   microphones, locked-screen use and battery and thermal behaviour are untested.

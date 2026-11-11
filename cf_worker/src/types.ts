@@ -1,4 +1,7 @@
 export interface Env {
+  APP_FRONTEND_ENABLED?: string;
+  APP_FRONTEND_TOKEN_SHA256?: string;
+  APP_FRONTEND_OWNER_PHONE?: string;
   DB: D1Database;
   VOICE_SESSIONS: DurableObjectNamespace;
   TERMINAL_RELAYS: DurableObjectNamespace;

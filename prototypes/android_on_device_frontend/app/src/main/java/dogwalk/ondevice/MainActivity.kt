@@ -241,18 +241,40 @@ class MainActivity : Activity() {
         if (modal) return
         modal = true
         val body = stack().apply { setPadding(dp(20), dp(8), dp(20), dp(12)) }
-        body.addView(text("Development · scripted fixture. No real coding connection or authentication adapter exists yet."))
+        body.addView(text("Development · choose isolated fixture or Adam-only real Orchestrator. Real mode requires an operator-provisioned app credential, never admin/provider keys."))
         body.addView(text("Connection", 18f))
         val endpoint = EditText(this).apply { hint = "Saved endpoint"; contentDescription = "Saved endpoint"; setText(prefs.getString("endpoint", "ws://127.0.0.1:8770/ws")); inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI }
         body.addView(endpoint)
+        val real = CheckBox(this).apply { text = "Real Orchestrator · authenticated WSS"; isChecked = prefs.getBoolean("app_real", false); minHeight = dp(48) }; body.addView(real)
+        val credential = EditText(this).apply {
+            hint = "Replace app credential (blank keeps saved)"; contentDescription = "Replace app credential"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+            isSaveEnabled = false
+        }; body.addView(credential)
+        body.addView(button("Clear saved app credential") { AppCredential(this).clear(); credential.text.clear(); sheetFeedback?.text = "Credential cleared locally. Stop frontend to detach; server rotation revokes other copies." })
         body.addView(text("Local model", 18f))
         val models = RadioGroup(this)
         ModelSpec.entries.forEach { spec -> models.addView(RadioButton(this).apply { id = View.generateViewId(); tag = spec.name; text = "${spec.label} · ${String.format(Locale.getDefault(), "%.1f", spec.bytes / 1_000_000_000.0)} GB"; minHeight = dp(48); isChecked = selected() == spec }) }
         body.addView(models)
         val gpu = CheckBox(this).apply { text = "GPU · experimental (unchecked: CPU)"; isChecked = prefs.getBoolean("gpu", false); minHeight = dp(48) }; body.addView(gpu)
         body.addView(text("Applies on next start. Stop frontend before changing model/backend. Installed is not ready: startup verifies, loads and performs a real warmup."))
-        fun save() { val name = models.findViewById<RadioButton>(models.checkedRadioButtonId).tag as String; prefs.edit().putString("endpoint", endpoint.text.toString().trim()).putString("model", name).putBoolean("gpu", gpu.isChecked).apply() }
-        body.addView(button("Save for next start", true) { save(); sheetFeedback?.text = "Saved for next start. Active model/backend unchanged."; scanInstalled() })
+        fun save(): Boolean {
+            val address = endpoint.text.toString().trim()
+            val secret = credential.text.toString().trim()
+            try {
+                val uri = java.net.URI(address)
+                require(uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null)
+                if (real.isChecked) AppCredential.requireRealEndpoint(address)
+                if (secret.isNotEmpty()) { require(real.isChecked); AppCredential(this).save(address, secret) }
+                credential.text.clear()
+                val name = models.findViewById<RadioButton>(models.checkedRadioButtonId).tag as String
+                prefs.edit().putString("endpoint", address).putString("model", name).putBoolean("gpu", gpu.isChecked).putBoolean("app_real", real.isChecked).apply()
+                return true
+            } catch (_: Exception) { credential.text.clear(); sheetFeedback?.text = "Not saved: real mode needs wss://host/app/frontend and a valid app credential. No URLs with credentials."; return false }
+        }
+        body.addView(button("Save for next start", true) { if (save()) { sheetFeedback?.text = "Saved for next start. Active model/backend unchanged."; scanInstalled() } })
         body.addView(button("Download pinned model") { if (!VoiceService.presentation.running) { save(); provision(true) } else sheetFeedback?.text = "Stop frontend first." })
         body.addView(button("Verify existing model file") { if (!VoiceService.presentation.running) { save(); provision(false) } else sheetFeedback?.text = "Stop frontend first." })
         body.addView(text("Pinned HTTPS download, about 2.6–3.7 GB. Keep this process running. No cancel button: closing Menu does not cancel; interrupted downloads resume on next attempt. Verify also accepts an adb-pushed file.", 12f))
@@ -260,7 +282,7 @@ class MainActivity : Activity() {
         body.addView(button("Stop frontend") { stopService(service(VoiceService.ACTION_TEXT)); sheetFeedback?.text = "Stopping frontend. Model files and settings retained." })
         sheetFeedback = text(if (toolBusy) "Local setup/test is running." else "No download starts until requested.").apply { accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }; body.addView(sheetFeedback)
         AlertDialog.Builder(this).setTitle("Setup and tools").setView(ScrollView(this).apply { addView(body) }).setPositiveButton("Done", null)
-            .create().apply { setOnDismissListener { modalClosed() }; show(); silenceClicks(window!!.decorView) }
+            .create().apply { setOnDismissListener { modalClosed() }; show(); window!!.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE); silenceClicks(window!!.decorView) }
     }
     private fun provision(download: Boolean) {
         if (toolBusy || VoiceService.presentation.running) { sheetFeedback?.text = "Stop frontend and wait for other tools first."; return }

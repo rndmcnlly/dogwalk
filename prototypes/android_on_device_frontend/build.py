@@ -16,6 +16,7 @@ import argparse
 import os
 from pathlib import Path
 import subprocess
+import re
 
 ROOT = Path(__file__).resolve().parent
 GRADLE_VERSION = "8.11.1"
@@ -43,6 +44,13 @@ def main():
     env["PATH"] = str(java_home / "bin") + os.pathsep + env["PATH"]
     run([gradle, "--no-daemon", "--console=plain", ":app:testDebugUnitTest", ":app:assembleDebug", ":app:lintDebug"], env)
     apk = ROOT / "app/build/outputs/apk/debug/app-debug.apk"
+    signer = sdk / "build-tools/35.0.0/apksigner"
+    verified = subprocess.check_output([str(signer), "verify", "--print-certs", str(apk)], env=env, text=True)
+    certificate = re.search(r"certificate SHA-256 digest: ([0-9a-f]+)", verified)
+    expected = "770c6f0b86fa8f1de880a8f60a3f4c937733335f17e3ba8667b97bc331959b92"
+    if not certificate or certificate[1] != expected:
+        raise SystemExit("APK signing differs from native v4. Set DOGWALK_ANDROID_DEBUG_KEYSTORE to the existing prototype debug.keystore and rebuild. Do not uninstall or install this APK.")
+    print(f"Signing certificate matches native v4: {expected}")
     print(f"\nAPK: {apk}")
     if args.install:
         run([sdk / "platform-tools/adb", "install", "-r", apk], env)

@@ -216,6 +216,9 @@ class FrontendCore {
 
     fun pendingRequests() = requests.values.filter { it.status == RequestStatus.PENDING }
 
+    /** Attachment-local delivery only: never replay old remote requests on a new link. */
+    fun detach() { epoch++; requests.clear(); playing = null; inFlight = null; pendingCaller = null; held = true }
+
     fun onSay(delegationId: String?, content: String): SpeechRequest =
         SpeechRequest("r${++requestSeq}", delegationId, content).also { requests[it.id] = it }
 

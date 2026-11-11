@@ -11,8 +11,8 @@ android {
         applicationId 'as.adamsmith.dogwalk.ondevice.dev'
         minSdk 33
         targetSdk 35
-        versionCode 4
-        versionName '0.4-native-conversation-dev'
+        versionCode 5
+        versionName '0.5-operator-trial-dev'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -20,6 +20,12 @@ android {
     }
     kotlinOptions { jvmTarget = '17' }
     buildFeatures { buildConfig true }
+    signingConfigs {
+        debug {
+            def existingKey = System.getenv('DOGWALK_ANDROID_DEBUG_KEYSTORE')
+            if (existingKey) storeFile file(existingKey)
+        }
+    }
     packaging { jniLibs { useLegacyPackaging true } }
 }
 

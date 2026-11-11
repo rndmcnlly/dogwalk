@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { APP_LEASE_MS, APP_PROTOCOL, parseAppFrame } from "./app_frontend";
 import { DEFAULT_THEME, THEMES, type Theme } from "./themes";
 import { VOICE_AGENT_SKILL_INDEX, voiceAgentSkill } from "./voice_agent_skills";
 import {
@@ -141,6 +142,7 @@ interface JsonRpcMessage {
 }
 
 interface TranscriptEntry {
+  delivery?: string;
   role: "caller" | "voice";
   text: string;
   startMs: number;
@@ -840,6 +842,15 @@ export class VoiceSession {
   private thoughts = new Map<string, { chunks: number; chars: number; tail: string }>();
   private permissions = new Map<string | number, PendingPermission>();
   private liveAttached = false;
+  private frontendAttaching = false;
+  private appFrontend = false;
+  private appStarting = false;
+  private appStartupEvents: string[] = [];
+  private appStartupMessages: unknown[] = [];
+  private appAttachment = "";
+  private appLease: ReturnType<typeof setTimeout> | null = null;
+  private appAccepted = new Map<string, string>();
+  private appRequests = new Map<string, boolean>();
   private acpReady = false;
   // Background Agent Connection: talking starts before the Sandbox is reachable.
   private acpConnecting: Promise<void> | null = null;
@@ -934,6 +945,28 @@ export class VoiceSession {
   }
 
   async fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    if (path === "/app/heartbeat") {
+      if (!this.appFrontend || !this.liveAttached || request.headers.get("x-dogwalk-attachment") !== this.appAttachment) return new Response("stale attachment", { status: 409 });
+      this.renewAppLease();
+      await this.env.DB.prepare("UPDATE voice_calls SET last_activity_at = unixepoch() WHERE call_sid = ?").bind(this.callSid).run();
+      return new Response(null, { status: 204 });
+    }
+    if (path === "/prewarm" && (this.frontendAttaching || this.liveAttached)) return new Response(null, { status: 202 });
+    if (["/app/frontend", "/prepare", "/attach"].includes(path)) {
+      if (this.frontendAttaching || this.cleaningUpVoice || (this.liveAttached &&
+        (path === "/app/frontend" || this.appFrontend || request.headers.get("x-dogwalk-live-session-id") !== this.liveSessionId))) {
+        return new Response("voice frontend already attached", { status: 409 });
+      }
+      // Reservation precedes every await and every mutation of call identity.
+      this.frontendAttaching = true;
+      try { return path === "/app/frontend" ? await this.attachAppFrontend(request) : await this.fetchInternal(request); }
+      finally { this.frontendAttaching = false; }
+    }
+    return this.fetchInternal(request);
+  }
+
+  private async fetchInternal(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/conversation") {
       // Read-only operator diagnostics; the Worker gates this behind admin auth.
@@ -1057,7 +1090,93 @@ export class VoiceSession {
     return new Response(null, { status: 204 });
   }
 
+  private renewAppLease(): void {
+    if (this.appLease) clearTimeout(this.appLease);
+    const attachment = this.appAttachment;
+    this.appLease = setTimeout(() => {
+      if (this.appFrontend && this.appAttachment === attachment) void this.cleanupVoice("app authentication lease expired");
+    }, APP_LEASE_MS);
+  }
+
+  private async attachAppFrontend(request: Request): Promise<Response> {
+    if (this.env.APP_FRONTEND_ENABLED !== "true") return new Response("not found", { status: 404 });
+    const phone = request.headers.get("x-dogwalk-phone");
+    const sandbox = request.headers.get("x-dogwalk-sandbox-id");
+    const identity = request.headers.get("x-dogwalk-identity");
+    if (!phone || !sandbox || !identity || (this.attachedSandboxId && this.attachedSandboxId !== sandbox)) return new Response("invalid existing assignment", { status: 409 });
+    const pair = new WebSocketPair();
+    const socket = pair[1];
+    const attachment = crypto.randomUUID();
+    this.resetCallState(attachment);
+    this.appFrontend = true;
+    this.appStarting = true;
+    this.appAttachment = attachment;
+    this.appAccepted.clear();
+    this.appRequests.clear();
+    this.live = socket;
+    this.phone = phone;
+    this.callSid = `APP_${attachment}`;
+    this.sandboxId = this.attachedSandboxId = sandbox;
+    this.identityHash = identity;
+    socket.accept();
+    socket.addEventListener("message", (event) => {
+      const received = Date.now();
+      this.liveMessageChain = this.liveMessageChain.then(async () => {
+        if (this.live !== socket || !this.liveAttached || this.appAttachment !== attachment) return;
+        const frame = parseAppFrame(event.data, attachment);
+        const serialized = JSON.stringify(frame.event);
+        const previous = this.appAccepted.get(frame.id);
+        if (previous !== undefined && previous !== serialized) throw new Error("event ID reused");
+        if (previous === undefined) {
+          if (this.appAccepted.size >= 4096) throw new Error("attachment event limit; reconnect explicitly");
+          const e = frame.event;
+          if (e.type === "session.output_transcript.delta" && e.request_id != null) {
+            if (!this.appRequests.has(e.request_id) || this.appRequests.get(e.request_id)) throw new Error("stale request receipt");
+            if (e.complete) this.appRequests.set(e.request_id, true);
+          }
+          if (e.type === "session.delegation.created" && this.delegations.has(e.delegation.id)) throw new Error("duplicate handoff identity");
+          await this.handleLiveMessage({ data: serialized } as MessageEvent, received);
+          if (this.live !== socket || !this.liveAttached) return;
+          this.appAccepted.set(frame.id, serialized);
+        }
+        socket.send(JSON.stringify({ v: APP_PROTOCOL, type: "frontend.accepted", attachment, id: frame.id }));
+      }).catch(async () => {
+        if (this.live !== socket) return;
+        socket.close(1008, "invalid frontend event");
+        await this.cleanupVoice("app protocol error");
+      });
+    });
+    socket.addEventListener("close", () => { if (this.live === socket) void this.cleanupVoice("app disconnected"); });
+    socket.addEventListener("error", () => { if (this.live === socket) void this.cleanupVoice("app transport error"); });
+    try {
+      await this.recoverTranscript();
+      await this.state.storage.put({ sandbox_id: sandbox, identity_hash: identity });
+      await this.env.DB.prepare("INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at) VALUES (?, ?, 'app-active', unixepoch(), unixepoch())").bind(this.callSid, phone).run();
+      this.ensureAcp();
+      await this.state.storage.setAlarm(Date.now() + KEEPALIVE_MS);
+      // No await between acceptance and enabling input: a fast client cannot lose its
+      // first frame in the gap between ready and the call_started queue reservation.
+      // No caller-ID assertion, new sandbox claim, or forced provider voice change.
+      socket.send(JSON.stringify({ v: APP_PROTOCOL, type: "frontend.ready", attachment, agent_ready: this.acpReady, lease_ms: APP_LEASE_MS }));
+      this.sendLive({ type: "session.commentary.append", delegation_id: null, content: "Dogwalk. App connected. What would you like to work on?" }, true);
+      this.agentConnecting = !this.acpReady;
+      this.liveAttached = true;
+      this.appStarting = false;
+      const started = this.orchestratorEvent(`[harness event] call_started: ${JSON.stringify({ ...this.voiceContextSnapshot(), source: "on_device_frontend", caller_id: null,
+        capabilities: { typed_input: true, recognized_speech: true, text_display: true, local_speech: true, audio_clips: false, recordings: false, telephony: false, provider_voice: false },
+        note: "App frontend: receipts mean display or local playback only, never authorization. Brief and Following are background. No cloud audio, recording, acoustic pairing, menu, provider voice or Theme switch. Existing session and Permission Request tools remain available." })}${this.agentConnecting ? `\n[harness event] agent_connecting: ${JSON.stringify({ note: ACP_STARTING_ERROR })}` : ""}\n${this.appStartupEvents.splice(0).join("\n")}`);
+      for (const message of this.appStartupMessages.splice(0)) this.sendLive(message);
+      this.renewAppLease();
+      await started;
+      return new Response(null, { status: 101, webSocket: pair[0] });
+    } catch {
+      await this.cleanupVoice("app attachment failed");
+      return new Response("app attachment failed", { status: 500 });
+    }
+  }
+
   private async connectLive(sessionId: string): Promise<void> {
+    this.appFrontend = false;
     if (!this.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not configured");
     const base = (this.env.OPENAI_LIVE_ATTACH_BASE ?? this.env.OPENAI_LIVE_API_BASE ?? "https://api.openai.com/v1/live").replace(/\/$/, "");
     const response = await fetch(`${base}/sessions/${encodeURIComponent(sessionId)}/attach`, {
@@ -1104,6 +1223,7 @@ export class VoiceSession {
         if (attempt > 1) await this.record("acp.connect.recovered", { attempt });
         if (this.liveAttached && this.agentConnecting) {
           this.agentConnecting = false;
+          if (this.appFrontend) this.sendLive({ type: "frontend.agent_status", status: "connected" });
           this.queueEarcon("agent_connected");
           await this.orchestratorEvent(`[harness event] agent_connected: ${JSON.stringify({
             managed_session_count: Array.from(this.sessions.values()).filter((item) => item.sessionState !== "closed").length,
@@ -1117,6 +1237,7 @@ export class VoiceSession {
           this.acpGaveUp = true;
           await this.record("acp.connect.failed", { attempts: attempt, message: errorMessage(error) });
           if (this.liveAttached) {
+            if (this.appFrontend) this.sendLive({ type: "frontend.agent_status", status: "unavailable" });
             await this.orchestratorEvent(`[harness event] agent_unavailable: ${JSON.stringify({ error: errorMessage(error) })}`);
           }
           return;
@@ -2568,11 +2689,11 @@ export class VoiceSession {
     if (!delta) return;
     this.feedSpeech(role, delta);
     const last = this.transcript.at(-1);
-    if (last && last.role === role) {
+    if (last && last.role === role && last.delivery === message.delivery) {
       last.text += delta;
       last.endMs = Number(message.end_ms ?? last.endMs);
     } else {
-      this.transcript.push({ role, text: delta, startMs: Number(message.start_ms ?? 0), endMs: Number(message.end_ms ?? 0) });
+      this.transcript.push({ role, text: delta, startMs: Number(message.start_ms ?? 0), endMs: Number(message.end_ms ?? 0), ...(message.delivery ? { delivery: message.delivery } : {}) });
     }
     this.transcript = this.transcript.slice(-200);
     this.scheduleTranscriptSave();
@@ -2622,7 +2743,9 @@ export class VoiceSession {
     }
     // The delegation carries no task text: the task is the transcript up to its offset.
     // Late transcript deltas for the same utterance get a short grace period.
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    const attachment = this.liveSessionId;
+    if (!this.appFrontend) await new Promise((resolve) => setTimeout(resolve, 300));
+    if (this.liveSessionId !== attachment || !this.liveAttached) return;
     const lines = this.takeTranscript(offsetMs);
     await this.record("voice.delegation.received", { delegation_id: delegationId, started_ms: startedMs, ms: Date.now() - startedMs });
     this.timing("handoff.queued", { delegation_id: delegationId,
@@ -2635,12 +2758,13 @@ export class VoiceSession {
   private takeTranscript(offsetMs = Infinity): string[] {
     const lines = this.transcript
       .filter((entry) => entry.endMs > this.transcriptCutMs && entry.startMs <= offsetMs + 1500)
-      .map((entry) => `${entry.role === "caller" ? "Caller" : "Voice"}: ${entry.text.trim()}`);
+      .map((entry) => `${entry.role === "caller" ? "Caller" : "Voice"}${entry.delivery ? ` (${entry.delivery})` : ""}: ${entry.text.trim()}`);
     this.transcriptCutMs = Math.max(this.transcriptCutMs, Math.min(offsetMs, this.transcript.at(-1)?.endMs ?? 0));
     return lines;
   }
 
   private async orchestratorEvent(text: string): Promise<void> {
+    if (this.appStarting) { this.appStartupEvents.push(text); return; }
     this.feedPush("system", text.replace(/^\[harness event\] /, ""), { lane: "event" });
     this.orchestratorQueue.push(text);
     this.timing("orchestrator.queued", { queued_events: this.orchestratorQueue.length, chars: text.length });
@@ -2659,7 +2783,10 @@ export class VoiceSession {
           this.orchestratorContext.push({ role: "user", content: this.orchestratorQueue.splice(0).join("\n") });
           await this.state.storage.put("orchestrator_queue", this.orchestratorQueue);
         }
+        const originAttachment = this.liveSessionId;
         const output = await this.orchestratorModel();
+        // Results from an ended attachment must not speak or act on its replacement.
+        if (originAttachment !== this.liveSessionId || !this.liveAttached) break;
         this.orchestratorContext.push(...output);
         const calls = output.filter((item: any) => item.type === "function_call") as Array<Record<string, any>>;
         const results = await Promise.all(calls.map((call) => this.executeOrchestratorTool(call)));
@@ -2897,6 +3024,9 @@ export class VoiceSession {
   }
 
   private async executeOrchestratorToolInner(item: Record<string, any>): Promise<unknown> {
+    if (this.appFrontend && ["start_recording", "play_audio", "pair_browser", "set_earcon_style", "set_theme", "open_recovery_menu"].includes(String(item.name))) {
+      return { ok: false, error: "Unsupported by the on-device frontend; no audio/telephony operation was performed." };
+    }
     let args: Record<string, unknown> = {};
     try {
       args = JSON.parse(String(item.arguments ?? "{}"));
@@ -3039,12 +3169,12 @@ export class VoiceSession {
         case "open_recovery_menu":
           await this.setCallHandoff("recovery");
           result = { ok: true, status: "opening recovery menu" };
-          setTimeout(() => void this.hangupLive(), 4000);
+          this.scheduleHangup();
           break;
         case "end_call":
-          await this.setCallHandoff("hangup");
+          if (!this.appFrontend) await this.setCallHandoff("hangup");
           result = { ok: true, status: "ending call" };
-          setTimeout(() => void this.hangupLive(), 4000);
+          this.scheduleHangup();
           break;
         default:
           throw new Error(`unknown tool ${String(item.name)}`);
@@ -3266,6 +3396,7 @@ export class VoiceSession {
   // Earcons queue rather than interrupt: each waits for a lull (fixtures cut off the model
   // and mute the caller), plays one at a time, and is dropped once stale.
   private queueEarcon(name: EarconName): void {
+    if (this.appFrontend) return;
     if (!this.liveAttached || this.recording || this.menu || !this.earconStyle) return;
     this.earconQueue.push({ name, queuedAt: Date.now() });
     void this.pumpEarcons();
@@ -4003,7 +4134,8 @@ export class VoiceSession {
       ...(prompt !== undefined ? { content_text: prompt, content_kind: "acp_prompt" } : {}) });
   }
 
-  private sendLive(message: unknown): void {
+  private sendLive(message: unknown, startup = false): void {
+    if (this.appStarting && !startup) { this.appStartupMessages.push(message); return; }
     if (!this.live || this.live.readyState !== WebSocket.OPEN) return;
     const outgoing = message as { type?: string; content?: unknown };
     const lane = /^session\.(thinking|commentary|instructions)\.append$/.exec(String(outgoing.type ?? ""))?.[1];
@@ -4019,7 +4151,11 @@ export class VoiceSession {
       this.heldAppends.push(message);
       return;
     }
-    this.live.send(JSON.stringify(message));
+    if (this.appFrontend) {
+      const requestId = crypto.randomUUID();
+      if (outgoing.type === "session.commentary.append") this.appRequests.set(requestId, false);
+      this.live.send(JSON.stringify({ v: APP_PROTOCOL, type: "frontend.event", attachment: this.appAttachment, id: requestId, event: message }));
+    } else this.live.send(JSON.stringify(message));
     this.timing("live.sent", {
       type: outgoing.type,
       delegation_id: (message as { delegation_id?: unknown }).delegation_id,
@@ -4029,6 +4165,7 @@ export class VoiceSession {
   }
 
   private playFixture(clip: Clip, label: string): Promise<boolean> {
+    if (this.appFrontend) return Promise.reject(new Error("audio clips are unsupported by this frontend"));
     if (!this.live || this.live.readyState !== WebSocket.OPEN || this.fixture) return Promise.resolve(false);
     return new Promise((resolve) => {
       const started = Date.now();
@@ -4167,6 +4304,7 @@ export class VoiceSession {
     // the line. Between calls the object is left free to be evicted (deploy.py relies on it).
     if (this.liveAttached) {
       this.agentConnecting = true;
+      if (this.appFrontend) this.sendLive({ type: "frontend.agent_status", status: "reconnecting" });
       await this.orchestratorEvent(`[harness event] agent_unavailable: ${JSON.stringify(sentence
         ? { reason: `${sentence} Reconnecting.`, reconnecting: true, agent_termination: termination!.reason, failed_turns: failedTurns }
         : { reason: `Agent Connection ${reason}; reconnecting`, reconnecting: true })}`);
@@ -4200,7 +4338,17 @@ export class VoiceSession {
 
   private async cleanupVoice(reason: string): Promise<void> {
     if (this.cleaningUpVoice) return;
+    if (this.appFrontend && !this.live && !this.appStarting) return;
     this.cleaningUpVoice = true;
+    if (this.appFrontend) this.liveAttached = false;
+    const startupEvents = this.appStartupEvents.splice(0);
+    this.appStarting = false;
+    this.appStartupMessages = [];
+    if (this.appLease) clearTimeout(this.appLease);
+    this.appLease = null;
+    // Agent work can finish during a failed attachment: retain its events for the
+    // next frontend, but never replay buffered speech from this attachment.
+    if (startupEvents.length) await this.orchestratorEvent(startupEvents.join("\n"));
     if (this.recording) await this.finishRecording(true, "call ended");
     this.endMenu();
     // A claim already waiting keeps its own timer; nobody is left to hear pairing_unclaimed.
@@ -4232,6 +4380,9 @@ export class VoiceSession {
     };
     await this.state.storage.put("last_call", ending);
     await this.state.storage.put("onboarded", true);
+    if (this.appFrontend && this.callSid) {
+      await this.env.DB.prepare("UPDATE voice_calls SET status = 'completed', ended_at = unixepoch(), last_activity_at = unixepoch() WHERE call_sid = ?").bind(this.callSid).run().catch(() => undefined);
+    }
     await this.orchestratorEvent(`[harness event] call_ended: ${JSON.stringify({ reason: ending.reason, error: ending.error })}`);
     this.cleaningUpVoice = false;
     // Off the critical path of both calls: the next opening is ready before anyone dials.
@@ -4255,7 +4406,13 @@ export class VoiceSession {
     this.cleaningUpVoice = false;
   }
 
+  private scheduleHangup(): void {
+    const attachment = this.liveSessionId;
+    setTimeout(() => { if (attachment && this.liveSessionId === attachment) void this.hangupLive(); }, 4000);
+  }
+
   private async hangupLive(): Promise<void> {
+    if (this.appFrontend) { await this.cleanupVoice("app frontend ended"); return; }
     if (!this.liveSessionId) return;
     const base = (this.env.OPENAI_LIVE_API_BASE ?? "https://api.openai.com/v1/live").replace(/\/$/, "");
     const response = await fetch(`${base}/sessions/${encodeURIComponent(this.liveSessionId)}/hangup`, {

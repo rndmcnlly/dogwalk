@@ -41,6 +41,7 @@ class VoiceService : Service() {
     private var recognizer: SpeechRecognizer? = null
     private var model: LocalModel? = null
     private var link: OrchestratorLink? = null
+    private var linkGeneration = 0
     private var ready = false
     private var stopped = false
     private var listening = false
@@ -111,7 +112,7 @@ class VoiceService : Service() {
         core.playing?.let { u ->
             val chars = synchronized(spokenChars) { spokenChars.remove(u.id) }
             val interrupted = core.playbackFinished(u.id, false, chars)
-            if (interrupted != null && interrupted.text.isNotEmpty()) link?.voiceHeard(interrupted.text, speechStartMs, link!!.nowMs())
+            if (interrupted != null && interrupted.text.isNotEmpty()) link?.voiceHeard(interrupted.text, speechStartMs, link!!.nowMs(), interrupted.utterance.requestId, false)
         }
         // Disable first. Late TTS/ASR/readiness callbacks cannot reopen the audio path.
         core.switchMode(InteractionMode.TEXT)
@@ -225,24 +226,29 @@ class VoiceService : Service() {
         connecting = true
         transport(LinkState.CONNECTING, "Connecting to saved endpoint")
         update("Connecting to Session Orchestrator")
+        val generation = ++linkGeneration
+        val real = getSharedPreferences("setup", MODE_PRIVATE).getBoolean("app_real", false)
         try {
-            link = OrchestratorLink(endpoint, { m -> main.post { if (!stopped) inbound(m) } }, { reason -> main.post { linkClosed(reason) } }, {
+            val credential = if (real) AppCredential(this).load(endpoint) else null
+            link = OrchestratorLink(endpoint, { m -> main.post { if (!stopped && generation == linkGeneration) inbound(m) } }, { reason -> main.post { if (generation == linkGeneration) linkClosed(reason) } }, {
             main.post {
-                if (!stopped) {
+                if (!stopped && generation == linkGeneration) {
                     ready = !core.voiceEnabled || voicePrepared
                     connected = true
                     connecting = false
-                    transport(LinkState.CONNECTED, "Connected to development link", "Socket open only. This prototype has no real coding or authentication adapter. No input automatically resent.")
+                    transport(LinkState.CONNECTED, if (real) "Real frontend accepted · Agent readiness separate" else "Fixture transport · unauthenticated", "No input automatically resent. Server acceptance is not work completion or authorization.")
                     update(if (core.voiceEnabled) "Voice ready" else "Text ready: silent")
                     notice(if (core.voiceEnabled) "Ready. Everything you say is recognized on this phone." else "Ready for typed messages. No microphone or speech output.")
                     pump()
                 }
             }
+            }, real, credential, getSharedPreferences("setup", MODE_PRIVATE).let { prefs ->
+                prefs.getString("client_id", null) ?: java.util.UUID.randomUUID().toString().also { prefs.edit().putString("client_id", it).apply() }
             }).also { it.connect() }
-        } catch (_: IllegalArgumentException) {
+        } catch (_: Exception) {
             connecting = false
-            transport(LinkState.ERROR, "Invalid connection address", "Use ws:// or wss:// in Menu.")
-            fatal("invalid Session Orchestrator address; use ws:// or wss://")
+            transport(LinkState.ERROR, "Connection configuration unavailable", "Check transport mode, WSS endpoint and saved app credential in Menu. Changing the endpoint requires replacing the credential.")
+            fatal("connection configuration unavailable; check Menu")
         }
     }
 
@@ -250,22 +256,31 @@ class VoiceService : Service() {
 
     private fun inbound(m: Inbound) {
         when (m) {
-            is Inbound.Say -> { val r = core.onSay(m.delegationId, m.content); event(EventKind.DIAGNOSTIC, "Orchestrator output queued", "One independent request awaits local phrasing and delivery.", requestId = r.id); log("SAY ${r.id} (${m.delegationId ?: "unsolicited"}): ${m.content}") }
+            is Inbound.Say -> { val r = core.onSay(m.delegationId, m.content); link?.bindRequest(r.id, m.sourceId); event(EventKind.DIAGNOSTIC, "Orchestrator output queued", "One independent request awaits local phrasing and delivery.", requestId = r.id); log("SAY ${r.id} (${m.delegationId ?: "unsolicited"}): ${m.content}") }
             is Inbound.Brief -> { core.onBrief(m.content); event(EventKind.DIAGNOSTIC, "Background context updated", "Brief / Following context is not an assistant reply or display receipt.") }
             is Inbound.Guidance -> { core.onGuidance(m.content); event(EventKind.DIAGNOSTIC, "Background guidance updated", "Not conversation output or permission authorization.") }
             is Inbound.Fixture -> { log("FIXTURE ORCHESTRATOR: ${m.description}"); notice("Connected to a test fixture, not your real sessions.") }
             is Inbound.Unsupported -> event(EventKind.DIAGNOSTIC, "Unsupported capability", "The frontend cannot handle this capability; no action was performed.")
+            is Inbound.Status -> {
+                event(EventKind.DIAGNOSTIC, m.summary)
+                if (m.summary.startsWith("Real frontend accepted") || m.summary.startsWith("Agent ")) transport(LinkState.CONNECTED, m.summary)
+            }
         }
         pump()
     }
 
     private fun linkClosed(reason: String) {
         if (stopped) return
+        linkGeneration++
+        core.detach()
+        model?.cancelCurrent()
+        tts?.stop()
+        ackPending = false
         log("LINK $reason")
         connected = false
         connecting = false
         ready = false
-        transport(LinkState.DISCONNECTED, "Connection lost · Retry when ready", "History stays in this running process. In-flight delivery is unknown. No automatic resend. Voice audio may still be active: Switch to text turns it off.")
+        transport(LinkState.DISCONNECTED, "Connection lost · Retry when ready", "$reason. History stays in this process. Pending remote speech is discarded at detachment, not replayed. No automatic resend. Switch to text turns audio off.")
         if (reason.startsWith("failed:")) presentation = presentation.copy(problem = reason)
         update("Disconnected")
     }
@@ -410,7 +425,7 @@ class VoiceService : Service() {
         val chars = synchronized(spokenChars) { spokenChars.remove(id) }
         val heard = core.playbackFinished(id, completed, chars) ?: return
         event(EventKind.ASSISTANT, heard.utterance.text, if (completed) "Playback completed callback, not proof of hearing or understanding." else "Playback interrupted. Played prefix is approximate, not acoustic evidence.", "${if (heard.utterance.requestId == null) "Local reply" else "Orchestrator request"} · playback ${if (completed) "completed" else "interrupted"}", heard.utterance.requestId)
-        if (heard.text.isNotEmpty()) link?.voiceHeard(heard.text, speechStartMs, link!!.nowMs())
+        if (heard.text.isNotEmpty()) link?.voiceHeard(heard.text, speechStartMs, link!!.nowMs(), heard.utterance.requestId, completed)
         log("PLAYBACK ${heard.utterance.id} ${if (completed) "completed" else "interrupted"}" +
             (heard.utterance.requestId?.let { " for $it" } ?: "") + (if (!completed) ", heard: \"${heard.text}\"" else ""))
         update("Waiting for recognition")
