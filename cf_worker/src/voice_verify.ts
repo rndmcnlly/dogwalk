@@ -3,6 +3,7 @@
 // User's Voice Reference; GET /admin/api/voice-verify/health warms the model on a
 // synthetic signal. Neither returns nor logs audio or embeddings, and neither
 // authorizes anything: thresholds and decisions belong to the Identity Check.
+// warmSpeaker readies the verifier when a call arrives.
 import type { Env, SpeakerAudio } from "./types";
 
 const MAX_WAV_BYTES = 1 << 20; // 30 s at 16 kHz is 960,000 bytes of samples.
@@ -60,6 +61,27 @@ export function syntheticAudio(): SpeakerAudio {
     samples[i] = Math.round(Math.max(-1, Math.min(1, 0.2 * voice * gate)) * 32767);
   }
   return { audio: samples.buffer, format: "pcm_s16le", sampleRate: rate };
+}
+
+/**
+ * Starts loading the verifier in the background when a User with a Voice Reference calls,
+ * so an Identity Challenge later in the call skips the 3–5 s model load. A verifier instance
+ * is warm only on the machine that ran it (speaker_worker/README.md, Latency), so this helps
+ * scoring that runs where the call's webhooks run. Returns nothing to await: the work goes
+ * to waitUntil and never delays TwiML, and every failure, including an unbound SPEAKER,
+ * is logged and dropped.
+ */
+export function warmSpeaker(env: Env, ctx: Pick<ExecutionContext, "waitUntil">, userId: number): void {
+  const speaker = env.SPEAKER;
+  if (!speaker) return;
+  ctx.waitUntil((async () => {
+    try {
+      const enrolled = await env.DB.prepare("SELECT 1 AS ok FROM voice_references WHERE user_id = ?").bind(userId).first();
+      if (enrolled) await speaker.warm();
+    } catch (error) {
+      console.error("speaker warm failed", error instanceof Error ? error.message : String(error));
+    }
+  })());
 }
 
 export async function handleVoiceVerify(req: Request, env: Env, url: URL, json: Json): Promise<Response> {

@@ -26,7 +26,7 @@ import { INVITATION_STATUS_SQL, redemptionStatements, USABLE_FOR_PHONE_SQL } fro
 import { availableHandles } from "./handles";
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
-import { handleVoiceVerify } from "./voice_verify";
+import { handleVoiceVerify, warmSpeaker } from "./voice_verify";
 import { handlePracticeHeard, handlePracticeResult, handlePracticeStream, practiceReceived, practiceStreamStop, practiceTone, startPractice } from "./challenge_practice";
 import { asksToDonate, donationConsent, donationTone, handleDonationConsent, handleDonationRound, handleDonationStream } from "./voice_donation";
 export { TerminalRelay, VoiceSession };
@@ -1263,6 +1263,9 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
   // here; until it exists, the Home alone admits the caller, as the phone number did before.
   const user = await homeUser(env, from);
   if (user) {
+    // The verifier's model load takes seconds; start it now, on this machine, so the
+    // Identity Challenge does not wait for it. Background only: TwiML never waits.
+    warmSpeaker(env, ctx, user.id);
     await env.DB.batch([
       env.DB.prepare("UPDATE users SET last_seen_at = unixepoch(), home_used_at = unixepoch() WHERE id = ?").bind(user.id),
       env.DB.prepare("UPDATE voice_calls SET user_id = ? WHERE call_sid = ?").bind(user.id, callSid),

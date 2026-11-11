@@ -436,11 +436,18 @@ def run_tests(
         require(DaytonaMock.preview_reads > 0, "prewarm did not reach the VoiceSession")
 
         # Re-entering /voice in the same call (as the in-call menu does) keeps the first
-        # caller-ID attestation rather than recording one without StirVerstat.
+        # caller-ID attestation rather than recording one without StirVerstat. The User now
+        # has a Voice Reference, so the call also warms the speaker verifier in the
+        # background; with no verifier running locally that fails quietly and the call dials.
+        d1_local(
+            "INSERT INTO voice_references (user_id, embedding_space, embedding, enrolled_at) "
+            f"SELECT id, 'local-test', '[]', unixepoch() FROM users WHERE home_phone = '{TEST_PHONE}'"
+        )
         status, body = post(
             base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_TEST2"}, token
         )
         require(status == 200 and "<Dial" in body, f"voice re-entry: {status} {body}")
+        d1_local(f"DELETE FROM voice_references WHERE user_id IN (SELECT id FROM users WHERE home_phone = '{TEST_PHONE}')")
 
         # A stopped Sandbox is started without waiting, and the call is dialed at once.
         time.sleep(3.1)
