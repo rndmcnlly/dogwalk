@@ -19,13 +19,14 @@ sealed interface Inbound {
 }
 
 /**
- * Transcript out, Handoffs out, context and speech requests in. The app sends only words the
- * caller said or heard; it has no session tools and sends no engineering briefs.
+ * Transcript out, Handoffs out, context and speech requests in. Input/output provenance
+ * distinguishes typed/displayed text from recognized/played speech. No session tools or briefs out.
  */
 class OrchestratorLink(
     private val endpoint: String,
     private val onMessage: (Inbound) -> Unit,
     private val onClosed: (String) -> Unit,
+    private val onOpen: () -> Unit = {},
 ) {
     private val client = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
     private var socket: WebSocket? = null
@@ -37,7 +38,7 @@ class OrchestratorLink(
 
     fun connect() {
         socket = client.newWebSocket(Request.Builder().url(endpoint).build(), object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) { open = true }
+            override fun onOpen(webSocket: WebSocket, response: Response) { open = true; onOpen() }
             override fun onMessage(webSocket: WebSocket, text: String) { parse(text)?.let(onMessage) }
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(1000, null) }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { finish("closed: $reason") }
@@ -47,8 +48,13 @@ class OrchestratorLink(
 
     private fun finish(reason: String) { if (open || socket != null) { open = false; socket = null; onClosed(reason) } }
 
-    fun callerSaid(text: String, startMs: Long, endMs: Long) =
-        send(JSONObject().put("type", "session.input_transcript.delta").put("delta", text).put("start_ms", startMs).put("end_ms", endMs))
+    fun callerSaid(text: String, startMs: Long, endMs: Long, typed: Boolean = false) =
+        send(transcript("input", text, startMs, endMs, if (typed) "text_typed" else "speech_recognized"))
+
+    // Existing transcript envelopes and clock positions, not audio durations. No spoken_chars.
+    // The app-local delivery field makes the provenance explicit to fixtures/future adapters.
+    fun textShown(u: Utterance, atMs: Long) =
+        send(transcript("output", u.text, atMs, atMs, "text_displayed"))
 
     /** Only words the caller actually heard: the full text, or the prefix before an interruption. */
     fun voiceHeard(text: String, startMs: Long, endMs: Long) =
@@ -64,6 +70,10 @@ class OrchestratorLink(
     fun close() { socket?.close(1000, "frontend stopped"); socket = null; open = false; client.dispatcher.executorService.shutdown() }
 
     companion object {
+        fun transcript(direction: String, text: String, startMs: Long, endMs: Long, delivery: String) =
+            JSONObject().put("type", "session.${direction}_transcript.delta").put("delta", text)
+                .put("start_ms", startMs).put("end_ms", endMs).put("delivery", delivery)
+
         fun parse(text: String): Inbound? {
             val m = runCatching { JSONObject(text) }.getOrNull() ?: return null
             val delegation = m.optString("delegation_id").takeIf { m.has("delegation_id") && !m.isNull("delegation_id") && it.isNotEmpty() }

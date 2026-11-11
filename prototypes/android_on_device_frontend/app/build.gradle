@@ -11,8 +11,8 @@ android {
         applicationId 'as.adamsmith.dogwalk.ondevice.dev'
         minSdk 33
         targetSdk 35
-        versionCode 1
-        versionName '0.1-dev'
+        versionCode 2
+        versionName '0.2-text-dev'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

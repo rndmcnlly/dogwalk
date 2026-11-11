@@ -34,6 +34,7 @@ class FrontendTest {
 
     @Test fun oneRequestOneJobOneReceipt() {
         val core = FrontendCore()
+        core.switchMode(InteractionMode.VOICE)
         val a = core.onSay("d1", "Fir needs permission to delete the build folder. Allow once or deny?")
         val b = core.onSay(null, "Oak finished the tests.")
         val first = core.nextJob() as PhraseJob
@@ -50,6 +51,7 @@ class FrontendTest {
 
     @Test fun interruptionKeepsTheRequestPendingWithOnlyTheHeardPrefix() {
         val core = FrontendCore()
+        core.switchMode(InteractionMode.VOICE)
         val r = core.onSay(null, "x")
         val u = core.completePhrase(core.nextJob() as PhraseJob, "Fir is asking to delete the build folder")!!
         val heard = core.playbackFinished(u.id, false, 15)!!
@@ -70,6 +72,7 @@ class FrontendTest {
 
     @Test fun localStopHoldsSpeechWithoutHandoffOrRetirement() {
         val core = FrontendCore()
+        core.switchMode(InteractionMode.VOICE)
         val r = core.onSay(null, "Oak finished.")
         core.completePhrase(core.nextJob() as PhraseJob, "Oak is done.")
         assertEquals(CallerRoute.LocalStop, core.onCaller("stop talking"))

@@ -9,12 +9,64 @@ Orchestrator and ACP Agents stay remote and unchanged. Proposal:
 
 This is a parallel path for callers with a recent smartphone, mainly to cut per-minute
 GPT-Live cost. It does not change the ordinary-telephone path or the minimum equipment a
-caller needs. Normal use runs in a microphone foreground service and keeps working with the
-screen locked; the screen is only for one-time setup and diagnostics.
+caller needs. Explicit voice use runs in a microphone foreground service and keeps working
+with the screen locked. Optional silent text chat uses the screen and a non-microphone service.
 
 **Status: development prototype, tested only against a scripted fixture Orchestrator.**
 Main's Worker has no route that accepts this app, so it cannot reach the real Orchestrator
 yet (see Gaps).
+
+## Silent text chat (default in 0.2)
+
+Install the updated APK **over the existing app**, without uninstalling or clearing data.
+The application ID and debug signing configuration are unchanged; versionCode is now 2.
+Existing model weights, verification markers and saved endpoint/backend choices remain.
+Android's package installer should offer **Update**. If it instead reports a signing
+conflict, stop: do not uninstall to get past it.
+
+1. Open the app. Opening/restoring the Activity silences any existing voice service;
+   legacy `--ez start true` intents now start **text**, never voice.
+2. Tap **Start / switch to silent text**. Wait for **Text ready: silent**. Text readiness
+   loads and warms the same local model and opens the same OrchestratorLink, but never
+   constructs TTS or a speech recognizer, requests microphone access, or checks ASR/TTS packs.
+3. Type into **Message Dogwalk**, then tap **Send** (or the keyboard's Send action).
+   User and assistant turns remain visible, including asynchronous Orchestrator replies.
+   Work, permissions, corrections and cancellations follow the same Handoff policy as voice.
+4. Setup, pinned model download/verification, endpoint, voice controls and diagnostic logs
+   are under **Setup / voice / diagnostics**. Starting voice requires the explicit
+   **Enable voice explicitly (microphone and speaker)** button and microphone permission.
+
+In text mode there are no TTS speak calls, recognizer creation/listening, microphone
+foreground-service type, or spoken startup/download/readiness/error notices. The app uses
+a silent notification channel and disables its own control click sounds. It does not touch
+system volume, output devices or phone settings. Your keyboard's own key sounds, system
+accessibility speech, and unrelated apps remain outside this app's control.
+
+Switching to text stops/shuts down TTS, cancels/destroys recognition, advances the generation
+epoch and invalidates voice callbacks. Late jobs cannot reopen audio. Already displayed
+requests do not replay on a later voice switch. A request not yet displayed remains pending.
+Each queued say gets its own phrasing job and separate chat turn; brief/Following entries
+are background only (visible in diagnostics, never assistant chat bubbles).
+
+**Text delivery semantics:** `TEXT_DISPLAYED` and `Displayed` are distinct from
+`PLAYBACK_COMPLETE` and `Heard`. Only appending the exact utterance to an active Activity
+acknowledges its code-bound source request. With the screen absent, the utterance waits;
+returning to the Activity presents it. Local model history labels typed/displayed turns
+accurately. Existing input/output transcript delta envelopes and Handoff offsets are retained,
+with an app-local `delivery` extension: `text_typed`, `text_displayed`, or
+`speech_recognized`. Text uses a single session-relative timestamp (`start_ms == end_ms`),
+not an invented audio duration; it sends no `spoken_chars` or synthetic playback callback.
+Request/utterance IDs stay code-owned in local receipts/logs. A display receipt proves
+neither reading nor understanding, just as playback proves neither understanding nor consent.
+Existing adapters that ignore `delivery` cannot distinguish text from speech: a real adapter
+must preserve that provenance before this is used beyond the fixture.
+
+Chat and pending delivery state are process-local, not a durable messenger. Keep the app
+open for active text interaction; it holds a special-use foreground service for inference
+and the socket, but Android/process death loses this local history/queue. Errors are shown
+in the readiness line; your unsent draft is kept if Send is pressed before readiness. To
+change model/backend after starting, stop the frontend in Setup, then start again.
+There is still no real Orchestrator route/authentication: the configured fixture does no real work.
 
 ## Pieces and provenance
 
@@ -30,7 +82,7 @@ Gemma checkpoints are a different format and were not used. The ML Kit Prompt AP
 was not chosen: on a Pixel 10 it serves Gemini Nano (nano-v3), and Gemma 4 through AICore is
 a Developer Preview needing enrollment. LiteRT-LM lets this app pin and verify the exact model.
 
-Readiness happens in order, and each step is spoken when it fails: offline voice selected,
+In explicitly enabled voice mode, readiness happens in order, and each step is spoken when it fails: offline voice selected,
 on-device recognizer installed, model file SHA-256 verified (hashed once, then a marker),
 engine loaded, **one real warmup generation**, Orchestrator link opened. Only then does the app
 say it is ready and start listening.
@@ -45,7 +97,7 @@ say it is ready and start listening.
   action ("started", "cancelled", "done"), becomes a Handoff. The model can add Handoffs, never
   remove one. The spoken acknowledgement is fixed text ("Let me think about that.").
 - **Transcript out, brief and say in.** The app sends `session.input_transcript.delta`,
-  `session.output_transcript.delta` (only words the caller heard) and
+  `session.output_transcript.delta` (heard words in voice mode, displayed words in text mode) and
   `session.delegation.created` (`target: client`, `offset_ms`), and receives
   `session.thinking.append` (brief), `session.commentary.append` (say) and
   `session.instructions.append`. These are the shapes main's `VoiceSession` already uses with
@@ -71,7 +123,7 @@ say it is ready and start listening.
   again, and send no Handoff. Bare "stop" with nothing to stop is a Handoff, since it may mean
   the work.
 - **No supersession.** No pending request is ever retired except by its own completed
-  playback. FIFO can therefore speak stale progress or a withdrawn question. That is known and
+  playback or explicit text-display receipt. FIFO can therefore present stale progress or a withdrawn question. That is known and
   **not production-safe**; the remote contract carries no authoritative replacement IDs, and
   small-model supersession dropped live permission questions in the archived experiments.
 
@@ -92,7 +144,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 The development package is `as.adamsmith.dogwalk.ondevice.dev` and coexists with the
 archived audio probe. Provision the model either with the app's pinned download button, or
 with `adb push gemma-4-E2B-it.litertlm /sdcard/Android/data/as.adamsmith.dogwalk.ondevice.dev/files/models/`
-followed by "Verify model file". Then grant the microphone and press Start voice, or:
+followed by "Verify model file". Text mode needs no microphone grant. Start text with:
 
 ```sh
 adb shell am start -n as.adamsmith.dogwalk.ondevice.dev/dogwalk.ondevice.MainActivity \
@@ -102,6 +154,10 @@ adb shell am start -n …/dogwalk.ondevice.MainActivity --ez stop_speaking true 
 adb logcat -s DogwalkFrontend:I
 ```
 
+For an isolated test fixture, set `DOGWALK_FIXTURE_PORT=18771` before running it and
+reverse that port on an **explicitly selected emulator** (`adb -s emulator-5558 reverse
+tcp:18771 tcp:18771`). Never reuse a fixture connection carrying another user's playtest.
+
 On the emulator, `emulator_speech.py "phrase"` synthesizes caller speech with macOS `say` and
 streams it into the emulated microphone through the emulator's authenticated gRPC
 `injectAudio` (start the emulator with `-grpc 8554 -grpc-use-token`). Debug builds also accept
@@ -109,6 +165,32 @@ streams it into the emulated microphone through the emulator's authenticated gRP
 evidence below.
 
 ## Evidence (2026-11-10 to 11)
+
+### Silent text update (2026-11-11)
+
+- 22 JVM tests pass, including 10 text-specific tests with fake audio adapters: default
+  silence, per-request receipts, unavailable display, late playback callbacks, stale model
+  jobs, mode switches without replay, latest typed intent, background context and transcript provenance.
+- API 35 ARM64 emulator `emulator-5558`, launched with `-no-audio`, existing E2B weights,
+  CPU LiteRT-LM 0.19.1, isolated loopback fixture on port 18771. `adb -s emulator-5558
+  install -r` succeeded without uninstalling and the existing 2,588,147,712-byte model remained.
+- Actual UI text entry and Send, not debug injection: greeting produced a real local
+  reply, status produced a Handoff and visible answer, and a two-say burst produced separate
+  `r3 -> u6` and `r4 -> u7` display receipts. Brief stayed background. Fixture disconnect
+  appeared as a readable error. No TTS/ASR/playback/debug-injection path appeared in app logs.
+- The final expanded run also passed with the app's `RECORD_AUDIO` permission **denied**:
+  a rebuild request, its permission question, and typed "yes allow it once" all traveled
+  through Handoffs and visible replies. The isolated fixture recorded only `text_typed`
+  and `text_displayed` deltas, with equal start/end timestamps. Build/lint pass (0 errors,
+  2 prototype warnings: Intent SAM false-positive and untranslated UI copy); fixture self-test passes.
+- Measured local generation: warmup 2292 ms, greeting decision 2820 ms, the two queued
+  phrasings 1419 and 1530 ms. These are emulator measurements, not Pixel latency.
+- `silent_text_smoke.py` reproduces UI checks against an already installed app, model and
+  isolated fixture; it accepts only an explicit emulator serial and refuses port 8770.
+  It never installs, enables voice, injects audio, or touches a physical phone.
+- Real voice-to-text audio interruption was **not** exercised: all audio tests were
+  prohibited for this update. Mode/generation/receipt behavior is covered by JVM fakes
+  and source-level gates. No physical-device install or Pixel runtime check was performed.
 
 Android Emulator, API 35 `google_apis` arm64 image on an M3 Max, 6 GB guest RAM, CPU backend.
 This is emulated Android, **not Pixel hardware**: latency is not phone latency.
@@ -145,7 +227,7 @@ This is emulated Android, **not Pixel hardware**: latency is not phone latency.
   route, plus a production identity and authentication for a non-PSTN client, needs an
   operator decision. Operator-admin credentials must never go in the app.
 - **No authoritative supersession.** FIFO speaks every request, including obsolete ones.
-- **Not tested on a Pixel.** No physical device was attached. The GPU backend, real
+- **Voice evidence above is not a Pixel test.** No physical device was attached for these checks. The GPU backend, real
   microphones, locked-screen use and battery and thermal behaviour are untested.
 - **Recognition defects seen:** "in fir" was heard as "infer" (aliases are not biased into
   recognition), and endpointing split "yes, allow it once" and "okay, go on" after the first
