@@ -204,7 +204,7 @@ wrong phrase and is not scored. Every phrase Gather (donation rounds too) passes
 the phrase's content words as speech `hints`. A short "repeat", "say that
 again", "again", "what", or "pardon" replays the phrase as a new take (its own
 stream and capability, `practice_rounds.take`), up to three times per round,
-without counting it. A captured answer, matched or a wrong phrase (never
+without counting it; a fourth request moves to a fresh phrase (`repeat_limit`). A captured answer, matched or a wrong phrase (never
 silence, "stop", or a repeat request), first plays the received cue,
 `/voice/practice/received.wav` (`answerReceivedCue` in `src/caller_stream.ts`:
 C6 for 70 ms, 30 ms of silence, G5 for 110 ms, 8 kHz mono, public and cached a
@@ -224,7 +224,7 @@ to `/voice`, reconnecting the Voice Agent. Audio is never written anywhere; each
 round's row is deleted once spoken, and Call Activity keeps `practice.round`
 events for every round (`outcome`: `strong_match`, `match`, `no_match`,
 `not_enough_speech` with the score when the verifier gave one, `wrong_phrase`,
-`silent`, or `unscored`; `cosine` and `speech_seconds` when available) plus
+`repeat_limit`, `silent`, or `unscored`; `cosine` and `speech_seconds` when available) plus
 `practice.started`, `practice.repeat`, `practice.ended`, and
 `practice.unavailable`.
 

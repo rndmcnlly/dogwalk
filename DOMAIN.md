@@ -381,7 +381,8 @@ is never a voice failure. The recognizer is hinted with the phrase's words, so a
 correct repetition comes back as them while a different word still comes
 through. A caller who asks to hear the sentence again ("repeat", "say that
 again", "pardon") in a short utterance hears the same phrase again, counted as
-neither an answer nor a failure. Every Identity Challenge has the same spoken
+neither an answer nor a failure; past a few replays the request earns a fresh
+phrase instead, still not an answer. Every Identity Challenge has the same spoken
 shape: a tone, the sentence, the caller's answer, a received cue the moment an
 answer is captured, then the verdict. The received cue (two falling blips, unlike
 the single tone) tells the caller their answer arrived, so the seconds spent

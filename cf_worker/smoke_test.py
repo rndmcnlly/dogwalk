@@ -1051,9 +1051,17 @@ def practice_checks(base_url: str, token: str) -> None:
             and f">{phrase}</Say></Gather>" in body and "Here's another" not in body and "received.wav" not in body, f"repeat: {body}")
     _, action = round_of(body, 8, take=1)
     require(stream_rejection(base_url, old_stream, token) == 409, "a replaced take accepted a stream")
+    # Past three replays a repeat request moves to a fresh phrase, still without the received cue.
+    for take in (2, 3):
+        status, body = post(base_url, action, {**call, "SpeechResult": "Again.", "Confidence": "0.9"}, token)
+        _, action = round_of(body, 8, take=take)
+    status, body = post(base_url, action, {**call, "SpeechResult": "Pardon?", "Confidence": "0.9"}, token)
+    require(body.startswith('<Response><Stop><Stream name="practice-round-08-3"/></Stop><Say voice="Polly.Joanna">No more repeats of that one. '
+                            "Here's another.</Say>") and "received.wav" not in body, f"repeat limit: {body}")
+    _, action = round_of(body, 9)
     # A short stop returns the call to the Voice Agent and clears the rounds.
     status, body = post(base_url, action, {**call, "SpeechResult": "Stop.", "Confidence": "0.9"}, token)
-    require(body.startswith('<Response><Stop><Stream name="practice-round-08-1"/></Stop>') and "Practice over. Back to Dogwalk." in body
+    require(body.startswith('<Response><Stop><Stream name="practice-round-09"/></Stop>') and "Practice over. Back to Dogwalk." in body
             and "received.wav" not in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'), f"stop: {body}")
     require(d1_local("SELECT COUNT(*) AS n FROM practice_rounds WHERE call_sid = 'CA_PRACTICE'")[0]["n"] == 0, "rounds kept after stop")
 
@@ -1084,7 +1092,7 @@ def practice_checks(base_url: str, token: str) -> None:
     rows = d1_local("SELECT event, detail FROM call_activity WHERE call_sid = 'CA_PRACTICE' AND event LIKE 'practice.%' ORDER BY id")
     rounds = [json.loads(row["detail"]) for row in rows if row["event"] == "practice.round"]
     require([r["outcome"] for r in rounds] == ["wrong_phrase", "strong_match", "match", "no_match", "not_enough_speech",
-                                               "not_enough_speech", "match", "silent", "silent", "unscored"], f"practice rounds: {rounds}")
+                                               "not_enough_speech", "match", "repeat_limit", "silent", "silent", "unscored"], f"practice rounds: {rounds}")
     require(rounds[1]["speech_seconds"] == 3.0 and 0.79 < rounds[1]["cosine"] < 0.82 and isinstance(rounds[1].get("wait_ms"), int),
             f"scored round detail: {rounds[1]}")
     # Too little speech keeps the verifier's score for calibration; insufficient audio has none.
@@ -1092,12 +1100,12 @@ def practice_checks(base_url: str, token: str) -> None:
     require(rounds[5]["cosine"] is None and rounds[5]["error"] == "insufficient-audio", f"insufficient audio detail: {rounds[5]}")
     require(rounds[6]["speech_seconds"] == 30.0, f"long answer was not trimmed to 30 s: {rounds[6]}")
     require(all("transcript" not in r and "phrase" not in r for r in rounds), "Call Activity kept practice speech")
-    # Only scored rounds count toward the round limit: four of the first practice's eight judged.
+    # Only scored rounds count toward the round limit: four of the first practice's nine judged.
     ended = [json.loads(row["detail"]) for row in rows if row["event"] == "practice.ended"]
-    require(ended[0]["reason"] == "stop" and ended[0]["judged"] == 4 and ended[0]["attempts"] == 8, f"practice.ended: {ended[0]}")
+    require(ended[0]["reason"] == "stop" and ended[0]["judged"] == 4 and ended[0]["attempts"] == 9, f"practice.ended: {ended[0]}")
     events = [row["event"] for row in rows]
     require(events.count("practice.started") == 3 and events.count("practice.ended") == 3 and "practice.unavailable" in events
-            and events.count("practice.repeat") == 1,
+            and events.count("practice.repeat") == 3,
             f"practice activity: {events}")
 
 

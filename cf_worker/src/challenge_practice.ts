@@ -65,7 +65,7 @@ const CALL_SID = /^[A-Za-z0-9_]{1,64}$/;
 const RETURN = '<Redirect method="POST">/voice</Redirect>';
 
 type Log = (event: string, detail: Record<string, unknown>) => Promise<void>;
-type Outcome = "strong_match" | "match" | "no_match" | "not_enough_speech" | "wrong_phrase" | "silent" | "unscored";
+type Outcome = "strong_match" | "match" | "no_match" | "not_enough_speech" | "wrong_phrase" | "repeat_limit" | "silent" | "unscored";
 
 interface RoundRow {
   phrase: string;
@@ -199,11 +199,17 @@ export async function handlePracticeHeard(env: Env, ctx: ExecutionContext, url: 
     return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: progress.silent + 1 }, "I didn't hear the sentence.");
   }
   // "Say that again": the same phrase in a fresh take, counted as neither a round nor a miss.
-  if (askedToRepeat(heard) && take < MAX_REPEATS) {
-    await env.DB.prepare("UPDATE practice_rounds SET take = ?, streamed = 0 WHERE call_sid = ? AND round = ? AND take = ?")
-      .bind(take + 1, callSid, round, take).run();
-    await log("practice.repeat", { round, take: take + 1 });
-    return stop + Say("Again.") + await takeTwiml(env, ctx, url, callSid, round, take + 1, row.phrase, account, progress);
+  if (askedToRepeat(heard)) {
+    if (take < MAX_REPEATS) {
+      await env.DB.prepare("UPDATE practice_rounds SET take = ?, streamed = 0 WHERE call_sid = ? AND round = ? AND take = ?")
+        .bind(take + 1, callSid, round, take).run();
+      await log("practice.repeat", { round, take: take + 1 });
+      return stop + Say("Again.") + await takeTwiml(env, ctx, url, callSid, round, take + 1, row.phrase, account, progress);
+    }
+    // Past the replay limit the request is still not an answer: no received cue, a fresh phrase.
+    await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
+    await log("practice.round", { round, outcome: "repeat_limit" satisfies Outcome });
+    return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: 0 }, "No more repeats of that one.");
   }
   // Every content word, in order: a misheard prompt or a misrecognized word is a wrong phrase,
   // never a voice failure.
