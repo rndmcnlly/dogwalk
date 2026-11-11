@@ -783,14 +783,19 @@ def provider_route_checks(base_url: str, token: str, headers: dict) -> None:
 
 REAP_CRON = "17 10 * * *"
 DAY = 86400
-# Sandbox reaping fixtures: name -> (Home, provider ID or None for a fresh mock Sandbox, calls).
-# A call is (started days ago, ended days ago or None while in progress).
+# Sandbox reaping fixtures: name -> (Home, provider ID or None for a fresh mock Sandbox, calls,
+# assignment state). A call is (started days ago, ended days ago or None while in progress).
+# "stuck" is a deletion an interrupted delete pass marked but never finished; "diag" is the
+# assignment the diagnostics race rewrites.
 REAP_USERS = {
-    "idle": ("+15555550105", None, [(40, 40)]),
-    "gone": ("+15555550106", "mock-reap-gone", []),
-    "recent": ("+15555550107", "mock-reap-recent", [(45, 45), (2, 2)]),
-    "live": ("+15555550108", "mock-reap-live", [(45, 45), (0.05, None)]),
+    "idle": ("+15555550105", None, [(40, 40)], "stopped"),
+    "gone": ("+15555550106", "mock-reap-gone", [], "stopped"),
+    "recent": ("+15555550107", "mock-reap-recent", [(45, 45), (2, 2)], "stopped"),
+    "live": ("+15555550108", "mock-reap-live", [(45, 45), (0.05, None)], "stopped"),
+    "stuck": ("+15555550104", "mock-reap-stuck", [], "reaping"),
+    "diag": ("+15555550103", "mock-diag-old", [(1, 1)], "stopped"),
 }
+ARRIVING_PHONE = "+15555550102"
 
 
 def seed_reap_fixture() -> dict[str, int]:
@@ -799,7 +804,7 @@ def seed_reap_fixture() -> dict[str, int]:
     DaytonaMock.exists = True
     DaytonaMock.detail_reads = 0
     statements = []
-    for name, (phone, provider, calls) in REAP_USERS.items():
+    for name, (phone, provider, calls, state) in REAP_USERS.items():
         provider = provider or f"mock-sandbox-{DaytonaMock.generation}"
         user = f"(SELECT id FROM users WHERE identity_hash = 'reap-{name}')"
         statements.append(
@@ -807,7 +812,7 @@ def seed_reap_fixture() -> dict[str, int]:
             f"VALUES ('reap-{name}', '{LOCAL_INVITE}', unixepoch() - {60 * DAY}, '{phone}', unixepoch() - {40 * DAY})")
         statements.append(
             f"INSERT INTO sandbox_assignments (user_id, provider_id, state, provisioning_started_at, created_at) "
-            f"VALUES ({user}, '{provider}', 'stopped', unixepoch() - {60 * DAY}, unixepoch() - {60 * DAY})")
+            f"VALUES ({user}, '{provider}', '{state}', unixepoch() - {60 * DAY}, unixepoch() - {60 * DAY})")
         for index, (started, ended) in enumerate(calls):
             end = "NULL" if ended is None else f"unixepoch() - {int(ended * DAY)}"
             statements.append(
@@ -860,20 +865,24 @@ def reap_dry_run_checks(base_url: str) -> dict[str, int]:
 
 
 def reap_delete_checks(base_url: str, token: str, users: dict[str, int]) -> None:
-    """Delete mode reaps idle Sandboxes (a provider 404 counts as gone), spares recent and
-    in-progress callers, and the reaped User's next call provisions a fresh Sandbox."""
+    """Delete mode reaps idle Sandboxes (a provider 404 counts as gone), resumes a deletion an
+    interrupted pass left `reaping`, spares recent and in-progress callers, and the reaped
+    User's next call provisions a fresh Sandbox."""
     before = reap_assignments()
     idle_provider = before[users["idle"]]["provider_id"]
     DaytonaMock.deleted.clear()
-    rows = run_reap_pass(base_url, users, "sandbox.reaped", 2)
+    rows = run_reap_pass(base_url, users, "sandbox.reaped", 3)
     reaped = {row["detail"]["user_id"]: row["detail"] for row in rows}
-    require(set(reaped) == {users["idle"], users["gone"]}, f"reaped: {rows}")
+    require(set(reaped) == {users["idle"], users["gone"], users["stuck"]}, f"reaped: {rows}")
     require(reaped[users["idle"]]["already_gone"] is False and reaped[users["gone"]]["already_gone"] is True,
             f"404 not tolerated as already gone: {rows}")
-    require(sorted(DaytonaMock.deleted) == sorted([f"/api/sandbox/{idle_provider}", "/api/sandbox/mock-reap-gone"]),
+    require(reaped[users["stuck"]]["resumed"] is True and reaped[users["idle"]]["resumed"] is False,
+            f"interrupted deletion not resumed: {rows}")
+    require(sorted(DaytonaMock.deleted) == sorted([f"/api/sandbox/{idle_provider}", "/api/sandbox/mock-reap-gone",
+                                                   "/api/sandbox/mock-reap-stuck"]),
             f"provider deletions: {DaytonaMock.deleted}")
     after = reap_assignments()
-    for name in ("idle", "gone"):
+    for name in ("idle", "gone", "stuck"):
         require(after[users[name]]["provider_id"] is None and after[users[name]]["state"] == "reaped",
                 f"{name} assignment not cleared: {after[users[name]]}")
     for name in ("recent", "live"):
@@ -887,6 +896,71 @@ def reap_delete_checks(base_url: str, token: str, users: dict[str, int]) -> None
     require(DaytonaMock.create_count == created + 1 and fresh["provider_id"] == f"mock-sandbox-{DaytonaMock.generation}"
             and fresh["provider_id"] != idle_provider, f"reaped User did not get a fresh Sandbox: {fresh}")
     post(base_url, "/voice/status", {"From": phone, "CallSid": "CA_REAP_NEXT", "CallStatus": "completed"}, token)
+    reap_arriving_call_checks(base_url, token)
+    diagnostics_race_checks(base_url, users)
+
+
+def reap_arriving_call_checks(base_url: str, token: str) -> None:
+    """A call that arrives after a pass marked its Sandbox `reaping` (deletion decided, maybe in
+    flight) finishes the deletion itself and gets a fresh Sandbox, never the doomed one."""
+    DaytonaMock.generation += 1
+    DaytonaMock.exists = True
+    DaytonaMock.detail_reads = 0
+    doomed = f"mock-sandbox-{DaytonaMock.generation}"
+    d1_local(f"""INSERT INTO users (identity_hash, invite_code, registered_at, home_phone, home_used_at)
+        VALUES ('reap-arriving', '{LOCAL_INVITE}', unixepoch() - {60 * DAY}, '{ARRIVING_PHONE}', unixepoch() - {40 * DAY});
+        INSERT INTO sandbox_assignments (user_id, provider_id, state, provisioning_started_at, created_at)
+        VALUES ((SELECT id FROM users WHERE identity_hash = 'reap-arriving'), '{doomed}', 'reaping', 0, unixepoch() - {60 * DAY})""")
+    user = d1_local("SELECT id FROM users WHERE identity_hash = 'reap-arriving'")[0]["id"]
+    mark = d1_local("SELECT COALESCE(MAX(id), 0) AS id FROM audit_log")[0]["id"]
+    DaytonaMock.deleted.clear()
+    created = DaytonaMock.create_count
+    status, body = post(base_url, "/voice", {"From": ARRIVING_PHONE, "CallSid": "CA_REAP_ARRIVING"}, token)
+    require(status == 200 and "<Dial" in body, f"call during reaping: {status} {body}")
+    require(DaytonaMock.deleted == [f"/api/sandbox/{doomed}"], f"call did not finish the deletion: {DaytonaMock.deleted}")
+    fresh = reap_assignments()[user]
+    require(DaytonaMock.create_count == created + 1 and fresh["provider_id"] == f"mock-sandbox-{DaytonaMock.generation}"
+            and fresh["provider_id"] != doomed, f"call during reaping did not get a fresh Sandbox: {fresh}")
+    audits = d1_local(f"SELECT detail FROM audit_log WHERE id > {mark} AND event = 'sandbox.reaped'")
+    require([json.loads(row["detail"]).get("via") for row in audits] == ["call"], f"call-finished reap audit: {audits}")
+    post(base_url, "/voice/status", {"From": ARRIVING_PHONE, "CallSid": "CA_REAP_ARRIVING", "CallStatus": "completed"}, token)
+
+
+def diagnostics_race_checks(base_url: str, users: dict[str, int]) -> None:
+    """A diagnostics refresh that read Sandbox A cannot write A back over an assignment that a
+    reap or replacement moved to B while the provider read was in flight."""
+    reached, release = threading.Event(), threading.Event()
+
+    def slow_detail(path):
+        if path != "/api/sandbox/mock-diag-old":
+            return None
+        reached.set()
+        release.wait(8)
+        return 200, json.dumps({"id": "mock-diag-old", "state": "started", "desiredState": "started"}).encode(), "application/json"
+
+    DaytonaMock.get_hooks.append(slow_detail)
+    credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
+    result: dict = {}
+
+    def snapshot():
+        request = urllib.request.Request(base_url + "/admin/api/state",
+                                         headers={"authorization": f"Basic {credentials}", "user-agent": "dogwalk-smoke-test/1.0"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result["state"] = json.loads(response.read())
+
+    reader = threading.Thread(target=snapshot)
+    reader.start()
+    try:
+        require(reached.wait(15), "diagnostics never read the fixture Sandbox")
+        d1_local(f"UPDATE sandbox_assignments SET provider_id = 'mock-diag-new', state = 'creating' WHERE user_id = {users['diag']}")
+    finally:
+        release.set()
+        reader.join(30)
+        DaytonaMock.get_hooks.remove(slow_detail)
+    require("state" in result, "diagnostics snapshot failed")
+    row = reap_assignments()[users["diag"]]
+    require(row["provider_id"] == "mock-diag-new" and row["state"] == "creating",
+            f"diagnostics refresh clobbered a replaced assignment: {row}")
 
 
 def research_object(key: str) -> bytes | None:

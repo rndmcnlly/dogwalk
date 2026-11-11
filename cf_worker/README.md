@@ -88,14 +88,22 @@ when there are no calls) and none in progress. It handles at most ten per pass,
 oldest first. `SANDBOX_REAP_MODE` ships as `dry-run`: the pass only audits
 `sandbox.reap.candidate`. Any value other than `delete` is a dry run.
 
-In `delete` mode, each candidate's assignment is cleared (`provider_id` NULL,
-state `reaped`) in the same statement that rechecks idleness, then the Daytona
-Sandbox is deleted (a 404 counts as already gone) and `sandbox.reaped` is
-audited with `already_gone`. If Daytona refuses, the provider ID is restored
-with state `reap_failed`, `sandbox.reap.failed` is audited, and the next pass
-retries. The User's next call provisions a fresh Sandbox, the VoiceSession drops
-the old projection as on replacement (its Memory stays), and the Opening says
-the sandbox was cleared.
+In `delete` mode, each candidate's assignment is marked `reaping` in the same
+statement that rechecks idleness, keeping its `provider_id`. Then the Daytona
+Sandbox is deleted, and only once Daytona accepts the deletion (or answers 404)
+is the assignment cleared (`provider_id` NULL, state `reaped`) and
+`sandbox.reaped` audited with `already_gone` and `resumed`. A `reaping`
+assignment is never adopted or refreshed: `updateAssignment` writes only while
+the assignment still names the Sandbox it read and is not `reaping`, which also
+keeps the operator diagnostics refresh from restoring a replaced Sandbox. A call
+that arrives while an assignment is `reaping` finishes the deletion itself
+(audited with `via: "call"`) and provisions a fresh Sandbox. A delete pass first
+resumes any `reaping` rows an interrupted pass left behind; a dry run leaves
+them alone. If Daytona refuses, the assignment keeps its Sandbox as
+`reap_failed` (still usable), `sandbox.reap.failed` is audited, and a later pass
+retries if the User is still idle. The User's next call provisions a fresh
+Sandbox, the VoiceSession drops the old projection as on replacement (its Memory
+stays), and the Opening says the sandbox was cleared.
 
 See the candidates before turning deletion on:
 

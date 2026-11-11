@@ -643,7 +643,10 @@ Stopped and archived Sandboxes retain identity and durable filesystem state and
 are resumed in place, until reaped (see Identity and Hosting Lifecycle).
 
 A reaped assignment keeps its row with no provider ID and the state `reaped`,
-so the next call provisions a fresh Sandbox exactly as after a replacement.
+so the next call provisions a fresh Sandbox exactly as after a replacement. Any
+refresh of an assignment from the provider applies only while the assignment
+still names the Sandbox that was read, so a slow read never restores a Sandbox
+that was replaced or reaped meanwhile.
 
 ### Diagnostics Surface
 
@@ -926,7 +929,7 @@ Inactivity reaps from the outside in, each layer more slowly:
 
 Reaping is ordinary lifecycle, not failure. Someone reaped, or locked out of their identity, is invited again and registers as a new User.
 
-Sandbox reaping is a daily, bounded pass. A User's last Voice Call is the latest one that reached them (the Sandbox Assignment's creation if there is none); a Sandbox is never reaped while its User has a call in progress or one within the reap age, and that check is made atomically with clearing the assignment, so a call arriving during the pass cannot reach a Sandbox being deleted. A provider that already deleted the Sandbox counts as reaped. The reap age is deployment configuration (30 days by default), and the pass starts as a dry run that only records candidates until the operator turns deletion on.
+Sandbox reaping is a daily, bounded pass. A User's last Voice Call is the latest one that reached them (the Sandbox Assignment's creation if there is none); a Sandbox is never reaped while its User has a call in progress or one within the reap age. Reaping is decided by marking the Sandbox Assignment as reaping, atomically with that check; the assignment keeps the Sandbox's provider identity until the provider confirms the deletion (or reports the Sandbox already gone), and only then becomes reaped. While it is reaping, nothing adopts or refreshes that Sandbox. A call that arrives once reaping is decided does not reverse it, since the deletion may be in flight: the call finishes the deletion and gets a fresh Sandbox. A pass interrupted after deciding leaves the decision recorded, and the next pass finishes it. If the provider refuses the deletion, the Sandbox stays assigned and usable, and a later pass decides again. The reap age is deployment configuration (30 days by default), and the pass starts as a dry run that only records candidates until the operator turns deletion on.
 
 A reaped Sandbox is a different Workspace, handled as a replacement is: when the next call brings the fresh Sandbox, the Voice Session drops the old Sandbox's projection (Managed Sessions, pending Attention Requests, the Session Orchestrator's conversation, Whiteboard boards and Board Assets, and Paired Browsers with their Human Takeovers). The Memory survives, because it is the Session Orchestrator's knowledge of the User rather than state in the Sandbox; the Session Orchestrator is told the Sandbox was reaped, so it treats the Memory's sessions and files as gone. The Opening says the sandbox was cleared and starts fresh, in place of the welcome line written about the old Sandbox.
 
