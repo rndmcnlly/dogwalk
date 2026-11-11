@@ -66,8 +66,9 @@ class DaytonaMock(BaseHTTPRequestHandler):
     execute_hooks: list = []
     # Optional handlers for other GETs (toolbox file reads): path -> (status, body, content type).
     get_hooks: list = []
-    # Paths of every DELETE, answered or not.
+    # Paths of every DELETE, answered or not, and optional handlers: path -> status or None.
     deleted: list[str] = []
+    delete_hooks: list = []
 
     def sandbox(self, state: str = "started") -> dict:
         return {
@@ -175,6 +176,14 @@ class DaytonaMock(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         DaytonaMock.deleted.append(self.path)
+        for hook in DaytonaMock.delete_hooks:
+            status = hook(self.path)
+            if status == 200:
+                self.reply({"id": self.path.rsplit("/", 1)[-1], "state": "destroying"})
+                return
+            if status is not None:
+                self.send_error(status)
+                return
         if self.exists and self.path == f"/api/sandbox/mock-sandbox-{self.generation}":
             DaytonaMock.exists = False
             self.reply(self.sandbox("destroying"))
@@ -813,6 +822,8 @@ def seed_reap_fixture() -> dict[str, int]:
         statements.append(
             f"INSERT INTO sandbox_assignments (user_id, provider_id, state, provisioning_started_at, created_at) "
             f"VALUES ({user}, '{provider}', '{state}', unixepoch() - {60 * DAY}, unixepoch() - {60 * DAY})")
+        if state == "reaping":
+            statements.append(pending_deletion(provider, user))
         for index, (started, ended) in enumerate(calls):
             end = "NULL" if ended is None else f"unixepoch() - {int(ended * DAY)}"
             statements.append(
@@ -822,6 +833,12 @@ def seed_reap_fixture() -> dict[str, int]:
     d1_local(";\n".join(statements))
     rows = d1_local("SELECT id, identity_hash FROM users WHERE identity_hash LIKE 'reap-%'")
     return {row["identity_hash"].removeprefix("reap-"): row["id"] for row in rows}
+
+
+def pending_deletion(provider: str, user: str) -> str:
+    """The sandbox_deletions row a delete pass writes when it decides to reap."""
+    return (f"INSERT INTO sandbox_deletions (provider_id, user_id, requested_at) "
+            f"VALUES ('{provider}', {user}, unixepoch() - {DAY})")
 
 
 def reap_assignments() -> dict[int, dict]:
@@ -897,7 +914,84 @@ def reap_delete_checks(base_url: str, token: str, users: dict[str, int]) -> None
             and fresh["provider_id"] != idle_provider, f"reaped User did not get a fresh Sandbox: {fresh}")
     post(base_url, "/voice/status", {"From": phone, "CallSid": "CA_REAP_NEXT", "CallStatus": "completed"}, token)
     reap_arriving_call_checks(base_url, token)
+    reap_race_checks(base_url, token)
     diagnostics_race_checks(base_url, users)
+
+
+def reap_race_checks(base_url: str, token: str) -> None:
+    """The pass's DELETE is in flight when a call's DELETE of the same Sandbox fails with 503.
+    The call must not fall back to the doomed Sandbox: it provisions fresh, the deletion stays
+    pending, and when the pass's DELETE then succeeds it is recorded without touching the call's
+    new Sandbox."""
+    doomed, phone = "mock-race-doomed", "+15555550110"
+    user_sql = "(SELECT id FROM users WHERE identity_hash = 'reap-race')"
+    d1_local(f"""INSERT INTO users (identity_hash, invite_code, registered_at, home_phone, home_used_at)
+        VALUES ('reap-race', '{LOCAL_INVITE}', unixepoch() - {60 * DAY}, '{phone}', unixepoch() - {40 * DAY});
+        INSERT INTO sandbox_assignments (user_id, provider_id, state, provisioning_started_at, created_at)
+        VALUES ({user_sql}, '{doomed}', 'reaping', 0, unixepoch() - {60 * DAY});
+        {pending_deletion(doomed, user_sql)}""")
+    user = d1_local(f"SELECT id FROM users WHERE identity_hash = 'reap-race'")[0]["id"]
+    reached, release = threading.Event(), threading.Event()
+    requests: list[str] = []
+
+    def interleave(path):
+        if path != f"/api/sandbox/{doomed}":
+            return None
+        requests.append(path)
+        if len(requests) == 1:  # the pass: held open until the call has come and gone
+            reached.set()
+            release.wait(8)
+            return 200
+        return 503  # the call
+
+    def alive(path):
+        # Until the pass's DELETE returns, Daytona still reports the doomed Sandbox as running.
+        if path != f"/api/sandbox/{doomed}" or release.is_set():
+            return None
+        body = {"id": doomed, "state": "started", "desiredState": "started", "errorReason": None}
+        return 200, json.dumps(body).encode(), "application/json"
+
+    DaytonaMock.delete_hooks.append(interleave)
+    DaytonaMock.get_hooks.insert(0, alive)
+    DaytonaMock.exists = False  # nothing else to discover: the call must provision
+    mark = d1_local("SELECT COALESCE(MAX(id), 0) AS id FROM audit_log")[0]["id"]
+    created = DaytonaMock.create_count
+    trigger = threading.Thread(target=get, args=(base_url, "/__scheduled?cron=" + urllib.parse.quote_plus(REAP_CRON)))
+    trigger.start()
+    try:
+        require(reached.wait(15), "the pass never sent its DELETE")
+        status, body = post(base_url, "/voice", {"From": phone, "CallSid": "CA_REAP_RACE"}, token)
+        require(status == 200 and "<Dial" in body, f"call racing a reap: {status} {body}")
+        fresh = reap_assignments()[user]
+        require(DaytonaMock.create_count == created + 1 and fresh["provider_id"] == f"mock-sandbox-{DaytonaMock.generation}",
+                f"call fell back to the doomed Sandbox: {fresh}")
+        pending = d1_local(f"SELECT provider_id FROM sandbox_deletions WHERE provider_id = '{doomed}'")
+        require(len(pending) == 1, "a failed call DELETE dropped the pending deletion")
+    finally:
+        release.set()
+        trigger.join(30)
+    deadline = time.time() + 10
+    while True:
+        rows = d1_local(f"SELECT event, detail FROM audit_log WHERE id > {mark} AND event LIKE 'sandbox.reap%'")
+        mine = [(row["event"], json.loads(row["detail"])) for row in rows if json.loads(row["detail"]).get("user_id") == user]
+        if any(event == "sandbox.reaped" for event, _ in mine) or time.time() > deadline:
+            break
+        time.sleep(0.2)
+    DaytonaMock.delete_hooks.remove(interleave)
+    DaytonaMock.get_hooks.remove(alive)
+    require(len(requests) == 2, f"expected the pass's and the call's DELETE: {requests}")
+    reaped = [detail for event, detail in mine if event == "sandbox.reaped"]
+    detached = [detail for event, detail in mine if event == "sandbox.reap.detached"]
+    require(len(reaped) == 1 and reaped[0]["resumed"] is True and reaped[0]["already_gone"] is False,
+            f"the pass's confirmed deletion was not recorded once: {mine}")
+    require(len(detached) == 1 and detached[0]["via"] == "call" and len(mine) == 2,
+            f"the call's failed DELETE: {mine}")
+    after = reap_assignments()[user]
+    require(after["provider_id"] == fresh["provider_id"] and after["state"] != "reaped",
+            f"the pass's clear touched the call's new Sandbox: {after}")
+    require(d1_local(f"SELECT provider_id FROM sandbox_deletions WHERE provider_id = '{doomed}'") == [],
+            "confirmed deletion still pending")
+    post(base_url, "/voice/status", {"From": phone, "CallSid": "CA_REAP_RACE", "CallStatus": "completed"}, token)
 
 
 def reap_arriving_call_checks(base_url: str, token: str) -> None:
@@ -910,7 +1004,8 @@ def reap_arriving_call_checks(base_url: str, token: str) -> None:
     d1_local(f"""INSERT INTO users (identity_hash, invite_code, registered_at, home_phone, home_used_at)
         VALUES ('reap-arriving', '{LOCAL_INVITE}', unixepoch() - {60 * DAY}, '{ARRIVING_PHONE}', unixepoch() - {40 * DAY});
         INSERT INTO sandbox_assignments (user_id, provider_id, state, provisioning_started_at, created_at)
-        VALUES ((SELECT id FROM users WHERE identity_hash = 'reap-arriving'), '{doomed}', 'reaping', 0, unixepoch() - {60 * DAY})""")
+        VALUES ((SELECT id FROM users WHERE identity_hash = 'reap-arriving'), '{doomed}', 'reaping', 0, unixepoch() - {60 * DAY});
+        {pending_deletion(doomed, "(SELECT id FROM users WHERE identity_hash = 'reap-arriving')")}""")
     user = d1_local("SELECT id FROM users WHERE identity_hash = 'reap-arriving'")[0]["id"]
     mark = d1_local("SELECT COALESCE(MAX(id), 0) AS id FROM audit_log")[0]["id"]
     DaytonaMock.deleted.clear()
@@ -1293,6 +1388,7 @@ DELETE FROM users WHERE home_phone LIKE '{TEST_NUMBERS}' OR invite_code = '{LOCA
 DELETE FROM invitations WHERE inviter_user_id NOT IN (SELECT id FROM users)
   OR redeemed_by_user_id NOT IN (SELECT id FROM users);
 DELETE FROM sandbox_assignments WHERE user_id NOT IN (SELECT id FROM users);
+DELETE FROM sandbox_deletions WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM voice_references WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM retired_handles WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM provider_call_jobs WHERE root_call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
@@ -1378,7 +1474,7 @@ def main() -> int:
             print("wrangler dev did not restart", file=sys.stderr)
             return 1
         reap_delete_checks(DEFAULT_LOCAL, LOCAL_TOKEN, reap_users)
-        print("Sandbox reaping checks passed (dry run, delete, 404, recent and live callers, fresh Sandbox)")
+        print("Sandbox reaping checks passed (dry run, delete, 404, resume, recent and live callers, call during reaping, call/pass DELETE race, diagnostics race)")
         return 0
     finally:
         stop_worker(process)

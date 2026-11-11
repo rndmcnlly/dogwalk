@@ -88,22 +88,41 @@ when there are no calls) and none in progress. It handles at most ten per pass,
 oldest first. `SANDBOX_REAP_MODE` ships as `dry-run`: the pass only audits
 `sandbox.reap.candidate`. Any value other than `delete` is a dry run.
 
-In `delete` mode, each candidate's assignment is marked `reaping` in the same
-statement that rechecks idleness, keeping its `provider_id`. Then the Daytona
-Sandbox is deleted, and only once Daytona accepts the deletion (or answers 404)
-is the assignment cleared (`provider_id` NULL, state `reaped`) and
-`sandbox.reaped` audited with `already_gone` and `resumed`. A `reaping`
-assignment is never adopted or refreshed: `updateAssignment` writes only while
-the assignment still names the Sandbox it read and is not `reaping`, which also
-keeps the operator diagnostics refresh from restoring a replaced Sandbox. A call
-that arrives while an assignment is `reaping` finishes the deletion itself
-(audited with `via: "call"`) and provisions a fresh Sandbox. A delete pass first
-resumes any `reaping` rows an interrupted pass left behind; a dry run leaves
-them alone. If Daytona refuses, the assignment keeps its Sandbox as
-`reap_failed` (still usable), `sandbox.reap.failed` is audited, and a later pass
-retries if the User is still idle. The User's next call provisions a fresh
-Sandbox, the VoiceSession drops the old projection as on replacement (its Memory
-stays), and the Opening says the sandbox was cleared.
+In `delete` mode, deciding to reap inserts a `sandbox_deletions` row and marks
+the assignment `reaping` (keeping its `provider_id`) in one D1 batch that
+rechecks idleness. The pending row is the durable record until Daytona accepts a
+DELETE or answers 404; then the row goes, an assignment still naming that
+Sandbox becomes `reaped` with no `provider_id` (whatever its state), and
+whoever removed the row audits `sandbox.reaped` (`already_gone`, `resumed`, or
+`via: "call"`). `updateAssignment` never writes a Sandbox with a pending
+deletion, writes only while the assignment still names the Sandbox it read, and
+skips `reaping` rows, so neither adoption nor the operator diagnostics refresh
+can bring one back.
+
+A call that arrives while its assignment is `reaping` tries the DELETE itself.
+If that fails, it lets go of the Sandbox (the assignment becomes `reaped`, the
+deletion stays pending) and provisions fresh, auditing
+`sandbox.reap.detached`, which the Opening treats like `sandbox.reaped`. Each delete pass first retries pending
+deletions; a dry run leaves them alone. The pass counts its own refusals in
+`sandbox_deletions.attempts`, and after three, if the assignment still names
+the Sandbox, abandons the reap (`outcome: "abandoned"`, state `reap_failed`, the
+Sandbox stays usable, and a later pass decides again if the User is still idle).
+A Sandbox a call has let go of is never abandoned. The User's next call
+provisions a fresh Sandbox, the VoiceSession drops the old projection as on
+replacement (its Memory stays), and the Opening says the sandbox was cleared.
+
+Apply `migrations/2026-11-12-sandbox-deletions.sql` remotely before deploying
+reaping:
+
+```sh
+npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-12-sandbox-deletions.sql
+```
+
+Pending deletions, if any linger:
+
+```sh
+npx wrangler d1 execute dogwalk --remote --command "SELECT * FROM sandbox_deletions"
+```
 
 See the candidates before turning deletion on:
 
