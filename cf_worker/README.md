@@ -181,7 +181,13 @@ signal or exit, answers unanswered requests with JSON-RPC error data
 the same reason; the Durable Object puts it in `failure`, `turn_failed`, and
 `agent_unavailable` (`agent_termination`, `failed_turns`). The gateway is baked
 into the snapshot at `/opt/dogwalk/sandbox_acp_gateway.py`, so a change reaches
-a Sandbox only through a new snapshot or a back-patch of that file and a restart. On reconnect, Managed Sessions are restored with
+a Sandbox through a new snapshot (new Sandboxes only) or a back-patch:
+`uv run --script deploy.py --no-deploy --patch-sandboxes` lists which snapshot-owned
+files (`SNAPSHOT_FILES` in `build_sandbox_snapshot.py`: gateway, OpenCode config,
+rules, plugin) differ in each managed Sandbox, and `--apply` writes them with
+backups, self-tests a patched gateway inside the Sandbox (restoring everything on
+failure), and stops the Sandbox so the next call boots them. Packages and binaries,
+OpenCode included, still need a new snapshot. On reconnect, Managed Sessions are restored with
 `session/resume` when the Agent advertises `sessionCapabilities.resume` in
 `initialize`, otherwise `session/load`, always from the session's recorded
 directory (OpenCode rejects a reload from any other). A record without a

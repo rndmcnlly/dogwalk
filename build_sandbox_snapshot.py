@@ -47,8 +47,23 @@ ACP_INITIALIZE = (
 )
 
 
+# Repository files the snapshot owns: (source, Sandbox path, mode). `deploy.py
+# --patch-sandboxes` brings existing Sandboxes up to date from this same list, so
+# changing one of these files rarely needs a new snapshot or a replaced Sandbox.
+# Packages, binaries (OpenCode itself), and image settings are not covered.
+SNAPSHOT_FILES = (
+    ("sandbox_acp_gateway.py", "/opt/dogwalk/sandbox_acp_gateway.py", "755"),
+    ("sandbox_opencode.json", "/home/daytona/.config/opencode/opencode.json", "644"),
+    # Global rules OpenCode loads into every session: narrate between tool calls,
+    # since Dogwalk relays the Agent's text, not its tool arguments.
+    ("sandbox_opencode_agents.md", "/home/daytona/.config/opencode/AGENTS.md", "644"),
+    # OpenCode discovers plugins in this directory without a config entry.
+    ("sandbox_opencode_binary_guard.ts", "/home/daytona/.config/opencode/plugins/binary-guard.ts", "644"),
+)
+
+
 def snapshot_image() -> Image:
-    return (
+    image = (
         Image.base(BASE_IMAGE)
         .run_commands(
             "apt-get update && DEBIAN_FRONTEND=noninteractive "
@@ -68,25 +83,11 @@ def snapshot_image() -> Image:
             "printf 'daytona ALL=(ALL) NOPASSWD:ALL\\n' > /etc/sudoers.d/daytona && "
             "chmod 0440 /etc/sudoers.d/daytona",
         )
-        .add_local_file(
-            ROOT / "sandbox_acp_gateway.py", "/opt/dogwalk/sandbox_acp_gateway.py"
-        )
-        .add_local_file(
-            ROOT / "sandbox_opencode.json",
-            "/home/daytona/.config/opencode/opencode.json",
-        )
-        # Global rules OpenCode loads into every session: narrate between tool calls,
-        # since Dogwalk relays the Agent's text, not its tool arguments.
-        .add_local_file(
-            ROOT / "sandbox_opencode_agents.md",
-            "/home/daytona/.config/opencode/AGENTS.md",
-        )
-        # OpenCode discovers plugins in this directory without a config entry.
-        .add_local_file(
-            ROOT / "sandbox_opencode_binary_guard.ts",
-            "/home/daytona/.config/opencode/plugins/binary-guard.ts",
-        )
-        .run_commands(
+    )
+    for source, destination, _mode in SNAPSHOT_FILES:
+        image = image.add_local_file(ROOT / source, destination)
+    return (
+        image.run_commands(
             "chmod 755 /opt/dogwalk/sandbox_acp_gateway.py && "
             "chmod 0700 /home/daytona/.config/dogwalk && "
             "chown -R daytona:daytona /home/daytona /opt/dogwalk",

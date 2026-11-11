@@ -64,9 +64,9 @@ not record. Its source (`anomalyco/opencode` at `6b1db275`,
 newer than the 2.2.6 tag, not verified against it) wraps each ACP request in its own span
 (`cli.acp.<method>`) exported only when an OTLP endpoint is configured, and nothing in
 its ACP layer reads `_meta.traceparent`, so those spans do not join Dogwalk's trace.
-The logging change reaches a Sandbox only through a new snapshot, which applies to
-Sandboxes created afterwards, or a back-patch of `/opt/dogwalk/sandbox_acp_gateway.py`
-in an existing one: snapshot `dogwalk-acp-20261108-v2` predates it.
+Snapshot `dogwalk-acp-20261108-v2` predates the logging change; existing Sandboxes get
+it with `deploy.py --patch-sandboxes --apply` (see `cf_worker/README.md`), and the
+operator's Sandbox was back-patched that way on 2026-11-11.
 Nothing in this repository gives the Sandbox an OTLP endpoint (the live snapshot's
 environment was not inspected), so OpenCode should export no spans there.
 
