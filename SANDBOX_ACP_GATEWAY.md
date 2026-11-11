@@ -58,8 +58,9 @@ never logged; an `rpc_id` or `method` that is not a short plain token is logged 
 collector, so these lines go to the gateway's log only.
 
 OpenCode `2.2.6` accepts `initialize` and `session/new` carrying `_meta.traceparent`
-without error (checked locally; the snapshot pins `2.2.5`, and a production call's
-`session/resume` with `_meta` succeeded against it). Its source (`anomalyco/opencode` at `6b1db275`,
+without error (checked locally). The current snapshot pins `2.2.5`; a production call's
+`session/resume` with `_meta` succeeded, against an OpenCode version the journal does
+not record. Its source (`anomalyco/opencode` at `6b1db275`,
 newer than the 2.2.6 tag, not verified against it) wraps each ACP request in its own span
 (`cli.acp.<method>`) exported only when an OTLP endpoint is configured, and nothing in
 its ACP layer reads `_meta.traceparent`, so those spans do not join Dogwalk's trace.
