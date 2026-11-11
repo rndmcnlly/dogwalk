@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -51,6 +52,14 @@ def auth() -> str:
     password = subprocess.run(["security", "find-generic-password", "-a", "adam", "-s", "dogwalk-admin", "-w"],
                               capture_output=True, text=True, check=True).stdout.strip()
     return "Basic " + base64.b64encode(f"adam:{password}".encode()).decode()
+
+
+def finite(value) -> float | None:
+    """A measurement as a finite number, or None: json.loads accepts NaN and Infinity, and
+    json.dumps would write them back out as JSON no strict reader accepts."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return value
 
 
 def call(authorization: str, path: str, body: bytes | None = None,
@@ -89,11 +98,9 @@ def call(authorization: str, path: str, body: bytes | None = None,
     if not isinstance(payload, dict):
         payload = {}
     total = round((time.monotonic() - started) * 1000)
-    ms = payload.get("ms")
-    if not isinstance(ms, (int, float)):
-        ms = None
+    ms = finite(payload.get("ms"))
     return {"status": status, "rpc_ms": ms, "total_ms": total, "colo": ray.rpartition("-")[2],
-            "slow": ms is not None and ms > SLOW_MS, "cold": payload.get("cold"), "warm_ms": payload.get("warm_ms"),
+            "slow": ms is not None and ms > SLOW_MS, "cold": payload.get("cold"), "warm_ms": finite(payload.get("warm_ms")),
             "error": transport_error or payload.get("error")}
 
 
@@ -151,10 +158,15 @@ def idle(args, authorization: str) -> None:
     # server closed it and http.client reconnected), the sample says nothing about retention
     # and is reported apart.
     connection = http.client.HTTPSConnection(ORIGIN.removeprefix("https://"), timeout=60)
-    results = []
+    results, failed_warmups = [], []
     for repeat in range(args.repeats):
         for gap in args.gaps:
-            probe(authorization, connection, mode="idle-warmup", gap=gap, repeat=repeat)
+            warmup = probe(authorization, connection, mode="idle-warmup", gap=gap, repeat=repeat)
+            if warmup["rpc_ms"] is None:
+                # No inference, so the instance may never have loaded: a later cold probe
+                # would be the first load, not an eviction. Skip the gap and report it.
+                failed_warmups.append(warmup)
+                continue
             sock = connection.sock
             deadline = time.monotonic() + gap
             while (left := deadline - time.monotonic()) > 0:
@@ -173,6 +185,9 @@ def idle(args, authorization: str) -> None:
         reconnected = [r for r in results if r["gap"] == gap and not r["same_connection"]]
         if reconnected:
             summarize(f"idle gap={gap}s reconnected (not retention evidence)", reconnected)
+        failed = [r for r in failed_warmups if r["gap"] == gap]
+        if failed:
+            summarize(f"idle gap={gap}s failed warm-up (gap skipped)", failed)
 
 
 def verify(args, authorization: str) -> None:
