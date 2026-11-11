@@ -181,9 +181,11 @@ CREATE TABLE IF NOT EXISTS call_handoffs (
 
 -- Transient state of one Challenge Practice round, shared by the round's webhooks and its
 -- Media Stream: the phrase, the current take (each replay of the phrase on request gets a new
--- stream), whether its transcript matched, and the verifier's result. Never
--- audio or an embedding. A round's row is deleted once its result is spoken, and every row of
--- a call when practice ends.
+-- stream), whether its transcript matched, and the verifier's result. The spec_ columns hold
+-- the latest speculative score, started at the end of the answer before the transcript arrived
+-- (discarded unused unless the phrase matched); heard_ms and speculative record whether it was
+-- used and its head start. Never audio or an embedding. A round's row is deleted once its result
+-- is spoken, and every row of a call when practice ends.
 CREATE TABLE IF NOT EXISTS practice_rounds (
   call_sid TEXT NOT NULL,
   round INTEGER NOT NULL,
@@ -194,6 +196,13 @@ CREATE TABLE IF NOT EXISTS practice_rounds (
   cosine REAL,
   speech_seconds REAL,
   error TEXT,
+  heard_ms INTEGER,
+  spec_seq INTEGER,
+  spec_started_ms INTEGER,
+  spec_cosine REAL,
+  spec_speech_seconds REAL,
+  spec_error TEXT,
+  speculative INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (call_sid, round)
 );

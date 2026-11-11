@@ -9,11 +9,14 @@
 // phrase inside a speech Gather hinted with the phrase's words. Every answer the Gather captures
 // (scored or a wrong phrase, never silence or a repeat request) first hears the received cue,
 // so the wait for its verdict is never silent. The Gather's action checks the
-// transcript first: every content word, in order, or the round is a wrong phrase and is not
-// scored. A short "say that again" replays the phrase as a fresh take with its own stream. A matched phrase marks the row 'scoring' and stops the stream, so the
-// stream's stop event (which can only follow that response) scores the audio in memory with
-// SPEAKER and writes back only the cosine and speech seconds. The action redirects to
-// /voice/practice/result, which waits for that score and speaks a level, never the number.
+// transcript first: every content word, in order, or the round is a wrong phrase and any score
+// is discarded unused. A short "say that again" replays the phrase as a fresh take with its own
+// stream. Scoring does not wait for the transcript: the stream's endpointer starts SPEAKER on
+// the audio so far whenever the caller's answer ends, and the row keeps only the latest result.
+// A matched phrase marks the row 'scoring' and stops the stream, so the stream's stop event
+// (which can only follow that response) uses that score if the caller has not talked since, or
+// scores the whole stream in memory, writing back only the cosine and speech seconds. The action
+// redirects to /voice/practice/result, which waits for the score and speaks a level, never the number.
 import {
   acceptCallerStream, answerReceivedCue, GatherSpeech, isAccountSid, originHost, roundTone, SAMPLE_RATE, saidStop, Say, speechWords, StartStream,
   StopStream, streamCapability, verifyStreamCapability,
@@ -49,6 +52,9 @@ const MAX_ATTEMPTS = 20;
 const MAX_SILENT_ROUNDS = 2;
 // Replays of one phrase on request ("say that again") before practice moves to a fresh one.
 const MAX_REPEATS = 3;
+// Speculative scores started per take (one per end of the answer the stream hears). A phrase
+// answer ends once; this bounds verifier calls from a caller who keeps pausing.
+const MAX_SPECULATIVE_SCORES = 4;
 // A speech Gather listens for at most a minute; anything past this is a stuck stream.
 const MAX_ROUND_SECONDS = 90;
 // How long the result step waits for the verifier: Twilio gives a webhook 15 seconds, and a
@@ -74,7 +80,13 @@ interface RoundRow {
   cosine: number | null;
   speech_seconds: number | null;
   error: string | null;
+  heard_ms: number | null;
+  spec_started_ms: number | null;
+  speculative: number;
 }
+
+// A take's speculative score, discarded unused whenever the take ends without a matched phrase.
+const DISCARD_SPECULATIVE = "spec_seq = NULL, spec_started_ms = NULL, spec_cosine = NULL, spec_speech_seconds = NULL, spec_error = NULL";
 
 // Each replay of a phrase is a new take with its own stream, so a stopped take's late audio
 // can never be scored for a later one.
@@ -106,7 +118,8 @@ async function callReference(env: Env, callSid: string): Promise<SpeakerReferenc
 
 async function readRound(env: Env, callSid: string, round: number): Promise<RoundRow | null> {
   return env.DB.prepare(
-    "SELECT phrase, take, state, cosine, speech_seconds, error FROM practice_rounds WHERE call_sid = ? AND round = ?",
+    `SELECT phrase, take, state, cosine, speech_seconds, error, heard_ms, spec_started_ms, speculative
+       FROM practice_rounds WHERE call_sid = ? AND round = ?`,
   ).bind(callSid, round).first<RoundRow>();
 }
 
@@ -123,7 +136,8 @@ async function roundTwiml(
   await env.DB.prepare(
     `INSERT INTO practice_rounds (call_sid, round, phrase, state, created_at) VALUES (?, ?, ?, 'listening', unixepoch())
      ON CONFLICT(call_sid, round) DO UPDATE SET phrase = excluded.phrase, take = 0, state = 'listening', streamed = 0,
-       cosine = NULL, speech_seconds = NULL, error = NULL, created_at = excluded.created_at`,
+       cosine = NULL, speech_seconds = NULL, error = NULL, heard_ms = NULL, speculative = 0, ${DISCARD_SPECULATIVE},
+       created_at = excluded.created_at`,
   ).bind(callSid, round, phrase).run();
   return takeTwiml(env, ctx, url, callSid, round, 0, phrase, account, progress);
 }
@@ -195,33 +209,39 @@ export async function handlePracticeHeard(env: Env, ctx: ExecutionContext, url: 
     if (progress.silent + 1 >= MAX_SILENT_ROUNDS) {
       return stop + await endPractice(env, callSid, log, "silence", progress, "I didn't hear anything.");
     }
-    await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
+    await env.DB.prepare(`UPDATE practice_rounds SET state = 'skipped', ${DISCARD_SPECULATIVE} WHERE call_sid = ? AND round = ?`)
+      .bind(callSid, round).run();
     return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: progress.silent + 1 }, "I didn't hear the sentence.");
   }
   // "Say that again": the same phrase in a fresh take, counted as neither a round nor a miss.
   if (askedToRepeat(heard)) {
     if (take < MAX_REPEATS) {
-      await env.DB.prepare("UPDATE practice_rounds SET take = ?, streamed = 0 WHERE call_sid = ? AND round = ? AND take = ?")
+      await env.DB.prepare(`UPDATE practice_rounds SET take = ?, streamed = 0, ${DISCARD_SPECULATIVE} WHERE call_sid = ? AND round = ? AND take = ?`)
         .bind(take + 1, callSid, round, take).run();
       await log("practice.repeat", { round, take: take + 1 });
       return stop + Say("Again.") + await takeTwiml(env, ctx, url, callSid, round, take + 1, row.phrase, account, progress);
     }
-    // Past the replay limit the request is still not an answer: no received cue, a fresh phrase.
-    await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
+    // Past the replay limit the request is still not an answer: no received cue, a fresh phrase,
+    // and any speculative score of the request discarded unused.
+    await env.DB.prepare(`UPDATE practice_rounds SET state = 'skipped', ${DISCARD_SPECULATIVE} WHERE call_sid = ? AND round = ?`)
+      .bind(callSid, round).run();
     await log("practice.round", { round, outcome: "repeat_limit" satisfies Outcome });
     return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: 0 }, "No more repeats of that one.");
   }
   // Every content word, in order: a misheard prompt or a misrecognized word is a wrong phrase,
-  // never a voice failure.
+  // never a voice failure. Its speculative score, if one started, is discarded unread: once
+  // 'skipped', the stream can neither store nor use one.
   const received = `<Play>https://${originHost(env, url)}/voice/practice/received.wav</Play>`;
   if (!phraseMatches(row.phrase, transcript)) {
-    await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
+    await env.DB.prepare(`UPDATE practice_rounds SET state = 'skipped', ${DISCARD_SPECULATIVE} WHERE call_sid = ? AND round = ?`)
+      .bind(callSid, round).run();
     await log("practice.round", { round, outcome: "wrong_phrase" satisfies Outcome });
     return stop + received + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: 0 }, "That wasn't the sentence.");
   }
-  // Committed before the response that stops the stream, so the stream's end sees it.
-  await env.DB.prepare("UPDATE practice_rounds SET state = 'scoring' WHERE call_sid = ? AND round = ? AND state = 'listening'")
-    .bind(callSid, round).run();
+  // Committed before the response that stops the stream, so the stream's end sees it. The time
+  // measures how much head start a speculative score had over this webhook.
+  await env.DB.prepare("UPDATE practice_rounds SET state = 'scoring', heard_ms = ? WHERE call_sid = ? AND round = ? AND state = 'listening'")
+    .bind(Date.now(), callSid, round).run();
   // The cue plays while the verifier scores, so it costs the caller no extra wait.
   return stop + received + `<Redirect method="POST">/voice/practice/result?round=${round}&amp;judged=${progress.judged}</Redirect>`;
 }
@@ -252,22 +272,26 @@ export async function handlePracticeResult(env: Env, ctx: ExecutionContext, url:
     return endPractice(env, callSid, log, "lost_round", progress, "Challenge practice stopped.");
   }
   await env.DB.prepare("DELETE FROM practice_rounds WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
+  // Whether the score came from the end of the answer rather than the stream's stop, and how
+  // long before /heard it started (negative when the endpointer was slower than the Gather).
+  const timing = row.speculative && row.heard_ms !== null && row.spec_started_ms !== null
+    ? { speculative: true, head_start_ms: row.heard_ms - row.spec_started_ms, wait_ms } : { speculative: false, wait_ms };
   if (row.state === "scoring") {
-    await log("practice.round", { round, outcome: "unscored" satisfies Outcome, wait_ms });
+    await log("practice.round", { round, outcome: "unscored" satisfies Outcome, ...timing });
     return nextRound(env, ctx, url, callSid, account, log, round, progress, "I couldn't score that one.");
   }
   if (row.error && row.error !== "insufficient-audio") {
-    await log("practice.round", { round, outcome: "unscored" satisfies Outcome, error: row.error, wait_ms });
+    await log("practice.round", { round, outcome: "unscored" satisfies Outcome, error: row.error, ...timing });
     return endPractice(env, callSid, log, "verifier_error", progress, "Challenge practice is not available right now.");
   }
   if (row.error || row.cosine === null || (row.speech_seconds ?? 0) < MIN_SPEECH_SECONDS) {
     // The score is kept for calibration even though no level is spoken.
     await log("practice.round", { round, outcome: "not_enough_speech" satisfies Outcome, cosine: row.cosine,
-      speech_seconds: row.speech_seconds, ...(row.error ? { error: row.error } : {}), wait_ms });
+      speech_seconds: row.speech_seconds, ...(row.error ? { error: row.error } : {}), ...timing });
     return nextRound(env, ctx, url, callSid, account, log, round, progress, "Not enough to judge.");
   }
   const level = matchLevel(row.cosine);
-  await log("practice.round", { round, outcome: level.outcome, cosine: row.cosine, speech_seconds: row.speech_seconds, wait_ms });
+  await log("practice.round", { round, outcome: level.outcome, cosine: row.cosine, speech_seconds: row.speech_seconds, ...timing });
   return nextRound(env, ctx, url, callSid, account, log, round, { ...progress, judged: progress.judged + 1 }, level.spoken);
 }
 
@@ -277,9 +301,13 @@ export const practiceTone = roundTone;
 export const practiceReceived = answerReceivedCue;
 
 /**
- * /voice/practice/stream/<capability>: one round's caller-only Media Stream. The caller has
- * already checked the upgrade's Twilio signature. One stream per round; its audio stays in
- * memory and is scored only if the round's transcript matched its phrase.
+ * /voice/practice/stream/<capability>: one take's caller-only Media Stream. The caller has
+ * already checked the upgrade's Twilio signature. Its audio stays in memory. Scoring is cheap
+ * and judges nothing by itself, so it starts speculatively at each end of the answer the
+ * endpointer hears, before the transcript arrives, and the take's row keeps only the latest
+ * result. At the stream's stop, a matched phrase ('scoring') uses that score when the caller
+ * has not talked since it started, and otherwise scores the whole stream; any other state
+ * leaves the score unused.
  */
 export async function handlePracticeStream(req: Request, env: Env, ctx: ExecutionContext, capability: string): Promise<Response> {
   if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("expected websocket", { status: 426 });
@@ -294,25 +322,68 @@ export async function handlePracticeStream(req: Request, env: Env, ctx: Executio
   ).bind(callSid, round, take).run();
   if (!claimed.meta.changes) return new Response("round not listening", { status: 409 });
 
+  let reference: Promise<SpeakerReference | null> | null = null;
+  const score = async (samples: Int16Array): Promise<{ cosine: number | null; speech: number | null; error: string | null }> => {
+    try {
+      reference ??= callReference(env, callSid);
+      const voice = await reference;
+      if (!env.SPEAKER || !voice) throw new Error("unavailable: no verifier or Voice Reference");
+      const tail = samples.subarray(Math.max(0, samples.length - MAX_VERIFY_SECONDS * SAMPLE_RATE));
+      const audio = tail.buffer.slice(tail.byteOffset, tail.byteOffset + tail.byteLength) as ArrayBuffer;
+      const verified = await env.SPEAKER.verify({ audio, format: "pcm_s16le", sampleRate: SAMPLE_RATE, reference: voice });
+      return { cosine: verified.cosineSimilarity, speech: verified.speechSeconds, error: null };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { cosine: null, speech: null, error: /^([a-z-]+): /.exec(message)?.[1] ?? "unavailable" };
+    }
+  };
+
+  // The latest speculative score (its number in this take, when it started, and its write to the
+  // row), and whether the caller has talked since, which makes it stale.
+  type Attempt = { seq: number; started: number; stored: Promise<void> };
+  let latest: Attempt | null = null;
+  let attempts = 0;
+  let talkedSince = false;
+  const answerEnded = (samples: Int16Array) => {
+    talkedSince = false;
+    // A caller who keeps stopping and starting gets no more verifier calls: the stop scores
+    // the whole stream instead.
+    if (++attempts > MAX_SPECULATIVE_SCORES) {
+      latest = null;
+      return;
+    }
+    const attempt: Attempt = { seq: attempts, started: Date.now(), stored: Promise.resolve() };
+    latest = attempt;
+    attempt.stored = score(samples).then(async (result) => {
+      if (latest !== attempt) return;
+      // Only while the take awaits its transcript or its matched phrase awaits a score (a
+      // skipped or replayed take's score is dropped here, never written), and never over a
+      // later attempt's score.
+      await env.DB.prepare(
+        `UPDATE practice_rounds SET spec_seq = ?, spec_started_ms = ?, spec_cosine = ?, spec_speech_seconds = ?, spec_error = ?
+          WHERE call_sid = ? AND round = ? AND take = ? AND state IN ('listening', 'scoring') AND (spec_seq IS NULL OR spec_seq < ?)`,
+      ).bind(attempt.seq, attempt.started, result.cosine, result.speech, result.error, callSid, round, take, attempt.seq).run();
+    }).catch((error) => console.error("speculative score failed", error instanceof Error ? error.message : "unknown"));
+    ctx.waitUntil(attempt.stored);
+  };
+
   return acceptCallerStream(ctx, { account: claim.account, parameters: { round: String(round), take: String(take) }, maxSeconds: MAX_ROUND_SECONDS },
     async ({ samples }) => {
       const row = await readRound(env, callSid, round);
       if (row?.state !== "scoring" || row.take !== take) return;
-      const reference = await callReference(env, callSid);
-      let result: { cosine: number | null; speech: number | null; error: string | null };
-      try {
-        if (!env.SPEAKER || !reference) throw new Error("unavailable: no verifier or Voice Reference");
-        const tail = samples.subarray(Math.max(0, samples.length - MAX_VERIFY_SECONDS * SAMPLE_RATE));
-        const audio = tail.buffer.slice(tail.byteOffset, tail.byteOffset + tail.byteLength) as ArrayBuffer;
-        const verified = await env.SPEAKER.verify({ audio, format: "pcm_s16le", sampleRate: SAMPLE_RATE, reference });
-        result = { cosine: verified.cosineSimilarity, speech: verified.speechSeconds, error: null };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        result = { cosine: null, speech: null, error: /^([a-z-]+): /.exec(message)?.[1] ?? "unavailable" };
+      if (latest && !talkedSince) {
+        await latest.stored;
+        const used = await env.DB.prepare(
+          `UPDATE practice_rounds SET state = 'scored', cosine = spec_cosine, speech_seconds = spec_speech_seconds, error = spec_error,
+             speculative = 1 WHERE call_sid = ? AND round = ? AND take = ? AND state = 'scoring' AND spec_seq = ?`,
+        ).bind(callSid, round, take, latest.seq).run();
+        if (used.meta.changes) return;
       }
+      const result = await score(samples);
       await env.DB.prepare(
         `UPDATE practice_rounds SET state = 'scored', cosine = ?, speech_seconds = ?, error = ?
           WHERE call_sid = ? AND round = ? AND take = ? AND state = 'scoring'`,
       ).bind(result.cosine, result.speech, result.error, callSid, round, take).run();
-    });
+    },
+    { end: answerEnded, resume: () => { talkedSince = true; } });
 }

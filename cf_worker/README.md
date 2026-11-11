@@ -280,11 +280,22 @@ silence, "stop", or a repeat request), first plays the received cue,
 C6 for 70 ms, 30 ms of silence, G5 for 110 ms, 8 kHz mono, public and cached a
 day like the tone), so the caller hears their answer arrive instead of four to
 seven seconds of silence before the level; on a match it plays while the
-verifier scores. A match marks the row `scoring` and stops the stream; the
-stream's stop event then sends the in-memory 8 kHz PCM (its last 30 s,
-`MAX_VERIFY_SECONDS`, the verifier's limit) to `SPEAKER.verify` and
-writes back only the cosine and speech seconds, while `/voice/practice/result`
-waits up to 10 seconds for them. Under 1.5 seconds of speech, or the verifier's
+verifier scores. Scoring is speculative: the stream's `AnswerEndpointer`
+(`src/caller_stream.ts`) watches 20 ms frames and, when at least a second of
+speech (energy over both the line's noise floor plus 15 dB and 40 dB absolute)
+is followed by 700 ms of silence, sends the in-memory 8 kHz PCM so far (its last
+30 s, `MAX_VERIFY_SECONDS`, the verifier's limit) to `SPEAKER.verify` at once,
+storing the result in the row's `spec_` columns. Talking again makes that score
+stale, and the next end starts a fresh one; only the latest is kept (`spec_seq`
+orders them), and a take starts at most four, after which the stop scores the
+whole stream. A match
+marks the row `scoring` (with `heard_ms`) and stops the stream; the stream's
+stop event then uses the latest speculative score if the caller has not talked
+since it started, or else scores the whole stream as before, and writes back
+only the cosine and speech seconds, while `/voice/practice/result` waits up to
+10 seconds for them. A wrong phrase, silence, or repeat request clears the
+`spec_` columns, and a score landing later is dropped, so it is never used,
+spoken, or logged. Under 1.5 seconds of speech, or the verifier's
 `insufficient-audio`, earns another phrase; otherwise the caller hears "Strong
 voice match." (cosine at least `STRONG_MATCH_COSINE`, 0.7), "Voice matched."
 (`MATCH_COSINE`, 0.5), or "Voice not matched.", never the number. A short "stop",
@@ -294,7 +305,9 @@ to `/voice`, reconnecting the Voice Agent. Audio is never written anywhere; each
 round's row is deleted once spoken, and Call Activity keeps `practice.round`
 events for every round (`outcome`: `strong_match`, `match`, `no_match`,
 `not_enough_speech` with the score when the verifier gave one, `wrong_phrase`,
-`repeat_limit`, `silent`, or `unscored`; `cosine` and `speech_seconds` when available) plus
+`repeat_limit`, `silent`, or `unscored`; `cosine` and `speech_seconds` when available; on every
+round that waited for a score, `wait_ms`, `speculative`, and, when the
+speculative score was used, `head_start_ms`, from its start to `/heard`) plus
 `practice.started`, `practice.repeat`, `practice.ended`, and
 `practice.unavailable`.
 
@@ -310,6 +323,7 @@ uv run --script admin_test.py
 uv run --script ../sandbox_acp_gateway.py test
 node --experimental-strip-types challenge_phrases_test.ts
 node --experimental-strip-types voice_verify_test.ts
+node --experimental-strip-types endpointer_test.ts
 ```
 
 The local suites listen on 8787 (Worker), 8790-8792 (mocks), and 10229 (inspector).
@@ -318,8 +332,9 @@ To run them in several worktrees at once, give each its own base, for example
 the base, base+3 to base+5, and base+1442. Each worktree keeps its own local D1.
 
 The smoke test's Voice Donation checks use wrangler dev's local R2. A local D1
-created before `migrations/2026-11-11-call-handoff-donation.sql` or
-`migrations/2026-11-12-challenge-practice.sql` needs those files applied with
+created before `migrations/2026-11-11-call-handoff-donation.sql`,
+`migrations/2026-11-12-challenge-practice.sql`, or
+`migrations/2026-11-12-speculative-scoring.sql` needs those files applied with
 `--local` once, since `schema.sql` only creates missing tables.
 
 The smoke test runs `wrangler dev -c wrangler.toml -c speaker_mock.toml`, so the
