@@ -1,7 +1,7 @@
 // Operator calibration tooling for the speaker verification Worker (SPEAKER).
 // POST /admin/api/voice-verify?user=<id> scores a mono 16-bit WAV against that
-// User's Voice Reference; GET /admin/api/voice-verify/health warms the model on a
-// synthetic signal. Neither returns nor logs audio or embeddings, and neither
+// User's Voice Reference; GET /admin/api/voice-verify/health warms the model and embeds a
+// synthetic signal, reporting whether that request loaded the model. Neither returns nor logs audio or embeddings, and neither
 // authorizes anything: thresholds and decisions belong to the Identity Check.
 // warmSpeaker readies the verifier when a call arrives.
 import type { Env, SpeakerAudio } from "./types";
@@ -92,11 +92,15 @@ export async function handleVoiceVerify(req: Request, env: Env, url: URL, json: 
   if (req.method !== (health ? "GET" : "POST")) return json({ error: "method not allowed" }, 405);
   if (!env.SPEAKER) return json({ error: "speaker verification is not bound" }, 503);
   if (health) {
+    // warm() first, so the response says whether this request loaded the model (cold) apart
+    // from time spent queued behind other requests in the same isolate.
     const started = Date.now();
     try {
+      const { cold } = await env.SPEAKER.warm();
+      const warmMs = Date.now() - started;
       const result = await env.SPEAKER.embed(syntheticAudio());
       return json({ ok: true, embedding_space: result.embeddingSpace, audio_seconds: result.audioSeconds,
-        ms: Date.now() - started });
+        cold, warm_ms: warmMs, ms: Date.now() - started });
     } catch (error) {
       return speakerFailure(error, json);
     }

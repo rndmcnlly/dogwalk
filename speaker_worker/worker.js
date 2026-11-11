@@ -7,8 +7,10 @@ import * as ort from "onnxruntime-web";
 import { MODEL_RATE, SpeakerError, WINDOW_SECONDS, modelInput } from "./preprocess.js";
 
 // Names the weights, exported graph, input contract, frontend, and normalization.
-// The hashes are checked at build time against the bundled model (build.mjs).
-export const EMBEDDING_SPACE =
+// The hashes are checked at build time against the bundled model (build.mjs). Not
+// exported: workerd treats every module export as an entrypoint, and local dev refuses a
+// string one.
+const EMBEDDING_SPACE =
   "redimnet2-b3-vox2-lm@02d14efdc1845738/onnx-waveform@c2653e3df4e2f5e3/pcm16k-mono-f32-48000/tfmelbanks-native/l2-cosine";
 const DIMENSION = 192;
 const MAX_SECONDS = 30;

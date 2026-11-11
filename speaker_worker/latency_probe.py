@@ -11,8 +11,9 @@
     uv run --script speaker_worker/latency_probe.py analytics [--hours 24]
 
 Each probe is `GET /admin/api/voice-verify/health`, which runs one real inference on a synthetic
-signal; its `ms` is the SPEAKER RPC alone, measured inside dogwalk, so client network time is
-excluded. A probe over COLD_MS is counted as a model load in a fresh instance. Requests from this
+signal; its `ms` is the SPEAKER RPCs alone, measured inside dogwalk, so client network time is
+excluded. A probe over SLOW_MS is slow; health also reports the verifier's own `cold` flag (from
+warm()), which separates a model load from waiting behind other requests in one isolate. Requests from this
 laptop reach a nearby colo, which is not necessarily the one serving Twilio's webhooks. `verify`
 scores a local WAV (8 or 16 kHz mono 16-bit) against a User's Voice Reference; use synthetic audio
 (macOS `say`), never commit it. `analytics` reads dogwalk-speaker's invocation metrics (status,
@@ -38,7 +39,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ORIGIN = "https://dogwalk.tools"
-COLD_MS = 2000
+# Over SLOW_MS is slow: a model load, or a wait behind other requests in a serialized
+# isolate. Only the Worker's own `cold` flag (health reports it) says a load happened.
+SLOW_MS = 2000
 ACCOUNT_ID = "890753ccd6f0bbbfbe2c030cc44f6a87"  # Adam's personal Cloudflare account
 CF_PROFILE = Path.home() / "Library/Preferences/cloudflare/config/personal.json"
 
@@ -78,7 +81,8 @@ def call(authorization: str, path: str, body: bytes | None = None,
     total = round((time.monotonic() - started) * 1000)
     ms = payload.get("ms")
     return {"status": status, "rpc_ms": ms, "total_ms": total, "colo": ray.rpartition("-")[2],
-            "cold": ms is not None and ms > COLD_MS, "error": payload.get("error")}
+            "slow": ms is not None and ms > SLOW_MS, "cold": payload.get("cold"), "warm_ms": payload.get("warm_ms"),
+            "error": payload.get("error")}
 
 
 def probe(authorization: str, connection: http.client.HTTPSConnection | None = None, **extra) -> dict:
@@ -89,8 +93,6 @@ def probe(authorization: str, connection: http.client.HTTPSConnection | None = N
 
 def summarize(label: str, results: list[dict]) -> None:
     ok = [r for r in results if r["rpc_ms"] is not None]
-    cold = [r["rpc_ms"] for r in ok if r["cold"]]
-    warm = [r["rpc_ms"] for r in ok if not r["cold"]]
 
     def spread(values: list[int]) -> str:
         if not values:
@@ -102,9 +104,16 @@ def summarize(label: str, results: list[dict]) -> None:
     for r in results:
         if r["rpc_ms"] is None:
             errors[f"{r['status']} {r['error']}"] = errors.get(f"{r['status']} {r['error']}", 0) + 1
-    print(json.dumps({"summary": label, "requests": len(results), "cold": len(cold),
-                      "cold_ms": spread(cold), "warm_ms": spread(warm), "errors": errors,
-                      "colos": sorted({r["colo"] for r in results})}), flush=True)
+    flagged = [r for r in ok if r["cold"] is not None]
+    print(json.dumps({
+        "summary": label, "requests": len(results), "slow": sum(r["slow"] for r in ok),
+        "slow_ms": spread([r["rpc_ms"] for r in ok if r["slow"]]),
+        "fast_ms": spread([r["rpc_ms"] for r in ok if not r["slow"]]),
+        # From the Worker's flag, so queueing is not counted; null against a verifier without warm().
+        "cold": sum(r["cold"] for r in flagged) if flagged else None,
+        "cold_ms": spread([r["rpc_ms"] for r in flagged if r["cold"]]),
+        "queued_slow": sum(r["slow"] and not r["cold"] for r in flagged) if flagged else None,
+        "errors": errors, "colos": sorted({r["colo"] for r in results})}), flush=True)
 
 
 def sequential(args, authorization: str) -> None:
@@ -126,7 +135,9 @@ def concurrent(args, authorization: str) -> None:
 def idle(args, authorization: str) -> None:
     # One connection pins every probe to one machine, so a cold probe after a gap means the
     # instance was evicted, not that routing chose another machine. /healthz every 20 s keeps
-    # the connection open without touching the verifier; a replaced socket is reported.
+    # the connection open without touching the verifier. If the socket was replaced (the
+    # server closed it and http.client reconnected), the sample says nothing about retention
+    # and is reported apart.
     connection = http.client.HTTPSConnection(ORIGIN.removeprefix("https://"), timeout=60)
     results = []
     for repeat in range(args.repeats):
@@ -139,9 +150,12 @@ def idle(args, authorization: str) -> None:
                 connection.request("GET", "/healthz", headers={"user-agent": "dogwalk-research/1"})
                 connection.getresponse().read()
             results.append(probe(authorization, connection, mode="idle", gap=gap, repeat=repeat,
-                                 same_connection=connection.sock is sock))
+                                 same_connection=sock is not None and connection.sock is sock))
     for gap in args.gaps:
-        summarize(f"idle gap={gap}s", [r for r in results if r["gap"] == gap])
+        summarize(f"idle gap={gap}s", [r for r in results if r["gap"] == gap and r["same_connection"]])
+        reconnected = [r for r in results if r["gap"] == gap and not r["same_connection"]]
+        if reconnected:
+            summarize(f"idle gap={gap}s reconnected (not retention evidence)", reconnected)
 
 
 def verify(args, authorization: str) -> None:
