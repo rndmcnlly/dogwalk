@@ -642,6 +642,9 @@ Replacement after explicit provider-side deletion is exceptional reconciliation.
 Stopped and archived Sandboxes retain identity and durable filesystem state and
 are resumed in place, until reaped (see Identity and Hosting Lifecycle).
 
+A reaped assignment keeps its row with no provider ID and the state `reaped`,
+so the next call provisions a fresh Sandbox exactly as after a replacement.
+
 ### Diagnostics Surface
 
 **Context:** Access Control, with projections from every other context
@@ -923,6 +926,10 @@ Inactivity reaps from the outside in, each layer more slowly:
 
 Reaping is ordinary lifecycle, not failure. Someone reaped, or locked out of their identity, is invited again and registers as a new User.
 
+Sandbox reaping is a daily, bounded pass. A User's last Voice Call is the latest one that reached them (the Sandbox Assignment's creation if there is none); a Sandbox is never reaped while its User has a call in progress or one within the reap age, and that check is made atomically with clearing the assignment, so a call arriving during the pass cannot reach a Sandbox being deleted. A provider that already deleted the Sandbox counts as reaped. The reap age is deployment configuration (30 days by default), and the pass starts as a dry run that only records candidates until the operator turns deletion on.
+
+A reaped Sandbox is a different Workspace, handled as a replacement is: when the next call brings the fresh Sandbox, the Voice Session drops the old Sandbox's projection (Managed Sessions, pending Attention Requests, the Session Orchestrator's conversation, Whiteboard boards and Board Assets, and Paired Browsers with their Human Takeovers). The Memory survives, because it is the Session Orchestrator's knowledge of the User rather than state in the Sandbox; the Session Orchestrator is told the Sandbox was reaped, so it treats the Memory's sessions and files as gone. The Opening says the sandbox was cleared and starts fresh, in place of the welcome line written about the old Sandbox.
+
 ### Attention Lifecycle
 
 An Attention Request is received from the Agent, queued for the appropriate interaction surface, presented to the User, resolved with subtype-correct semantics, and returned to the Agent. Cancelling a Prompt Turn also resolves or cancels its pending protocol requests as ACP requires.
@@ -1048,13 +1055,14 @@ The following language appears in Git history and is not canonical for productio
 - Which parts of Assignment history belong to Dogwalk versus the ACP Agent's retained session context?
 
 - Should the Session Orchestrator ever act without a live User utterance, for example starting a follow-up Prompt Turn after a failure? That is an authorization question first, and the current answer is no.
-- Resolved: the Session Orchestrator's persistent context is compacted voluntarily into its Memory (see Memory), readable on a Paired Browser. Still open: should parts of the Memory also become notes in the Workspace, the way a coworker's notebook would be, and should a Sandbox replacement reset it?
+- Resolved: the Session Orchestrator's persistent context is compacted voluntarily into its Memory (see Memory), readable on a Paired Browser. Also resolved: a Sandbox replacement or reaping keeps it (see Identity and Hosting Lifecycle). Still open: should parts of the Memory also become notes in the Workspace, the way a coworker's notebook would be, and should the Memory itself expire after a much longer absence?
 - When a newer Handoff arrives while work for an older one is in flight, which supersession rules belong in deterministic code rather than Orchestrator judgment?
 
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Invitations: should a successful Registration by Invitation continue straight into the new User's first call rather than hanging up? Should the Diagnostics Surface draw the invitation graph, and should an operator be able to raise or lower a User's active-Invitation limit?
 - Resolved: a spoken Handle plus Identity Challenges lets a User call from any telephone (see Roaming). Still open: how long before an inactive User is reaped; how many failed Identity Check attempts pause a Handle, and for how long; and whether registering from a number that is already a Home should be limited, since one phone could otherwise create many Users (bounded today only by Invitation limits).
 - Challenge Practice tells a caller how their voice scores, round after round, so it is also an oracle for tuning an impersonation (a recording or voice converter) before a real Identity Check. Today only the User reaches it, from inside an admitted call; should practice rounds count toward the same attempt limits once enforcement exists?
+- User reaping is not implemented; only Sandbox reaping is. When it is: its age; that reaping a User moves their Handle into `retired_handles` for the same 90-day quarantine as renaming (the table's `user_id` then names a reaped User), clears the Home, deletes the Voice Reference, and sets `users.reaped_at`; whether it also reaps a Sandbox not yet reaped; and what becomes of the Voice Session Durable Object (its Memory, transcripts, and archives), which no reaping deletes today.
 - Should the Identity Check ever collect more voice evidence during the conversation, or does whole-call collection need its own consent and retention decision?
 - Voice Donations: how long is donated audio kept? Today it stays until the operator deletes it on request or decides otherwise; a fixed retention period, and whether the consent script should state it, is undecided. Should a donor be able to delete their own session by voice without an identifier being spoken to them?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?

@@ -74,9 +74,45 @@ reference and starts idempotent replacement provisioning. The Registration is
 retained; the deleted sandbox's files and ACP Session history are not.
 
 Normal user sandboxes are not disposable. They auto-stop after 15 idle minutes,
-auto-archive after 7 days, and never auto-delete. A call starts or restores that
-same Sandbox, preserving its filesystem and Agent-held session history across
-months. Replacement occurs only after explicit provider-side deletion.
+auto-archive after 7 days, and never auto-delete in Daytona. A call starts or
+restores that same Sandbox, preserving its filesystem and Agent-held session
+history until Dogwalk reaps it (below). Replacement otherwise occurs only after
+explicit provider-side deletion or the caller's confirmed recovery replacement.
+
+### Sandbox Reaping
+
+A daily cron pass (`17 10 * * *`, `SANDBOX_REAP_CRON` in `src/index.ts`) looks
+for Sandbox Assignments whose User has made no Voice Call for
+`SANDBOX_REAP_AGE_DAYS` (default 30, minimum 1; the assignment's creation counts
+when there are no calls) and none in progress. It handles at most ten per pass,
+oldest first. `SANDBOX_REAP_MODE` ships as `dry-run`: the pass only audits
+`sandbox.reap.candidate`. Any value other than `delete` is a dry run.
+
+In `delete` mode, each candidate's assignment is cleared (`provider_id` NULL,
+state `reaped`) in the same statement that rechecks idleness, then the Daytona
+Sandbox is deleted (a 404 counts as already gone) and `sandbox.reaped` is
+audited with `already_gone`. If Daytona refuses, the provider ID is restored
+with state `reap_failed`, `sandbox.reap.failed` is audited, and the next pass
+retries. The User's next call provisions a fresh Sandbox, the VoiceSession drops
+the old projection as on replacement (its Memory stays), and the Opening says
+the sandbox was cleared.
+
+See the candidates before turning deletion on:
+
+```sh
+npx wrangler d1 execute dogwalk --remote --command \
+  "SELECT datetime(ts, 'unixepoch') AS at, event, detail FROM audit_log
+    WHERE event LIKE 'sandbox.reap%' ORDER BY id DESC LIMIT 50"
+```
+
+Each row's `detail` names `user_id`, `provider_id`, `last_call_at`, and
+`idle_days`. Join `user_id` to `users.handle` to recognize whose Sandbox it is.
+To turn deletion on, set `SANDBOX_REAP_MODE = "delete"` under `[vars]` in
+`wrangler.toml` and deploy (or change the variable in the Cloudflare dashboard,
+which the next `wrangler deploy` overwrites with the file's value). In production a pass
+runs only on that schedule, so the first candidates appear after the next 10:17
+UTC following a deploy. Locally, `wrangler dev --test-scheduled` exposes
+`/__scheduled?cron=17+10+*+*+*`, which the smoke test uses.
 
 ## Deploying Changes
 

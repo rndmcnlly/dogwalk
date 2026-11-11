@@ -66,6 +66,8 @@ class DaytonaMock(BaseHTTPRequestHandler):
     execute_hooks: list = []
     # Optional handlers for other GETs (toolbox file reads): path -> (status, body, content type).
     get_hooks: list = []
+    # Paths of every DELETE, answered or not.
+    deleted: list[str] = []
 
     def sandbox(self, state: str = "started") -> dict:
         return {
@@ -172,7 +174,8 @@ class DaytonaMock(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_DELETE(self) -> None:
-        if self.path == f"/api/sandbox/mock-sandbox-{self.generation}":
+        DaytonaMock.deleted.append(self.path)
+        if self.exists and self.path == f"/api/sandbox/mock-sandbox-{self.generation}":
             DaytonaMock.exists = False
             self.reply(self.sandbox("destroying"))
             return
@@ -778,6 +781,114 @@ def provider_route_checks(base_url: str, token: str, headers: dict) -> None:
             "provider callback retry was not deduplicated")
 
 
+REAP_CRON = "17 10 * * *"
+DAY = 86400
+# Sandbox reaping fixtures: name -> (Home, provider ID or None for a fresh mock Sandbox, calls).
+# A call is (started days ago, ended days ago or None while in progress).
+REAP_USERS = {
+    "idle": ("+15555550105", None, [(40, 40)]),
+    "gone": ("+15555550106", "mock-reap-gone", []),
+    "recent": ("+15555550107", "mock-reap-recent", [(45, 45), (2, 2)]),
+    "live": ("+15555550108", "mock-reap-live", [(45, 45), (0.05, None)]),
+}
+
+
+def seed_reap_fixture() -> dict[str, int]:
+    """Users whose Sandboxes were assigned 60 days ago, with the calls REAP_USERS lists."""
+    DaytonaMock.generation += 1
+    DaytonaMock.exists = True
+    DaytonaMock.detail_reads = 0
+    statements = []
+    for name, (phone, provider, calls) in REAP_USERS.items():
+        provider = provider or f"mock-sandbox-{DaytonaMock.generation}"
+        user = f"(SELECT id FROM users WHERE identity_hash = 'reap-{name}')"
+        statements.append(
+            f"INSERT INTO users (identity_hash, invite_code, registered_at, home_phone, home_used_at) "
+            f"VALUES ('reap-{name}', '{LOCAL_INVITE}', unixepoch() - {60 * DAY}, '{phone}', unixepoch() - {40 * DAY})")
+        statements.append(
+            f"INSERT INTO sandbox_assignments (user_id, provider_id, state, provisioning_started_at, created_at) "
+            f"VALUES ({user}, '{provider}', 'stopped', unixepoch() - {60 * DAY}, unixepoch() - {60 * DAY})")
+        for index, (started, ended) in enumerate(calls):
+            end = "NULL" if ended is None else f"unixepoch() - {int(ended * DAY)}"
+            statements.append(
+                f"INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at, ended_at, user_id) "
+                f"VALUES ('CA_REAP_{name.upper()}_{index}', '{phone}', '{'in-progress' if ended is None else 'completed'}', "
+                f"unixepoch() - {int(started * DAY)}, unixepoch() - {int(started * DAY)}, {end}, {user})")
+    d1_local(";\n".join(statements))
+    rows = d1_local("SELECT id, identity_hash FROM users WHERE identity_hash LIKE 'reap-%'")
+    return {row["identity_hash"].removeprefix("reap-"): row["id"] for row in rows}
+
+
+def reap_assignments() -> dict[int, dict]:
+    rows = d1_local("""SELECT s.user_id, s.provider_id, s.state FROM sandbox_assignments s
+        JOIN users u ON u.id = s.user_id WHERE u.identity_hash LIKE 'reap-%'""")
+    return {row["user_id"]: row for row in rows}
+
+
+def run_reap_pass(base_url: str, users: dict[str, int], event: str, expected: int) -> list[dict]:
+    """Trigger the daily pass and return the fixture Users' new `event` audit rows."""
+    mark = d1_local("SELECT COALESCE(MAX(id), 0) AS id FROM audit_log")[0]["id"]
+    status, _ = get(base_url, "/__scheduled?cron=" + urllib.parse.quote_plus(REAP_CRON))
+    require(status == 200, f"scheduled trigger failed: {status}")
+    ids = set(users.values())
+    deadline = time.time() + 10
+    while True:
+        rows = d1_local(f"SELECT event, detail FROM audit_log WHERE id > {mark} AND event LIKE 'sandbox.reap%'")
+        mine = [dict(row, detail=json.loads(row["detail"])) for row in rows]
+        mine = [row for row in mine if row["detail"].get("user_id") in ids]
+        if len(mine) >= expected or time.time() > deadline:
+            break
+        time.sleep(0.2)
+    time.sleep(0.5)
+    require(all(row["event"] == event for row in mine), f"unexpected reaping events: {mine}")
+    return mine
+
+
+def reap_dry_run_checks(base_url: str) -> dict[str, int]:
+    """The default mode only audits candidates: no provider call, no assignment change."""
+    users = seed_reap_fixture()
+    before = reap_assignments()
+    DaytonaMock.deleted.clear()
+    rows = run_reap_pass(base_url, users, "sandbox.reap.candidate", 2)
+    candidates = {row["detail"]["user_id"] for row in rows}
+    require(candidates == {users["idle"], users["gone"]}, f"dry-run candidates: {rows}")
+    require(all(row["detail"]["mode"] == "dry-run" and row["detail"]["idle_days"] >= 39 for row in rows),
+            f"dry-run candidate detail: {rows}")
+    require(DaytonaMock.deleted == [], f"dry run deleted a Sandbox: {DaytonaMock.deleted}")
+    require(reap_assignments() == before, "dry run changed a Sandbox Assignment")
+    return users
+
+
+def reap_delete_checks(base_url: str, token: str, users: dict[str, int]) -> None:
+    """Delete mode reaps idle Sandboxes (a provider 404 counts as gone), spares recent and
+    in-progress callers, and the reaped User's next call provisions a fresh Sandbox."""
+    before = reap_assignments()
+    idle_provider = before[users["idle"]]["provider_id"]
+    DaytonaMock.deleted.clear()
+    rows = run_reap_pass(base_url, users, "sandbox.reaped", 2)
+    reaped = {row["detail"]["user_id"]: row["detail"] for row in rows}
+    require(set(reaped) == {users["idle"], users["gone"]}, f"reaped: {rows}")
+    require(reaped[users["idle"]]["already_gone"] is False and reaped[users["gone"]]["already_gone"] is True,
+            f"404 not tolerated as already gone: {rows}")
+    require(sorted(DaytonaMock.deleted) == sorted([f"/api/sandbox/{idle_provider}", "/api/sandbox/mock-reap-gone"]),
+            f"provider deletions: {DaytonaMock.deleted}")
+    after = reap_assignments()
+    for name in ("idle", "gone"):
+        require(after[users[name]]["provider_id"] is None and after[users[name]]["state"] == "reaped",
+                f"{name} assignment not cleared: {after[users[name]]}")
+    for name in ("recent", "live"):
+        require(after[users[name]] == before[users[name]], f"{name} Sandbox was touched: {after[users[name]]}")
+
+    created = DaytonaMock.create_count
+    phone = REAP_USERS["idle"][0]
+    status, body = post(base_url, "/voice", {"From": phone, "CallSid": "CA_REAP_NEXT"}, token)
+    require(status == 200 and "<Dial" in body, f"reaped User's next call: {status} {body}")
+    fresh = reap_assignments()[users["idle"]]
+    require(DaytonaMock.create_count == created + 1 and fresh["provider_id"] == f"mock-sandbox-{DaytonaMock.generation}"
+            and fresh["provider_id"] != idle_provider, f"reaped User did not get a fresh Sandbox: {fresh}")
+    post(base_url, "/voice/status", {"From": phone, "CallSid": "CA_REAP_NEXT", "CallStatus": "completed"}, token)
+
+
 def research_object(key: str) -> bytes | None:
     """An object from the local research bucket, or None when it does not exist."""
     result = subprocess.run(
@@ -1172,9 +1283,40 @@ def main() -> int:
     thread = threading.Thread(target=daytona.serve_forever, daemon=True)
     thread.start()
 
-    print("starting wrangler dev")
+    # A private dev registry, shared by both Workers this run starts, so no other worktree's
+    # wrangler dev binds to this speaker mock.
     registry = tempfile.mkdtemp(prefix="dogwalk-wrangler-registry-")
-    process = subprocess.Popen(
+    process = start_worker(wrangler, registry)
+    try:
+        if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
+            print("wrangler dev did not start", file=sys.stderr)
+            return 1
+        result = run_tests(
+            DEFAULT_LOCAL, "local Worker", LOCAL_TOKEN, LOCAL_INVITE, mock_daytona=True
+        )
+        if result:
+            return result
+        # Sandbox reaping: the configured default is a dry run; delete mode needs a restart.
+        reap_users = reap_dry_run_checks(DEFAULT_LOCAL)
+        stop_worker(process)
+        process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:delete")
+        if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
+            print("wrangler dev did not restart", file=sys.stderr)
+            return 1
+        reap_delete_checks(DEFAULT_LOCAL, LOCAL_TOKEN, reap_users)
+        print("Sandbox reaping checks passed (dry run, delete, 404, recent and live callers, fresh Sandbox)")
+        return 0
+    finally:
+        stop_worker(process)
+        daytona.shutdown()
+        daytona.server_close()
+        shutil.rmtree(registry, ignore_errors=True)
+
+
+def start_worker(wrangler: str, registry: str, *overrides: str) -> subprocess.Popen:
+    print("starting wrangler dev")
+    extra = [arg for override in overrides for arg in ("--var", override)]
+    return subprocess.Popen(
         [
             wrangler,
             "dev",
@@ -1209,26 +1351,24 @@ def main() -> int:
             "DAYTONA_AGENT_SECRET:dogwalk-test-agent-secret",
             "--var",
             f"ADMIN_PASSWORD:{LOCAL_ADMIN_PASSWORD}",
+            "--test-scheduled",
+            *extra,
         ],
         cwd=WORKER_DIR,
-        # A private dev registry, so no other worktree's wrangler dev binds to this speaker mock.
         env={**os.environ, "WRANGLER_REGISTRY_PATH": registry},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    try:
-        if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
-            print("wrangler dev did not start", file=sys.stderr)
-            return 1
-        return run_tests(
-            DEFAULT_LOCAL, "local Worker", LOCAL_TOKEN, LOCAL_INVITE, mock_daytona=True
-        )
-    finally:
+
+
+def stop_worker(process: subprocess.Popen) -> None:
+    if process.poll() is None:
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=10)
-        daytona.shutdown()
-        daytona.server_close()
-        shutil.rmtree(registry, ignore_errors=True)
+    # Wait for the port to be released before a restart binds it again.
+    end = time.time() + 10
+    while time.time() < end and wait_port("127.0.0.1", WORKER_PORT, timeout=0.3):
+        time.sleep(0.2)
 
 
 if __name__ == "__main__":

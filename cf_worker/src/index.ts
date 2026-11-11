@@ -401,7 +401,9 @@ async function ensureSandboxAssignment(env: Env, user: User): Promise<SandboxAss
   if (!assignment) throw new Error("sandbox assignment insert failed");
   if (assignment.provider_id) return assignment;
 
-  const discovered = await findDaytonaSandboxes(env, hash);
+  // A Sandbox being deleted (replaced or reaped) may still be listed for a while; never adopt it.
+  const discovered = (await findDaytonaSandboxes(env, hash))
+    .filter((sandbox) => !["destroying", "destroyed"].includes(sandbox.state));
   if (discovered.length > 1) {
     await env.DB.prepare(
       "UPDATE sandbox_assignments SET state = 'conflict', error = ? WHERE user_id = ?",
@@ -501,6 +503,86 @@ async function resolveSandbox(
   }
   await updateAssignment(env, user, sandbox);
   return { assignment: (await getAssignment(env, user))!, sandbox };
+}
+
+// --- Sandbox reaping ----------------------------------------------------
+
+// Identity and Hosting Lifecycle (DOMAIN.md): a Sandbox is reaped once its User has made no
+// Voice Call for SANDBOX_REAP_AGE_DAYS. A daily pass handles a bounded batch. Anything but
+// SANDBOX_REAP_MODE=delete is a dry run that only audits sandbox.reap.candidate.
+const SANDBOX_REAP_CRON = "17 10 * * *";
+const SANDBOX_REAP_BATCH = 10;
+// A call row without an end is in progress only while it is younger than this; an older one
+// lost its status report (Twilio ends any call within four hours).
+const CALL_IN_PROGRESS_SECONDS = 86400;
+
+interface ReapCandidate {
+  user_id: number;
+  provider_id: string;
+  last_call_at: number;
+}
+
+// No Voice Call by this User started at or after the cutoff (?1), and none is in progress.
+const userIdleSince = (user: string) => `NOT EXISTS (
+  SELECT 1 FROM voice_calls c WHERE c.user_id = ${user}
+     AND (c.started_at >= ?1 OR (c.ended_at IS NULL AND c.started_at >= unixepoch() - ${CALL_IN_PROGRESS_SECONDS})))`;
+
+async function reapSandboxes(env: Env): Promise<void> {
+  const days = Number(env.SANDBOX_REAP_AGE_DAYS ?? "30");
+  if (!Number.isFinite(days) || days < 1) {
+    console.error(`SANDBOX_REAP_AGE_DAYS must be at least 1; reaping skipped (${env.SANDBOX_REAP_AGE_DAYS})`);
+    return;
+  }
+  const mode = env.SANDBOX_REAP_MODE === "delete" ? "delete" : "dry-run";
+  const now = Math.floor(Date.now() / 1000);
+  const cutoff = now - Math.round(days * 86400);
+  const { results } = await env.DB.prepare(
+    `SELECT s.user_id, s.provider_id,
+            COALESCE((SELECT MAX(c.started_at) FROM voice_calls c WHERE c.user_id = s.user_id), s.created_at) AS last_call_at
+       FROM sandbox_assignments s
+      WHERE s.provider_id IS NOT NULL AND s.created_at < ?1 AND ${userIdleSince("s.user_id")}
+      ORDER BY last_call_at LIMIT ?2`,
+  ).bind(cutoff, SANDBOX_REAP_BATCH).all<ReapCandidate>();
+  for (const candidate of results) {
+    const detail = {
+      user_id: candidate.user_id, provider_id: candidate.provider_id, mode,
+      last_call_at: candidate.last_call_at, idle_days: Math.floor((now - candidate.last_call_at) / 86400),
+    };
+    if (mode === "dry-run") {
+      await audit(env, "sandbox.reap.candidate", null, null, detail);
+      continue;
+    }
+    await reapSandbox(env, candidate, cutoff, detail);
+  }
+}
+
+// Clear the assignment first, atomically with the idleness check, so a call arriving now cannot
+// reach the Sandbox being deleted; restore it if the provider refuses the deletion. The
+// VoiceSession forgets the old Sandbox's projection when the next call brings a new Sandbox ID.
+async function reapSandbox(env: Env, candidate: ReapCandidate, cutoff: number, detail: Record<string, unknown>): Promise<void> {
+  const cleared = await env.DB.prepare(
+    `UPDATE sandbox_assignments
+        SET provider_id = NULL, state = 'reaped', error = NULL, provisioning_started_at = 0, last_checked_at = unixepoch()
+      WHERE user_id = ?2 AND provider_id = ?3 AND ${userIdleSince("?2")}`,
+  ).bind(cutoff, candidate.user_id, candidate.provider_id).run();
+  if (cleared.meta.changes !== 1) return;
+  let alreadyGone = false;
+  try {
+    await daytonaFetch(env, `/sandbox/${encodeURIComponent(candidate.provider_id)}`, { method: "DELETE" });
+  } catch (error) {
+    if (error instanceof DaytonaApiError && error.status === 404) {
+      alreadyGone = true;
+    } else {
+      const message = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+      await env.DB.prepare(
+        `UPDATE sandbox_assignments SET provider_id = ?, state = 'reap_failed', error = ?
+          WHERE user_id = ? AND provider_id IS NULL`,
+      ).bind(candidate.provider_id, message, candidate.user_id).run();
+      await audit(env, "sandbox.reap.failed", null, null, { ...detail, message });
+      return;
+    }
+  }
+  await audit(env, "sandbox.reaped", null, null, { ...detail, already_gone: alreadyGone });
 }
 
 // --- Diagnostics --------------------------------------------------------
@@ -997,7 +1079,11 @@ function voiceSessionFor(env: Env, identity: string): DurableObjectStub {
 // --- /voice routing -----------------------------------------------------
 
 export default {
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (event.cron === SANDBOX_REAP_CRON) {
+      ctx.waitUntil(reapSandboxes(env).catch((error) => console.error("sandbox reaping failed", error)));
+      return;
+    }
     ctx.waitUntil(processTwilioJobs(env));
   },
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
