@@ -684,6 +684,19 @@ def call_activity_rows(call_sid: str, timing: bool = False) -> list[dict]:
     return [item for call in calls if call["call_sid"] == call_sid for item in call["activity"]]
 
 
+def activity_line(row: dict) -> str:
+    """One activity row for failure output: what happened, to which tool, first; the rest cut."""
+    try:
+        detail = json.loads(row.get("detail") or "{}")
+    except ValueError:
+        detail = {}
+    if not isinstance(detail, dict):
+        detail = {}
+    head = [detail.pop(key, None) for key in ("event", "name", "tool_call_id", "outcome", "ms")]
+    head = " ".join(str(field) for field in [row.get("ts"), row.get("event"), *head] if field is not None)
+    return f"{head} {json.dumps(detail)[:160]}"
+
+
 def call_activity(call_sid: str) -> list[str]:
     return [row["event"] for row in call_activity_rows(call_sid)]
 
@@ -1985,9 +1998,9 @@ def main() -> int:
         tail = WRANGLER_LOG.read_text(errors="replace").splitlines()[-60:]
         print(f"--- last lines of {WRANGLER_LOG}", *tail, sep="\n", file=sys.stderr)
         # A tool.started with no tool.completed names the Worker call that stalled.
-        for call_sid in ("CA_VOICE_TEST2", "CA_VOICE_TEST3"):
+        for call_sid in ("CA_VOICE_TEST", "CA_VOICE_TEST2", "CA_VOICE_TEST3"):
             try:
-                rows = [json.dumps(row)[:240] for row in call_activity_rows(call_sid, timing=True)[-20:]]
+                rows = [activity_line(row) for row in call_activity_rows(call_sid, timing=True)[-20:]]
             except Exception as error:
                 rows = [f"unavailable: {error!r}"]
             print(f"--- last activity of {call_sid}", *rows, sep="\n", file=sys.stderr)
