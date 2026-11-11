@@ -73,6 +73,9 @@ Nesting: a Card holds no Card or Tabs; a Row holds no Row, Tabs, or Details; a T
 - An image on a board is as of when you drew it: it stays while the sandbox sleeps, and does not follow later edits. When a session changes the file, draw the board again to show the new version, and say so ("that's the updated diagram").
 - A complex diagram gets its explanation as Text or Steps next to it, not only in alt.
 - An image an Agent generated may be wrong. Caption it as generated, and do not present it as checked instruction.
+- For a rendition, give the producing session concrete limits: a still WebP under 1,500,000 bytes, at most 2048 pixels on the long side, preserving aspect ratio and transparency. Keep the original; use a new filename, inspect diagram labels, and report the new path. This is a file-preparation task, not a request to regenerate the illustration. Dogwalk's repository includes `board_rendition.py` as a tested example, but do not assume that script is installed in a session's Workspace.
+- Boards have no export, arbitrary canvas, or connector editor. Use Steps for a simple flow, or ask a session for a self-contained SVG diagram with connectors and show it as an Image. Do not promise editable geometry or a downloadable board.
+- HTML reports are live Workspace files, unlike captured boards: opening or reopening one needs the Sandbox. An already displayed report stays visible while it sleeps. Do not promise offline report reopening.
 
 ## Examples
 

@@ -436,7 +436,7 @@ BOARD_PROGRAM = (
     'big = Image(\'big.png\', "A generated chart")\n'
     'pick = Choice("approach", ["Quick fix", "Refactor"], "Which approach?")'
 )
-ICON_PROGRAM = 'root = Stack([Image("/home/daytona/chart.png", "", null, "icon"), Text("Next")])'
+ICON_PROGRAM = 'root = Stack([Image (asset, "", null, "icon"), Text("Example: Image(\'missing.png\', \'x\')")])\nasset = "/home/daytona/chart.png"'
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say", "f-begin", "f-inspect", "o-begin", "o-inspect",
@@ -780,7 +780,7 @@ async def recv_type(socket, kind: str, timeout: float = 8) -> dict:
                 return message
 
 
-PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(64)
+PNG_BYTES = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=")
 SVG_BYTES = b'<?xml version="1.0"?>\n<!-- drawn by an agent -->\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><script>alert(1)</script><rect width="10" height="10"/></svg>'
 # Workspace images: name -> (bytes, size the file info reports). huge.png understates its size,
 # so only the cap on downloaded bytes can catch it.
@@ -791,6 +791,8 @@ IMAGE_FILES = {
     "huge.png": (PNG_BYTES + bytes(8 * 1024 * 1024), 1000),
     "escape.png": (PNG_BYTES, len(PNG_BYTES)),
     "big.png": (PNG_BYTES + bytes(1_600_000), len(PNG_BYTES) + 1_600_000),
+    "wide.png": (PNG_BYTES[:16] + (9000).to_bytes(4, "big") + PNG_BYTES[20:], len(PNG_BYTES)),
+    "pixels.png": (PNG_BYTES[:16] + (5000).to_bytes(4, "big") * 2 + PNG_BYTES[24:], len(PNG_BYTES)),
 }
 # An HTML report: a Workspace image (relative) is inlined, a web image and one outside the Workspace are not.
 REPORT_HTML = (
@@ -1414,6 +1416,9 @@ async def run_protocol(identity: str) -> None:
             status, _, body = await asyncio.to_thread(image, "notes.png")
             assert status == 415 and b"not a PNG" in body, (status, body)
             assert (await asyncio.to_thread(image, "huge.png"))[0] == 413, "the cap counts downloaded bytes"
+            for oversized in ["wide.png", "pixels.png"]:
+                status, _, body = await asyncio.to_thread(image, oversized)
+                assert status == 415 and b"megapixels" in body, (oversized, status, body)
             status, _, body = await asyncio.to_thread(image, "escape.png")
             assert status == 403 and b"outside" in body, (status, body)
             assert (await asyncio.to_thread(image, "missing.png"))[0] == 404
@@ -1827,6 +1832,7 @@ def whiteboard_parser_checks() -> None:
         'root = Stack([Image("../../etc/a.png", "x")])',
         'root = Stack([Image("notes.txt", "x")])',
         'root = Stack([Image("/home/daytona/icon.png", "", null, "huge")])',
+        'root = Stack([Image (path, "Plot")])\npath = alias\nalias = "chart.png"',
     ]
     script = (
         'const HOME = "/home/daytona";\n' + resolve + parser
@@ -1834,13 +1840,14 @@ def whiteboard_parser_checks() -> None:
         + " return { errors: r.errors, children: r.root ? r.root.props.children.map((c) => c.props) : null }; })));"
     )
     results = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
-    drawn, url, data, escape, text, size = results
+    drawn, url, data, escape, text, size, reference = results
     assert not drawn["errors"] and drawn["children"][0] == {
         "path": "/home/daytona/bayleaf/diagram.svg", "alt": "Chain path", "caption": "Generated, unverified", "size": "large",
     }, drawn
     for refused, why in [(url, "never a URL"), (data, "never a URL"), (escape, "under /home/daytona"), (text, ".png")]:
         assert refused["children"] == [] and any(why in error for error in refused["errors"]), refused
     assert size["children"] == [{"path": "/home/daytona/icon.png", "alt": ""}] and "must be one of icon" in size["errors"][0], size
+    assert not reference["errors"] and reference["children"] == [{"path": "/home/daytona/chart.png", "alt": "Plot"}], reference
 
 
 def main() -> int:

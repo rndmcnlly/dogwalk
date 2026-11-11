@@ -17,6 +17,7 @@ import {
 import { PAIR_BUILD } from "./pair_page";
 import { producerFields } from "./otlp";
 import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, type TraceContext, withTraceparent } from "./trace_context";
+import { boardImagePaths, checkRasterSize } from "./board_images";
 
 const ACP_PORT = 8765;
 const WORKSPACE = "/home/daytona";
@@ -2276,6 +2277,8 @@ export class VoiceSession {
     const kind = sniffImage(bytes);
     if (!kind) throw new WorkspaceFileError(415, "that file is not a PNG, JPEG, GIF, WebP, or SVG image");
     if (named && named !== kind) throw new WorkspaceFileError(415, `that file holds a ${kind.toUpperCase()} image but is named .${extension}`);
+    try { checkRasterSize(bytes, kind); }
+    catch (error) { throw new WorkspaceFileError(415, errorMessage(error)); }
     return { bytes, kind };
   }
 
@@ -4393,15 +4396,6 @@ function imageHeaders(kind: ImageKind, length: number): Record<string, string> {
     "content-length": String(length),
     "content-security-policy": kind === "svg" ? SVG_CSP : "sandbox; default-src 'none'",
   };
-}
-
-// The first argument of each Image(...) written as a string literal, unescaped as the page's
-// tokenizer does. An image named any other way is not captured, and the page says so.
-function boardImagePaths(program: string): string[] {
-  return Array.from(program.matchAll(/\bImage\(\s*("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')/g), (match) => match[1].slice(1, -1)
-    .replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, escape: string) => escape.length === 5 ? String.fromCharCode(parseInt(escape.slice(1), 16))
-      : escape === "n" ? "\n" : escape === "t" ? "\t" : escape === "r" ? "" : escape)
-    .trim());
 }
 
 function boardAssetHashes(board: Board): string[] {

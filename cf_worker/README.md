@@ -382,6 +382,58 @@ takeovers and web pages show a banner the User clicks. HTML renders in an
 
 ### Whiteboard
 
+#### Image follow-up decisions (#3)
+
+- **Large images:** retain the 1.5 MB stored-asset limit rather than add R2 or a
+  Sandbox image-processing dependency to the call path. There is now a small,
+  explicit rendition helper: `uv run --script board_rendition.py INPUT.png OUTPUT.webp`
+  from the repository root. It preserves the original, refuses output overwrite,
+  bounds input pixels, and produces a still WebP under the asset cap. A synthetic
+  1280 × 1600 RGB PNG was reduced from 6,154,022 to 1,231,116 bytes without reducing
+  dimensions; transparency is covered separately. This proves the conversion,
+  not the correctness or visual legibility of any generated diagram. The Voice
+  Agent skill supplies the same concrete limits to a producing session.
+- **Decoded pixels:** raster headers are checked before serving or capture:
+  at most 8192 pixels per side and 16 megapixels. PNG, JPEG, GIF, and WebP are
+  covered; missing dimensions fail locally. These are canvas-size bounds, not a
+  complete decoder, an animation-frame budget, or SVG complexity protection.
+- **Path capture:** comments and quoted examples no longer produce false assets;
+  whitespace before `(` and string-valued statement references are supported,
+  including aliases and cycle termination. The browser parser confirms those
+  references are legal. No general expression evaluator was added to the server.
+- **Sleeping-Sandbox HTML reports:** source tracing confirms `workspaceRead`
+  downloads the report and calls `inlineReportImages` on every read; the iframe
+  then owns a self-contained `srcdoc`. Already displayed reports remain visible,
+  but reopening needs the Sandbox. Keep that live-file contract: persistent
+  report snapshots would require a new retention/replacement policy, not just
+  fixing Board Assets. No cache or wake-up promise is implied.
+- **Export/canvas:** inspection found no Whiteboard export or canvas-readback
+  operation. Keep export unsupported, rather than certify a nonexistent path.
+  Blob image display alone proves nothing about canvas origin cleanliness.
+- **Connectors/freeform layout:** `Steps(..., "row")` already renders simple flows;
+  a Workspace SVG supplies arbitrary diagrams through Image. Keep the component
+  layout rather than add editable geometry or a new canvas model.
+- **Symlink race:** a synthetic local filesystem test reproduced redirection by
+  replacing a parent of the *resolved* pathname between validation and open.
+  Replacing the original symlink alone did not redirect the resolved read.
+  Keep the limitation for now: this requires a concurrently mutating Sandbox
+  process, which already runs with the Sandbox user's filesystem authority.
+  This is not proof of race-free confinement or a test against the Daytona
+  toolbox. Closing it properly would require changing the Sandbox read adapter
+  (descriptor-based traversal/read), not another Worker pathname check.
+
+Focused checks: `node --experimental-strip-types cf_worker/board_images_test.ts`
+and `uv run --script test_board_rendition.py` from the repository root. The image
+endpoint regression cases also live in `voice_session_test.py`.
+
+Validation for this follow-up: focused header/path tests (including five real
+Pillow-encoded raster formats), the extracted browser parser, both rendition
+tests, TypeScript checking, Worker smoke tests (31 core checks plus timing), and
+the gateway's checks passed. The full voice integration suite, including the new
+`wide.png`/`pixels.png` endpoint regressions and the referenced-path parser case,
+passed end to end when this was committed (two earlier attempts had timed out
+before reaching the image checks). No production deploy or live-call test was done.
+
 `draw_on_whiteboard(program, note)` puts an openui-lang board on the paired
 page (the Hands tab, or a tab of its own): diagrams, tables, charts, forms, or
 per-item decisions such as before/after edit review. The page parses and renders
