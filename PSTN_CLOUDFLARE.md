@@ -122,8 +122,8 @@ exists but is disabled until a path-scoped Access application is configured.
 - Pairing Tones are verified only against local mocks and a simulated phone
   line; real carriers (AMR or EVS speech codecs), room acoustics, and a phone's
   own echo of the tones are untested.
-- Session discovery/load, explicit close/delete/config operations, and ACP
-  Elicitation are not yet exposed through the Voice Agent.
+- Session deletion, Session Config Options, and ACP Elicitation are not yet exposed
+  through the Voice Agent; discovery, load, and close are.
 - The Diagnostics surface is read-only infrastructure, not a required user interface.
 
 These are bounded gaps in the accepted architecture, not competing product
