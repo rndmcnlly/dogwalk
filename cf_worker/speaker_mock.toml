@@ -1,0 +1,4 @@
+# Local tests only: see speaker_mock.js. Never deployed.
+name = "dogwalk-speaker"
+main = "speaker_mock.js"
+compatibility_date = "2026-07-20"

@@ -131,7 +131,8 @@ which User a call reached. `voice_references` holds enrolled speaker embeddings
 (never audio) for the coming Identity Check. The `SPEAKER` Service Binding reaches
 the separately deployed `dogwalk-speaker` Worker (`../speaker_worker/`), which
 scores audio against them; operator-only `/admin/api/voice-verify` routes expose
-it for calibration and answer 503 when it is not bound, as in local dev.
+it for calibration and answer 503 when it is unbound or unreachable. Local tests
+bind `speaker_mock.js` in its place (see Verification).
 
 `migrations/2026-11-11-users.sql` converted the phone-keyed `registrations`
 table, keeping each existing `identity_hash` so Durable Objects, Sandboxes, and
@@ -183,6 +184,34 @@ Pulls land in `~/Library/Application Support/Dogwalk/voice_research/<date>/<sess
 when they called; match it against `list`. Annotate speaker and microphone
 beside the pulled copy, not in the bucket.
 
+## Challenge Practice
+
+A User asks the Voice Agent to "challenge me" or "test my voice" (DOMAIN.md,
+Challenge Practice); its `start_challenge_practice` tool leaves a `practice`
+handoff, so `/voice/after-live` redirects to `/voice/practice`
+(`src/challenge_practice.ts`). That route checks for the call's User's Voice
+Reference (`voice_calls.user_id`) and the `SPEAKER` binding, returning to `/voice`
+with a spoken reason when either is missing, warms the verifier with a synthetic
+`embed` in `waitUntil`, and starts round one. Each round inserts a transient
+`practice_rounds` row with a fresh phrase, starts a caller-only
+`<Start><Stream>` to `/voice/practice/stream/<capability>` (the same signed,
+per-round machinery as Voice Donations, in `src/caller_stream.ts`), plays the
+tone, and says the phrase inside a speech `<Gather>`. Its action,
+`/voice/practice/heard`, checks the transcript first (`phraseMatches` in
+`src/challenge_phrases.ts`, shared with the coming Identity Check): a wrong
+phrase is not scored. A match marks the row `scoring` and stops the stream; the
+stream's stop event then sends the in-memory 8 kHz PCM to `SPEAKER.verify` and
+writes back only the cosine and speech seconds, while `/voice/practice/result`
+waits up to 10 seconds for them. Under 2 seconds of speech, or the verifier's
+`insufficient-audio`, earns another phrase; otherwise the caller hears "Strong
+voice match." (cosine at least `STRONG_MATCH_COSINE`, 0.7), "Voice matched."
+(`MATCH_COSINE`, 0.5), or "Voice not matched.", never the number. A short "stop",
+ten rounds, two silent rounds, or a verifier error ends practice and redirects
+to `/voice`, reconnecting the Voice Agent. Audio is never written anywhere; each
+round's row is deleted once spoken, and Call Activity keeps `practice.round`
+events (`outcome`, `cosine`, `speech_seconds`) plus `practice.started`,
+`practice.ended`, and `practice.unavailable`.
+
 ## Verification
 
 The local smoke test runs a fake Daytona lifecycle and toolbox server:
@@ -202,8 +231,15 @@ To run them in several worktrees at once, give each its own base, for example
 the base, base+3 to base+5, and base+1442. Each worktree keeps its own local D1.
 
 The smoke test's Voice Donation checks use wrangler dev's local R2. A local D1
-created before `migrations/2026-11-11-call-handoff-donation.sql` needs that file
-applied with `--local` once, since `schema.sql` only creates missing tables.
+created before `migrations/2026-11-11-call-handoff-donation.sql` or
+`migrations/2026-11-12-challenge-practice.sql` needs those files applied with
+`--local` once, since `schema.sql` only creates missing tables.
+
+The smoke test runs `wrangler dev -c wrangler.toml -c speaker_mock.toml`, so the
+`SPEAKER` binding reaches `speaker_mock.js`, whose answers follow from the audio
+streamed to it (Challenge Practice levels, short speech, verifier errors). It
+gives wrangler a private dev registry (`WRANGLER_REGISTRY_PATH`), so another
+worktree's `wrangler dev` never binds to the mock.
 
 It checks registration, retry limits, the unregistered greeting, snapshot and
 credential-free configuration, sandbox creation, immediate dialing while a

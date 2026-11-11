@@ -17,6 +17,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -523,8 +524,8 @@ def run_tests(
     status, body = get(base_url, "/admin/timing", operator_headers)
     require(status == 200 and "sequence" in body.lower(), "operator timing page unavailable")
 
-    # Voice verification calibration is operator-only, and degrades to 503 when the
-    # speaker verification Worker is not running alongside local dev.
+    # Voice verification calibration is operator-only. Local dev runs speaker_mock.js as the
+    # speaker verification Worker; deployed, health runs a real inference.
     def voice_verify(body: bytes, headers: dict, user: str = "1") -> tuple[int, str]:
         req = urllib.request.Request(base_url + "/admin/api/voice-verify?user=" + user, data=body,
                                      headers={"content-type": "audio/wav", **headers}, method="POST")
@@ -535,8 +536,8 @@ def run_tests(
             return error.code, error.read().decode()
     require(get(base_url, "/admin/api/voice-verify/health")[0] == 401, "voice verify health is public")
     require(voice_verify(b"RIFF", {})[0] == 401, "voice verify is public")
-    require(get(base_url, "/admin/api/voice-verify/health", operator_headers)[0] == 503,
-            "voice verify health did not report the unbound speaker Worker")
+    status, body = get(base_url, "/admin/api/voice-verify/health", operator_headers)
+    require(status == 200 and json.loads(body)["ok"], f"voice verify health: {status} {body}")
     require(get(base_url, "/admin/api/voice-verify?user=1", operator_headers)[0] == 405, "voice verify accepted GET")
     status, _ = voice_verify(b"not a wav file", operator_headers)
     require(status in (400, 503), f"voice verify accepted a non-WAV body: {status}")
@@ -704,7 +705,9 @@ def run_tests(
         provider_route_checks(base_url, token, operator_headers)
         # Donation writes to the research bucket, so it runs only against local R2.
         donation_checks(base_url, token)
-    print("33 core checks plus operator/provider timing and Voice Donation checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
+        # Practice scores through the mock speaker Worker that runs beside local dev.
+        practice_checks(base_url, token)
+    print("33 core checks plus operator/provider timing, Voice Donation, and Challenge Practice checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
     return 0
 
 
@@ -925,6 +928,125 @@ def donation_checks(base_url: str, token: str) -> None:
     require(status == 200 and '<Redirect method="POST">/voice/donation</Redirect>' in body, f"donation handoff: {body}")
 
 
+def ulaw_byte(target: int) -> int:
+    """The mu-law byte whose decoded sample is nearest the target, as the Worker decodes it."""
+    def decode(encoded: int) -> int:
+        value = ~encoded & 0xFF
+        magnitude = ((((value & 0x0F) << 3) + 0x84) << ((value & 0x70) >> 4)) - 0x84
+        return -magnitude if value & 0x80 else magnitude
+    return min(range(256), key=lambda encoded: abs(decode(encoded) - target))
+
+
+def practice_stream(base_url: str, path: str, token: str, round_number: int, seconds: float, first_sample: int, heard) -> None:
+    """One round's caller-only stream: constant audio whose first sample tells speaker_mock.js
+    what to answer, then the Gather's action (heard), then the stop event its <Stop> produces."""
+    start = {"event": "start", "start": {"accountSid": TEST_ACCOUNT, "callSid": "CA_PRACTICE",
+             "mediaFormat": {"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1},
+             "customParameters": {"round": str(round_number)}}}
+    payload = base64.b64encode(bytes([ulaw_byte(first_sample)] * 160)).decode()
+    with open_stream(base_url, path, token, scheme="wss") as ws:
+        ws.send(json.dumps(start))
+        for frame in range(int(seconds * 50)):
+            ws.send(json.dumps({"event": "media", "media": {"track": "inbound", "timestamp": str(frame * 20), "payload": payload}}))
+        heard()
+        ws.send(json.dumps({"event": "stop", "stop": {"accountSid": TEST_ACCOUNT, "callSid": "CA_PRACTICE"}}))
+        try:
+            ws.recv(timeout=5)
+        except Exception:
+            pass
+
+
+def practice_checks(base_url: str, token: str) -> None:
+    """Challenge Practice: a deterministic loop of phrases, transcript first, then a spoken level
+    from the verifier, never the number; every exit returns the call to /voice."""
+    user = d1_local(f"SELECT id, home_phone FROM users WHERE home_phone LIKE '{TEST_NUMBERS}' AND reaped_at IS NULL LIMIT 1")[0]
+    phone = user["home_phone"]
+    call = {"From": phone, "CallSid": "CA_PRACTICE", "AccountSid": TEST_ACCOUNT}
+    subprocess.run([project_wrangler(), "d1", "execute", "dogwalk", "--local", "--command",
+                    f"INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at, user_id) "
+                    f"VALUES ('CA_PRACTICE', '{phone}', 'in-progress', unixepoch(), unixepoch(), {user['id']}); "
+                    f"DELETE FROM voice_references WHERE user_id = {user['id']}"],
+                   cwd=WORKER_DIR, check=True, stdout=subprocess.DEVNULL)
+
+    # The Voice Agent's handoff, and a User without a Voice Reference.
+    subprocess.run([project_wrangler(), "d1", "execute", "dogwalk", "--local", "--command",
+                    f"INSERT INTO call_handoffs (call_sid, phone_number, action, created_at) VALUES ('CA_PRACTICE', '{phone}', 'practice', unixepoch())"],
+                   cwd=WORKER_DIR, check=True, stdout=subprocess.DEVNULL)
+    status, body = post(base_url, "/voice/after-live", call, token)
+    require(status == 200 and '<Redirect method="POST">/voice/practice</Redirect>' in body, f"practice handoff: {body}")
+    status, body = post(base_url, "/voice/practice", call, token)
+    require(status == 200 and "needs an enrolled voice" in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>')
+            and "<Stream" not in body, f"practice without a Voice Reference: {body}")
+
+    subprocess.run([project_wrangler(), "d1", "execute", "dogwalk", "--local", "--command",
+                    f"INSERT INTO voice_references (user_id, embedding_space, embedding, enrolled_at) "
+                    f"VALUES ({user['id']}, 'mock-speaker-space', '[0.5, 0.5]', unixepoch())"],
+                   cwd=WORKER_DIR, check=True, stdout=subprocess.DEVNULL)
+    status, body = post(base_url, "/voice/practice", call, token)
+    require(status == 200 and "Nothing is recorded" in body, f"practice intro: {body}")
+
+    def round_of(body: str, number: int) -> tuple[str, str]:
+        stream = re.search(rf'<Start><Stream name="practice-round-{number:02d}" url="wss://dogwalk\.tools(/voice/practice/stream/[^"]+)" track="inbound_track">', body)
+        action = re.search(rf'action="(/voice/practice/heard\?round={number}&amp;silent=\d)"', body)
+        require(stream and action and "<Play>https://dogwalk.tools/voice/practice/tone.wav</Play>" in body, f"round {number}: {body}")
+        phrase = d1_local(f"SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]["phrase"]
+        require(f">{phrase}</Say></Gather>" in body, f"round {number} does not say its phrase: {body}")
+        return stream[1], action[1].replace("&amp;", "&")
+
+    def scored(number: int, body: str, seconds: float, first_sample: int) -> str:
+        stream, action = round_of(body, number)
+        phrase = d1_local(f"SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]["phrase"]
+        def heard() -> None:
+            _, twiml = post(base_url, action, {**call, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)
+            require(twiml == f'<Response><Stop><Stream name="practice-round-{number:02d}"/></Stop>'
+                    f'<Redirect method="POST">/voice/practice/result?round={number}</Redirect></Response>', f"matched phrase: {twiml}")
+        practice_stream(base_url, stream, token, number, seconds, first_sample, heard)
+        status, result = post(base_url, f"/voice/practice/result?round={number}", call, token)
+        require(status == 200, f"result {number}: {status} {result}")
+        return result
+
+    # Round 1: a wrong phrase is not scored, and the stream is stopped.
+    stream, action = round_of(body, 1)
+    status, body = post(base_url, action, {**call, "SpeechResult": "hello there how are you", "Confidence": "0.9"}, token)
+    require(body.startswith('<Response><Stop><Stream name="practice-round-01"/></Stop>') and "That wasn't the sentence. Here's another." in body
+            and "/voice/practice/result" not in body, f"wrong phrase: {body}")
+    require(stream_rejection(base_url, stream, token) == 409, "a skipped round accepted a stream")
+    # Each level, said as words and never as a number.
+    body = scored(2, body, 3.0, 8000)
+    require("Strong voice match. Here's another." in body and not any(re.search(r"\d", said) for said in re.findall(r"<Say[^>]*>([^<]*)</Say>", body)), f"strong: {body}")
+    body = scored(3, body, 3.0, 6000)
+    require("Voice matched. Here's another." in body, f"match: {body}")
+    body = scored(4, body, 3.0, 3000)
+    require("Voice not matched. Here's another." in body, f"no match: {body}")
+    # Too little speech, by the verifier's measure and by its insufficient-audio error.
+    body = scored(5, body, 1.5, 8000)
+    require("Not enough to judge. Here's another." in body, f"short speech: {body}")
+    body = scored(6, body, 0.3, 8000)
+    require("Not enough to judge. Here's another." in body, f"insufficient audio: {body}")
+    # A short stop returns the call to the Voice Agent and clears the rounds.
+    _, action = round_of(body, 7)
+    status, body = post(base_url, action, {**call, "SpeechResult": "Stop.", "Confidence": "0.9"}, token)
+    require(body.startswith('<Response><Stop><Stream name="practice-round-07"/></Stop>') and "Practice over. Back to Dogwalk." in body
+            and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'), f"stop: {body}")
+    require(d1_local("SELECT COUNT(*) AS n FROM practice_rounds WHERE call_sid = 'CA_PRACTICE'")[0]["n"] == 0, "rounds kept after stop")
+
+    # A verifier error ends practice as unavailable and returns.
+    status, body = post(base_url, "/voice/practice", call, token)
+    body = scored(1, body, 3.0, -8000)
+    require("not available right now. Back to Dogwalk." in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'),
+            f"verifier error: {body}")
+
+    rows = d1_local("SELECT event, detail FROM call_activity WHERE call_sid = 'CA_PRACTICE' AND event LIKE 'practice.%' ORDER BY id")
+    rounds = [json.loads(row["detail"]) for row in rows if row["event"] == "practice.round"]
+    require([r["outcome"] for r in rounds] == ["wrong_phrase", "strong_match", "match", "no_match", "not_enough_speech",
+                                               "not_enough_speech", "unscored"], f"practice rounds: {rounds}")
+    require(rounds[1]["speech_seconds"] == 3.0 and 0.79 < rounds[1]["cosine"] < 0.82, f"scored round detail: {rounds[1]}")
+    require(all("transcript" not in r and "phrase" not in r for r in rounds), "Call Activity kept practice speech")
+    events = [row["event"] for row in rows]
+    require(events.count("practice.started") == 2 and events.count("practice.ended") == 2 and "practice.unavailable" in events,
+            f"practice activity: {events}")
+
+
 def project_wrangler() -> str | None:
     local = WORKER_DIR / "node_modules" / ".bin" / "wrangler"
     return str(local) if local.exists() else shutil.which("wrangler")
@@ -1007,10 +1129,16 @@ def main() -> int:
     thread.start()
 
     print("starting wrangler dev")
+    registry = tempfile.mkdtemp(prefix="dogwalk-wrangler-registry-")
     process = subprocess.Popen(
         [
             wrangler,
             "dev",
+            # The speaker mock answers the SPEAKER Service Binding inside this one process.
+            "-c",
+            "wrangler.toml",
+            "-c",
+            "speaker_mock.toml",
             "--port",
             str(WORKER_PORT),
             "--inspector-port",
@@ -1039,6 +1167,8 @@ def main() -> int:
             f"ADMIN_PASSWORD:{LOCAL_ADMIN_PASSWORD}",
         ],
         cwd=WORKER_DIR,
+        # A private dev registry, so no other worktree's wrangler dev binds to this speaker mock.
+        env={**os.environ, "WRANGLER_REGISTRY_PATH": registry},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -1054,6 +1184,7 @@ def main() -> int:
         process.wait(timeout=10)
         daytona.shutdown()
         daytona.server_close()
+        shutil.rmtree(registry, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -47,8 +47,8 @@ export function parseWav(bytes: ArrayBuffer): SpeakerAudio | string {
 }
 
 // Four seconds of a voiced, gated 16 kHz tone: enough "speech" to pass the
-// Worker's activity check, so the health probe runs a real inference.
-function syntheticAudio(): SpeakerAudio {
+// Worker's activity check, so the health probe (and a warm-up) runs a real inference.
+export function syntheticAudio(): SpeakerAudio {
   const rate = 16000, samples = new Int16Array(rate * 4);
   let phase = 0;
   for (let i = 0; i < samples.length; i++) {

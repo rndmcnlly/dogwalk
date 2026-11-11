@@ -5,7 +5,7 @@ description: Investigate Dogwalk speaker verification from recordings: Voice Don
 
 # Voice research
 
-Judge speaker verification by listening to the recordings and reading the verifier's own view of them, not by debating hypotheses. Read `DOMAIN.md` first for terms: Voice Reference, Re-enrollment, Identity Check, Identity Challenge, Voice Donation, Donation Session. Operations keep waveforms transient. Raw audio exists only in Voice Donations, which callers consent to, and in the earlier private collection corpus.
+Judge speaker verification by listening to the recordings and reading the verifier's own view of them, not by debating hypotheses. Read `DOMAIN.md` first for terms: Voice Reference, Re-enrollment, Identity Check, Identity Challenge, Challenge Practice, Voice Donation, Donation Session. Operations keep waveforms transient. Raw audio exists only in Voice Donations, which callers consent to, and in the earlier private collection corpus.
 
 ## Start with the soundboard
 
@@ -22,6 +22,7 @@ Donations carry no link to their caller. Adam annotates speaker and condition fr
 ## Raw access, when the soundboard lacks something
 
 - Score any WAV (8 or 16 kHz mono 16-bit) against a User's Voice Reference: `POST https://dogwalk.tools/admin/api/voice-verify?user=<id>`, HTTP Basic `adam` with `security find-generic-password -a adam -s dogwalk-admin -w`, header `user-agent: dogwalk-research/1` (the zone blocks Python's default). `GET /admin/api/voice-verify/health` first to warm the model. Returns cosine, embedding space, audio and speech seconds. It refuses audio over 30 s (score the first 30 s) and returns 422 for too little speech.
+- Challenge Practice rounds keep no audio, but each scored round leaves a `practice.round` Call Activity event (`outcome`, `cosine`, `speech_seconds`; wrong phrases and short speech too). Read them through the operator timing API (`/admin/api/timing?call_sid=...`) or `playtest.py`; they show how a real call scores in a real condition without a donation.
 - The verifier is `speaker_worker/` (Service Binding only, no public route). `preprocess.js` and `check_preprocess.py` define the window: skip 0.5 s, the most speech-active 3 s, resampled from 8 to 16 kHz. Any local analysis must reuse this window, or its scores are not comparable.
 - The private Voice Reference builder and Adam's reference: `~/Library/Application Support/Dogwalk/voice_reference/` (`build_reference.py`, `adam.json`). The earlier corpus: `.../phone_voice_collection/`. Save working files under `/tmp/dogwalk_voice_<slug>/`.
 
@@ -50,4 +51,5 @@ Like `call-analysis`: a new kind of check starts as prose here, moves into `rese
 - **Leakage:** IVR tone or prompt in the caller-only stream (speakerphones without echo cancellation are the risk). Words Parakeet hears from the prompt before the caller answers are the strongest evidence.
 - **Impostor realism:** synthetic voices are easier to separate than people. Match impostors by age, gender, and accent, play them through a real telephone path, and include one clone of the enrolled speaker to show the ceiling honestly.
 - **Optimism:** clips used to build a reference score high against it. Report held-out and enrolled scores separately.
+- **Practice is not a sample:** a User practicing climbs toward a high level by adjusting their delivery, so practice scores run optimistic, and an impostor practicing would too. Treat `practice.round` cosines as per-condition anecdotes for that User, never as an impostor distribution.
 - **Threshold changes:** propose them from the soundboard's distribution with held-out genuine and impostor clips in the same condition, never from one call.
