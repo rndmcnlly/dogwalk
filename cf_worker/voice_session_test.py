@@ -438,6 +438,8 @@ ORCHESTRATOR_SCRIPT = [
     }]),
     # Asking to donate voice samples hands the call to the deterministic Voice Donation flow.
     ('"key":"C"', lambda ctx: [call("kC-donate", "start_voice_donation")]),
+    # Asking to test their voice hands the call to deterministic Challenge Practice.
+    ('"key":"D"', lambda ctx: [call("kD-practice", "start_challenge_practice")]),
 ]
 # Invitation fixtures (test numbers only). SEED_INVITER invited TEST_PHONE; FOREIGN is
 # SEED_INVITER's own, unbound and active; EXPIRED is TEST_PHONE's and lapsed.
@@ -468,7 +470,7 @@ STEP_IDS = [
     "h4-say", "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
     "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist",
     "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5", "kB-html", "k3-say", "k3-theme",
-    "k2-dramaturgy", "kC-donate",
+    "k2-dramaturgy", "kC-donate", "kD-practice",
 ]
 
 
@@ -1575,11 +1577,21 @@ async def run_protocol(identity: str) -> None:
             "From": TEST_PHONE, "CallSid": "CA_VOICE_TEST2"}, LOCAL_TOKEN)
         assert status == 200 and '<Redirect method="POST">/voice/donation</Redirect>' in body, body
 
+        # start_challenge_practice leaves a practice handoff the same way; practice itself
+        # returns the call to /voice, which reconnects the Voice Agent.
+        await mocks.send_live(dtmf("D"))
+        await wait_for(lambda: hangups() == 2, 10)
+        assert OrchestratorMock.tool_output("kD-practice")["status"] == "handing the call to challenge practice"
+        assert await asyncio.to_thread(d1, "SELECT action FROM call_handoffs WHERE call_sid = 'CA_VOICE_TEST2'") == [{"action": "practice"}]
+        status, body = await asyncio.to_thread(post, DEFAULT_LOCAL, "/voice/after-live", {
+            "From": TEST_PHONE, "CallSid": "CA_VOICE_TEST2"}, LOCAL_TOKEN)
+        assert status == 200 and '<Redirect method="POST">/voice/practice</Redirect>' in body, body
+
         # Star then two hands the call to the recovery menu, which ends the GPT-Live leg.
         await mocks.send_live(dtmf("*"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
         await mocks.send_live(dtmf("2"))
-        await wait_for(lambda: hangups() == 2, 10)
+        await wait_for(lambda: hangups() == 3, 10)
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
         # Drain the operator API by insertion cursor, independently of event-time
         # sorting and without pairing to either caller's browser.
@@ -1633,8 +1645,10 @@ async def run_protocol(identity: str) -> None:
                 "discover_persisted_sessions", "load_persisted_session", "set_alias",
                 "close_managed_session", "list_workspace_projects", "create_invitation", "list_invitations",
                 "set_invitation_recipient", "revoke_invitation", "inspect_registration", "start_voice_donation",
+                "start_challenge_practice",
             }
             assert "start_voice_donation together in the same response" in payload["instructions"]
+            assert "start_challenge_practice together in the same response" in payload["instructions"]
             assert "invite-someone" in payload["instructions"]
             assert "Never create a session in home and tell it to work in another directory" in payload["instructions"]
             assert "from what I know, unverified" in payload["instructions"]

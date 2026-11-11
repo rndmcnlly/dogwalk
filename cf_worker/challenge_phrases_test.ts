@@ -1,6 +1,6 @@
 // node --experimental-strip-types cf_worker/challenge_phrases_test.ts
 import assert from "node:assert/strict";
-import { challengePhrases, ESCAPE_WORDS, PHRASE_SLOTS, PHRASE_TEMPLATES } from "./src/challenge_phrases.ts";
+import { askedToRepeat, challengePhrases, contentWords, ESCAPE_WORDS, PHRASE_SLOTS, PHRASE_TEMPLATES, phraseMatches } from "./src/challenge_phrases.ts";
 import { HANDLE_WORDS } from "./src/handles.ts";
 import { EVEN_WORDS, ODD_WORDS } from "./src/invitations.ts";
 
@@ -29,6 +29,45 @@ for (let round = 0; round < 200; round++) {
     const words = phrase.toLowerCase().replace(/[^a-z ]/g, "").split(" ");
     assert.ok(words.length >= 4 && words.length <= 10, phrase);
     for (const word of words) assert.ok(!reserved.has(word), `${phrase}: ${word}`);
+    // Every phrase carries enough content words for a transcript match to mean something.
+    assert.ok(contentWords(phrase).length >= 3, `${phrase}: too few content words`);
+    assert.ok(phraseMatches(phrase, phrase.toUpperCase().replace(".", "")), phrase);
+    // Dropping any one content word fails.
+    for (const missing of contentWords(phrase)) {
+      const without = phrase.toLowerCase().replace(".", "").split(" ").filter((word) => word !== missing).join(" ");
+      assert.ok(!phraseMatches(phrase, without), `${phrase} matched without ${missing}`);
+    }
   }
+}
+
+const cases: [string, string, boolean][] = [
+  // Real pairs from a car Voice Donation (prompt, Twilio transcript).
+  ["A fluffy sparrow strolled across the sidewalk.", "A fluffy sperl strolled across the sidewalk.", false],
+  ["We found a gray spoon behind the sofa.", "We found a gray spoon beside the sofa.", false],
+  ["Please hand me the golden kettle from the closet.", "Please hand me the golden Kettle from behind the closet.", true],
+  ["Please hand me the golden towel from the drawer.", "Please hand me the golden cow from the drawer.", false],
+  // Synthetic.
+  ["The golden kettle belongs in the kitchen.", "the golden kettles belong in the kitchen", true],
+  ["The golden kettle belongs in the kitchen.", "golden kettle belongs in a kitchen", true],
+  ["The golden kettle belongs in the kitchen.", "the golden kettle belongs in the kitchen um yes", true],
+  ["The golden kettle belongs in the kitchen.", "the kettle golden belongs in the kitchen", false],
+  ["The golden kettle belongs in the kitchen.", "the golden cattle belongs in the kitchen", false],
+  ["The golden kettle belongs in the kitchen.", "the golden kettle belongs on the kitchen", false],
+  ["Please hand me the gray stool from the windowsill.", "please hand me the grey stool from the window sill", true],
+  ["Please hand me the gray stool from the windowsill.", "please hand me the gray stools from the window", false],
+  ["The towel was warm this morning.", "the towel is warm this morning", true],
+  ["The towel was warm this morning.", "the towel was warm this mourning", false],
+  ["The towel was warm this morning.", "", false],
+  ["My neighbor left the candle in the hallway.", "my neighbors left the candles in the hallway", true],
+];
+for (const [phrase, transcript, expected] of cases) {
+  assert.equal(phraseMatches(phrase, transcript), expected, `${phrase} / ${transcript}`);
+}
+
+for (const request of ["Repeat.", "Say that again.", "Again?", "What?", "Pardon?", "can you repeat that"]) {
+  assert.ok(askedToRepeat(request.toLowerCase().replace(/[^a-z ]/g, "").split(" ").filter(Boolean)), request);
+}
+for (const other of ["", "what a lovely golden kettle in the kitchen", "the golden kettle"]) {
+  assert.ok(!askedToRepeat(other.split(" ").filter(Boolean)), other);
 }
 console.log(challengePhrases(8).join("\n"));

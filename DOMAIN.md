@@ -61,7 +61,7 @@ Owns realtime audio transport, speech turn detection, browser or telephone media
 ### Access Control
 
 Owns Registration, Handles, Homes, Voice References, the Identity Check,
-Invite Codes, and Invitations at the PSTN boundary. A User is identified by a
+Challenge Practice, Invite Codes, and Invitations at the PSTN boundary. A User is identified by a
 spoken Handle, never by a personal name, birth date, or account number, and
 proves it by voice in an Identity Check before the Voice Agent answers. Caller
 ID only suggests which Handle to check. Telephony providers and sandbox hosts
@@ -372,11 +372,41 @@ voice, such as "The golden kettle belongs in the kitchen." Nothing is remembered
 for later. Phrases use familiar syntax and concrete words, and avoid digit
 strings, tongue twisters, disturbing content, Handle words, and escape words.
 Phrase correctness and speaker similarity are separate signals, and both must
-pass. Fresh phrases defeat replayed recordings, not voice cloning. The
+pass. Correctness is deterministic and strict: every content word of the phrase
+(all but articles, possessives, and auxiliaries; prepositions count) must appear
+in the transcript, in order, with only plural inflection forgiven and extra
+words allowed between them. A mismatch, whether the caller misheard the prompt
+or the recognizer misheard the caller, is a wrong phrase: it is not scored and
+is never a voice failure. The recognizer is hinted with the phrase's words, so a
+correct repetition comes back as them while a different word still comes
+through. A caller who asks to hear the sentence again ("repeat", "say that
+again", "pardon") in a short utterance hears the same phrase again, counted as
+neither an answer nor a failure. Fresh phrases defeat replayed recordings, not voice cloning. The
 similarity threshold is configuration, not a domain rule. It starts at a cosine
 of 0.5: synthetic impostors through a telephone path scored at most 0.40, and
 the operator's own voice in an unenrolled setting (car hands-free) at least
 0.50. It is adjusted as real calls and Voice Donations accumulate.
+
+### Challenge Practice
+
+**Context:** Access Control
+
+A User's rehearsal of Identity Challenges, asked for in conversation ("challenge
+me", "test my voice"): the Voice Agent hands the call to a deterministic,
+speech-only loop that offers fresh phrases until the caller says stop or a round
+limit is reached, then returns the call to the Voice Agent. Each round follows
+the Identity Check's rules: a transcript that does not match the phrase is not
+scored, too little speech to judge earns another phrase without counting, a
+request to hear the sentence again replays it, and a
+scored round is spoken only as a level of voice match (strong, matched, or not
+matched), never as the raw score. The levels come from configured thresholds, the
+lower one being the Identity Check's. Practice never gates entry, keeps no audio
+(each round is scored in memory and discarded), and never changes the Voice
+Reference; Call Activity keeps each round's outcome, score, and speech duration
+for calibration. A User without a Voice Reference hears that practice needs an
+enrolled voice.
+
+**Not:** An Identity Check, Re-enrollment, or a Voice Donation.
 
 ### Roaming
 
@@ -948,6 +978,9 @@ These canonical terms name Voice Agent tools as well as core methods. Narration 
 - Passing the Identity Check is not Registration; failing it is not losing the identity.
 - A Voice Donation is not Registration and creates no User; donating grants and changes no access.
 - Donation audio is not a Voice Reference, and a Donation Session is not a Voice Recording.
+- Challenge Practice is not an Identity Check: it grants, withholds, and counts nothing toward access.
+- Challenge Practice is not Re-enrollment: a poor level never changes the Voice Reference, and a good one never reinforces it.
+- Challenge Practice is not a Voice Donation: its audio is scored in memory and discarded, never kept.
 
 ## Adapter Vocabulary
 
@@ -1021,6 +1054,7 @@ The following language appears in Git history and is not canonical for productio
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Invitations: should a successful Registration by Invitation continue straight into the new User's first call rather than hanging up? Should the Diagnostics Surface draw the invitation graph, and should an operator be able to raise or lower a User's active-Invitation limit?
 - Resolved: a spoken Handle plus Identity Challenges lets a User call from any telephone (see Roaming). Still open: how long before an inactive User is reaped; how many failed Identity Check attempts pause a Handle, and for how long; and whether registering from a number that is already a Home should be limited, since one phone could otherwise create many Users (bounded today only by Invitation limits).
+- Challenge Practice tells a caller how their voice scores, round after round, so it is also an oracle for tuning an impersonation (a recording or voice converter) before a real Identity Check. Today only the User reaches it, from inside an admitted call; should practice rounds count toward the same attempt limits once enforcement exists?
 - Should the Identity Check ever collect more voice evidence during the conversation, or does whole-call collection need its own consent and retention decision?
 - Voice Donations: how long is donated audio kept? Today it stays until the operator deletes it on request or decides otherwise; a fixed retention period, and whether the consent script should state it, is undecided. Should a donor be able to delete their own session by voice without an identifier being spoken to them?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?

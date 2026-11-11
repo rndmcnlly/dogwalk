@@ -3,12 +3,12 @@
 // concrete words keep them easy to repeat over a narrowband line; there are no digit strings,
 // tongue twisters, or disturbing content. No word is a Handle word, an Invite Code word, or an
 // escape word, so a transcript of a phrase is never mistaken for a Handle, an Invite Code, or a
-// request to leave. Voice Donations use them now; the Identity Check will.
+// request to leave. Voice Donations and Challenge Practice use them now; the Identity Check will.
 import { HANDLE_WORDS } from "./handles.ts";
 import { EVEN_WORDS, ODD_WORDS } from "./invitations.ts";
 
 /** Words that steer a deterministic speech stage elsewhere, so no phrase may contain them. */
-export const ESCAPE_WORDS = ["someone", "else", "invite", "donate", "stop", "yes", "no"];
+export const ESCAPE_WORDS = ["someone", "else", "invite", "donate", "stop", "yes", "no", "repeat", "again", "pardon", "what"];
 
 const RESERVED = new Set([...HANDLE_WORDS, ...EVEN_WORDS, ...ODD_WORDS, ...ESCAPE_WORDS]);
 
@@ -59,6 +59,53 @@ function pick<T>(items: readonly T[]): T {
 export function challengePhrase(): string {
   return pick(TEMPLATES).replace(/\{(\w+)\}/g, (_, slot: Slot) => pick(PHRASE_SLOTS[slot]));
 }
+
+// --- phrase match -------------------------------------------------------
+
+// Articles, possessives, and auxiliaries: a recognizer drops or swaps them freely, and they
+// carry no evidence of which phrase was said. Everything else, prepositions included, counts:
+// "beside the sofa" is not "behind the sofa".
+const FUNCTION_WORDS = new Set(["a", "an", "the", "my", "your", "our", "his", "her", "me", "we", "was", "this"]);
+
+const normalized = (raw: string) => raw.toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/).filter(Boolean)
+  .map((word) => (word === "grey" ? "gray" : word));
+
+// Only plural inflection is forgiven: "kettles" for "kettle", "boxes" for "box".
+const sameWord = (wanted: string, heard: string) =>
+  heard === wanted || heard === `${wanted}s` || heard === `${wanted}es` || wanted === `${heard}s` || wanted === `${heard}es`;
+
+/** The words of a phrase that show it was repeated: everything but articles, possessives, and auxiliaries. */
+export function contentWords(phrase: string): string[] {
+  return normalized(phrase).filter((word) => !FUNCTION_WORDS.has(word));
+}
+
+/**
+ * Whether a speech transcript repeats the phrase: every content word appears, in order, with
+ * plural inflection forgiven and extra words between them allowed ("from behind the closet"
+ * still repeats "from the closet"). One content word may also arrive split in two ("window
+ * sill" for "windowsill"). A different word fails, whether the caller misheard the phrase or
+ * the recognizer misheard the caller, and the round is a wrong phrase, never a voice failure.
+ * Deterministic, and shared by Challenge Practice and the Identity Check.
+ */
+export function phraseMatches(phrase: string, transcript: string): boolean {
+  const wanted = contentWords(phrase);
+  const heard = normalized(transcript);
+  let at = 0;
+  for (const word of wanted) {
+    let found = -1;
+    for (let i = at; i < heard.length && found < 0; i++) {
+      if (sameWord(word, heard[i])) found = i + 1;
+      else if (i + 1 < heard.length && sameWord(word, heard[i] + heard[i + 1])) found = i + 2;
+    }
+    if (found < 0) return false;
+    at = found;
+  }
+  return wanted.length > 0;
+}
+
+/** Short requests to hear the phrase again, which replay it without counting a round. */
+const REPEAT_WORDS = new Set(["repeat", "again", "pardon", "what"]);
+export const askedToRepeat = (heard: string[]) => heard.length > 0 && heard.length <= 4 && heard.some((word) => REPEAT_WORDS.has(word));
 
 /** Distinct fresh challenge phrases. */
 export function challengePhrases(count: number): string[] {

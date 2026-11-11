@@ -27,6 +27,7 @@ import { availableHandles } from "./handles";
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
 import { handleVoiceVerify } from "./voice_verify";
+import { handlePracticeHeard, handlePracticeResult, handlePracticeStream, practiceStreamStop, practiceTone, startPractice } from "./challenge_practice";
 import { asksToDonate, donationConsent, donationTone, handleDonationConsent, handleDonationRound, handleDonationStream } from "./voice_donation";
 export { TerminalRelay, VoiceSession };
 
@@ -1053,6 +1054,9 @@ export default {
     if (url.pathname.startsWith("/voice/donation")) {
       return handleDonation(req, env, ctx, url);
     }
+    if (url.pathname.startsWith("/voice/practice")) {
+      return handlePractice(req, env, ctx, url);
+    }
     if (url.pathname === "/voice/status" && req.method === "POST") {
       return handleCallStatus(req, env, ctx);
     }
@@ -1191,6 +1195,7 @@ async function handleAfterLive(req: Request, env: Env, ctx: ExecutionContext): P
   // A theme switch: back through /voice to a fresh GPT-Live session with the new voice.
   if (handoff?.action === "rejoin") return twiml(Redirect("/voice"));
   if (handoff?.action === "donation") return twiml(Redirect("/voice/donation"));
+  if (handoff?.action === "practice") return twiml(Redirect("/voice/practice"));
   return recoveryMenu(handoff?.action === "recovery" ? "Recovery options. " : "Voice dropped. ");
 }
 
@@ -1496,6 +1501,37 @@ async function handleDonation(req: Request, env: Env, ctx: ExecutionContext, url
   } catch (error) {
     await log("donation.error", { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
     return twiml(Say("Voice donation stopped because of an error. Thank you. Goodbye.") + Hangup());
+  }
+  return new Response("not found", { status: 404 });
+}
+
+// --- /voice/practice: Challenge Practice (challenge_practice.ts) --------
+
+// The call's User practices against their own Voice Reference; every path ends back at /voice.
+async function handlePractice(req: Request, env: Env, ctx: ExecutionContext, url: URL): Promise<Response> {
+  if (url.pathname === "/voice/practice/tone.wav" && req.method === "GET") return practiceTone();
+  const stream = /^\/voice\/practice\/stream\/([A-Za-z0-9._-]{1,300})$/.exec(url.pathname);
+  if (stream && req.method === "GET") {
+    const signed = (await twilioSignatureValid(req, env, "wss")).valid || (await twilioSignatureValid(req, env)).valid;
+    if (!signed) return new Response("forbidden", { status: 403 });
+    return handlePracticeStream(req, env, ctx, stream[1]);
+  }
+  if (req.method !== "POST") return new Response("not found", { status: 404 });
+  if (!(await twilioSignatureValid(req, env)).valid) return new Response("forbidden", { status: 403 });
+  const form = await req.clone().formData();
+  const from = normalizePhone(form.get("From"));
+  const callSid = String(form.get("CallSid") ?? "");
+  if (!from || !callSid) return twiml(Hangup());
+  const log = (event: string, detail: Record<string, unknown>) => audit(env, event, from, callSid, detail);
+  try {
+    if (url.pathname === "/voice/practice") return twiml(await startPractice(env, ctx, url, form, log));
+    if (url.pathname === "/voice/practice/heard") return twiml(await handlePracticeHeard(env, url, form, log));
+    if (url.pathname === "/voice/practice/result") return twiml(await handlePracticeResult(env, url, form, log));
+  } catch (error) {
+    await log("practice.error", { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+    // A failed round webhook still stops its stream, which would otherwise keep listening.
+    const stop = url.pathname === "/voice/practice/heard" ? practiceStreamStop(url) : "";
+    return twiml(stop + Say("Challenge practice stopped because of an error. Back to Dogwalk.") + Redirect("/voice"));
   }
   return new Response("not found", { status: 404 });
 }
