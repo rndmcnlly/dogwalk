@@ -1,0 +1,32 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'dogwalk.ondevice'
+    compileSdk 35
+    defaultConfig {
+        // Distinct from the archived audio probe so both can coexist on one device.
+        applicationId 'as.adamsmith.dogwalk.ondevice.dev'
+        minSdk 33
+        targetSdk 35
+        versionCode 1
+        versionName '0.1-dev'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+    buildFeatures { buildConfig true }
+    packaging { jniLibs { useLegacyPackaging true } }
+}
+
+dependencies {
+    // On-device LLM runtime (Apache-2.0, Google Maven). Pinned, never latest.release.
+    implementation 'com.google.ai.edge.litertlm:litertlm-android:0.19.1'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'  // Android's org.json is a stub in JVM tests
+}

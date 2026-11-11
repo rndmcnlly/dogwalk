@@ -1,0 +1,7 @@
+.tools/
+.gradle/
+build/
+app/build/
+local.properties
+*.apk
+*.litertlm
