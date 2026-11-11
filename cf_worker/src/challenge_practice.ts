@@ -25,8 +25,12 @@ import { syntheticAudio } from "./voice_verify";
 export const STRONG_MATCH_COSINE = 0.7;
 /** At or above this cosine, a round matches; below it, it does not. The Identity Check's starting threshold. */
 export const MATCH_COSINE = 0.5;
-/** Less speech than this in a round is not enough to judge. */
-export const MIN_SPEECH_SECONDS = 2.0;
+/**
+ * Less speech than this in a round, as the verifier measures it, is not enough to judge. Cutting
+ * enrolled phone answers short (2026-11-11) cost a genuine cosine 0.07 on average at 1.5 s and
+ * 0.21 at 1.3 s; at 2.0 the floor rejected strong matches (0.75 and 0.77 at 1.9 and 1.64 s).
+ */
+export const MIN_SPEECH_SECONDS = 1.5;
 /**
  * The most audio the verifier accepts (speaker_worker MAX_SECONDS). A longer round sends its
  * last this-many seconds: the verifier still picks the most speech-active 3 s window inside
@@ -48,7 +52,11 @@ const MAX_ROUND_SECONDS = 90;
 // How long the result step waits for the verifier: Twilio gives a webhook 15 seconds, and a
 // fresh verifier instance takes about 4.
 const RESULT_WAIT_MS = 10_000;
-const RESULT_POLL_MS = 200;
+const RESULT_POLL_MS = 100;
+// The answer ends at a one-second pause (Twilio's shortest numeric speechTimeout): "auto" waited
+// up to four seconds after a caller's last word, and no repetition held a pause over 0.8 s.
+// Callers start about 0.7 s after the prompt, so five seconds of silence means no answer.
+const ROUND_GATHER_TIMING = 'speechTimeout="1" timeout="5"';
 const STREAM_PURPOSE = "practice";
 const CALL_SID = /^[A-Za-z0-9_]{1,64}$/;
 
@@ -106,35 +114,42 @@ async function endPractice(env: Env, callSid: string, log: Log, reason: string, 
   return Say(`${spoken} Back to Dogwalk.`) + RETURN;
 }
 
-async function roundTwiml(env: Env, url: URL, callSid: string, round: number, account: string, progress: Progress): Promise<string> {
+async function roundTwiml(
+  env: Env, ctx: ExecutionContext, url: URL, callSid: string, round: number, account: string, progress: Progress,
+): Promise<string> {
   const phrase = challengePhrase();
   await env.DB.prepare(
     `INSERT INTO practice_rounds (call_sid, round, phrase, state, created_at) VALUES (?, ?, ?, 'listening', unixepoch())
      ON CONFLICT(call_sid, round) DO UPDATE SET phrase = excluded.phrase, take = 0, state = 'listening', streamed = 0,
        cosine = NULL, speech_seconds = NULL, error = NULL, created_at = excluded.created_at`,
   ).bind(callSid, round, phrase).run();
-  return takeTwiml(env, url, callSid, round, 0, phrase, account, progress);
+  return takeTwiml(env, ctx, url, callSid, round, 0, phrase, account, progress);
 }
 
 // One take of a round: a stream, the tone, and the phrase inside a Gather hinted with its words.
+// It also warms the verifier, which scores this take some seconds from now: in a playtest
+// (2026-11-11) a level came about 5 s after the answer, where a warm verifier takes under 1.
 async function takeTwiml(
-  env: Env, url: URL, callSid: string, round: number, take: number, phrase: string, account: string, progress: Progress,
+  env: Env, ctx: ExecutionContext, url: URL, callSid: string, round: number, take: number, phrase: string, account: string,
+  progress: Progress,
 ): Promise<string> {
+  warmVerifier(env, ctx);
   const host = originHost(env, url);
   const capability = await streamCapability(env, STREAM_PURPOSE, [callSid, String(round), String(take)], account);
   return StartStream(roundName(round, take), `wss://${host}/voice/practice/stream/${capability}`, { round: String(round), take: String(take) }) +
     `<Play>https://${host}/voice/practice/tone.wav</Play>` +
-    GatherSpeech(phrase, `/voice/practice/heard?round=${round}&take=${take}&silent=${progress.silent}&judged=${progress.judged}`, 'speechTimeout="auto" timeout="6"',
+    GatherSpeech(phrase, `/voice/practice/heard?round=${round}&take=${take}&silent=${progress.silent}&judged=${progress.judged}`, ROUND_GATHER_TIMING,
       contentWords(phrase));
 }
 
 async function nextRound(
-  env: Env, url: URL, callSid: string, account: string, log: Log, round: number, progress: Progress, spoken: string,
+  env: Env, ctx: ExecutionContext, url: URL, callSid: string, account: string, log: Log, round: number, progress: Progress,
+  spoken: string,
 ): Promise<string> {
   if (progress.judged >= MAX_JUDGED_ROUNDS || round >= MAX_ATTEMPTS) {
     return endPractice(env, callSid, log, "round_limit", progress, `${spoken} That was the last round.`);
   }
-  return Say(`${spoken} Here's another.`) + await roundTwiml(env, url, callSid, round + 1, account, { ...progress, attempts: round + 1 });
+  return Say(`${spoken} Here's another.`) + await roundTwiml(env, ctx, url, callSid, round + 1, account, { ...progress, attempts: round + 1 });
 }
 
 /** /voice/practice: check the Voice Reference and the verifier, warm it, and start round one. */
@@ -149,19 +164,16 @@ export async function startPractice(env: Env, ctx: ExecutionContext, url: URL, f
     await log("practice.unavailable", { reason: env.SPEAKER ? "no_account" : "no_verifier" });
     return Say("Challenge practice is not available right now. Back to Dogwalk.") + RETURN;
   }
-  // A fresh verifier instance takes about 4 seconds; warm it while the caller hears the intro.
-  const speaker = env.SPEAKER;
-  ctx.waitUntil(speaker.embed(syntheticAudio()).then(() => undefined, () => undefined));
   // Rows outlive a call that hung up mid-round; any practice start clears those too.
   await env.DB.prepare("DELETE FROM practice_rounds WHERE call_sid = ? OR created_at < unixepoch() - 3600").bind(callSid).run();
   await log("practice.started", { max_judged_rounds: MAX_JUDGED_ROUNDS, max_attempts: MAX_ATTEMPTS });
   return Say("Challenge practice. After each tone, repeat the sentence once in your normal voice, " +
     "and you will hear how well your voice matched. Nothing is recorded. Say stop to finish.") +
-    await roundTwiml(env, url, callSid, 1, account, { attempts: 1, silent: 0, judged: 0 });
+    await roundTwiml(env, ctx, url, callSid, 1, account, { attempts: 1, silent: 0, judged: 0 });
 }
 
 /** /voice/practice/heard: the round's transcript decides whether its audio is scored at all. */
-export async function handlePracticeHeard(env: Env, url: URL, form: FormData, log: Log): Promise<string> {
+export async function handlePracticeHeard(env: Env, ctx: ExecutionContext, url: URL, form: FormData, log: Log): Promise<string> {
   const callSid = String(form.get("CallSid") ?? "");
   const account = String(form.get("AccountSid") ?? "");
   const round = Number(url.searchParams.get("round"));
@@ -182,21 +194,21 @@ export async function handlePracticeHeard(env: Env, url: URL, form: FormData, lo
       return stop + await endPractice(env, callSid, log, "silence", progress, "I didn't hear anything.");
     }
     await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
-    return stop + await nextRound(env, url, callSid, account, log, round, { ...progress, silent: progress.silent + 1 }, "I didn't hear the sentence.");
+    return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: progress.silent + 1 }, "I didn't hear the sentence.");
   }
   // "Say that again": the same phrase in a fresh take, counted as neither a round nor a miss.
   if (askedToRepeat(heard) && take < MAX_REPEATS) {
     await env.DB.prepare("UPDATE practice_rounds SET take = ?, streamed = 0 WHERE call_sid = ? AND round = ? AND take = ?")
       .bind(take + 1, callSid, round, take).run();
     await log("practice.repeat", { round, take: take + 1 });
-    return stop + Say("Again.") + await takeTwiml(env, url, callSid, round, take + 1, row.phrase, account, progress);
+    return stop + Say("Again.") + await takeTwiml(env, ctx, url, callSid, round, take + 1, row.phrase, account, progress);
   }
   // Every content word, in order: a misheard prompt or a misrecognized word is a wrong phrase,
   // never a voice failure.
   if (!phraseMatches(row.phrase, transcript)) {
     await env.DB.prepare("UPDATE practice_rounds SET state = 'skipped' WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
     await log("practice.round", { round, outcome: "wrong_phrase" satisfies Outcome });
-    return stop + await nextRound(env, url, callSid, account, log, round, { ...progress, silent: 0 }, "That wasn't the sentence.");
+    return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: 0 }, "That wasn't the sentence.");
   }
   // Committed before the response that stops the stream, so the stream's end sees it.
   await env.DB.prepare("UPDATE practice_rounds SET state = 'scoring' WHERE call_sid = ? AND round = ? AND state = 'listening'")
@@ -212,39 +224,46 @@ export function practiceStreamStop(url: URL): string {
 }
 
 /** /voice/practice/result: wait for the round's score, speak its level, and go on. */
-export async function handlePracticeResult(env: Env, url: URL, form: FormData, log: Log): Promise<string> {
+export async function handlePracticeResult(env: Env, ctx: ExecutionContext, url: URL, form: FormData, log: Log): Promise<string> {
   const callSid = String(form.get("CallSid") ?? "");
   const account = String(form.get("AccountSid") ?? "");
   const round = Number(url.searchParams.get("round"));
   if (!CALL_SID.test(callSid) || !Number.isInteger(round) || round < 1 || round > MAX_ATTEMPTS || !isAccountSid(account)) return RETURN;
   const progress = { ...progressOf(url, round), silent: 0 };
-  const deadline = Date.now() + RESULT_WAIT_MS;
+  const started = Date.now(), deadline = started + RESULT_WAIT_MS;
   let row = await readRound(env, callSid, round);
   while (row?.state === "scoring" && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, RESULT_POLL_MS));
     row = await readRound(env, callSid, round);
   }
+  // How long the caller waited in silence for the score, for tuning (Workers clocks advance across I/O).
+  const wait_ms = Date.now() - started;
   if (!row || (row.state !== "scoring" && row.state !== "scored")) {
     return endPractice(env, callSid, log, "lost_round", progress, "Challenge practice stopped.");
   }
   await env.DB.prepare("DELETE FROM practice_rounds WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
   if (row.state === "scoring") {
-    await log("practice.round", { round, outcome: "unscored" satisfies Outcome });
-    return nextRound(env, url, callSid, account, log, round, progress, "I couldn't score that one.");
+    await log("practice.round", { round, outcome: "unscored" satisfies Outcome, wait_ms });
+    return nextRound(env, ctx, url, callSid, account, log, round, progress, "I couldn't score that one.");
   }
   if (row.error && row.error !== "insufficient-audio") {
-    await log("practice.round", { round, outcome: "unscored" satisfies Outcome, error: row.error });
+    await log("practice.round", { round, outcome: "unscored" satisfies Outcome, error: row.error, wait_ms });
     return endPractice(env, callSid, log, "verifier_error", progress, "Challenge practice is not available right now.");
   }
   if (row.error || row.cosine === null || (row.speech_seconds ?? 0) < MIN_SPEECH_SECONDS) {
     // The score is kept for calibration even though no level is spoken.
     await log("practice.round", { round, outcome: "not_enough_speech" satisfies Outcome, cosine: row.cosine,
-      speech_seconds: row.speech_seconds, ...(row.error ? { error: row.error } : {}) });
-    return nextRound(env, url, callSid, account, log, round, progress, "Not enough to judge.");
+      speech_seconds: row.speech_seconds, ...(row.error ? { error: row.error } : {}), wait_ms });
+    return nextRound(env, ctx, url, callSid, account, log, round, progress, "Not enough to judge.");
   }
   const level = matchLevel(row.cosine);
-  await log("practice.round", { round, outcome: level.outcome, cosine: row.cosine, speech_seconds: row.speech_seconds });
-  return nextRound(env, url, callSid, account, log, round, { ...progress, judged: progress.judged + 1 }, level.spoken);
+  await log("practice.round", { round, outcome: level.outcome, cosine: row.cosine, speech_seconds: row.speech_seconds, wait_ms });
+  return nextRound(env, ctx, url, callSid, account, log, round, { ...progress, judged: progress.judged + 1 }, level.spoken);
+}
+
+/** Load the verifier's model now, off the call's path, so the take it will score is not kept waiting on a fresh instance. */
+function warmVerifier(env: Env, ctx: ExecutionContext): void {
+  if (env.SPEAKER) ctx.waitUntil(env.SPEAKER.embed(syntheticAudio()).then(() => undefined, () => undefined));
 }
 
 /** The round cue, the same tone Voice Donation plays. */

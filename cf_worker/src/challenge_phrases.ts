@@ -35,12 +35,15 @@ const SLOTS = {
 } as const;
 type Slot = keyof typeof SLOTS;
 
+// Eight to eleven words: a brisk repetition then lasts about 2.5 s or more, enough for the
+// verifier to measure (MIN_SPEECH_SECONDS in challenge_practice.ts) even where a noisy line
+// hides the quieter syllables, while each phrase stays one easy breath.
 const TEMPLATES = [
-  "The {color} {thing} belongs {place}.",
-  "{person} left the {thing} {place}.",
-  "A {mood} {creature} {moved} across the {area}.",
+  "The old {color} {thing} belongs {place}.",
+  "{person} left the {color} {thing} {place}.",
+  "A {mood} {creature} {moved} across the {area} {time}.",
   "Please hand me the {color} {thing} from the {furniture}.",
-  "The {thing} was {state} {time}.",
+  "The {color} {thing} was still {state} {time}.",
   "{person} painted the {surface} {color} last {season}.",
   "We found a {color} {thing} {place}.",
 ];

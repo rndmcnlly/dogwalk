@@ -40,6 +40,16 @@ Donations carry no link to their caller. Adam annotates speaker and condition fr
 - Car audio had no IVR prompt leakage: the phone's echo cancellation removed it. The lowest car round (0.504) had only 1.6 s of speech in its window. Too little speech to judge earns another phrase, never a failure.
 - A fresh verifier instance takes about 4 s to load the model; a warm one about 0.7 s. Cloudflare often routes to fresh instances, so warm the verifier early in a call.
 
+## Challenge round timing and the speech floor (2026-11-11)
+
+From Adam's speakerphone practice call (10 rounds), the car donation (8 phrase rounds), and the 18-clip phone corpus, with `context3` and the local ONNX model:
+
+- **Where a round's time goes.** Scored rounds took 15.7 s on average from the previous outcome, wrong phrases (which end at `/heard`) 10.8 s: about 5 s of silence passed between the answer and its level, where a warm verifier needs 0.7 s, so the verifier was probably cold on most rounds. Inside a donation round: tone and prompt about 3.5 s, the caller starts 0.7 s after the prompt (up to 2.5), answers in 3.2 s (Parakeet first to last word), then `speechTimeout="auto"` closed the Gather 1 s after the last speech energy in 3 rounds and 3.5 to 4.1 s after it in 5. The stream ended 0.45 s after `/heard`. Donation `/heard` webhooks took 0.7 to 1.3 s to answer.
+- **Pauses.** No repetition held a pause over 0.76 s (energy) or 0.24 s (between Parakeet words), so a 1 s `speechTimeout` (Twilio's smallest integer; any `speechModel` requires an integer) should not cut a phrase. Unverified on a live call until the next playtest; `practice.round` now logs `wait_ms`, the result step's wait for the score.
+- **Speech measure.** `speech_seconds` counts energy-active frames over the whole clip, not the window, against an adaptive threshold, so it depends on the line as much as on the words: 0.25 s per phrase word on the enrolled phone conditions, 0.19 in the car, while articulation ran 0.38 s per word in both. An 8-word phrase measures about 2.0 s clean and 1.6 s in the car.
+- **How little speech is enough.** Keeping only the first N measured seconds of each genuine answer (the rest replaced by the clip's own floor): on enrolled conditions the cosine fell 0.53 on average at 1.0 s, 0.21 at 1.3, 0.07 at 1.5 (worst 0.21), 0.04 at 1.6, about 0.01 from 1.8. Car clips barely moved, because the measure there undercounts speech. Hence `MIN_SPEECH_SECONDS` 1.5, down from 2.0, which rejected two strong rounds (1.9 and 1.64 s); 6 of 8 car rounds clear it. Truncation only lowered genuine scores; it says nothing about impostors with little speech, and enrolled clips are optimistic.
+- **Not shown:** whether numeric `speechTimeout` endpoints faster than `auto` on a noisy line, whether per-take warming reaches the same verifier instance, and how phrase length moves the wrong-phrase rate (3 of 10 playtest rounds were wrong phrases; phrases are now 8 to 11 words, mean 8.7, up from 6 to 10, mean 7.8).
+
 ## Extension policy
 
 Like `call-analysis`: a new kind of check starts as prose here, moves into `research_soundboard.py` after the same extraction is written twice or after a stumble, and a feature that adds a voice concept updates this checklist with `DOMAIN.md`. Record a dated finding when an experiment settles a question, and say what it does not show.

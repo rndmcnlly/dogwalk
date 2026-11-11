@@ -1525,8 +1525,8 @@ async function handlePractice(req: Request, env: Env, ctx: ExecutionContext, url
   const log = (event: string, detail: Record<string, unknown>) => audit(env, event, from, callSid, detail);
   try {
     if (url.pathname === "/voice/practice") return twiml(await startPractice(env, ctx, url, form, log));
-    if (url.pathname === "/voice/practice/heard") return twiml(await handlePracticeHeard(env, url, form, log));
-    if (url.pathname === "/voice/practice/result") return twiml(await handlePracticeResult(env, url, form, log));
+    if (url.pathname === "/voice/practice/heard") return twiml(await handlePracticeHeard(env, ctx, url, form, log));
+    if (url.pathname === "/voice/practice/result") return twiml(await handlePracticeResult(env, ctx, url, form, log));
   } catch (error) {
     await log("practice.error", { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
     // A failed round webhook still stops its stream, which would otherwise keep listening.

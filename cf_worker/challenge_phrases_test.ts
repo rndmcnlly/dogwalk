@@ -27,7 +27,7 @@ for (let round = 0; round < 200; round++) {
   for (const phrase of phrases) {
     assert.match(phrase, /^[A-Z][A-Za-z ]+\.$/, phrase);
     const words = phrase.toLowerCase().replace(/[^a-z ]/g, "").split(" ");
-    assert.ok(words.length >= 4 && words.length <= 10, phrase);
+    assert.ok(words.length >= 8 && words.length <= 11, phrase);
     for (const word of words) assert.ok(!reserved.has(word), `${phrase}: ${word}`);
     // Every phrase carries enough content words for a transcript match to mean something.
     assert.ok(contentWords(phrase).length >= 3, `${phrase}: too few content words`);
