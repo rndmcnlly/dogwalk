@@ -78,10 +78,10 @@ class VoiceService : Service() {
                 }
             }
             ACTION_SEND -> {
-                if (core.mode == InteractionMode.TEXT) intent.getStringExtra("text")?.let { caller(it, typed = true) }
+                if (presentation.canSend) intent.getStringExtra("text")?.let { caller(it, typed = true) }
                 return START_NOT_STICKY
             }
-            ACTION_REFRESH -> { core.playing?.let(::deliver); pump(); return START_NOT_STICKY }
+            ACTION_REFRESH -> { if (!core.voiceEnabled) core.playing?.let(::deliver); pump(); return START_NOT_STICKY }
             ACTION_VOICE -> { if (initialized) { voiceMode(); return START_NOT_STICKY } }
             ACTION_STOP_SPEAKING -> { localStop("button"); return START_NOT_STICKY }
             ACTION_INJECT -> {
@@ -92,6 +92,7 @@ class VoiceService : Service() {
         }
         if (initialized) { textMode(); return START_NOT_STICKY }
         initialized = true
+        presentation = presentation.copy(running = true, problem = null)
         startTextForeground("Starting silently")
         audio = getSystemService(AudioManager::class.java)
         wakeLock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dogwalk:frontend").apply { acquire() }
@@ -114,6 +115,8 @@ class VoiceService : Service() {
         }
         // Disable first. Late TTS/ASR/readiness callbacks cannot reopen the audio path.
         core.switchMode(InteractionMode.TEXT)
+        event(EventKind.CONTROL, "Switched to silent text", "Microphone and speaker off. No Prompt Turn cancelled. Opening or restoring the Activity does not resume voice.")
+        presentation = presentation.copy(mode = InteractionMode.TEXT, microphone = false, speaker = false, activity = "Silent")
         model?.cancelCurrent()
         listening = false
         recognizer?.cancel(); recognizer?.destroy(); recognizer = null
@@ -129,6 +132,9 @@ class VoiceService : Service() {
     private fun voiceMode() {
         if (core.voiceEnabled) return
         core.switchMode(InteractionMode.VOICE)
+        presentation = presentation.copy(mode = InteractionMode.VOICE, activity = "Preparing voice", accepting = false)
+        event(EventKind.CONTROL, "Voice explicitly enabled", "Checking installed offline speech and recognition. Only text crosses the network.")
+        publish()
         voicePrepared = false
         model?.cancelCurrent()
         ready = false
@@ -180,28 +186,35 @@ class VoiceService : Service() {
     private fun loadModel(spec: ModelSpec, endpoint: String, gpu: Boolean) {
         if (loading || stopped) return
         loading = true
+        engineOwned = true
+        local(LocalState.VERIFYING)
         update("Loading on-device model (silent in text mode)")
         notice("Loading the on-device voice model.")
         val store = ModelStore(getExternalFilesDir("models")!!)
         modelThread.execute {
             val problem = if (store.verified(spec)) null else store.verify(spec) { msg -> main.post { log(msg) } }
-            if (problem != null) { main.post { loading = false; fatal("${spec.label}: $problem") }; return@execute }
+            if (problem != null) { main.post { engineOwned = false; loading = false; local(if (store.file(spec).exists()) LocalState.ERROR else LocalState.MISSING); fatal("Model verification failed. Open Menu to verify or install the pinned file.") }; return@execute }
             val m = LocalModel(spec, store.file(spec), cacheDir, gpu)
             try {
+                main.post { local(LocalState.LOADING) }
                 val t0 = System.currentTimeMillis(); m.load(); val loadMs = System.currentTimeMillis() - t0
                 // Readiness means a real local generation succeeded, not merely that a file exists.
                 val t1 = System.currentTimeMillis()
+                main.post { local(LocalState.WARMING) }
                 val raw = m.generate(Prompts.DECIDE_SYSTEM, Prompts.decide(Prompts.context(emptyList(), null, emptyList(), emptyList()), "Hello, can you hear me?"))
+                check(raw.isNotBlank()) { "Empty warmup output" }
                 val warmMs = System.currentTimeMillis() - t1
                 main.post {
                     loading = false
-                    if (stopped) { m.close(); return@post }
+                    if (stopped) { m.close(); engineOwned = false; return@post }
                     model = m
+                    local(LocalState.READY)
+                    event(EventKind.DIAGNOSTIC, "Local model warmup complete", "${spec.label} · ${if (gpu) "GPU" else "CPU"}. Load ${loadMs} ms; real warmup ${warmMs} ms. LiteRT-LM 0.19.1.")
                     log("MODEL: ${m.description}; load ${loadMs} ms; warmup ${warmMs} ms -> ${raw.trim().take(80)}")
                     connect(endpoint)
                 }
             } catch (e: Throwable) {
-                m.close(); main.post { loading = false; fatal("${spec.label} failed to run: ${e.javaClass.simpleName} ${e.message?.take(120)}") }
+                m.close(); engineOwned = false; main.post { loading = false; if (!stopped) { local(LocalState.ERROR); fatal("Local model failed to run (${e.javaClass.simpleName}). Stop frontend, then check model and backend in Menu.") } }
             }
         }
     }
@@ -210,6 +223,7 @@ class VoiceService : Service() {
         if (endpoint.isBlank()) return fatal("no Session Orchestrator address is set")
         if (connected || connecting) return
         connecting = true
+        transport(LinkState.CONNECTING, "Connecting to saved endpoint")
         update("Connecting to Session Orchestrator")
         try {
             link = OrchestratorLink(endpoint, { m -> main.post { if (!stopped) inbound(m) } }, { reason -> main.post { linkClosed(reason) } }, {
@@ -218,6 +232,7 @@ class VoiceService : Service() {
                     ready = !core.voiceEnabled || voicePrepared
                     connected = true
                     connecting = false
+                    transport(LinkState.CONNECTED, "Connected to development link", "Socket open only. This prototype has no real coding or authentication adapter. No input automatically resent.")
                     update(if (core.voiceEnabled) "Voice ready" else "Text ready: silent")
                     notice(if (core.voiceEnabled) "Ready. Everything you say is recognized on this phone." else "Ready for typed messages. No microphone or speech output.")
                     pump()
@@ -226,6 +241,7 @@ class VoiceService : Service() {
             }).also { it.connect() }
         } catch (_: IllegalArgumentException) {
             connecting = false
+            transport(LinkState.ERROR, "Invalid connection address", "Use ws:// or wss:// in Menu.")
             fatal("invalid Session Orchestrator address; use ws:// or wss://")
         }
     }
@@ -234,11 +250,11 @@ class VoiceService : Service() {
 
     private fun inbound(m: Inbound) {
         when (m) {
-            is Inbound.Say -> { val r = core.onSay(m.delegationId, m.content); log("SAY ${r.id} (${m.delegationId ?: "unsolicited"}): ${m.content}") }
-            is Inbound.Brief -> { core.onBrief(m.content); log("BRIEF: ${m.content}") }
-            is Inbound.Guidance -> { core.onGuidance(m.content); log("GUIDANCE: ${m.content}") }
+            is Inbound.Say -> { val r = core.onSay(m.delegationId, m.content); event(EventKind.DIAGNOSTIC, "Orchestrator output queued", "One independent request awaits local phrasing and delivery.", requestId = r.id); log("SAY ${r.id} (${m.delegationId ?: "unsolicited"}): ${m.content}") }
+            is Inbound.Brief -> { core.onBrief(m.content); event(EventKind.DIAGNOSTIC, "Background context updated", "Brief / Following context is not an assistant reply or display receipt.") }
+            is Inbound.Guidance -> { core.onGuidance(m.content); event(EventKind.DIAGNOSTIC, "Background guidance updated", "Not conversation output or permission authorization.") }
             is Inbound.Fixture -> { log("FIXTURE ORCHESTRATOR: ${m.description}"); notice("Connected to a test fixture, not your real sessions.") }
-            is Inbound.Unsupported -> log("UNSUPPORTED by this app: ${m.type}")
+            is Inbound.Unsupported -> event(EventKind.DIAGNOSTIC, "Unsupported capability", "The frontend cannot handle this capability; no action was performed.")
         }
         pump()
     }
@@ -249,7 +265,8 @@ class VoiceService : Service() {
         connected = false
         connecting = false
         ready = false
-        notice("I lost the connection to your sessions. Their work keeps going.")
+        transport(LinkState.DISCONNECTED, "Connection lost · Retry when ready", "History stays in this running process. In-flight delivery is unknown. No automatic resend. Voice audio may still be active: Switch to text turns it off.")
+        if (reason.startsWith("failed:")) presentation = presentation.copy(problem = reason)
         update("Disconnected")
     }
 
@@ -260,8 +277,9 @@ class VoiceService : Service() {
         if (!typed && !core.voiceEnabled) return
         if (typed) {
             core.abandonUndeliveredText()
-            showChat(ChatTurn("caller-${++chatSeq}", "You", text))
+            showChat("caller-${++chatSeq}", EventKind.USER, text, "Typed · accepted locally")
         }
+        else event(EventKind.USER, text, provenance = "Recognized on device · accepted locally")
         val endMs = link!!.nowMs()
         lastCallerEndMs = endMs
         link!!.callerSaid(text, if (typed) endMs else callerStartMs.coerceAtMost(endMs), endMs, typed)
@@ -281,11 +299,14 @@ class VoiceService : Service() {
     }
 
     private fun localStop(source: String) {
+        event(EventKind.CONTROL, "Speech stopped locally", "No Prompt Turn cancelled. Queued speech waits for new input.")
+        presentation = presentation.copy(activity = "Locally paused")
         log("LOCAL STOP ($source): speech stops; no Prompt Turn is cancelled")
         core.stopLocal()
         ackPending = false
         model?.cancelCurrent()
         tts?.stop()
+        publish()
     }
 
     // --- Scheduler: one model job at a time, then playback, then listening ----------------------
@@ -301,6 +322,8 @@ class VoiceService : Service() {
         }
         val job = core.nextJob()
         if (job != null) {
+            presentation = presentation.copy(activity = "Thinking locally")
+            publish()
             stopListening()
             val m = model ?: return
             modelThread.execute {
@@ -315,6 +338,8 @@ class VoiceService : Service() {
     }
 
     private fun completed(job: Job, raw: String?, ms: Long) {
+        event(EventKind.DIAGNOSTIC, if (raw == null) "Local inference failed" else "Local inference finished", "${job.javaClass.simpleName}: ${ms} ms. ${if (raw == null) "Safe fallback policy applies." else "Output checked by code-owned delivery policy."}", warning = raw == null)
+        presentation = presentation.copy(activity = "Waiting")
         when (job) {
             is DecideJob -> when (val d = core.completeDecide(job, raw)) {
                 null -> log("DECIDE discarded as stale (${ms} ms)")
@@ -334,7 +359,8 @@ class VoiceService : Service() {
     private fun deliver(u: Utterance) {
         val receipt = core.deliver(u, display = {
             // A receipt exists only after the active UI has synchronously appended this turn.
-            showChat(ChatTurn("$instanceId-${it.id}", "Dogwalk", it.text, it.requestId))
+            showChat("$instanceId-${it.id}", EventKind.ASSISTANT, it.text,
+                (if (it.requestId == null) "Local reply" else "Orchestrator request · locally phrased") + " · displayed, not spoken", it.requestId)
         }, voice = { speak(it) })
         if (receipt != null) {
             link?.textShown(receipt.utterance, link!!.nowMs())
@@ -347,8 +373,10 @@ class VoiceService : Service() {
         stopListening()
         speechStartMs = link?.nowMs() ?: 0
         spokenChars.remove(u.id)
-        tts!!.speak(u.text, TextToSpeech.QUEUE_FLUSH, Bundle(), u.id)
-        update("Speaking")
+        if (tts!!.speak(u.text, TextToSpeech.QUEUE_FLUSH, Bundle(), u.id) == TextToSpeech.ERROR) {
+            event(EventKind.DIAGNOSTIC, "Speech output failed", "No playback completion observed.", warning = true)
+            finished(u.id, false, voiceGeneration)
+        }
         if (duplexHeadset()) startListening()  // barge-in is only safe without a loudspeaker echo
     }
 
@@ -361,22 +389,31 @@ class VoiceService : Service() {
     }
 
     private fun progress(generation: Int) = object : UtteranceProgressListener() {
-        override fun onStart(id: String) {}
+        override fun onStart(id: String) { main.post { if (core.voiceEnabled && generation == voiceGeneration) { presentation = presentation.copy(speaker = true, activity = "Speaking"); publish() } } }
         override fun onRangeStart(id: String, start: Int, end: Int, frame: Int) { if (generation == voiceGeneration) synchronized(spokenChars) { spokenChars[id] = end } }
         override fun onDone(id: String) = main.post { finished(id, true, generation) }.let {}
-        @Deprecated("Deprecated in Java") override fun onError(id: String) = main.post { finished(id, false, generation) }.let {}
+        @Deprecated("Deprecated in Java") override fun onError(id: String) = main.post {
+            if (core.voiceEnabled && generation == voiceGeneration && !stopped) {
+                event(EventKind.DIAGNOSTIC, "Offline speech playback failed", "No successful playback completion observed. Switch to text for silent interaction.", warning = true)
+                finished(id, false, generation)
+                presentation = presentation.copy(activity = "Speech playback failed"); publish()
+            }
+        }.let {}
         override fun onStop(id: String, interrupted: Boolean) = main.post { finished(id, false, generation) }.let {}
     }
 
     private fun finished(id: String, completed: Boolean, generation: Int) {
         if (!core.voiceEnabled || stopped || generation != voiceGeneration) return
+        presentation = presentation.copy(speaker = false, activity = if (core.held) "Locally paused" else "Waiting")
+        publish()
         if (id.startsWith("notice-")) { noticeSpeaking = (noticeSpeaking - 1).coerceAtLeast(0); pump(); return }
         val chars = synchronized(spokenChars) { spokenChars.remove(id) }
         val heard = core.playbackFinished(id, completed, chars) ?: return
+        event(EventKind.ASSISTANT, heard.utterance.text, if (completed) "Playback completed callback, not proof of hearing or understanding." else "Playback interrupted. Played prefix is approximate, not acoustic evidence.", "${if (heard.utterance.requestId == null) "Local reply" else "Orchestrator request"} · playback ${if (completed) "completed" else "interrupted"}", heard.utterance.requestId)
         if (heard.text.isNotEmpty()) link?.voiceHeard(heard.text, speechStartMs, link!!.nowMs())
         log("PLAYBACK ${heard.utterance.id} ${if (completed) "completed" else "interrupted"}" +
             (heard.utterance.requestId?.let { " for $it" } ?: "") + (if (!completed) ", heard: \"${heard.text}\"" else ""))
-        update("Listening")
+        update("Waiting for recognition")
         pump()
     }
 
@@ -398,16 +435,18 @@ class VoiceService : Service() {
     private fun stopListening() {
         if (!listening || duplexHeadset()) return
         listening = false
+        presentation = presentation.copy(microphone = false)
+        publish()
         recognizer?.cancel()
     }
 
     private fun voiceListener(generation: Int) = object : RecognitionListener {
         private fun valid() = core.voiceEnabled && generation == voiceGeneration && !stopped
-        override fun onReadyForSpeech(params: Bundle?) {}
+        override fun onReadyForSpeech(params: Bundle?) { if (valid()) { presentation = presentation.copy(microphone = true, activity = if (presentation.speaker) "Speaking" else "Listening"); publish() } }
         override fun onBeginningOfSpeech() { if (valid()) callerStartMs = link?.nowMs() ?: 0 }
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() {}
+        override fun onEndOfSpeech() { if (valid()) { presentation = presentation.copy(microphone = false, activity = "Recognizing"); publish() } }
         override fun onEvent(eventType: Int, params: Bundle?) {}
         override fun onPartialResults(partial: Bundle?) {
             if (!valid()) return
@@ -417,12 +456,14 @@ class VoiceService : Service() {
         override fun onResults(results: Bundle?) {
             if (!valid()) return
             listening = false
+            presentation = presentation.copy(microphone = false); publish()
             val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
             if (text.isNotBlank()) caller(text) else pump()
         }
         override fun onError(error: Int) {
             if (!valid()) return
             listening = false
+            presentation = presentation.copy(microphone = false, activity = "Recognition unavailable ($error)"); publish()
             // Silence and no-match restart listening without any model call.
             val delay = if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) 0L else 500L
             if (delay > 0) log("ASR error $error; retrying")
@@ -438,15 +479,17 @@ class VoiceService : Service() {
     // --- Lifecycle and diagnostics ---------------------------------------------------------------
 
     private fun fatal(reason: String) {
+        presentation = presentation.copy(problem = reason, activity = if (core.voiceEnabled) "Voice unavailable" else "Silent")
+        event(EventKind.READINESS, "Frontend unavailable", reason, warning = true)
         log("NOT READY: $reason")
         update("Not ready: $reason")
         ready = false
+        publish()
         if (!stopped) core.voiceOnly { tts?.speak("I can't start: $reason.", TextToSpeech.QUEUE_ADD, Bundle(), "notice-fatal") }
     }
 
     private fun update(state: String) {
-        status = state
-        stateListener?.invoke(state)
+        publish()
         getSystemService(NotificationManager::class.java).notify(1, notification(state))
     }
 
@@ -472,12 +515,14 @@ class VoiceService : Service() {
         stopped = true
         voiceGeneration++
         ready = false
-        status = "Text mode: stopped (silent)"
-        stateListener?.invoke(status)
+        core.switchMode(InteractionMode.TEXT)
+        presentation = PresentationState(local = if (model != null) LocalState.INSTALLED else presentation.local)
+        event(EventKind.CONTROL, "Frontend stopped", "Model files retained. Process-local history only. Stopping this frontend does not cancel a remote Prompt Turn.")
+        publish()
         link?.close()
         recognizer?.destroy()
         tts?.shutdown()
-        modelThread.execute { model?.close() }
+        modelThread.execute { model?.close(); engineOwned = false }
         modelThread.shutdown()
         wakeLock?.takeIf { it.isHeld }?.release()
         log("STOPPED")
@@ -486,7 +531,19 @@ class VoiceService : Service() {
 
     private fun log(line: String) {
         Log.i(TAG, line)
-        main.post { synchronized(lines) { lines.addLast(line); while (lines.size > 200) lines.removeFirst() }; listener_?.invoke(line) }
+    }
+
+    private fun publish() {
+        presentation = presentation.copy(mode = core.mode, accepting = ready && !stopped, running = initialized && !stopped)
+        stateListener?.invoke(presentation)
+    }
+    private fun local(state: LocalState) {
+        if (presentation.local != state) event(EventKind.READINESS, "Local · ${state.label}", "Observed on this device. Installed files alone do not establish runtime readiness.")
+        presentation = presentation.copy(local = state, problem = null); publish()
+    }
+    private fun transport(state: LinkState, summary: String, detail: String = "") {
+        presentation = presentation.copy(link = state, problem = null)
+        event(EventKind.CONNECTION, summary, detail, warning = state == LinkState.ERROR || state == LinkState.DISCONNECTED); publish()
     }
 
     companion object {
@@ -498,19 +555,22 @@ class VoiceService : Service() {
         const val ACTION_SEND = "dogwalk.ondevice.SEND"
         const val ACTION_REFRESH = "dogwalk.ondevice.REFRESH"
         const val ACTION_RESTORE_TEXT = "dogwalk.ondevice.RESTORE_TEXT"
-        data class ChatTurn(val id: String, val role: String, val text: String, val requestId: String? = null)
-        val chat = mutableListOf<ChatTurn>()
+        val timeline = Timeline()
         var chatSeq = 0
-        var status = "Text mode: stopped (silent)"
-        var stateListener: ((String) -> Unit)? = null
-        var chatListener: ((ChatTurn) -> Unit)? = null
-        private fun showChat(turn: ChatTurn): Boolean {
-            val render = chatListener ?: return false
-            if (chat.none { it.id == turn.id }) chat.add(turn)
-            render(turn)
+        var presentation = PresentationState()
+        @Volatile var engineOwned = false
+        var stateListener: ((PresentationState) -> Unit)? = null
+        var timelineListener: ((TimelineEvent) -> Unit)? = null
+        var displayVisible: (() -> Boolean)? = null
+        fun event(kind: EventKind, summary: String, detail: String = "", provenance: String = "", requestId: String? = null, warning: Boolean = false) {
+            val item = timeline.append(kind, summary, detail, provenance, requestId, warning)
+            timelineListener?.invoke(item)
+        }
+        private fun showChat(id: String, kind: EventKind, text: String, provenance: String, requestId: String? = null): Boolean {
+            if (kind == EventKind.ASSISTANT && displayVisible?.invoke() != true) return false
+            val turn = timeline.append(kind, text, provenance = provenance, requestId = requestId, id = id)
+            timelineListener?.invoke(turn)
             return true
         }
-        val lines = ArrayDeque<String>()
-        @Volatile var listener_: ((String) -> Unit)? = null
     }
 }

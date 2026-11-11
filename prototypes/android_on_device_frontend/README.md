@@ -16,10 +16,54 @@ with the screen locked. Optional silent text chat uses the screen and a non-micr
 Main's Worker has no route that accepts this app, so it cannot reach the real Orchestrator
 yet (see Gaps).
 
-## Silent text chat (default in 0.2)
+## Native conversation UI (0.4, versionCode 4)
+
+The approved `design/chat-redesign.html` is implemented with native widgets, not a WebView.
+The pale surface, blue actions, compact Dogwalk/Development header, independent Link/Local
+strip, mode strip, single chronological timeline, pinned composer and modal Setup map to
+that design. Preview keyboards, scenario selectors and sample history are not app features.
+
+1. Open the app, then **Start text**. Opening/restoring the Activity always silences voice.
+   Installed/not loaded is not ready: verification, engine load and a real warmup precede
+   model readiness. Link connecting/connected is independently reported.
+2. Type in **Message Dogwalk**, then **Send** or the IME Send action. Draft stays editable
+   while blocked. There is no automatic resend on reconnect.
+3. **Menu** opens modal **Setup and tools**: endpoint, pinned model, backend,
+   download/verify, no-audio self-test and Stop frontend. **Done** or Back returns to chat.
+   Save applies on the next start, not to a running engine. Stop before changing backend/model.
+4. **Enable voice** requires explicit confirmation and microphone permission. After granting
+   permission, confirm again. Listening/speaking labels use recognizer/TTS callbacks; local
+   inference shows Thinking. **Stop speaking** is local interruption, not cancellation of work.
+   **Switch to text** closes audio. A dropped link alone does not promise audio has stopped.
+5. Expand a diagnostic in place. New activity follows only when near the end; otherwise use
+   **Latest**. Conversation and diagnostics share one scroller, never a second log.
+
+Presentation is typed (`Presentation.kt`), emitted at source, ordered by phone observation
+sequence and labeled with locally recorded time, not invented provider time. Background
+Brief/Following context produces a sanitized diagnostic only. Each request produces its own
+assistant item and receipt. A display receipt is withheld when the Activity is paused,
+unfocused or covered by a modal. Closing Setup resumes pending presentation. Displayed
+does not mean spoken, read, understood or authorized. Raw logs are not timeline data.
+
+The timeline is bounded to 300 process-local events. No conversation database or disk history
+is added. Draft survives Activity recreation and transient layout changes (saved instance
+state plus process-local fallback); process death/history persistence is not guaranteed.
+Download progress is visible in Setup, not appended as repeated timeline rows. Closing Setup
+does not cancel downloading; an interrupted partial file can resume on the next attempt.
+Free storage is checked before downloading. Self-test requires the frontend stopped and is
+serialized against provisioning to avoid allocating a second multi-GB model.
+
+**Keyboard/accessibility acceptance:** edge-to-edge root owns system/cutout/IME insets once,
+using `max(navigation, IME)` with resize, not pan. Only the timeline shrinks. Composer grows
+to four lines and then scrolls internally. Actions have 48 dp minimum height, native modal
+focus semantics, semantic labels and scalable sp text. Link/Local and errors use words, not
+color alone. Real emulator evidence and remaining test-matrix gaps are recorded below.
+
+## Silent text chat
 
 Install the updated APK **over the existing app**, without uninstalling or clearing data.
-The application ID and debug signing configuration are unchanged; versionCode is now 3.
+The application ID and debug signing configuration are unchanged; versionCode is now 4
+(`0.4-native-conversation-dev`).
 Existing model weights, verification markers and saved endpoint/backend choices remain.
 Android's package installer should offer **Update**. If it instead reports a signing
 conflict, stop: do not uninstall to get past it.
@@ -34,15 +78,14 @@ show an actionable message without exposing endpoint URLs or tokens.
 
 1. Open the app. Opening/restoring the Activity silences any existing voice service;
    legacy `--ez start true` intents now start **text**, never voice.
-2. Tap **Start / switch to silent text**. Wait for **Text ready: silent**. Text readiness
+2. Tap **Start text**. Wait for **Link Connected / Local Model ready**. Text readiness
    loads and warms the same local model and opens the same OrchestratorLink, but never
    constructs TTS or a speech recognizer, requests microphone access, or checks ASR/TTS packs.
 3. Type into **Message Dogwalk**, then tap **Send** (or the keyboard's Send action).
    User and assistant turns remain visible, including asynchronous Orchestrator replies.
    Work, permissions, corrections and cancellations follow the same Handoff policy as voice.
-4. Setup, pinned model download/verification, endpoint, voice controls and diagnostic logs
-   are under **Setup / voice / diagnostics**. Starting voice requires the explicit
-   **Enable voice explicitly (microphone and speaker)** button and microphone permission.
+4. Setup, pinned model download/verification, endpoint and self-test are under **Menu**.
+   Voice requires **Enable voice**, explicit confirmation and microphone permission.
 
 In text mode there are no TTS speak calls, recognizer creation/listening, microphone
 foreground-service type, or spoken startup/download/readiness/error notices. The app uses
@@ -173,6 +216,50 @@ streams it into the emulated microphone through the emulator's authenticated gRP
 evidence below.
 
 ## Evidence (2026-11-10 to 11)
+
+### Native conversation redesign (2026-11-11)
+
+- 29 JVM tests pass (the existing 24 plus five presentation tests): independent readiness,
+  source ordering/clock, distinct request provenance, retention/deduplication, conservative
+  modal visibility, and no false audio-off claim on link loss. Existing mode-switch and
+  failed-display tests still pass. `assembleDebug` and `lintDebug` pass: 0 errors,
+  13 warnings (prototype English-only copy and conservative free-space checking).
+- API 35 ARM64 emulator `emulator-5560`, launched here with `-no-audio -no-window`, CPU
+  LiteRT-LM 0.19.1, existing E2B weights. Explicit `adb -s emulator-5560 install -r`
+  succeeded. First install time remained 2026-11-10; package version is 4. Model SHA-256
+  still equals `181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c`,
+  the verification marker remains, and `RECORD_AUDIO` remains denied.
+- Final APK silent UI smoke against isolated port 18774 passed: actual UI text entry,
+  real local greeting decision, work Handoff, two independent asynchronous requests,
+  permission question/typed answer, fixture disconnect and Retry. No TTS, ASR, playback
+  or debug-injection path appeared in the test process's logs. No real Agent work ran.
+- Real Gboard visible: timeline bounds `[0,540][1080,1296]` (756 px high), composer
+  `[31,1317][797,1441]`, above IME. The native Send target remained reachable and the
+  multiline IME offered Send. Screenshots were inspected against the approved HTML.
+  System-bar contrast and diagnostic density were corrected during this review.
+- At exactly 360 dp width (945 px at 420 dpi), real Gboard left a 571 px timeline
+  viewport `[0,523][945,1094]` and composer `[31,1115][662,1239]`, with Send above the IME.
+  The actual selected-model-missing route was exercised by selecting the absent E4B file,
+  stopping and reopening, then restoring E2B. No weights or app data were removed.
+- A second controlled fixture on port 18775 proved that a new output receives no display
+  receipt while Setup is open, then receives exactly one after Done. Five separate initial
+  requests retained independent receipts. While reading older history, a new reply preserved
+  the top visible item/offset and exposed Latest. Draft survived opening/closing Setup and
+  landscape Activity recreation. This was real local inference with scripted socket inputs,
+  not simulated model readiness or audio.
+- `silent_text_smoke.py` now uses semantic accessibility labels and separate status words,
+  and requires `--artifacts /absolute/local/directory` for screenshot/XML evidence. It still
+  refuses physical-device serials and port 8770, never installs or enables audio.
+- Connected-plus-loading is tested as a typed-state invariant, not a fabricated runtime
+  screenshot: the real startup still warms locally before opening the link.
+- No physical phone, real microphone/speaker, screen-lock voice, E4B/GPU, new download,
+  low-storage fault, TalkBack, cutout/three-button navigation or 200% font-scale runtime
+  coverage is claimed. Download/verification failure and genuinely empty-device installation
+  are not runtime-tested. The platform dialog is intentionally used instead of a custom
+  bottom sheet. Process-local pending requests are not a durable or fully bounded mailbox.
+  Extremely short landscape windows or large-font combinations can leave little history:
+  the upper surface is constrained so it cannot push the composer below the IME. Full
+  landscape-with-IME and large-font acceptance remains a test-matrix gap.
 
 ### Silent text update (2026-11-11)
 
