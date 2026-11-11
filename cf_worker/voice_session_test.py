@@ -32,6 +32,9 @@ from http.server import BaseHTTPRequestHandler
 
 from smoke_test import (
     DAYTONA_MOCK_PORT,
+    INSPECTOR_PORT,
+    PORT_BASE,
+    WORKER_PORT,
     DEFAULT_LOCAL,
     DaytonaMock,
     LOCAL_ADMIN_PASSWORD,
@@ -46,8 +49,8 @@ from smoke_test import (
 )
 
 WORKER_DIR = Path(__file__).resolve().parent
-SOCKET_PORT = 8791
-ORCHESTRATOR_MOCK_PORT = 8792
+SOCKET_PORT = PORT_BASE + 4
+ORCHESTRATOR_MOCK_PORT = PORT_BASE + 5
 IDENTITY_SECRET = f"local-identity-secret-{secrets.token_hex(8)}"
 OPENAI_WEBHOOK_KEY = secrets.token_bytes(32)
 OPENAI_WEBHOOK_SECRET = "whsec_" + base64.b64encode(OPENAI_WEBHOOK_KEY).decode()
@@ -645,7 +648,7 @@ def signed_webhook(call_sid: str, live_session_id: str) -> tuple[str, str, str]:
 def post_webhook(body: str, identity: str, signature_header: str) -> int:
     webhook_id, timestamp = identity.split("|")
     request = urllib.request.Request(
-        "http://127.0.0.1:8787/openai/live",
+        f"http://127.0.0.1:{WORKER_PORT}/openai/live",
         data=body.encode(),
         headers={
             "content-type": "application/json",
@@ -668,7 +671,7 @@ CALL_TRACE_ID, CALL_SPAN_ID = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba90
 def call_activity_rows(call_sid: str, timing: bool = False) -> list[dict]:
     credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
     request = urllib.request.Request(
-        "http://127.0.0.1:8787/admin/api/calls?verbose=1&limit=10" + ("&timing=1" if timing else ""),
+        f"http://127.0.0.1:{WORKER_PORT}/admin/api/calls?verbose=1&limit=10" + ("&timing=1" if timing else ""),
         headers={"authorization": f"Basic {credentials}"},
     )
     with urllib.request.urlopen(request, timeout=10) as response:
@@ -683,7 +686,7 @@ def call_activity(call_sid: str) -> list[str]:
 def operator_timing_page(call_sid: str, after: int = 0) -> dict:
     credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
     request = urllib.request.Request(
-        f"http://127.0.0.1:8787/admin/api/timing?call_sid={call_sid}&after={after}",
+        f"http://127.0.0.1:{WORKER_PORT}/admin/api/timing?call_sid={call_sid}&after={after}",
         headers={"authorization": f"Basic {credentials}"},
     )
     with urllib.request.urlopen(request, timeout=10) as response:
@@ -693,7 +696,7 @@ def operator_timing_page(call_sid: str, after: int = 0) -> dict:
 def operator_content(call_sid: str) -> dict:
     credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
     request = urllib.request.Request(
-        f"http://127.0.0.1:8787/admin/api/timing/content?call_sid={call_sid}",
+        f"http://127.0.0.1:{WORKER_PORT}/admin/api/timing/content?call_sid={call_sid}",
         headers={"authorization": f"Basic {credentials}"},
     )
     with urllib.request.urlopen(request, timeout=10) as response:
@@ -703,7 +706,7 @@ def operator_content(call_sid: str) -> dict:
 def conversations() -> list[dict]:
     credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
     request = urllib.request.Request(
-        "http://127.0.0.1:8787/admin/api/conversations?verbose=1",
+        f"http://127.0.0.1:{WORKER_PORT}/admin/api/conversations?verbose=1",
         headers={"authorization": f"Basic {credentials}"},
     )
     with urllib.request.urlopen(request, timeout=10) as response:
@@ -713,7 +716,7 @@ def conversations() -> list[dict]:
 def operator_access_state(verbose: bool = False) -> dict:
     credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
     request = urllib.request.Request(
-        "http://127.0.0.1:8787/admin/api/state" + ("?verbose=1" if verbose else ""),
+        f"http://127.0.0.1:{WORKER_PORT}/admin/api/state" + ("?verbose=1" if verbose else ""),
         headers={"authorization": f"Basic {credentials}"},
     )
     with urllib.request.urlopen(request, timeout=10) as response:
@@ -772,7 +775,7 @@ def decode_pairing_tones(audio_b64: str) -> str | None:
 
 def pair_http(method: str, path: str, body: dict | None = None, headers: dict | None = None) -> tuple[int, dict]:
     request = urllib.request.Request(
-        f"http://127.0.0.1:8787{path}",
+        f"http://127.0.0.1:{WORKER_PORT}{path}",
         data=json.dumps(body).encode() if body is not None else None,
         headers={"content-type": "application/json", **(headers or {})},
         method=method,
@@ -785,7 +788,7 @@ def pair_http(method: str, path: str, body: dict | None = None, headers: dict | 
 
 
 def pair_raw(path: str, headers: dict) -> tuple[int, dict, bytes]:
-    request = urllib.request.Request(f"http://127.0.0.1:8787{path}", headers=headers)
+    request = urllib.request.Request(f"http://127.0.0.1:{WORKER_PORT}{path}", headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, dict(response.headers), response.read()
@@ -1320,10 +1323,10 @@ async def run_protocol(identity: str) -> None:
         assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1] == {"state": "accepted"}, "the token is handed out once"
         token = accepted["token"]
         # The page carries its build identity and sends it when it connects.
-        page = await asyncio.to_thread(lambda: urllib.request.urlopen("http://127.0.0.1:8787/pair", timeout=10).read().decode())
+        page = await asyncio.to_thread(lambda: urllib.request.urlopen(f"http://127.0.0.1:{WORKER_PORT}/pair", timeout=10).read().decode())
         build = re.search(r'const PAIR_BUILD = "([0-9a-f]{8})";', page).group(1)
         assert "__PAIR_BUILD__" not in page
-        async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as browser:
+        async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}") as browser:
             await browser.send(json.dumps({"type": "auth", "token": token, "build": build}))
             hello = await recv_type(browser, "hello")
             assert hello["device"] == "Chrome on a Mac" and hello["idle_expires_at"] > time.time() * 1000
@@ -1356,12 +1359,12 @@ async def run_protocol(identity: str) -> None:
             await asyncio.sleep(0.3)
             # A tab loaded before a deploy: one with another build is told to reload itself; one
             # from before builds existed cannot, so the Orchestrator hears it must ask the caller.
-            async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as newer:
+            async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}") as newer:
                 await newer.send(json.dumps({"type": "auth", "token": token, "build": "00000000"}))
                 told = await recv_type(newer, "hello")
                 assert told["stale"] is True and told["build"] == build, told
             await wait_for(lambda: any('browser_page_stale: {"reloads_itself":true}' in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
-            stale = await connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}")
+            stale = await connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}")
             await stale.send(json.dumps({"type": "auth", "token": token}))
             assert (await recv_type(stale, "hello"))["stale"] is True
             await wait_for(lambda: any('browser_page_stale: {"reloads_itself":false}' in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
@@ -1492,7 +1495,7 @@ async def run_protocol(identity: str) -> None:
             launch = await recv_type(browser, "launch")
             assert launch["id"] == 7 and f"/pair/terminal#t={identity}." in launch["url"], launch
             ticket_credential = launch["url"].split("#t=", 1)[1]
-            terminal_url = f"ws://127.0.0.1:8787/pair/terminal/ws?for={identity}"
+            terminal_url = f"ws://127.0.0.1:{WORKER_PORT}/pair/terminal/ws?for={identity}"
             async with connect(terminal_url) as terminal:
                 await terminal.send(json.dumps({"type": "auth", "ticket": ticket_credential, "cols": 100, "rows": 30}))
                 ready = await recv_type(terminal, "ready")
@@ -1512,7 +1515,7 @@ async def run_protocol(identity: str) -> None:
             refused = await recv_type(browser, "error")
             assert refused["id"] == 8 and "desktop" in refused["error"], refused
         # A wrong secret for the right identity is refused and closed with 4001.
-        async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as stranger:
+        async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}") as stranger:
             await stranger.send(json.dumps({"type": "auth", "token": identity + "." + "0" * 48}))
             await recv_type(stranger, "error")
             try:
@@ -1520,16 +1523,16 @@ async def run_protocol(identity: str) -> None:
             except ConnectionClosed as closed:
                 assert closed.rcvd and closed.rcvd.code == 4001
         # Unpairing ends the credential: the next connection is refused.
-        async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as browser:
+        async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}") as browser:
             await browser.send(json.dumps({"type": "auth", "token": token}))
             await recv_type(browser, "hello")
             await browser.send(json.dumps({"type": "unpair"}))
             await recv_type(browser, "unpaired")
         # Unpairing ends what the browser launched: its terminal token no longer works.
-        async with connect(f"ws://127.0.0.1:8787/pair/terminal/ws?for={identity}") as revoked:
+        async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/terminal/ws?for={identity}") as revoked:
             await revoked.send(json.dumps({"type": "auth", "token": terminal_token}))
             await recv_type(revoked, "error")
-        async with connect(f"ws://127.0.0.1:8787/pair/ws?for={identity}") as browser:
+        async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}") as browser:
             await browser.send(json.dumps({"type": "auth", "token": token}))
             await recv_type(browser, "error")
 
@@ -1965,7 +1968,7 @@ def stop_wrangler(process: subprocess.Popen) -> None:
     process.wait(timeout=10)
     # The port frees once workerd exits, which may lag wrangler itself.
     deadline = time.time() + 10
-    while time.time() < deadline and wait_port("127.0.0.1", 8787, timeout=0.2):
+    while time.time() < deadline and wait_port("127.0.0.1", WORKER_PORT, timeout=0.2):
         time.sleep(0.2)
 
 
@@ -1975,7 +1978,9 @@ def start_wrangler(wrangler: str) -> subprocess.Popen:
             wrangler,
             "dev",
             "--port",
-            "8787",
+            str(WORKER_PORT),
+            "--inspector-port",
+            str(INSPECTOR_PORT),
             "--ip",
             "127.0.0.1",
             "--var",
@@ -2007,7 +2012,7 @@ def start_wrangler(wrangler: str) -> subprocess.Popen:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    if not wait_port("127.0.0.1", 8787, timeout=20):
+    if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
         process.kill()
         raise RuntimeError("wrangler dev did not start")
     return process

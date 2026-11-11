@@ -196,6 +196,11 @@ uv run --script ../sandbox_acp_gateway.py test
 node --experimental-strip-types challenge_phrases_test.ts
 ```
 
+The local suites listen on 8787 (Worker), 8790-8792 (mocks), and 10229 (inspector).
+To run them in several worktrees at once, give each its own base, for example
+`DOGWALK_TEST_PORT_BASE=8800 uv run --script voice_session_test.py`; ports are
+the base, base+3 to base+5, and base+1442. Each worktree keeps its own local D1.
+
 The smoke test's Voice Donation checks use wrangler dev's local R2. A local D1
 created before `migrations/2026-11-11-call-handoff-donation.sql` needs that file
 applied with `--local` once, since `schema.sql` only creates missing tables.

@@ -30,7 +30,12 @@ from websockets.sync.client import connect as ws_connect
 
 LOCAL_TOKEN = "local-smoke-token"
 LOCAL_ADMIN_PASSWORD = "local-admin-password"
-DEFAULT_LOCAL = "http://127.0.0.1:8787"
+# Ports derive from one base so worktrees can run the local suites at the same time:
+# DOGWALK_TEST_PORT_BASE=8800 uses 8800 (Worker), 8803-8805 (mocks), and 10242 (inspector).
+PORT_BASE = int(os.environ.get("DOGWALK_TEST_PORT_BASE", "8787"))
+WORKER_PORT = PORT_BASE
+INSPECTOR_PORT = PORT_BASE + 1442
+DEFAULT_LOCAL = f"http://127.0.0.1:{WORKER_PORT}"
 DEFAULT_REMOTE = "https://dogwalk.tools"
 LOCAL_INVITE = "ahead almighty apple"
 TEST_PHONE = "+15555550100"
@@ -41,7 +46,7 @@ DONOR_PHONE = "+15555550109"
 LOCAL_IDENTITY_SECRET = "local-identity-secret"
 TEST_ACCOUNT = "AC" + "0" * 32
 WORKER_DIR = Path(__file__).resolve().parent
-DAYTONA_MOCK_PORT = 8790
+DAYTONA_MOCK_PORT = PORT_BASE + 3
 
 
 class DaytonaMock(BaseHTTPRequestHandler):
@@ -87,7 +92,7 @@ class DaytonaMock(BaseHTTPRequestHandler):
             DaytonaMock.preview_reads += 1
             self.reply(
                 {
-                    "url": "http://127.0.0.1:8791",
+                    "url": f"http://127.0.0.1:{PORT_BASE + 4}",
                     "token": "local-preview-token",
                 }
             )
@@ -1007,7 +1012,9 @@ def main() -> int:
             wrangler,
             "dev",
             "--port",
-            "8787",
+            str(WORKER_PORT),
+            "--inspector-port",
+            str(INSPECTOR_PORT),
             "--ip",
             "127.0.0.1",
             "--var",
@@ -1036,7 +1043,7 @@ def main() -> int:
         stderr=subprocess.DEVNULL,
     )
     try:
-        if not wait_port("127.0.0.1", 8787, timeout=20):
+        if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
             print("wrangler dev did not start", file=sys.stderr)
             return 1
         return run_tests(
