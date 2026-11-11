@@ -1,0 +1,30 @@
+name = "dogwalk-speaker"
+# Adam's personal account (Workers Paid). Deploy only with that account's
+# credential, never the default Wrangler login; see README.md.
+account_id = "890753ccd6f0bbbfbe2c030cc44f6a87"
+main = ".worker/index.js"
+compatibility_date = "2026-07-20"
+no_bundle = true
+
+# Reachable only through the dogwalk Worker's SPEAKER Service Binding.
+workers_dev = false
+preview_urls = false
+
+# A warm 3 s inference is well under a second of CPU; the cap bounds a cold
+# model load plus a short queue without allowing runaway work.
+[limits]
+cpu_ms = 10000
+
+# Never log requests: inputs are biometric audio.
+[observability]
+enabled = false
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
+
+[[rules]]
+type = "Data"
+globs = ["**/*.onnx"]
+fallthrough = true

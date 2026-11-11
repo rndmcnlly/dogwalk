@@ -83,6 +83,18 @@ uses. Like crash-only software, the recovery path is the ordinary path, so it is
 exercised constantly and needs no special machinery. Durable work belongs in
 places that outlive a Sandbox, such as Git remotes.
 
+### Voice Research
+
+Owns Voice Donations: engineering voice data that a caller gives on purpose so
+Dogwalk's speaker verification, signal processing, and embeddings can be tuned
+and compared. Everywhere else, operational audio is transient (challenge audio
+is discarded once scored, and Voice References are embeddings, never audio). A
+Voice Donation is the one place Dogwalk keeps raw caller audio, and only by
+spoken consent, with no link to the caller: no phone number, Voice Call
+identifier, User, or Handle is stored with it. Voice Research reads nothing from
+Access Control and writes nothing back; any caller may donate, registered or
+not, and donating changes nothing about their access.
+
 ## Context Map
 
 ```text
@@ -304,6 +316,28 @@ scored, tagged with the embedding space (model weights, preprocessing, and
 normalization) that produced it. It is never audio, and challenge audio is
 discarded once scored. It is deleted when its User is reaped.
 
+A Voice Reference never learns from ordinary calls: passing an Identity Check
+changes nothing, so it cannot drift toward an impostor or a passing condition.
+It changes only through Re-enrollment, which the User starts, like re-homing.
+Just as a User can call from a strange number by passing challenges, they can
+call from a strange acoustic setting (a car, new earbuds, a noisy room) by
+passing challenges, and only if that setting becomes their new normal do they
+move their Voice Reference there.
+
+### Re-enrollment
+
+**Context:** Access Control
+
+The User-initiated ritual that replaces a Voice Reference, for example after a
+new phone, or when earbuds or a car become the User's usual way of calling. The
+User passes an Identity Check first, then repeats a fresh set of enrollment
+phrases in the new setting, and the new reference replaces the old one
+outright: earlier enrollment does not blend in. It is the voice counterpart of
+re-homing a number, and neither happens automatically.
+
+**Not:** Adaptive enrollment, or a Voice Donation (which never touches a Voice
+Reference).
+
 ### Identity Check
 
 **Context:** Access Control
@@ -315,27 +349,34 @@ who says they are someone else, names a Handle and takes three Identity
 Challenges. Each answer's transcript is classified deterministically: the
 challenge phrase (its audio is then scored against the Voice Reference), a
 Handle (switch to that identity), an Invite Code or a mention of an invite
-(Registration), or anything else (ask again). Only a matched phrase in the
+(Registration), a mention of donating (Voice Donation), or anything else (ask again). Only a matched phrase in the
 wrong voice counts as a failure, so noise and bad lines never lock a caller
-out. A User whose Home check fails moves to the three-challenge path, never to
+out. A matched phrase with too little speech to judge (about two seconds, as
+the verifier measures it) is neither a pass nor a failure: the caller gets
+another phrase. A User whose Home check fails moves to the three-challenge path, never to
 a dead end. Repeated failures for one Handle pause checks for that Handle for a
 while, and the User hears about the attempts in their next Opening. The check
 runs while the Sandbox wakes, and the Session Orchestrator learns how the
-caller passed it.
+caller passed it. After each scored challenge the caller hears a terse level of
+voice match, as the Opening reports caller-ID attestation: how strongly their
+voice matched, not the raw score. This makes the score something a caller can
+climb by trying again; that is accepted for now, in favor of telling Users how
+well Dogwalk recognizes them.
 
 ### Identity Challenge
 
 **Context:** Access Control
 
 One fresh, short, grammatical sentence the caller repeats at once in their own
-voice, such as "The purple suitcase belongs upstairs." Nothing is remembered
+voice, such as "The golden kettle belongs in the kitchen." Nothing is remembered
 for later. Phrases use familiar syntax and concrete words, and avoid digit
 strings, tongue twisters, disturbing content, Handle words, and escape words.
 Phrase correctness and speaker similarity are separate signals, and both must
 pass. Fresh phrases defeat replayed recordings, not voice cloning. The
-similarity threshold is configuration, not a domain rule: calibrated
-provisionally against synthetic impostor voices played through a real
-telephone call, and adjusted as real calls accumulate.
+similarity threshold is configuration, not a domain rule. It starts at a cosine
+of 0.5: synthetic impostors through a telephone path scored at most 0.40, and
+the operator's own voice in an unenrolled setting (car hands-free) at least
+0.50. It is adjusted as real calls and Voice Donations accumulate.
 
 ### Roaming
 
@@ -388,6 +429,40 @@ opt-in reveals them.
 
 **Not:** An operator Invite Code (no inviter, any expiry or use count), a
 Registration, or proof of identity.
+
+### Voice Donation
+
+**Context:** Voice Research
+
+A caller's spoken consent to give raw voice samples for engineering, and the
+deterministic, speech-only flow that collects them. An unregistered caller says
+"donate" at the registration prompt; a User asks the Voice Agent, which hands the
+call to the same flow. A short consent script says what is recorded (the caller
+repeating short phrases and a little free speech), why (to tune voice
+recognition for Dogwalk), where (raw, on the operator's storage, not linked to
+their phone number), that saying stop ends it at any time, and that deletion is
+requested by telling the operator roughly when they called. Only a spoken yes
+starts recording; anything else records nothing. Each round repeats a fresh
+challenge phrase (the same generator as Identity Challenges) or asks for free
+speech. Saying stop keeps what was already recorded and ends the call. The
+keypad is never required.
+
+**Not:** Registration (it creates no User and needs no Invite Code), an
+Identity Check, or research under an ethics board's protocol.
+
+### Donation Session
+
+**Context:** Voice Research
+
+One Voice Donation's stored result, named only by a fresh random id and dated by
+when it started: the consent version, each round's prompt and kind, the
+telephony provider's transcript and confidence for it, and the round's audio
+exactly as the provider delivered it (decoded to linear PCM, with any lost
+frames filled with silence and counted). Call Activity may note that a donation
+happened on a call, but never which Donation Session it produced; the operator
+finds a session for deletion by its time.
+
+**Not:** A Voice Recording (it never enters a Workspace) or a Voice Reference.
 
 ### Voice Call
 
@@ -871,6 +946,8 @@ These canonical terms name Voice Agent tools as well as core methods. Narration 
 - A Handle is not a credential, and a Home is not an identity.
 - Roaming is not re-homing, and grants no less access than a Home call.
 - Passing the Identity Check is not Registration; failing it is not losing the identity.
+- A Voice Donation is not Registration and creates no User; donating grants and changes no access.
+- Donation audio is not a Voice Reference, and a Donation Session is not a Voice Recording.
 
 ## Adapter Vocabulary
 
@@ -892,6 +969,10 @@ The following names may appear in adapter configuration and deployment documenta
   `<Gather>` for transcripts and a `<Start><Stream>` fork for challenge audio,
   stopped before the SIP dial. Never `<Record>`, whose media this account served
   without authentication.
+- **Cloudflare R2:** Current store of Donation Sessions, in a private bucket
+  reached only through the Worker's binding and the operator's own credentials.
+  Each round's audio arrives over the same `<Start><Stream>` fork the Identity
+  Check uses, never `<Record>`.
 - **Speaker verification Worker:** Current Voice Reference scorer: a stateless
   WASM speaker-embedding model in its own Worker (Workers Paid), reached only
   through a Service Binding. It holds no per-User state.
@@ -939,8 +1020,9 @@ The following language appears in Git history and is not canonical for productio
 
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Invitations: should a successful Registration by Invitation continue straight into the new User's first call rather than hanging up? Should the Diagnostics Surface draw the invitation graph, and should an operator be able to raise or lower a User's active-Invitation limit?
-- Resolved: a spoken Handle plus Identity Challenges lets a User call from any telephone (see Roaming). Still open: how long before an inactive User is reaped; how many failed Identity Check attempts pause a Handle, and for how long; how far one successful call may update a Voice Reference, so voice drift is followed without letting a one-time impostor pull it toward their own voice; and whether registering from a number that is already a Home should be limited, since one phone could otherwise create many Users (bounded today only by Invitation limits).
+- Resolved: a spoken Handle plus Identity Challenges lets a User call from any telephone (see Roaming). Still open: how long before an inactive User is reaped; how many failed Identity Check attempts pause a Handle, and for how long; and whether registering from a number that is already a Home should be limited, since one phone could otherwise create many Users (bounded today only by Invitation limits).
 - Should the Identity Check ever collect more voice evidence during the conversation, or does whole-call collection need its own consent and retention decision?
+- Voice Donations: how long is donated audio kept? Today it stays until the operator deletes it on request or decides otherwise; a fixed retention period, and whether the consent script should state it, is undecided. Should a donor be able to delete their own session by voice without an identifier being spoken to them?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
 
 - Should the Voice Frontend also receive recent conversation directly (as provider session history at call start), rather than only through the Session Orchestrator's reorienting speech?

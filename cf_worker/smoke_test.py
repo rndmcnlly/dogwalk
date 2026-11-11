@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = ["websockets==15.0.1"]
 # ///
 """Assertion-based smoke test for the Dogwalk registration Worker."""
 
@@ -25,6 +25,9 @@ import urllib.request
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from websockets.exceptions import InvalidStatus
+from websockets.sync.client import connect as ws_connect
+
 LOCAL_TOKEN = "local-smoke-token"
 LOCAL_ADMIN_PASSWORD = "local-admin-password"
 DEFAULT_LOCAL = "http://127.0.0.1:8787"
@@ -34,6 +37,9 @@ TEST_PHONE = "+15555550100"
 OTHER_PHONE = "+15555550101"
 # Every phone number the local tests use (fictional 555-01xx numbers), as a LIKE pattern.
 TEST_NUMBERS = "+1555555%"
+DONOR_PHONE = "+15555550109"
+LOCAL_IDENTITY_SECRET = "local-identity-secret"
+TEST_ACCOUNT = "AC" + "0" * 32
 WORKER_DIR = Path(__file__).resolve().parent
 DAYTONA_MOCK_PORT = 8790
 
@@ -309,6 +315,7 @@ def run_tests(
         "a voice line for supervising coding agents" in body and "three invite words" in body,
         f"unregistered greeting: {body}",
     )
+    require("say donate" in body and ",donate" in body, f"greeting does not offer Voice Donation: {body}")
 
     status, body = post(
         base_url,
@@ -510,6 +517,25 @@ def run_tests(
                 f"operator route accepts pairing bearer: {path}")
     status, body = get(base_url, "/admin/timing", operator_headers)
     require(status == 200 and "sequence" in body.lower(), "operator timing page unavailable")
+
+    # Voice verification calibration is operator-only, and degrades to 503 when the
+    # speaker verification Worker is not running alongside local dev.
+    def voice_verify(body: bytes, headers: dict, user: str = "1") -> tuple[int, str]:
+        req = urllib.request.Request(base_url + "/admin/api/voice-verify?user=" + user, data=body,
+                                     headers={"content-type": "audio/wav", **headers}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                return response.status, response.read().decode()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read().decode()
+    require(get(base_url, "/admin/api/voice-verify/health")[0] == 401, "voice verify health is public")
+    require(voice_verify(b"RIFF", {})[0] == 401, "voice verify is public")
+    require(get(base_url, "/admin/api/voice-verify/health", operator_headers)[0] == 503,
+            "voice verify health did not report the unbound speaker Worker")
+    require(get(base_url, "/admin/api/voice-verify?user=1", operator_headers)[0] == 405, "voice verify accepted GET")
+    status, _ = voice_verify(b"not a wav file", operator_headers)
+    require(status in (400, 503), f"voice verify accepted a non-WAV body: {status}")
+    require(voice_verify(b"x" * ((1 << 20) + 1), operator_headers)[0] in (413, 503), "voice verify accepted an oversized body")
     status, body = get(base_url, "/admin/api/timing/calls", operator_headers)
     listed = json.loads(body)
     require(status == 200 and listed["calls"] and all("*" in call["caller"] for call in listed["calls"]),
@@ -671,7 +697,9 @@ def run_tests(
     if mock_daytona:
         rehome_checks(base_url, token, invite, handle)
         provider_route_checks(base_url, token, operator_headers)
-    print("33 core checks plus operator/provider timing checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
+        # Donation writes to the research bucket, so it runs only against local R2.
+        donation_checks(base_url, token)
+    print("33 core checks plus operator/provider timing and Voice Donation checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
     return 0
 
 
@@ -740,6 +768,156 @@ def provider_route_checks(base_url: str, token: str, headers: dict) -> None:
     _, body = get(base_url, f"/admin/api/timing?call_sid={root}&after=0", headers)
     require(sum(row["event"] == "provider.twilio.callback.ringing" for row in json.loads(body)["events"]) == 1,
             "provider callback retry was not deduplicated")
+
+
+def research_object(key: str) -> bytes | None:
+    """An object from the local research bucket, or None when it does not exist."""
+    result = subprocess.run(
+        [project_wrangler(), "r2", "object", "get", f"dogwalk-voice-research/{key}", "--local", "--pipe"],
+        cwd=WORKER_DIR, capture_output=True,
+    )
+    return result.stdout if result.returncode == 0 and result.stdout else None
+
+
+def donation_session(prefix: str) -> dict:
+    data = research_object(prefix + "session.json")
+    require(data is not None, f"no session.json under {prefix}")
+    return json.loads(data)
+
+
+def stream_capability(date: str, session: str, round_number: int, expires: int, account: str = TEST_ACCOUNT) -> str:
+    content = f"{date}.{session}.{round_number}.{expires}.{account}"
+    mac = hmac.new(LOCAL_IDENTITY_SECRET.encode(), f"donation-stream-v1:{content}".encode(), hashlib.sha256).digest()
+    return content + "." + base64.urlsafe_b64encode(mac).decode().rstrip("=")
+
+
+def open_stream(base_url: str, path: str, token: str | None, scheme: str = "http"):
+    """Connect as Twilio's Media Streams client would, signing the upgrade over its URL."""
+    headers = {"x-twilio-signature": sign(f"{scheme}://dogwalk.tools{path}", {}, token)} if token else {}
+    return ws_connect(base_url.replace("http://", "ws://") + path, additional_headers=headers, open_timeout=5)
+
+
+def stream_rejection(base_url: str, path: str, token: str | None) -> int:
+    try:
+        with open_stream(base_url, path, token):
+            return 101
+    except InvalidStatus as error:
+        return error.response.status_code
+
+
+def donation_checks(base_url: str, token: str) -> None:
+    """Voice Donation: reached by saying donate, a spoken consent, then signed per-round streams
+    whose audio lands in the research bucket with no link to the caller."""
+    call = {"From": DONOR_PHONE, "CallSid": "CA_DONATE", "AccountSid": TEST_ACCOUNT}
+    status, body = post(base_url, "/voice", call, token)
+    require(status == 200 and "say donate" in body, f"donor greeting: {body}")
+    status, body = post(base_url, "/voice/claim?attempts=1", {**call, "SpeechResult": "I want to donate.", "Confidence": "0.9"}, token)
+    require(status == 200 and '<Redirect method="POST">/voice/donation</Redirect>' in body, f"donate not routed: {body}")
+    status, body = post(base_url, "/voice/donation", call, token)
+    require(status == 200 and 'action="/voice/donation/consent?attempts=1"' in body
+            and "not linked to your phone number" in body and "say stop at any time" in body
+            and "<Stream" not in body, f"consent prompt: {body}")
+    status, body = post(base_url, "/voice/donation/consent?attempts=1", {**call, "SpeechResult": "No thanks."}, token)
+    require("Nothing was recorded" in body and "<Hangup/>" in body and "<Stream" not in body, f"declined consent: {body}")
+    status, body = post(base_url, "/voice/donation/consent?attempts=1", {**call, "SpeechResult": "Hmm."}, token)
+    require("Please say yes" in body and "consent?attempts=2" in body, f"unclear consent: {body}")
+    status, body = post(base_url, "/voice/donation/consent?attempts=3", {**call, "SpeechResult": "what"}, token)
+    require("nothing was recorded" in body and "<Hangup/>" in body, f"unclear consent cap: {body}")
+    status, body = post(base_url, "/voice/donation/consent?attempts=1", {**call, "SpeechResult": "Yes, I agree."}, token)
+    stream = re.search(r'<Start><Stream name="donation-round-01" url="wss://dogwalk\.tools(/voice/donation/stream/[^"]+)" track="inbound_track">', body)
+    action = re.search(r'action="/voice/donation/round\?date=([\d-]+)&amp;session=([0-9a-f-]{36})&amp;round=1"', body)
+    require(status == 200 and stream and action and "<Play>https://dogwalk.tools/voice/donation/tone.wav</Play>" in body
+            and body.index("<Start>") < body.index("<Play>") < body.index("<Gather"), f"first round: {body}")
+    date, session = action[1], action[2]
+    prefix = f"donations/{date}/{session}/"
+    record = donation_session(prefix)
+    require(record["consent_version"] and record["ended_at"] is None and len(record["rounds"]) == 10
+            and [r["kind"] for r in record["rounds"]].count("free_speech") == 2
+            and len({r["prompt"] for r in record["rounds"]}) == 10, f"session.json: {record}")
+    stored = json.dumps(record)
+    require(DONOR_PHONE[2:] not in stored and "CA_" not in stored and "AccountSid" not in stored, f"session links the caller: {stored}")
+
+    # Streams: the upgrade needs Twilio's signature and an unexpired capability for this round.
+    require(stream_rejection(base_url, stream[1], None) == 403, "unsigned stream accepted")
+    require(stream_rejection(base_url, stream[1][:-2] + "xx", token) == 403, "tampered capability accepted")
+    expired = f"/voice/donation/stream/{stream_capability(date, session, 1, int(time.time()) - 1)}"
+    require(stream_rejection(base_url, expired, token) == 403, "expired capability accepted")
+    future = f"/voice/donation/stream/{stream_capability(date, session, 11, int(time.time()) + 60)}"
+    require(stream_rejection(base_url, future, token) == 404, "capability for a round the session lacks accepted")
+    start = {"event": "start", "start": {
+        "accountSid": TEST_ACCOUNT, "streamSid": "MZ" + "1" * 32, "callSid": "CA_DONATE", "tracks": ["inbound"],
+        "mediaFormat": {"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1},
+        "customParameters": {"session": session, "round": "1"}}}
+    with open_stream(base_url, stream[1], token) as ws:
+        ws.send(json.dumps({**start, "start": {**start["start"], "accountSid": "AC" + "f" * 32}}))
+        try:
+            ws.recv(timeout=5)
+        except Exception:
+            pass
+    require(research_object(prefix + "round-01.wav") is None, "a stream from another account was kept")
+    with open_stream(base_url, stream[1], token, scheme="wss") as ws:
+        ws.send(json.dumps({"event": "connected", "protocol": "Call", "version": "1.0.0"}))
+        ws.send(json.dumps(start))
+        payload = base64.b64encode(bytes([0x7F, 0xFF, 0x00, 0x80] * 40)).decode()
+        for frame in range(50):
+            # One lost 20 ms frame at frame 25: the next timestamp jumps by 40 ms.
+            timestamp = frame * 20 + (20 if frame >= 25 else 0)
+            ws.send(json.dumps({"event": "media", "media": {"track": "inbound", "chunk": str(frame + 1), "timestamp": str(timestamp), "payload": payload}}))
+        ws.send(json.dumps({"event": "stop", "stop": {"accountSid": TEST_ACCOUNT, "callSid": "CA_DONATE"}}))
+        try:
+            ws.recv(timeout=5)
+        except Exception:
+            pass
+    deadline = time.time() + 10
+    while time.time() < deadline and not donation_session(prefix)["rounds"][0]["stream"]:
+        time.sleep(0.3)
+    first = donation_session(prefix)["rounds"][0]["stream"]
+    require(first and first["complete"] and first["frames"] == 50 and first["inserted_gap_ms"] == 20
+            and not first["truncated"], f"stream record: {first}")
+    audio = research_object(prefix + "round-01.wav")
+    require(audio and audio[:4] == b"RIFF" and audio[8:16] == b"WAVEfmt " and len(audio) == 44 + 2 * (50 * 160 + 160)
+            and int.from_bytes(audio[24:28], "little") == 8000, f"round WAV: {audio[:44] if audio else None}")
+    # mu-law 0x7F and 0xFF are both silence; 0x00 and 0x80 are the two extremes.
+    require(audio[44:52] == bytes([0, 0, 0, 0, 0x84, 0x82, 0x7C, 0x7D]), f"mu-law decode: {audio[44:52]!r}")
+    require(stream_rejection(base_url, stream[1], token) == 409, "a recorded round accepted a second stream")
+
+    # Rounds: the transcript is kept, the stream stopped, and the next round started.
+    round_path = f"/voice/donation/round?date={date}&session={session}&round="
+    phrase = record["rounds"][0]["prompt"]
+    status, body = post(base_url, round_path + "1", {**call, "SpeechResult": phrase, "Confidence": "0.87"}, token)
+    require(status == 200 and body.startswith('<Response><Stop><Stream name="donation-round-01"/></Stop><Start><Stream name="donation-round-02"')
+            and "round=2" in body, f"next round: {body}")
+    heard = donation_session(prefix)["rounds"][0]
+    require(heard["transcript"] == phrase and heard["confidence"] == 0.87, f"transcript: {heard}")
+    status, body = post(base_url, round_path + "2", {**call, "SpeechResult": "Stop.", "Confidence": "0.9"}, token)
+    require("Stopped. What you already recorded is kept" in body and "<Hangup/>" in body and "<Start>" not in body, f"stop: {body}")
+    ended = donation_session(prefix)
+    require(ended["ended_by"] == "stop" and ended["ended_at"] and ended["rounds"][0]["stream"], f"stopped session: {ended}")
+    require(stream_rejection(base_url, f"/voice/donation/stream/{stream_capability(date, session, 3, int(time.time()) + 60)}", token) == 404,
+            "an ended session accepted a stream")
+
+    # A second session runs to the end; the last round's action finishes it.
+    status, body = post(base_url, "/voice/donation/consent?attempts=1", {**call, "SpeechResult": "okay"}, token)
+    second = re.search(r"session=([0-9a-f-]{36})", body)[1]
+    require(second != session, "Donation Sessions share an id")
+    status, body = post(base_url, f"/voice/donation/round?date={date}&session={second}&round=10",
+                        {**call, "SpeechResult": "I had to stop at the store on the way home this morning.", "Confidence": "0.8"}, token)
+    require("That is everything" in body and "<Hangup/>" in body, f"completion: {body}")
+    require(donation_session(f"donations/{date}/{second}/")["ended_by"] == "completed", "free speech mentioning stop ended the session")
+
+    with urllib.request.urlopen(base_url + "/voice/donation/tone.wav", timeout=5) as response:
+        require(response.headers["content-type"] == "audio/wav" and response.read(4) == b"RIFF", "tone unavailable")
+    events = [row["event"] for row in d1_local("SELECT event, detail FROM call_activity WHERE call_sid = 'CA_DONATE' ORDER BY id")]
+    require(events.count("donation.started") == 2 and "donation.declined" in events and "donation.requested" in events, f"donation activity: {events}")
+    details = json.dumps(d1_local("SELECT detail FROM call_activity WHERE call_sid = 'CA_DONATE'"))
+    require(session not in details and second not in details, "Call Activity names a Donation Session")
+
+    # A Voice Agent handoff sends the call from the GPT-Live leg to the donation flow.
+    subprocess.run([project_wrangler(), "d1", "execute", "dogwalk", "--local", "--command",
+                    f"INSERT INTO call_handoffs (call_sid, phone_number, action, created_at) VALUES ('CA_DONATE', '{DONOR_PHONE}', 'donation', unixepoch())"],
+                   cwd=WORKER_DIR, check=True, stdout=subprocess.DEVNULL)
+    status, body = post(base_url, "/voice/after-live", call, token)
+    require(status == 200 and '<Redirect method="POST">/voice/donation</Redirect>' in body, f"donation handoff: {body}")
 
 
 def project_wrangler() -> str | None:
@@ -841,7 +1019,7 @@ def main() -> int:
             "--var",
             "DAYTONA_API_KEY:local-daytona-token",
             "--var",
-            "DOGWALK_IDENTITY_SECRET:local-identity-secret",
+            f"DOGWALK_IDENTITY_SECRET:{LOCAL_IDENTITY_SECRET}",
             "--var",
             "OPENAI_PROJECT_ID:proj_test",
             "--var",

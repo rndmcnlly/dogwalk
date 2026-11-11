@@ -4,7 +4,7 @@
 // Invite Codes use (invitations.ts), so a transcript tells the two apart by vocabulary as well
 // as by length, minus grim, identity, brand, and bodily words, and minus function words and
 // the Identity Check's escape words, which ordinary speech would collide with.
-const HANDLE_WORDS = (
+export const HANDLE_WORDS = (
   "abbreviate abiding absorbing abundant academy accountant acoustics acquire acrobat actress acuteness aerosol " +
   "aesthetic afloat aftershave agency agreeing ajar alarmclock albatross alchemy alfalfa algae alkaline almanac " +
   "alphabet altitude aluminum amazingly amendment amiable amoeba amplifier amuser anagram anchor android " +

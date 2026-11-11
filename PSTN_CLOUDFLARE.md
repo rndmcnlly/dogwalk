@@ -47,6 +47,13 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 - Serves the read-only Diagnostics surface, the public landing page and
   earcon soundboard (`/sounds`), and the Paired Browser page (`/pair`); consumes
   claimed Pairing Codes and routes browser sockets by credential identity.
+- Scores audio against Voice References through the `SPEAKER` Service Binding to
+  `dogwalk-speaker` (`speaker_worker/`), a stateless WASM speaker-embedding Worker
+  with no public routes. Only operator calibration routes use it so far.
+- Runs Voice Donations (`/voice/donation/*`): deterministic consent and rounds in
+  TwiML, each round's caller-only Media Stream received by the Worker itself and
+  written to the private R2 bucket `dogwalk-voice-research` (`RESEARCH_AUDIO`)
+  with no link to the caller. See `cf_worker/README.md`, Voice Donations.
 
 ### VoiceSession Durable Object
 

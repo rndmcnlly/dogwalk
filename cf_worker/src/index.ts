@@ -26,6 +26,8 @@ import { INVITATION_STATUS_SQL, redemptionStatements, USABLE_FOR_PHONE_SQL } fro
 import { availableHandles } from "./handles";
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
+import { handleVoiceVerify } from "./voice_verify";
+import { asksToDonate, donationConsent, donationTone, handleDonationConsent, handleDonationRound, handleDonationStream } from "./voice_donation";
 export { TerminalRelay, VoiceSession };
 
 // --- env ----------------------------------------------------------------
@@ -45,13 +47,15 @@ export { TerminalRelay, VoiceSession };
  *   Voice: A call comes in     -> POST https://dogwalk.tools/voice
  *   Voice: Call status changes -> POST https://dogwalk.tools/voice/status
  * When PUBLIC_ORIGIN is unset (pure local dev) we fall back to the request's
- * own origin.
+ * own origin. A Media Stream's WebSocket upgrade is signed over its wss URL,
+ * which the Worker sees as https, so that caller passes the scheme.
  *
  * Reference: https://www.twilio.com/docs/usage/webhooks/webhooks-security
  */
 async function twilioSignatureValid(
   req: Request,
   env: Env,
+  signedScheme?: string,
 ): Promise<{ valid: boolean; url: string }> {
   const authToken = env.TWILIO_AUTH_TOKEN;
   const sigHeader = req.headers.get("x-twilio-signature") ?? "";
@@ -63,7 +67,7 @@ async function twilioSignatureValid(
   // dev).
   const url = new URL(req.url);
   const configuredHost = env.PUBLIC_ORIGIN ? new URL(env.PUBLIC_ORIGIN).host : url.host;
-  const scheme = url.protocol.replace(":", "");
+  const scheme = signedScheme ?? url.protocol.replace(":", "");
   const signedUrl = `${scheme}://${configuredHost}${url.pathname}${url.search}`;
 
   // Twilio sends POST as application/x-www-form-urlencoded for /voice.
@@ -763,6 +767,9 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
     if (env.ADMIN_PASSWORD) headers["www-authenticate"] = 'Basic realm="Dogwalk Diagnostics"';
     return new Response("unauthorized", { status: env.ADMIN_PASSWORD ? 401 : 403, headers });
   }
+  if (pathname === "/admin/api/voice-verify" || pathname === "/admin/api/voice-verify/health") {
+    return handleVoiceVerify(req, env, new URL(req.url), jsonResponse);
+  }
   if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
   if (pathname === "/admin/timing" || pathname === "/admin/timing/") {
     return new Response(OPERATOR_TIMING_HTML, { headers: {
@@ -1043,6 +1050,9 @@ export default {
     if (url.pathname === "/voice/menu" && req.method === "POST") {
       return handleMenu(req, env);
     }
+    if (url.pathname.startsWith("/voice/donation")) {
+      return handleDonation(req, env, ctx, url);
+    }
     if (url.pathname === "/voice/status" && req.method === "POST") {
       return handleCallStatus(req, env, ctx);
     }
@@ -1134,8 +1144,9 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
   await audit(env, "claim.ritual.start", from, callSid, {});
   const invites = await usableInviteCodes(env, from);
   return twiml(GatherSpeech(
-    "This is Dogwalk, a voice line for supervising coding agents. If you have an invite, say your three invite words now.",
-    "/voice/claim", 1, invites.map((i) => i.code_words),
+    "This is Dogwalk, a voice line for supervising coding agents. If you have an invite, say your three invite words now. " +
+      "To donate voice samples for research, say donate.",
+    "/voice/claim", 1, [...invites.map((i) => i.code_words), "donate"],
   ));
 }
 
@@ -1179,6 +1190,7 @@ async function handleAfterLive(req: Request, env: Env, ctx: ExecutionContext): P
   if (handoff?.action === "hangup") return twiml(Hangup());
   // A theme switch: back through /voice to a fresh GPT-Live session with the new voice.
   if (handoff?.action === "rejoin") return twiml(Redirect("/voice"));
+  if (handoff?.action === "donation") return twiml(Redirect("/voice/donation"));
   return recoveryMenu(handoff?.action === "recovery" ? "Recovery options. " : "Voice dropped. ");
 }
 
@@ -1456,6 +1468,38 @@ async function handleCallStatus(req: Request, env: Env, ctx: ExecutionContext): 
   return new Response(null, { status: 204 });
 }
 
+// --- /voice/donation: Voice Donation (voice_donation.ts) ---------------
+
+// Open to any caller, registered or not; nothing here reads or writes a User. Call Activity
+// records that a donation happened on a call, while the Donation Session itself stays unlinked.
+async function handleDonation(req: Request, env: Env, ctx: ExecutionContext, url: URL): Promise<Response> {
+  if (url.pathname === "/voice/donation/tone.wav" && req.method === "GET") return donationTone();
+  const stream = /^\/voice\/donation\/stream\/([A-Za-z0-9._-]{1,300})$/.exec(url.pathname);
+  if (stream && req.method === "GET") {
+    const signed = (await twilioSignatureValid(req, env, "wss")).valid || (await twilioSignatureValid(req, env)).valid;
+    if (!signed) return new Response("forbidden", { status: 403 });
+    return handleDonationStream(req, env, ctx, stream[1]);
+  }
+  if (req.method !== "POST") return new Response("not found", { status: 404 });
+  if (!(await twilioSignatureValid(req, env)).valid) return new Response("forbidden", { status: 403 });
+  const form = await req.clone().formData();
+  const from = normalizePhone(form.get("From"));
+  const callSid = String(form.get("CallSid") ?? "");
+  const log = (event: string, detail: Record<string, unknown>) => audit(env, event, from, callSid || null, detail);
+  if (url.pathname === "/voice/donation") {
+    await log("donation.consent.asked", {});
+    return twiml(donationConsent());
+  }
+  try {
+    if (url.pathname === "/voice/donation/consent") return twiml(await handleDonationConsent(env, url, form, log));
+    if (url.pathname === "/voice/donation/round") return twiml(await handleDonationRound(env, url, form, log));
+  } catch (error) {
+    await log("donation.error", { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+    return twiml(Say("Voice donation stopped because of an error. Thank you. Goodbye.") + Hangup());
+  }
+  return new Response("not found", { status: 404 });
+}
+
 // --- /voice/claim: receive spoken words --------------------------------
 
 async function handleClaim(req: Request, env: Env): Promise<Response> {
@@ -1478,6 +1522,10 @@ async function handleClaim(req: Request, env: Env): Promise<Response> {
 
   if (spoken.length === 0) {
     return retryOrHangup(env, from, callSid, attempts, "I did not hear anything. ");
+  }
+  if (asksToDonate(spoken)) {
+    await audit(env, "donation.requested", from, callSid, { via: "registration prompt" });
+    return twiml(Redirect("/voice/donation"));
   }
 
   const candidates = await usableInviteCodes(env, from);

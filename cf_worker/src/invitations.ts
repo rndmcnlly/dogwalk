@@ -9,7 +9,7 @@ export const MAX_ACTIVE_INVITATIONS = 3;
 
 // Words from the PGP word list (two syllables, three, then two, as PGPfone reads bytes),
 // lowercased, without proper nouns or grim words. The registration ritual matches them exactly.
-const EVEN_WORDS = (
+export const EVEN_WORDS = (
   "aardvark absurd accrue acme adrift adult ahead aimless allow alone ancient apple artist assume atlas " +
   "baboon backfield backward banjo beaming bedlamp beehive beeswax befriend billiard bison blockade blowtorch " +
   "bluebird bookshelf brackish breadline breakup brickyard briefcase button buzzard cement chairlift chatter " +
@@ -27,7 +27,7 @@ const EVEN_WORDS = (
   "tracker transit treadmill tunnel tycoon unearth unwind uproot upshot vapor village waffle wallet watchword " +
   "wayside willow woodlark"
 ).split(" ");
-const ODD_WORDS = (
+export const ODD_WORDS = (
   "adroitness adviser aftermath aggregate alkali almighty amulet amusement antenna applicant armistice article " +
   "asteroid atmosphere backwater barbecue belowground bifocals bodyguard bookseller borderline bottomless bravado " +
   "breakaway butterfat candidate cannonball caravan caretaker celebrate cellulose certify coherence combustion " +

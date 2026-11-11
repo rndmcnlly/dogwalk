@@ -1,0 +1,17 @@
+{
+  "name": "dogwalk-speaker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node check_preprocess.mjs",
+    "deploy": "node build.mjs && wrangler deploy"
+  },
+  "dependencies": {
+    "onnxruntime-web": "1.24.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "wrangler": "4.160.0"
+  }
+}

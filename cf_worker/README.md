@@ -128,7 +128,10 @@ most one Home number. Registration assigns a random Handle and speaks it twice.
 Until the Identity Check exists, an unexpired Home (used within 90 days) admits
 its caller as the phone number alone did before; `voice_calls.user_id` records
 which User a call reached. `voice_references` holds enrolled speaker embeddings
-(never audio) for the coming Identity Check.
+(never audio) for the coming Identity Check. The `SPEAKER` Service Binding reaches
+the separately deployed `dogwalk-speaker` Worker (`../speaker_worker/`), which
+scores audio against them; operator-only `/admin/api/voice-verify` routes expose
+it for calibration and answer 503 when it is not bound, as in local dev.
 
 `migrations/2026-11-11-users.sql` converted the phone-keyed `registrations`
 table, keeping each existing `identity_hash` so Durable Objects, Sandboxes, and
@@ -137,6 +140,48 @@ out of Git because it names Handles: relabel each Sandbox from
 `phone-hmac-v1:` to `identity-v1:` (Daytona's label PUT replaces all labels, so
 read and write back the rest), assign Handles to migrated Users, and store the
 operator's Voice Reference.
+
+## Voice Donations
+
+Any caller can donate engineering voice samples (DOMAIN.md, Voice Research)
+without an account: an unregistered caller says "donate" at the registration
+prompt, and a User asks the Voice Agent, whose `start_voice_donation` tool leaves
+a `donation` handoff so `/voice/after-live` redirects to `/voice/donation`. That
+route speaks the consent script (`CONSENT_VERSION` in `src/voice_donation.ts`;
+change the version with the words) and records nothing without a spoken yes.
+Each round then starts a caller-only `<Start><Stream>` to
+`wss://dogwalk.tools/voice/donation/stream/<capability>`, plays
+`/voice/donation/tone.wav`, and says the prompt inside a speech `<Gather>` whose
+action (`/voice/donation/round`) keeps the transcript, stops that stream, and
+starts the next round. Eight challenge phrases (`src/challenge_phrases.ts`, the
+generator the Identity Check will reuse) and two free-speech prompts make about
+three minutes. A short "stop" ends it, keeping what was recorded. Never `<Record>`.
+
+The stream upgrade must carry a valid Twilio signature (over its wss URL) and an
+unexpired HMAC capability (`DOGWALK_IDENTITY_SECRET`) naming one round of one
+session and the Twilio account that requested it; the start event must match
+that account, session, round, and 8 kHz mono mu-law. The Worker itself holds the
+WebSocket for the round, buffers frames in memory (at most 90 seconds), and on
+stop or close writes `round-NN.wav` (8 kHz mono 16-bit PCM decoded from what
+Twilio sent, lost frames filled with silence and counted) to the private R2
+bucket `dogwalk-voice-research` (binding `RESEARCH_AUDIO`), then records the
+stream in `session.json` with a conditional put, as the round webhooks do.
+Layout: `donations/YYYY-MM-DD/<session id>/{session.json,round-NN.wav}`. Nothing
+about a donation goes to D1 except Call Activity events (`donation.*`) that never
+name the session; the bucket stores no phone number, CallSid, User, or Handle.
+
+From the repository root, with the personal Cloudflare profile:
+
+```bash
+uv run --script voice_research.py list                  # time, session id, outcome, rounds, size
+uv run --script voice_research.py pull [SESSION ...]    # default: everything not yet pulled
+uv run --script voice_research.py delete SESSION --yes  # a donor asked; removes the local copy too
+```
+
+Pulls land in `~/Library/Application Support/Dogwalk/voice_research/<date>/<session>/`
+(mode 0700, files 0600, outside Git). A donor asking for deletion names roughly
+when they called; match it against `list`. Annotate speaker and microphone
+beside the pulled copy, not in the bucket.
 
 ## Verification
 
@@ -148,7 +193,12 @@ uv run --script smoke_test.py
 uv run --script voice_session_test.py
 uv run --script admin_test.py
 uv run --script ../sandbox_acp_gateway.py test
+node --experimental-strip-types challenge_phrases_test.ts
 ```
+
+The smoke test's Voice Donation checks use wrangler dev's local R2. A local D1
+created before `migrations/2026-11-11-call-handoff-donation.sql` needs that file
+applied with `--local` once, since `schema.sql` only creates missing tables.
 
 It checks registration, retry limits, the unregistered greeting, snapshot and
 credential-free configuration, sandbox creation, immediate dialing while a

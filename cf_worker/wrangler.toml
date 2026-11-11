@@ -53,6 +53,17 @@ binding = "DB"
 database_name = "dogwalk"
 database_id = "f04230d7-172f-4a89-9556-2d3d62e8bf1a"
 
+# Speaker verification Worker (speaker_worker/), reachable only through this RPC binding.
+[[services]]
+binding = "SPEAKER"
+service = "dogwalk-speaker"
+entrypoint = "SpeakerVerifier"
+
+# Voice Donations: raw donated audio, private, unlinked to callers (src/voice_donation.ts).
+[[r2_buckets]]
+binding = "RESEARCH_AUDIO"
+bucket_name = "dogwalk-voice-research"
+
 [[durable_objects.bindings]]
 name = "VOICE_SESSIONS"
 class_name = "VoiceSession"

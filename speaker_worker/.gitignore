@@ -1,0 +1,5 @@
+# Model weights, upstream source, ONNX exports, and bundles are rebuilt by export.py and build.mjs.
+artifacts/
+.worker/
+.wrangler/
+node_modules/
