@@ -261,9 +261,16 @@ registers again as a new User; nothing links the two.
 
 **Context:** Access Control
 
-A User's spoken, nonsecret, unique identifier: two words assigned at
-Registration, such as "brindle whippet". A caller says it to claim an identity;
-the Identity Check proves the claim. Handles draw from EFF short wordlist 2,
+A User's spoken, nonsecret, unique name: two words, such as "brindle whippet",
+assigned at Registration. It is a display name over a stable identity that is
+never spoken, so changing it changes nothing else: invitations, the Sandbox,
+and history follow the User, not the Handle. A caller says it to claim an
+identity; the Identity Check proves the claim. A User may rename themselves at
+any time through a ritual: Dogwalk offers three available Handles, and the User
+picks one, spins again (three spins per call), or keeps their name. The Voice
+Agent can set only a Handle Dogwalk offered in that call, so nobody chooses a
+name freely. A Handle left behind by renaming or reaping is quarantined for 90
+days, so a stale name reaches nobody for a while, and then returns to the pool. Handles draw from EFF short wordlist 2,
 whose longer words survive narrowband audio and whose unique three-letter
 prefixes tolerate speech-recognition errors, minus grim words, every word of
 the Invite Code vocabulary (the PGP word list), and the Identity Check's escape
@@ -932,7 +939,7 @@ The following language appears in Git history and is not canonical for productio
 
 - Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through ACP (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Invitations: should a successful Registration by Invitation continue straight into the new User's first call rather than hanging up? Should the Diagnostics Surface draw the invitation graph, and should an operator be able to raise or lower a User's active-Invitation limit?
-- Resolved: a spoken Handle plus Identity Challenges lets a User call from any telephone (see Roaming). Still open: how long before an inactive User is reaped; how many failed Identity Check attempts pause a Handle, and for how long; whether a reaped Handle may be reissued, and after what quarantine; whether a User may ask for a new Handle; how far one successful call may update a Voice Reference, so voice drift is followed without letting a one-time impostor pull it toward their own voice; and whether registering from a number that is already a Home should be limited, since one phone could otherwise create many Users (bounded today only by Invitation limits).
+- Resolved: a spoken Handle plus Identity Challenges lets a User call from any telephone (see Roaming). Still open: how long before an inactive User is reaped; how many failed Identity Check attempts pause a Handle, and for how long; how far one successful call may update a Voice Reference, so voice drift is followed without letting a one-time impostor pull it toward their own voice; and whether registering from a number that is already a Home should be limited, since one phone could otherwise create many Users (bounded today only by Invitation limits).
 - Should the Identity Check ever collect more voice evidence during the conversation, or does whole-call collection need its own consent and retention decision?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
 

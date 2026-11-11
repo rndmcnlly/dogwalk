@@ -23,7 +23,7 @@ import type { Env } from "./types";
 import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
 import { TerminalRelay } from "./terminal_relay";
 import { INVITATION_STATUS_SQL, redemptionStatements, USABLE_FOR_PHONE_SQL } from "./invitations";
-import { newHandle } from "./handles";
+import { availableHandles } from "./handles";
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
 export { TerminalRelay, VoiceSession };
@@ -1664,7 +1664,7 @@ async function bindClaim(
   let handle = "";
   let results: D1Result[] = [];
   for (let attempt = 0; attempt < 5 && !results.length; attempt++) {
-    handle = newHandle();
+    [handle] = await availableHandles(env.DB, 1);
     try {
       results = await env.DB.batch([
         ...redemptionStatements(env.DB, from, codeWords, now, handle, newIdentityHash()),

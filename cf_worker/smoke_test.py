@@ -760,6 +760,7 @@ DELETE FROM invitations WHERE inviter_user_id NOT IN (SELECT id FROM users)
   OR redeemed_by_user_id NOT IN (SELECT id FROM users);
 DELETE FROM sandbox_assignments WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM voice_references WHERE user_id NOT IN (SELECT id FROM users);
+DELETE FROM retired_handles WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM provider_call_jobs WHERE root_call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
 DELETE FROM call_activity WHERE call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
 DELETE FROM call_handoffs WHERE phone_number LIKE '{TEST_NUMBERS}';

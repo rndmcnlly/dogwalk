@@ -80,7 +80,46 @@ const HANDLE_WORDS = (
   "yogurt zebra zeppelin zestfully zigzagged zillion zipping zirconium zodiac zookeeper zucchini"
 ).split(" ");
 
-export function newHandle(): string {
+export const HANDLE_QUARANTINE_SECONDS = 90 * 86400;
+export const HANDLE_OPTIONS_PER_SPIN = 3;
+export const HANDLE_SPINS_PER_CALL = 3;
+
+function newHandle(): string {
   const [a, b] = crypto.getRandomValues(new Uint32Array(2));
   return `${HANDLE_WORDS[a % HANDLE_WORDS.length]} ${HANDLE_WORDS[b % HANDLE_WORDS.length]}`;
+}
+
+// A Handle is available when no User holds it and no User left it within the quarantine, so a
+// stale name reaches nobody for a while. (?1 is the Handle.)
+const AVAILABLE_SQL = `NOT EXISTS (SELECT 1 FROM users WHERE handle = ?1)
+  AND NOT EXISTS (SELECT 1 FROM retired_handles WHERE handle = ?1 AND retired_at > unixepoch() - ${HANDLE_QUARANTINE_SECONDS})`;
+
+/** Distinct random Handles available right now. Registration and renaming both draw here. */
+export async function availableHandles(db: D1Database, count: number): Promise<string[]> {
+  const chosen: string[] = [];
+  for (let attempt = 0; attempt < count * 4 && chosen.length < count; attempt++) {
+    const handle = newHandle();
+    if (chosen.includes(handle) || handle.split(" ")[0] === handle.split(" ")[1]) continue;
+    if (await db.prepare(`SELECT 1 AS ok WHERE ${AVAILABLE_SQL}`).bind(handle).first()) chosen.push(handle);
+  }
+  if (chosen.length < count) throw new Error("could not find unused Handles; try again");
+  return chosen;
+}
+
+/**
+ * Rename a User to a Handle they were offered. One transaction: the rename happens only if the
+ * User still holds `current` and `next` is still available, and only then is `current`
+ * quarantined. The User's identity (id, identity_hash) never changes.
+ */
+export async function renameUser(db: D1Database, user: number, current: string, next: string): Promise<boolean> {
+  const [renamed] = await db.batch([
+    db.prepare(`UPDATE users SET handle = ?1 WHERE id = ?2 AND handle = ?3 AND reaped_at IS NULL AND ${AVAILABLE_SQL}`)
+      .bind(next, user, current),
+    db.prepare(
+      `INSERT INTO retired_handles (handle, user_id, retired_at) SELECT ?1, ?2, unixepoch()
+        WHERE EXISTS (SELECT 1 FROM users WHERE id = ?2 AND handle = ?3)
+       ON CONFLICT(handle) DO UPDATE SET user_id = excluded.user_id, retired_at = excluded.retired_at`,
+    ).bind(current, user, next),
+  ]);
+  return renamed.meta.changes === 1;
 }

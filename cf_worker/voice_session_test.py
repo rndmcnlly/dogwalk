@@ -287,6 +287,13 @@ def call(call_id: str, name: str, **arguments) -> dict:
     }
 
 
+def tool_result(context: list[dict], call_id: str) -> dict:
+    return json.loads(next(
+        item for item in context
+        if item.get("type") == "function_call_output" and item["call_id"] == call_id
+    )["output"])
+
+
 def invite_words(context: list[dict], call_id: str) -> str:
     output = next(
         item for item in context
@@ -391,6 +398,15 @@ ORCHESTRATOR_SCRIPT = [
         call("i1-hide", "revoke_invitation", invitation=invite_words(ctx, "i1-create")),
     ]),
     ("[handoff del-i3]", lambda ctx: [call("i-relist", "list_invitations")]),
+    # Renaming: Dogwalk offers Handles; only an offered one can be chosen, from any spin.
+    ("[handoff del-r1]", lambda ctx: [
+        call("r1-offer", "offer_handles"),
+        call("r1-bogus", "set_handle", handle="zebra zeppelin"),
+    ]),
+    ("[handoff del-r1]", lambda ctx: [call("r1-offer2", "offer_handles"), call("r1-offer3", "offer_handles")]),
+    ("[handoff del-r1]", lambda ctx: [call("r1-offer4", "offer_handles")]),
+    ("[handoff del-r1]", lambda ctx: [call("r1-set", "set_handle", handle=tool_result(ctx, "r1-offer")["options"][1].upper())]),
+    ("[handoff del-r1]", lambda ctx: [call("r1-who", "inspect_registration")]),
     # Preferences and pairing are voice operations; keypad digits stand in for asking here.
     ('"key":"6"', lambda ctx: [call("k6-style", "set_earcon_style", style="tonal")]),
     ('"key":"8"', lambda ctx: [call("k8-pair", "pair_browser")]),
@@ -445,7 +461,8 @@ STEP_IDS = [
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
     "h4-say", "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
-    "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5", "kB-html", "k3-say", "k3-theme",
+    "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist",
+    "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5", "kB-html", "k3-say", "k3-theme",
     "k2-dramaturgy",
 ]
 
@@ -1779,6 +1796,28 @@ async def run_invitations(mocks: SocketMocks) -> None:
     assert all(r["phone_number"] not in safe_json for r in registrations.values() if r["phone_number"])
     # Handles are not masked: the safe lens names Users by them.
     assert {CALLER_HANDLE, SEED_HANDLE, invitee_handle} <= {r["handle"] for r in safe["registrations"]}
+
+    # Renaming: three spins of three Dogwalk-chosen Handles; the caller picks one from any spin.
+    await mocks.send_live(transcript("input", "Can I get a new name?", 36000, 37000))
+    await mocks.send_live(delegation("del-r1", 37100))
+    await wait_for(outputs_back("r1-who"), 15)
+    offer = out("r1-offer")
+    assert offer["current"] == CALLER_HANDLE and offer["spins_left"] == 2 and offer["earlier_options"] == [], offer
+    options = offer["options"] + out("r1-offer2")["options"] + out("r1-offer3")["options"]
+    assert len(set(options)) == 9 and all(len(h.split()) == 2 and CALLER_HANDLE != h for h in options), options
+    assert out("r1-offer3")["earlier_options"] == offer["options"] + out("r1-offer2")["options"]
+    assert out("r1-bogus")["ok"] is False and "not offered" in out("r1-bogus")["error"], out("r1-bogus")
+    assert out("r1-offer4")["ok"] is False and "no spins left" in out("r1-offer4")["error"], out("r1-offer4")
+    renamed = offer["options"][1]
+    assert out("r1-set") | {"note": None} == {"ok": True, "handle": renamed, "previous": CALLER_HANDLE, "note": None}, out("r1-set")
+    assert out("r1-who")["handle"] == renamed, out("r1-who")
+    # Identity is unchanged: same User, its old Handle quarantined, its invitations still its own.
+    rows = await asyncio.to_thread(d1, f"""SELECT u.id, u.handle, r.user_id AS retired_by FROM users u
+        JOIN retired_handles r ON r.handle = '{CALLER_HANDLE}' WHERE u.handle = '{renamed}'""")
+    assert len(rows) == 1 and rows[0]["retired_by"] == rows[0]["id"], rows
+    renamed_state = await asyncio.to_thread(operator_access_state, True)
+    assert all(v["inviter_handle"] != CALLER_HANDLE for v in renamed_state["invitations"])
+    assert any(v["inviter_handle"] == renamed for v in renamed_state["invitations"])
 
 
 async def run_unobserved_end(restart) -> None:
