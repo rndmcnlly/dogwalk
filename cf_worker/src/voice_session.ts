@@ -2775,21 +2775,23 @@ export class VoiceSession {
   private async runOrchestrator(): Promise<void> {
     if (this.orchestrating) return;  // a running loop drains new events before its next model call
     this.orchestrating = true;
+    const loopAttachment = this.liveSessionId;
     try {
       let more = this.orchestratorQueue.length > 0;
-      for (let step = 0; more && step < 24 && this.liveAttached; step++) {
+      for (let step = 0; more && step < 24 && this.liveAttached && this.liveSessionId === loopAttachment; step++) {
         // Steering: corrections that arrive mid-loop reach the model before its next action.
         if (this.orchestratorQueue.length) {
           this.orchestratorContext.push({ role: "user", content: this.orchestratorQueue.splice(0).join("\n") });
           await this.state.storage.put("orchestrator_queue", this.orchestratorQueue);
         }
-        const originAttachment = this.liveSessionId;
+        if (this.liveSessionId !== loopAttachment || !this.liveAttached) break;
+        const originAttachment = loopAttachment;
         const output = await this.orchestratorModel();
         // Results from an ended attachment must not speak or act on its replacement.
         if (originAttachment !== this.liveSessionId || !this.liveAttached) break;
         this.orchestratorContext.push(...output);
         const calls = output.filter((item: any) => item.type === "function_call") as Array<Record<string, any>>;
-        const results = await Promise.all(calls.map((call) => this.executeOrchestratorTool(call)));
+        const results = await Promise.all(calls.map((call) => this.executeOrchestratorTool(call, originAttachment)));
         calls.forEach((call, index) => this.orchestratorContext.push({
           type: "function_call_output", call_id: call.call_id, output: JSON.stringify(results[index]),
         }));
@@ -2804,7 +2806,7 @@ export class VoiceSession {
       }
     } catch (error) {
       await this.record("orchestrator.failed", { message: errorMessage(error) });
-      this.sendLive({ type: "session.commentary.append", delegation_id: null, content: "Tell the caller you hit a snag reaching the sessions and to try again in a moment." });
+      if (loopAttachment === this.liveSessionId && this.liveAttached) this.sendLive({ type: "session.commentary.append", delegation_id: null, content: "Tell the caller you hit a snag reaching the sessions and to try again in a moment." });
     } finally {
       this.orchestrating = false;
       // A failed step may leave a compaction unapplied; its Memory is already stored.
@@ -3002,7 +3004,7 @@ export class VoiceSession {
     return { ok: true, note: "Accepted by the Voice Frontend; not proof the caller heard it." };
   }
 
-  private async executeOrchestratorTool(item: Record<string, any>): Promise<unknown> {
+  private async executeOrchestratorTool(item: Record<string, any>, attachment = this.liveSessionId): Promise<unknown> {
     const started = Date.now();
     const metadata = { tool_call_id: item.call_id, name: item.name,
       ...spanFields(this.callTrace && childOf(this.callTrace), this.callTrace) };
@@ -3012,6 +3014,7 @@ export class VoiceSession {
     // returned ok:false, `returned` when its result carries no ok flag, `threw` on an exception.
     // There is no cancellation path for Orchestrator tools, so none is recorded.
     try {
+      if (attachment !== this.liveSessionId || !this.liveAttached) return { ok: false, error: "Originating frontend detached; tool was not dispatched." };
       const result = await this.executeOrchestratorToolInner(item);
       const ok = result && typeof result === "object" ? (result as { ok?: unknown }).ok : undefined;
       this.timing("tool.completed", { ...metadata, ms: Date.now() - started,

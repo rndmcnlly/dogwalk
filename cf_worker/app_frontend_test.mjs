@@ -145,6 +145,38 @@ try {
   assert(!newer.webSocket.peer.sent.some(m => m.event?.content === 'STALE OUTPUT'));
   await session.cleanupVoice('test complete');
 
+  // Rejected old model requests cannot emit the catch-path error on a replacement.
+  let rejectOld, notifyOld;
+  const rejectionStarted = new Promise(resolve => { notifyOld = resolve; });
+  const rejection = new Promise((_, reject) => { rejectOld = reject; });
+  let rejectFirst = true;
+  session.orchestratorModel = async () => {
+    if (rejectFirst) { rejectFirst = false; notifyOld(); return await rejection; }
+    return [];
+  };
+  await session.fetch(attachRequest()); await rejectionStarted;
+  const rejectedGeneration = session.liveSessionId;
+  await session.cleanupVoice('rejecting generation detached');
+  const afterRejection = await session.fetch(attachRequest());
+  rejectOld(new Error('old model failed')); await settle();
+  assert(!afterRejection.webSocket.peer.sent.some(m => m.event?.content?.includes('hit a snag')), 'old failure cannot speak to replacement');
+  const rpcBeforeStaleTool = rpc.length;
+  const staleTool = await session.executeOrchestratorTool(call('begin_prompt_turn', { alias: 'Fir', prompt: 'Must never dispatch' }), rejectedGeneration);
+  assert.equal(staleTool.ok, false);
+  assert.equal(rpc.length, rpcBeforeStaleTool, 'old-generation tool cannot begin on replacement');
+  const currentAttachment = session.liveSessionId;
+  const originalTiming = session.timing;
+  session.timing = function(event, ...args) {
+    originalTiming.call(this, event, ...args);
+    if (event === 'tool.started') this.liveSessionId = 'replacement-during-telemetry';
+  };
+  try {
+    const delayedDispatch = await session.executeOrchestratorTool(call('begin_prompt_turn', { alias: 'Fir', prompt: 'No dispatch after telemetry boundary' }), currentAttachment);
+    assert.equal(delayedDispatch.ok, false);
+    assert.equal(rpc.length, rpcBeforeStaleTool, 'generation is rechecked after telemetry and before dispatch');
+  } finally { session.timing = originalTiming; session.liveSessionId = currentAttachment; }
+  await session.cleanupVoice('test complete');
+
   const nativeTimeout = globalThis.setTimeout;
   let expire;
   globalThis.setTimeout = (fn, ms, ...args) => { if (ms === 60000) expire = fn; return nativeTimeout(fn, ms, ...args); };
