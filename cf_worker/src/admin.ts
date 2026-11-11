@@ -84,7 +84,7 @@ const when=(v)=>v?new Date(v*1000).toLocaleString():"never";
 const clock=(v)=>v?new Date(v*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}):"";
 const elapsed=(from,now)=>{const s=Math.max(0,(now||0)-(from||0));return Math.floor(s/60)+"m "+(s%60)+"s"};
 
-let DATA={registrations:[],live_calls:[],audit:[],verbose:false};
+let DATA={registrations:[],invitations:[],live_calls:[],audit:[],verbose:false};
 let SEL=null; // {kind, id}
 
 // --- tree ---------------------------------------------------------------
@@ -123,10 +123,14 @@ function renderTree(){
     t.append(node(1,{kind:"sandbox",id:r.phone_number,icon:"\\u25eb",cls:"mut",label:sandboxLabel(r),state:r.state||"unknown",onSelect:true}));
   });
 
-  // ROOT: Access Control (wired via registrations)
+  // ROOT: Access Control, including historical Invitations and their Registration edges.
   t.append(node(0,{root:true,icon:"\\u2691",label:"Access Control",count:DATA.registrations.length,tag:"access"}));
   DATA.registrations.forEach((r)=>{
-    t.append(node(1,{kind:"registration",id:r.phone_number,icon:"\\u260e",cls:"blu",label:r.phone_number,onSelect:true}));
+    t.append(node(1,{kind:"registration",id:r.diagnostic_id,icon:"\\u260e",cls:"blu",label:r.phone_number,onSelect:true}));
+  });
+  t.append(node(1,{root:true,label:"Invitations (including hidden)",count:DATA.invitations.length}));
+  DATA.invitations.forEach((v)=>{
+    t.append(node(2,{kind:"invitation",id:v.diagnostic_id,label:v.inviter_phone+" \\u2192 "+(v.invitee_phone||"not registered")+(v.hidden_at?" (hidden)":""),state:v.status,onSelect:true}));
   });
 
   // ROOT: Event Log (wired via audit)
@@ -139,8 +143,9 @@ function renderDetail(){
   const d=q("#detail");d.replaceChildren();
   if(!SEL){d.append(el("div","select a node","standby"));return}
   if(SEL.kind==="call")return renderCall(d,DATA.live_calls.find((c)=>c.call_sid===SEL.id));
-  if(SEL.kind==="sandbox"||SEL.kind==="registration")return renderReg(d,DATA.registrations.find((r)=>r.phone_number===SEL.id),SEL.kind);
+  if(SEL.kind==="sandbox"||SEL.kind==="registration")return renderReg(d,DATA.registrations.find((r)=>(SEL.kind==="registration"?r.diagnostic_id:r.phone_number)===SEL.id),SEL.kind);
   if(SEL.kind==="eventlog")return renderAudit(d);
+  if(SEL.kind==="invitation")return renderInvitation(d,DATA.invitations.find((v)=>v.diagnostic_id===SEL.id));
   d.append(el("div","select a node","standby"));
 }
 function crumb(d,parts){const c=el("div",undefined,"crumb");parts.forEach((p,i)=>{if(i)c.append(el("b"," \\u203a "));c.append(document.createTextNode(p))});d.append(c)}
@@ -176,7 +181,39 @@ function renderReg(d,r,kind){
   const rows=[["Sandbox state",r.state||"\\u2014"],["Provider id",r.provider_id||"\\u2014"],["Last checked",when(r.last_checked_at)],["Error",r.error||"none"]];
   rows.forEach(([k,v])=>{const tr=el("tr");tr.append(el("th",k),el("td",v));body.append(tr)});
   tb.append(body);s.append(tb);d.append(s);
+  if(kind==="registration"){
+    const graph=el("div",undefined,"sec");graph.append(el("h4","Invitation provenance"));
+    const incoming=DATA.invitations.filter((v)=>v.invitee_id===r.diagnostic_id);
+    if(!incoming.length)graph.append(el("div","No User-created Invitation recorded for this Registration.","standby"));
+    incoming.forEach((v)=>graph.append(invitationLink(v,"Invited by "+v.inviter_phone)));
+    const outgoing=DATA.invitations.filter((v)=>v.inviter_id===r.diagnostic_id);
+    graph.append(el("h4","Invitations created (including hidden): "+outgoing.length));
+    outgoing.forEach((v)=>graph.append(invitationLink(v,(v.invitee_phone||"not registered")+" / "+v.status+(v.hidden_at?" / hidden":""))));
+    d.append(graph);
+  }
   const nw=el("div",undefined,"sec");nw.append(el("h4","Managed Sessions on this sandbox"),el("div","Session Management telemetry not wired yet.","standby"));d.append(nw);
+}
+function invitationLink(v,label){
+  const b=el("button",label,"node");b.addEventListener("click",()=>{SEL={kind:"invitation",id:v.diagnostic_id};renderDetail()});return b;
+}
+function registrationLink(id,label){
+  const r=DATA.registrations.find((r)=>r.diagnostic_id===id);
+  if(!r)return el("span",label);
+  const b=el("button",label,"node");b.addEventListener("click",()=>{SEL={kind:"registration",id:r.diagnostic_id};renderDetail()});return b;
+}
+function renderInvitation(d,v){
+  if(!v){d.append(el("div","Invitation not found","standby"));return}
+  head(d,["Access Control","Invitations"],v.code_words||"Invitation","blu",v.status+(v.hidden_at?" / hidden from inviter's list":""));
+  const s=el("div",undefined,"sec");s.append(el("h4","Inviter \\u2192 Invitation \\u2192 registered invitee"));
+  s.append(registrationLink(v.inviter_id,"Inviter: "+v.inviter_phone));
+  if(v.invitee_phone)s.append(registrationLink(v.invitee_id,"Registered invitee: "+v.invitee_phone));
+  else s.append(el("div","No registered invitee. An intended recipient is not a verified User.","standby"));
+  const tb=el("table"),body=el("tbody");
+  const rows=[["Invite Code words",v.code_words||"hidden (enable verbose)"],["Status",v.status],["Created",when(v.minted_at)],["Expires",when(v.expires_at)],
+    ["Intended recipient",v.recipient_phone||"unbound"],["Recipient readback confirmed",when(v.recipient_confirmed_at)],
+    ["Redeemed",when(v.redeemed_at)],["Registered",when(v.registered_at)],["Revoked",when(v.revoked_at)],["Hidden",when(v.hidden_at)]];
+  rows.forEach(([k,value])=>{const tr=el("tr");tr.append(el("th",k),el("td",value));body.append(tr)});
+  tb.append(body);s.append(tb);s.append(el("div","Read-only history: hiding or revoking an Invitation does not remove a Registration or invitation edge.","standby"));d.append(s);
 }
 function renderAudit(d){
   head(d,["Event Log"],"Audit tail","","most recent "+DATA.audit.length+" events \\u00b7 "+(DATA.verbose?"verbose":"redacted"));

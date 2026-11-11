@@ -104,7 +104,12 @@ each is an `invite_codes` row with `max_uses = 1` and a 24-hour expiry, plus an
 `invitations` row naming the inviter, an optional bound recipient, and
 revocation, hiding, and redemption times. A User holds at most three active
 Invitations. Operator codes are unaffected. Nothing is deleted; trace the
-invitation graph with:
+invitation graph in `/admin` under Access Control. Select a Registration to see
+who invited them and the Invitations they created, or select an Invitation to
+follow its inviter and registered invitee. Hidden and revoked history remains
+visible. The default view masks all phone numbers and omits Invite Code words;
+the operator's verbose toggle reveals them. This is read-only and unavailable
+to Paired Browsers. The same graph can be queried with:
 
 ```sql
 SELECT v.inviter_phone, v.code_words, r.phone_number AS invitee, r.registered_at,
@@ -123,6 +128,7 @@ The local smoke test runs a fake Daytona lifecycle and toolbox server:
 npm run typecheck
 uv run --script smoke_test.py
 uv run --script voice_session_test.py
+uv run --script admin_test.py
 uv run --script ../sandbox_acp_gateway.py test
 ```
 

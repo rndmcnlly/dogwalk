@@ -482,7 +482,7 @@ def run_tests(
     # Operator diagnostics are independent of pairing and require operator auth
     # for the page, call discovery, and every incremental read.
     operator_headers = {"authorization": "Basic " + base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()}
-    for path in ("/admin/timing", "/admin/api/timing/calls", "/admin/api/timing?call_sid=CA_TEST2", "/admin/api/timing/content?call_sid=CA_TEST2"):
+    for path in ("/admin/api/state", "/admin/api/state?verbose=1", "/admin/api/events?verbose=1", "/admin/timing", "/admin/api/timing/calls", "/admin/api/timing?call_sid=CA_TEST2", "/admin/api/timing/content?call_sid=CA_TEST2"):
         require(get(base_url, path)[0] == 401, f"operator route is public: {path}")
         require(get(base_url, path, {"authorization": "Bearer paired-browser-credential"})[0] == 401,
                 f"operator route accepts pairing bearer: {path}")

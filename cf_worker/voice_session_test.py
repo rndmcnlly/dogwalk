@@ -674,6 +674,16 @@ def conversations() -> list[dict]:
         return json.load(response)
 
 
+def operator_access_state(verbose: bool = False) -> dict:
+    credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
+    request = urllib.request.Request(
+        "http://127.0.0.1:8787/admin/api/state" + ("?verbose=1" if verbose else ""),
+        headers={"authorization": f"Basic {credentials}"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)
+
+
 def latest_user_text() -> str:
     if not OrchestratorMock.requests:
         return ""
@@ -1655,6 +1665,32 @@ async def run_invitations(mocks: SocketMocks) -> None:
     ]), edges
     unredeemed = await asyncio.to_thread(d1, f"SELECT redeemed_by, revoked_at, hidden_at FROM invitations WHERE code_words = '{third}'")
     assert unredeemed[0]["redeemed_by"] is None and unredeemed[0]["revoked_at"] and unredeemed[0]["hidden_at"], unredeemed
+
+    # Operator-only graph projection includes hidden history across generations. The
+    # intended recipient of an unused Invitation is not presented as a registered invitee.
+    state = await asyncio.to_thread(operator_access_state, True)
+    invitations = {v["code_words"]: v for v in state["invitations"]}
+    assert invitations[first["words"]]["hidden_at"] and invitations[first["words"]]["status"] == "redeemed"
+    assert invitations[third]["status"] == "revoked" and invitations[third]["hidden_at"]
+    assert invitations[third]["recipient_phone"] == REBOUND_PHONE and invitations[third]["invitee_phone"] is None
+    assert invitations[EXPIRED_WORDS]["status"] == "expired"
+    registrations = {r["diagnostic_id"]: r for r in state["registrations"]}
+    projected_edges = []
+    for v in invitations.values():
+        assert registrations[v["inviter_id"]]["phone_number"] == v["inviter_phone"]
+        if v["invitee_id"]:
+            assert registrations[v["invitee_id"]]["phone_number"] == v["invitee_phone"]
+            projected_edges.append((v["inviter_phone"], v["invitee_phone"]))
+    assert sorted(projected_edges) == sorted((e["inviter"], e["invitee"]) for e in edges)
+    safe = await asyncio.to_thread(operator_access_state)
+    assert not safe["verbose"]
+    assert {v["diagnostic_id"] for v in safe["invitations"]} == {v["diagnostic_id"] for v in invitations.values()}
+    for v in safe["invitations"]:
+        assert "code_words" not in v
+        assert all(v[field] is None or "*" in v[field] for field in ("inviter_phone", "recipient_phone", "invitee_phone"))
+    safe_json = json.dumps(safe)
+    assert all(words not in safe_json for words in invitations)
+    assert all(r["phone_number"] not in safe_json for r in registrations.values())
 
 
 async def run_unobserved_end(restart) -> None:

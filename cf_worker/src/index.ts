@@ -20,7 +20,7 @@ import {
 import type { Env } from "./types";
 import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
 import { TerminalRelay } from "./terminal_relay";
-import { redemptionStatements, USABLE_FOR_PHONE_SQL } from "./invitations";
+import { INVITATION_STATUS_SQL, redemptionStatements, USABLE_FOR_PHONE_SQL } from "./invitations";
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
 export { TerminalRelay, VoiceSession };
@@ -529,7 +529,7 @@ const jsonResponse = (value: unknown, status = 200) => new Response(JSON.stringi
 
 async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<string, unknown>> {
   const registrationResult = await env.DB.prepare(
-    `SELECT r.phone_number, r.registered_at, r.last_seen_at,
+    `SELECT 'registration-' || r.rowid AS diagnostic_id, r.phone_number, r.registered_at, r.last_seen_at,
             s.provider_id, s.identity_hash, s.state, s.error,
             s.created_at AS sandbox_created_at, s.last_checked_at
        FROM registrations r
@@ -537,6 +537,21 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
       ORDER BY r.registered_at DESC`,
   ).all<Record<string, unknown>>();
   const registrations = registrationResult.results ?? [];
+  // Stable, non-capability references preserve graph identity when masked numbers collide.
+  const registrationIds = new Map(registrations.map((row) => [String(row.phone_number), row.diagnostic_id]));
+  const invitationResult = await env.DB.prepare(
+    `SELECT 'invitation-' || v.rowid AS diagnostic_id, v.code_words, v.inviter_phone, v.recipient_phone, v.recipient_confirmed_at,
+            v.redeemed_at, v.revoked_at, v.hidden_at, i.minted_at, i.expires_at,
+            r.phone_number AS invitee_phone, r.registered_at, ${INVITATION_STATUS_SQL} AS status
+       FROM invitations v JOIN invite_codes i ON i.code_words = v.code_words
+       LEFT JOIN registrations r ON r.invite_code = v.code_words AND r.phone_number = v.redeemed_by
+      ORDER BY i.minted_at DESC, v.code_words`,
+  ).all<Record<string, unknown>>();
+  const invitations = (invitationResult.results ?? []).map<Record<string, unknown>>((row) => ({
+    ...row,
+    inviter_id: registrationIds.get(String(row.inviter_phone)),
+    invitee_id: row.invitee_phone ? registrationIds.get(String(row.invitee_phone)) : null,
+  }));
 
   await Promise.all(registrations.map(async (row) => {
     const providerId = row.provider_id;
@@ -583,6 +598,7 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
     generated_at: Math.floor(Date.now() / 1000),
     verbose,
     registrations,
+    invitations,
     invites: inviteSummary,
     live_calls: liveCalls,
     audit: auditResult.results ?? [],
@@ -596,6 +612,13 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
       provider_id: row.provider_id ? "assigned" : null,
       identity_hash: undefined,
       error: row.error ? "operator attention required" : null,
+    })),
+    invitations: invitations.map((row) => ({
+      ...row,
+      code_words: undefined,
+      inviter_phone: maskPhone(String(row.inviter_phone)),
+      recipient_phone: row.recipient_phone ? maskPhone(String(row.recipient_phone)) : null,
+      invitee_phone: row.invitee_phone ? maskPhone(String(row.invitee_phone)) : null,
     })),
     live_calls: liveCalls.map((call, index) => ({
       ...call,

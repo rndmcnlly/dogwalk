@@ -269,7 +269,12 @@ edge. Removing an Invitation from the User's list revokes it if still active
 and hides it; nothing is deleted, so provenance and the Registration it
 produced survive. The inviter hears each Invitation's status, when it was
 redeemed, and by which number; the invitee may hear the inviter's number. The
-operator-wide graph is visible only on the Diagnostics Surface or in D1.
+operator-wide graph is visible only on the Diagnostics Surface or in D1. Its
+read-only Access Control projection includes hidden Invitations, distinguishes
+intended recipients from registered invitees, and links each Invitation to its
+inviter and redeeming Registration across generations. The default projection
+masks phone numbers and omits Invite Code words; the operator's explicit verbose
+opt-in reveals them.
 
 **Not:** An operator Invite Code (no inviter, any expiry or use count), a
 Registration, or proof of identity.

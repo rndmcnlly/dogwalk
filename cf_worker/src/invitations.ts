@@ -102,7 +102,7 @@ export function normalizeRecipient(raw: string, callerInUs: boolean): { phone: s
 }
 
 // Status is derived, never stored: expiry is a matter of time.
-const STATUS_SQL = `CASE
+export const INVITATION_STATUS_SQL = `CASE
     WHEN v.redeemed_at IS NOT NULL THEN 'redeemed'
     WHEN v.revoked_at IS NOT NULL THEN 'revoked'
     WHEN i.expires_at <= unixepoch() THEN 'expired'
@@ -141,7 +141,7 @@ function invitationView(row: InvitationRow, now: number) {
 async function ownInvitation(db: D1Database, inviter: string, words: string): Promise<InvitationRow> {
   const row = await db.prepare(
     `SELECT v.code_words, i.minted_at, i.expires_at, v.recipient_phone, v.recipient_confirmed_at,
-            v.redeemed_by, v.redeemed_at, ${STATUS_SQL} AS status
+            v.redeemed_by, v.redeemed_at, ${INVITATION_STATUS_SQL} AS status
        FROM invitations v JOIN invite_codes i ON i.code_words = v.code_words
       WHERE v.code_words = ? AND v.inviter_phone = ? AND v.hidden_at IS NULL`,
   ).bind(normalizeInviteWords(words), inviter).first<InvitationRow>();
@@ -154,7 +154,7 @@ export async function listInvitations(db: D1Database, inviter: string): Promise<
   const now = Math.floor(Date.now() / 1000);
   const rows = await db.prepare(
     `SELECT v.code_words, i.minted_at, i.expires_at, v.recipient_phone, v.recipient_confirmed_at,
-            v.redeemed_by, v.redeemed_at, ${STATUS_SQL} AS status
+            v.redeemed_by, v.redeemed_at, ${INVITATION_STATUS_SQL} AS status
        FROM invitations v JOIN invite_codes i ON i.code_words = v.code_words
       WHERE v.inviter_phone = ? AND v.hidden_at IS NULL
       ORDER BY i.minted_at DESC`,
