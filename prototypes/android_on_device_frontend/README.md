@@ -55,8 +55,8 @@ say it is ready and start listening.
 - **One speech request, one phrasing job, one utterance, one playback receipt.** Request IDs
   are bound by code. Each phrasing job sees only its own request plus context, under a stable
   per-task system prompt; heard history is quoted and separate from the current input.
-- **Coverage guard.** Phrasing that drops a capitalised name, a number, or the question mark
-  of a question, or that comes back in the wrong task format, is replaced by the
+- **Coverage guard.** Phrasing that drops a capitalised name, a number, a permission choice
+  word (allow, deny, once, always, reject, approve), or the question mark of a question, or that comes back in the wrong task format, is replaced by the
   Orchestrator's own words (`VERBATIM`). This guard was added after real on-device E2B turned
   a live permission question into "Hello." (see Evidence). Passing the guard is necessary, not
   sufficient: it does not prove meaning was conveyed.
@@ -119,7 +119,10 @@ This is emulated Android, **not Pixel hardware**: latency is not phone latency.
 - The first on-device run, with both tasks in one system prompt, phrased "Fir wants
   permission to delete the build folder… allow it once, or deny it?" as **"Hello."** and the
   test-result request also as "Hello.". Separate per-task system prompts fixed both outputs,
-  and the coverage guard now catches that class of output (unit-tested).
+  and the coverage guard now catches that class of output (unit-tested). A later run phrased
+  the same question as "Should I let it go through once, or stop it?": names kept, but "deny"
+  became "stop it", which a caller could repeat back and be heard as cancelling. The guard now
+  also requires permission choice words, so that output falls back to the Orchestrator's words.
 - Readiness on the emulator: Google TTS voice `en-us-x-tpf-local` (offline), on-device en-US
   recognizer installed, warmup generation, fixture link.
 - Speech exchanges, with synthetic `say` audio in the emulated microphone, on-device
@@ -142,11 +145,11 @@ This is emulated Android, **not Pixel hardware**: latency is not phone latency.
   route, plus a production identity and authentication for a non-PSTN client, needs an
   operator decision. Operator-admin credentials must never go in the app.
 - **No authoritative supersession.** FIFO speaks every request, including obsolete ones.
-- **Not tested on a Pixel.** No physical device was attached. The GPU backend, E4B on
-  device, real microphones, locked-screen use and battery and thermal behaviour are untested.
+- **Not tested on a Pixel.** No physical device was attached. The GPU backend, real
+  microphones, locked-screen use and battery and thermal behaviour are untested.
 - **Recognition defects seen:** "in fir" was heard as "infer" (aliases are not biased into
   recognition), and endpointing split "yes, allow it once" and "okay, go on" after the first
-  word. Half-duplex listening then lost the remainder while the acknowledgement played. Only
+  word, and a final run heard "please start the rebuild" as "Please start". Half-duplex listening then lost the remainder while the acknowledgement played. Only
   "Yes" reached the Orchestrator, which is not enough on its own to answer a permission
   question.
 - **Barge-in by voice** only runs while a headset output is connected (to avoid hearing the
@@ -155,6 +158,9 @@ This is emulated Android, **not Pixel hardware**: latency is not phone latency.
 - **Unsupported, and said so:** recording, audio clips and earcons (mute/unmute and clip
   messages are logged as unsupported), acoustic browser pairing, the keypad menu, Theme voice
   switches, and status readout by key. Theme is plain.
+- **E4B is selectable but unexercised.** Its pinned file was downloaded and its SHA-256
+  matched, but at 3.66 GB it does not fit the emulator's 6 GB data partition (3.4 GB free), and
+  growing the partition would mean changing or wiping that AVD.
 - **Heard prefixes are approximate** (TTS range callbacks, not acoustic measurement).
 - The coverage guard is lexical. It can reject a good paraphrase (then the Orchestrator's own
   wording plays) and accept a misleading one that keeps the names and numbers.

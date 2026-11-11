@@ -21,6 +21,7 @@ import kotlin.concurrent.thread
 class MainActivity : Activity() {
     private lateinit var log: TextView
     private lateinit var endpoint: EditText
+    private lateinit var e2b: RadioButton
     private lateinit var e4b: RadioButton
     private lateinit var gpu: CheckBox
     private val prefs by lazy { getSharedPreferences("setup", MODE_PRIVATE) }
@@ -36,10 +37,10 @@ class MainActivity : Activity() {
         endpoint = EditText(this).apply { hint = "ws://127.0.0.1:8770/ws"; setText(prefs.getString("endpoint", "ws://127.0.0.1:8770/ws")) }
         column.addView(endpoint)
         val models = RadioGroup(this)
-        val e2b = RadioButton(this).apply { text = "${ModelSpec.E2B.label} (${ModelSpec.E2B.bytes / 1_000_000} MB)"; id = 1 }
+        e2b = RadioButton(this).apply { text = "${ModelSpec.E2B.label} (${ModelSpec.E2B.bytes / 1_000_000} MB)"; id = 1 }
         e4b = RadioButton(this).apply { text = "${ModelSpec.E4B.label} (${ModelSpec.E4B.bytes / 1_000_000} MB)"; id = 2 }
         models.addView(e2b); models.addView(e4b)
-        models.check(if (prefs.getString("model", "E2B") == "E4B") 2 else 1)
+        choose(prefs.getString("model", "E2B")!!)
         column.addView(models)
         gpu = CheckBox(this).apply { text = "GPU backend (CPU if unchecked)"; isChecked = prefs.getBoolean("gpu", false) }
         column.addView(gpu)
@@ -63,10 +64,11 @@ class MainActivity : Activity() {
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleExtras(intent) }
 
-    /** adb conveniences: `--ez start true`, `--ez stop_speaking true`, `--ez selftest true`, debug-only `--es inject TEXT`. */
+    /** adb conveniences: `--es model E2B|E4B`, `--ez start true`, `--ez stop_speaking true`, `--ez selftest true`, debug-only `--es inject TEXT`. */
     private fun handleExtras(intent: Intent?) {
         if (intent == null) return
         intent.getStringExtra("endpoint")?.let { endpoint.setText(it) }
+        intent.getStringExtra("model")?.let(::choose)
         if (intent.getBooleanExtra("selftest", false)) modelSelfTest()
         if (intent.getBooleanExtra("start", false)) { save(); startForegroundService(serviceIntent()) }
         if (intent.getBooleanExtra("stop_speaking", false)) startService(Intent(this, VoiceService::class.java).setAction(VoiceService.ACTION_STOP_SPEAKING))
@@ -74,6 +76,8 @@ class MainActivity : Activity() {
         val text = intent.getStringExtra("inject")
         if (text != null && BuildConfig.DEBUG) startService(Intent(this, VoiceService::class.java).setAction(VoiceService.ACTION_INJECT).putExtra("text", text))
     }
+
+    private fun choose(model: String) { if (model == ModelSpec.E4B.name) e4b.isChecked = true else e2b.isChecked = true }
 
     private fun selected() = if (e4b.isChecked) ModelSpec.E4B else ModelSpec.E2B
 
