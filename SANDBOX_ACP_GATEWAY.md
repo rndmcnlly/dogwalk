@@ -58,10 +58,14 @@ never logged; an `rpc_id` or `method` that is not a short plain token is logged 
 collector, so these lines go to the gateway's log only.
 
 OpenCode `2.2.6` accepts `initialize` and `session/new` carrying `_meta.traceparent`
-without error (checked locally). Its source (`anomalyco/opencode` at `6b1db275`,
+without error (checked locally; the snapshot pins `2.2.5`, and a production call's
+`session/resume` with `_meta` succeeded against it). Its source (`anomalyco/opencode` at `6b1db275`,
 newer than the 2.2.6 tag, not verified against it) wraps each ACP request in its own span
 (`cli.acp.<method>`) exported only when an OTLP endpoint is configured, and nothing in
 its ACP layer reads `_meta.traceparent`, so those spans do not join Dogwalk's trace.
+The logging change reaches a Sandbox only through a new snapshot, which applies to
+Sandboxes created afterwards, or a back-patch of `/opt/dogwalk/sandbox_acp_gateway.py`
+in an existing one: snapshot `dogwalk-acp-20261108-v2` predates it.
 Nothing in this repository gives the Sandbox an OTLP endpoint (the live snapshot's
 environment was not inspected), so OpenCode should export no spans there.
 

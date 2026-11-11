@@ -37,7 +37,7 @@ Set `OPENAI_PROJECT_ID` in `wrangler.toml`. In the matching OpenAI project,
 subscribe `https://dogwalk.tools/openai/live` to `live.transport.incoming` and
 store its `whsec_...` signing secret as `OPENAI_WEBHOOK_SECRET`.
 
-`DAYTONA_SNAPSHOT` is currently `dogwalk-acp-20261108-v1`. It contains the ACP
+`DAYTONA_SNAPSHOT` is currently `dogwalk-acp-20261108-v2` (see `wrangler.toml`). It contains the ACP
 Gateway, OpenCode `2.2.5`, tmux and Daytona's computer-use desktop (Xvfb, xfce4,
 x11vnc, noVNC, Chromium with `--no-sandbox`) for Human Takeover, passwordless sandbox-local `sudo`, and network
 diagnostic utilities. The OpenCode config selects `openai/gpt-6.1-sol`.
