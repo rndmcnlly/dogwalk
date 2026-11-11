@@ -110,7 +110,9 @@ class FrontendTest {
 
     @Test fun phrasingThatDropsTheQuestionOrNamesFallsBackVerbatim() {
         val ask = "Fir wants permission to delete the build folder. Should I allow it once, or deny it?"
-        for (bad in listOf("REPLY: Hello.", "Hello.", "Someone wants to delete a folder. Allow once or deny?", "Fir wants to delete the build folder.")) {
+        for (bad in listOf("REPLY: Hello.", "Hello.", "Someone wants to delete a folder. Allow once or deny?", "Fir wants to delete the build folder.",
+            // Observed from on-device E2B: keeps the name but turns "deny" into "stop it".
+            "Fir needs permission to delete the build folder before rebuilding. Should I let it go through once, or stop it?")) {
             val core = FrontendCore()
             core.onSay(null, ask)
             val u = core.completePhrase(core.nextJob() as PhraseJob, bad)!!

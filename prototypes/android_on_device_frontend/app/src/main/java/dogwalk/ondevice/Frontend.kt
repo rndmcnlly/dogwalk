@@ -94,8 +94,10 @@ object Policy {
     private val numberWords = Regex("""\b(\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|""" +
         """twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|once|twice)\b""", RegexOption.IGNORE_CASE)
 
+    private val choiceWords = Regex("""\b(allow|deny|once|always|reject|approve)\b""", RegexOption.IGNORE_CASE)
+
     /**
-     * Code-owned poka-yoke on model phrasing: names and numbers survive, a question stays a
+     * Code-owned poka-yoke on model phrasing: names, numbers and permission choice words survive, a question stays a
      * question, and output from the wrong task format is refused. Null means it covers the
      * request; otherwise the reason it does not. Passing is necessary, not sufficient, for meaning.
      */
@@ -106,6 +108,9 @@ object Policy {
         names.firstOrNull { !Regex("""\b${it.lowercase()}\b""").containsMatchIn(said) }?.let { return "dropped name $it" }
         numberWords.findAll(request).map { it.value.lowercase() }.toSet()
             .firstOrNull { !Regex("""\b$it\b""").containsMatchIn(said) }?.let { return "dropped number $it" }
+        // Permission choices are answered by these words; a paraphrase like "stop it" for "deny" is unsafe.
+        choiceWords.findAll(request).map { it.value.lowercase() }.toSet()
+            .firstOrNull { !Regex("""\b$it\b""").containsMatchIn(said) }?.let { return "dropped choice word $it" }
         if ('?' in request && '?' !in phrased) return "dropped the question"
         return null
     }
