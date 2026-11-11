@@ -23,6 +23,7 @@
 // Phase 2, when a reviewed revision is pinned deliberately.
 
 import type { Env } from "./types";
+import { isTraceContext, type TraceContext } from "./trace_context.ts";  // Explicit extension: Node tests load this module directly.
 
 /**
  * Who produced an observation, stamped into its journal detail at write time. The projection
@@ -36,7 +37,8 @@ export function producerFields(env: Pick<Env, "CF_VERSION_METADATA" | "DEPLOYMEN
 }
 
 export type ActivityRow = { id: number; ts: number; source: string; event: string; detail: string | null };
-export type CallRow = { call_sid: string; started_at: number; ended_at: number | null; status: string };
+export type CallRow = { call_sid: string; started_at: number; ended_at: number | null; status: string;
+  trace_id?: string | null; span_id?: string | null };
 
 type AnyValue =
   | { stringValue: string } | { boolValue: boolean } | { intValue: string } | { doubleValue: number }
@@ -164,7 +166,8 @@ const ALLOW: Record<string, string> = {
   event_time_source: "dogwalk.timestamp.source",
 };
 // Read for timestamps or span matching, then represented by fields rather than attributes.
-const STRUCTURAL = new Set(["event", "ts_ms", "occurred_at_ms", "received_at_ms", "service_version", "deployment_environment"]);
+const STRUCTURAL = new Set(["event", "ts_ms", "occurred_at_ms", "received_at_ms", "service_version", "deployment_environment",
+  "trace_id", "span_id", "parent_span_id", "link_trace_id", "link_span_id"]);
 
 function attributes(name: string, detail: Detail): { attrs: KeyValue[]; dropped: number } {
   const attrs: KeyValue[] = [];
@@ -260,7 +263,22 @@ function scopeKey(o: Observation, kind: string, id: unknown): string {
   return JSON.stringify([o.detail.live_session_id ?? "", o.detail.clock_id ?? "", kind, typeof id, id]);
 }
 
+/** Context the Worker recorded when the operation started (issue #8, B1), if this row has it. */
+function recorded(o: Observation): (TraceContext & { parentSpanId?: string }) | null {
+  const context = { traceId: o.detail.trace_id as string, spanId: o.detail.span_id as string };
+  if (!isTraceContext(context)) return null;
+  const parent = o.detail.parent_span_id;
+  return typeof parent === "string" && /^(?!0{16})[0-9a-f]{16}$/.test(parent) ? { ...context, parentSpanId: parent } : context;
+}
+
+/** Recorded rows match by their span ID; older rows by the scoped identifiers below. */
 function role(o: Observation): Role | null {
+  const r = derivedRole(o);
+  const context = r && recorded(o);
+  return r && context ? { ...r, key: JSON.stringify(["span", context.traceId, context.spanId]) } : r;
+}
+
+function derivedRole(o: Observation): Role | null {
   const d = o.detail;
   if (o.name.startsWith("model.") && d.request_id) {
     return { kind: "model", id: d.request_id, key: scopeKey(o, "model", d.request_id),
@@ -289,14 +307,24 @@ function role(o: Observation): Role | null {
   return null;
 }
 
+/** The Voice Call's context: recorded by the front door when the call began, else derived. */
+async function callContextOf(call: CallRow): Promise<TraceContext & { recorded: boolean }> {
+  const context = { traceId: call.trace_id ?? undefined, spanId: call.span_id ?? undefined };
+  return isTraceContext(context) ? { ...context, recorded: true }
+    : { traceId: await traceId("voice_call", call.call_sid), spanId: await spanId("voice_call", call.call_sid), recorded: false };
+}
+
 /** Span identity derived from any row of the interval, so a start row knows it before the end exists. */
 async function identity(call: CallRow, o: Observation, r: Role): Promise<{ traceId: string; spanId: string }> {
+  const context = recorded(o);
+  if (context) return { traceId: context.traceId, spanId: context.spanId };
   if (r.kind === "turn") {
     const [session, startedMs] = r.id as [string, number];
     return { traceId: await traceId("prompt_turn", session, startedMs), spanId: await spanId("prompt_turn", session, startedMs) };
   }
-  // Identity hashes exactly the matching key, nothing incidental: an RPC response observed
-  // after the voice session changed must still name its request's span.
+  // Older rows keep stable derived IDs, independent of the call's recorded context. Identity
+  // hashes exactly the matching key, nothing incidental: an RPC response observed after the
+  // voice session changed must still name its request's span.
   return { traceId: await traceId("voice_call", call.call_sid), spanId: await spanId(r.kind, call.call_sid, r.key) };
 }
 
@@ -363,12 +391,27 @@ function matchIntervals(observations: Observation[]): Interval[] {
   return intervals;
 }
 
+/**
+ * Span IDs of recorded starts in these rows whose end is not among them. Work can end under a
+ * later Voice Call (a Prompt Turn, a slow request), and the journal keeps each row where it
+ * was observed; the export looks these IDs up across calls to complete the interval.
+ */
+export function openRecordedSpanIds(rows: ActivityRow[]): string[] {
+  const open = new Set<string>();
+  for (const o of [...rows].sort((a, b) => a.id - b.id).map(observe)) {
+    const r = role(o), context = recorded(o);
+    if (!r || !context) continue;
+    if (r.begin) open.add(context.spanId);
+    else if (r.finish) open.delete(context.spanId);
+  }
+  return [...open];
+}
+
 /** Spans for exactly matched intervals only. Needs every row of the call (up to the cap). */
 export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<ProjectedSpan[]> {
   // Insertion order is the matching order; event time is carried, never used to reorder here.
   const observations = [...rows].sort((a, b) => a.id - b.id).map(observe);
-  const callTrace = await traceId("voice_call", call.call_sid);
-  const callSpanId = await spanId("voice_call", call.call_sid);
+  const { traceId: callTrace, spanId: callSpanId, recorded: callRecorded } = await callContextOf(call);
   const spans: ProjectedSpan[] = [];
   const reconstructed = kv("dogwalk.reconstructed", true)!;
 
@@ -380,7 +423,8 @@ export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<
     // voice_calls rows record no producer, so the call span has none.
     spans.push({ producer: {}, traceId: callTrace, spanId: callSpanId, name: "voice_call", kind: SPAN_KIND.internal,
       startTimeUnixNano: callStart!, endTimeUnixNano: callEnd!, status: { code: STATUS.unset },
-      attributes: [reconstructed, kv("dogwalk.voice_call.id", call.call_sid)!,
+      attributes: [reconstructed, kv("dogwalk.context", callRecorded ? "recorded_at_start" : "derived")!,
+        kv("dogwalk.voice_call.id", call.call_sid)!,
         kv("dogwalk.voice_call.status", call.status)!, kv("dogwalk.timestamp.precision_ms", 1000)!] });
   }
 
@@ -391,39 +435,46 @@ export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<
     const endNanos = msToNanos(lifecycle ? end.detail.ended_ms as number : end.observedMs);
     if (!startNanos || !endNanos) continue;
     const ids = await identity(call, start, r);
-    const attrs: KeyValue[] = [reconstructed, kv("dogwalk.timestamp.precision_ms", Math.max(start.precisionMs, end.precisionMs))!,
+    const context = recorded(start);
+    const attrs: KeyValue[] = [reconstructed, kv("dogwalk.context", context ? "recorded_at_start" : "derived")!, kv("dogwalk.timestamp.precision_ms", Math.max(start.precisionMs, end.precisionMs))!,
       kv("dogwalk.journal.start_row_id", start.row.id)!, kv("dogwalk.journal.end_row_id", end.row.id)!,
       kv("dogwalk.interval.basis", lifecycle ? "recorded_lifecycle" : "worker_observations")!];
     // The span belongs to whoever observed its start; a later build that observed the end is in end_row_id.
     const base = { ...ids, producer: producerOf(start.detail), startTimeUnixNano: startNanos, endTimeUnixNano: endNanos };
-    // Model requests, Orchestrator tools, and RPCs are this call's Orchestrator work in the
-    // journal's own scoping (snapshotted at start), so they are children of the call span.
-    const parentSpanId = callSpanExported ? callSpanId : undefined;
+    // Recorded context names its own parent. Older model, tool, and RPC rows are this call's
+    // Orchestrator work in the journal's own scoping, so they derive the call span as parent,
+    // unless the call's context is recorded: then the call is in another trace, so link instead.
+    const legacyInRecordedCall = !context && callRecorded && callSpanExported && r.kind !== "turn";
+    const parentSpanId = context ? context.parentSpanId : callSpanExported && !callRecorded ? callSpanId : undefined;
+    const callLink = legacyInRecordedCall
+      ? [{ traceId: callTrace, spanId: callSpanId, attributes: [kv("dogwalk.link.reason", "observed_during_call")!] }] : [];
     if (r.kind === "turn") {
       // Prompt Turns are their own work traces, linked to the call that recorded the start.
       const stop = typeof end.detail.stop_reason === "string" ? end.detail.stop_reason : null;
+      const link = context ? { traceId: start.detail.link_trace_id as string, spanId: start.detail.link_span_id as string }
+        : callSpanExported ? { traceId: callTrace, spanId: callSpanId } : null;
       spans.push({ ...base, name: "acp.prompt_turn", kind: SPAN_KIND.client,
         status: end.name === "acp.turn.failed" ? { code: STATUS.error }
           : stop === "end_turn" ? { code: STATUS.ok } : { code: STATUS.unset },
         attributes: [...attrs, kv("dogwalk.acp.session.id", (r.id as unknown[])[0])!, ...(stop ? [kv("dogwalk.acp.stop_reason", stop)!] : [])],
-        links: callSpanExported ? [{ traceId: callTrace, spanId: callSpanId,
-          attributes: [kv("dogwalk.link.reason", "turn_start_recorded_during_call")!] }] : [] });
+        links: link && isTraceContext(link) ? [{ ...link,
+          attributes: [kv("dogwalk.link.reason", "turn_started_during_call")!] }] : [] });
     } else if (r.kind === "model") {
       const headers = observations.find((o) => o.name === "model.headers" && role(o)?.key === r.key);
       const headersNanos = headers ? msToNanos(headers.observedMs) : null;
-      spans.push({ ...base, parentSpanId, name: "orchestrator.model_request", kind: SPAN_KIND.client,
+      spans.push({ ...base, parentSpanId, links: callLink, name: "orchestrator.model_request", kind: SPAN_KIND.client,
         status: { code: end.name === "model.completed" ? STATUS.ok : STATUS.error },
         attributes: [...attrs, kv("dogwalk.model_request.id", r.id)!,
           kv("dogwalk.interval.includes", "network_and_worker_overhead")!],
         events: headersNanos ? [{ timeUnixNano: headersNanos, name: "model.headers",
           attributes: attributes(headers!.name, headers!.detail).attrs }] : [] });
       for (const id of Array.isArray(end.detail.tool_call_ids) ? end.detail.tool_call_ids : []) {
-        modelSpanByTool.set(scopeKey(start, "tool", id), ids);
+        modelSpanByTool.set(scopeKey(start, "tool", id), ids);  // Keyed by scope: tools may carry recorded IDs.
       }
     } else if (r.kind === "tool") {
       // Status follows the outcome the tool reported. Rows written before outcomes were recorded
       // came from a `finally` block, which proves the tool ended, not that it worked: Unset.
-      const model = modelSpanByTool.get(r.key);
+      const model = modelSpanByTool.get(scopeKey(start, "tool", r.id));
       const outcome = typeof end.detail.outcome === "string" ? end.detail.outcome
         : end.name === "tool.failed" ? "failed" : "not_recorded";
       spans.push({ ...base, parentSpanId, name: "orchestrator.tool", kind: SPAN_KIND.internal,
@@ -432,9 +483,9 @@ export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<
         attributes: [...attrs, kv("dogwalk.tool_call.id", r.id)!,
           ...(typeof start.detail.name === "string" ? [kv("dogwalk.orchestrator_tool.name", start.detail.name)!] : []),
           kv("dogwalk.outcome", outcome)!],
-        ...(model ? { links: [{ ...model, attributes: [kv("dogwalk.link.reason", "requested_by_model_response")!] }] } : {}) });
+        links: [...callLink, ...(model ? [{ ...model, attributes: [kv("dogwalk.link.reason", "requested_by_model_response")!] }] : [])] });
     } else {
-      spans.push({ ...base, parentSpanId, name: `acp ${String(start.detail.method)}`, kind: SPAN_KIND.client,
+      spans.push({ ...base, parentSpanId, links: callLink, name: `acp ${String(start.detail.method)}`, kind: SPAN_KIND.client,
         status: { code: end.detail.error === true ? STATUS.error : STATUS.unset },
         attributes: [...attrs, kv("dogwalk.acp.rpc.id", r.id)!, kv("dogwalk.acp.method", start.detail.method)!,
           kv("dogwalk.agent_connection.id", start.detail.agent_connection_id)!] });

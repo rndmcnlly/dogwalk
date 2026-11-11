@@ -80,7 +80,10 @@ CREATE TABLE IF NOT EXISTS voice_calls (
   started_at INTEGER NOT NULL,
   last_activity_at INTEGER NOT NULL,
   ended_at INTEGER,
-  duration_seconds INTEGER
+  duration_seconds INTEGER,
+  -- W3C trace context minted when the call begins; see migrations/2026-11-10-voice-call-trace.sql.
+  trace_id TEXT,
+  span_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_voice_calls_live
@@ -98,6 +101,10 @@ CREATE TABLE IF NOT EXISTS call_activity (
 
 CREATE INDEX IF NOT EXISTS idx_call_activity_call
   ON call_activity(call_sid, id);
+-- Lets the OTLP export complete spans whose end was observed under a later call.
+CREATE INDEX IF NOT EXISTS idx_call_activity_span
+  ON call_activity(json_extract(detail, '$.span_id'))
+  WHERE json_extract(detail, '$.span_id') IS NOT NULL;
 
 -- Kept in provider_timing.sql as an idempotent addition for deployed databases.
 -- This queue enriches diagnostics only, never operational call state.

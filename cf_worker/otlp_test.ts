@@ -3,7 +3,8 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type ActivityRow, type CallRow, logsRequest, msToNanos, projectLogs, projectSpans, tracesRequest } from "./src/otlp.ts";
+import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields } from "./src/trace_context.ts";
+import { type ActivityRow, type CallRow, logsRequest, msToNanos, openRecordedSpanIds, projectLogs, projectSpans, tracesRequest } from "./src/otlp.ts";
 
 const projectCall = async (call: CallRow, rows: ActivityRow[]) => ({ logs: await projectLogs(call, rows), spans: await projectSpans(call, rows) });
 
@@ -193,6 +194,77 @@ const okSpanResource = producedSpans.find((r) => r.scopeSpans[0].spans.some((s) 
 assert.equal(resAttrs(okSpanResource.resource)["service.version"], "ver-1111", "a span belongs to the build that observed its start");
 assert.equal(attr(tools[0], "dogwalk.outcome"), "not_recorded", "legacy finally-completion stays Unset");
 assert.deepEqual(logsRequest([]).resourceLogs, [], "an empty page is a valid, empty export");
+
+// W3C Trace Context helpers: strict version-00 parsing, valid fresh IDs.
+const root = newRootContext(), child = childOf(root);
+assert.deepEqual(parseTraceparent(formatTraceparent(root)), root);
+assert.equal(child.traceId, root.traceId); assert.notEqual(child.spanId, root.spanId);
+for (const bad of [null, "", `00-${"0".repeat(32)}-${root.spanId}-01`, `00-${root.traceId}-${"0".repeat(16)}-01`,
+  `ff-${root.traceId}-${root.spanId}-01`, `00-${root.traceId.toUpperCase()}-${root.spanId}-01`, `00-${root.traceId}-${root.spanId}-01-extra`]) {
+  assert.equal(parseTraceparent(bad), null, `accepted ${bad}`);
+}
+assert.deepEqual(spanFields(child, root), { trace_id: root.traceId, span_id: child.spanId, parent_span_id: root.spanId });
+assert.ok(!("parent_span_id" in spanFields(newRootContext(), root)), "a parent from another trace is a link, not a parent");
+
+// Context recorded at operation start (B1) wins over derivation, and matches by span ID.
+const callCtx = newRootContext(), modelCtx = childOf(callCtx), turnCtx = newRootContext(), promptRpc = childOf(turnCtx);
+const recordedCall: CallRow = { ...callA, trace_id: callCtx.traceId, span_id: callCtx.spanId };
+const live = (id: number, event: string, ms: number, extra: Record<string, unknown>) => ({ id, ts: Math.floor(ms / 1000),
+  source: "voice", event: "voice.timing", detail: JSON.stringify({ event, ts_ms: ms, clock_id: CLOCK, ...extra }) });
+const recordedRows = [
+  live(3001, "model.started", T0, { request_id: "r-live", live_session_id: "rtc_one", ...spanFields(modelCtx, callCtx) }),
+  // The voice session changed mid-request: derived matching would miss this; span IDs do not.
+  live(3002, "model.completed", T0 + 900, { request_id: "r-live", live_session_id: "rtc_two", ...spanFields(modelCtx, callCtx) }),
+  { id: 3003, ts: Math.floor(T0 / 1000) + 1, source: "acp", event: "acp.turn.started", detail: JSON.stringify({ acp_session_id: "ses_9",
+    started_ms: T0 + 1000, ts_ms: T0 + 1000, ...spanFields(turnCtx), link_trace_id: callCtx.traceId, link_span_id: callCtx.spanId }) },
+  live(3004, "acp.sent", T0 + 1001, { rpc_id: 5, method: "session/prompt", agent_connection_id: "conn-r", ...spanFields(promptRpc, turnCtx) }),
+  live(3005, "acp.received", T0 + 5000, { rpc_id: 5, agent_connection_id: "conn-r", ...spanFields(promptRpc, turnCtx) }),
+  { id: 3006, ts: Math.floor(T0 / 1000) + 5, source: "acp", event: "acp.turn.stopped", detail: JSON.stringify({ acp_session_id: "ses_9",
+    started_ms: T0 + 1000, ended_ms: T0 + 5001, stop_reason: "end_turn", ts_ms: T0 + 5001, ...spanFields(turnCtx) }) },
+];
+const recSpans = await projectSpans(recordedCall, recordedRows);
+const byName = (name: string) => recSpans.find((s) => s.name === name)!;
+assert.deepEqual([byName("voice_call").traceId, byName("voice_call").spanId], [callCtx.traceId, callCtx.spanId]);
+assert.equal(attr(byName("voice_call"), "dogwalk.context"), "recorded_at_start");
+const recModel = byName("orchestrator.model_request");
+assert.deepEqual([recModel.traceId, recModel.spanId, recModel.parentSpanId], [callCtx.traceId, modelCtx.spanId, callCtx.spanId]);
+const recTurn = byName("acp.prompt_turn");
+assert.deepEqual([recTurn.traceId, recTurn.spanId, recTurn.parentSpanId], [turnCtx.traceId, turnCtx.spanId, undefined]);
+assert.deepEqual([recTurn.links![0].traceId, recTurn.links![0].spanId], [callCtx.traceId, callCtx.spanId], "turn links its call");
+const recRpc = byName("acp session/prompt");
+assert.deepEqual([recRpc.traceId, recRpc.parentSpanId], [turnCtx.traceId, turnCtx.spanId], "session/prompt is inside its turn");
+const recLogs = await projectLogs(recordedCall, recordedRows);
+assert.ok(recLogs.every((l) => l.traceId && recSpans.some((s) => s.spanId === l.spanId)), "every log names its recorded span");
+assert.ok(!JSON.stringify(recLogs).includes("parent_span_id"), "context fields are not duplicated as attributes");
+
+// Older rows under a call with recorded context keep stable derived IDs, and link the call
+// instead of naming a parent in another trace.
+const legacyUnderRecorded = await projectSpans(recordedCall, rowsA.slice(1, 4));
+const legacyModel = legacyUnderRecorded.find((s) => s.name === "orchestrator.model_request")!;
+assert.equal(legacyModel.spanId, models[0].spanId, "derived identity does not depend on call context");
+assert.notEqual(legacyModel.traceId, callCtx.traceId);
+assert.equal(legacyModel.parentSpanId, undefined, "no parent from another trace");
+assert.deepEqual([legacyModel.links![0].traceId, legacyModel.links![0].spanId], [callCtx.traceId, callCtx.spanId]);
+assert.equal(attr(legacyModel, "dogwalk.context"), "derived");
+assert.deepEqual(await projectLogs(recordedCall, [rowsA[1]]), await projectLogs(callA, [rowsA[1]]), "older logs never change identity");
+
+// Cross-call completion: the start's call lists the open span; its end, journaled under a later
+// call, completes it once supplied. An interruption detected after eviction names it but never ends it.
+const crossTurn = newRootContext();
+const turnA = { id: 4001, ts: Math.floor(T0 / 1000), source: "acp", event: "acp.turn.started", detail: JSON.stringify({
+  acp_session_id: "ses_x", started_ms: T0, ts_ms: T0, ...spanFields(crossTurn) }) };
+const turnB = { id: 4100, ts: Math.floor(T0 / 1000) + 300, source: "acp", event: "acp.turn.stopped", detail: JSON.stringify({
+  acp_session_id: "ses_x", started_ms: T0, ended_ms: T0 + 300_000, stop_reason: "end_turn", ts_ms: T0 + 300_000, ...spanFields(crossTurn) }) };
+const interrupted = { id: 4200, ts: Math.floor(T0 / 1000) + 400, source: "acp", event: "acp.turn.interrupted", detail: JSON.stringify({
+  acp_session_id: "ses_x", started_ms: T0, detected_ms: T0 + 400_000, ts_ms: T0 + 400_000, ...spanFields(crossTurn) }) };
+assert.deepEqual(openRecordedSpanIds([turnA]), [crossTurn.spanId]);
+assert.deepEqual(openRecordedSpanIds([turnA, turnB]), []);
+assert.equal((await projectSpans(callA, [turnA])).filter((s) => s.name === "acp.prompt_turn").length, 0);
+const completed = (await projectSpans(callA, [turnA, turnB])).find((s) => s.name === "acp.prompt_turn")!;
+assert.equal(completed.spanId, crossTurn.spanId);
+assert.equal((await projectSpans(callA, [turnA, interrupted])).filter((s) => s.name === "acp.prompt_turn").length, 0,
+  "detecting an interruption is not observing the turn's end");
+assert.equal((await projectLogs(callA, [interrupted]))[0].spanId, crossTurn.spanId);
 
 // RPC rows without Agent Connection identity, and Agent-initiated requests, name no span.
 assert.equal(logFor(a, rowsA[14].id).spanId, undefined);

@@ -40,7 +40,8 @@ try {
   assert.equal(sanitizePath('https://example.org/capability/secret'), null);
   await observeTwilio(env, form({ CallSid: 'CA_TEST1' }), 'CA_TEST1', now);
   assert.equal(rows().length, 0);
-  db.prepare(`INSERT INTO voice_calls VALUES (?, 'private-number', 'completed', 1, 2, 3, 2)`).run(root);
+  db.prepare(`INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at, ended_at, duration_seconds)
+    VALUES (?, 'private-number', 'completed', 1, 2, 3, 2)`).run(root);
   const operational = db.prepare('SELECT * FROM voice_calls').get();
   const callback = form({ Timestamp: 'Tue, 10 Nov 2026 11:59:00 +0000', SequenceNumber: '3', From: 'private-number', To: 'private-number', Url: 'https://secret.invalid/?token=private' });
   globalThis.fetch = () => { throw Error('observation must never fetch'); };

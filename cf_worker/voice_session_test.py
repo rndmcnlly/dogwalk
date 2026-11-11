@@ -560,10 +560,11 @@ VALUES ('{WELCOME_WORDS}', '{SEED_INVITER}', '{TEST_PHONE}', unixepoch()),
 INSERT INTO sandbox_assignments
   (phone_number, provider_id, identity_hash, state, provisioning_started_at, last_checked_at)
 VALUES ('{TEST_PHONE}', 'mock-sandbox-1', '{identity}', 'started', unixepoch(), unixepoch());
-INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at)
-VALUES ('CA_VOICE_TEST', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch()),
-       ('CA_VOICE_TEST2', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch()),
-       ('CA_VOICE_TEST3', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch());
+-- CA_VOICE_TEST carries front-door trace context; the others are calls from before it existed.
+INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at, trace_id, span_id)
+VALUES ('CA_VOICE_TEST', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch(), '{CALL_TRACE_ID}', '{CALL_SPAN_ID}'),
+       ('CA_VOICE_TEST2', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch(), NULL, NULL),
+       ('CA_VOICE_TEST3', '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch(), NULL, NULL);
 INSERT INTO call_activity (call_sid, ts, source, direction, event, detail)
 VALUES ('CA_VOICE_TEST2', unixepoch(), 'voice', 'inbound', 'call.attestation',
         '{{"stir_verstat":"TN-Validation-Passed-A","caller_name_present":false,"from_country":"US","parameters":[]}}');
@@ -627,6 +628,9 @@ def post_webhook(body: str, identity: str, signature_header: str) -> int:
             return response.status
     except urllib.error.HTTPError as error:
         return error.code
+
+
+CALL_TRACE_ID, CALL_SPAN_ID = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"  # W3C spec example IDs
 
 
 def call_activity_rows(call_sid: str, timing: bool = False) -> list[dict]:
@@ -980,6 +984,25 @@ async def run_protocol(identity: str) -> None:
         acp_rows = [row for row in timed if row["event"] in {"acp.sent", "acp.received"}]
         assert acp_rows and all(isinstance(row.get("agent_connection_id"), str) for row in acp_rows), "ACP rows lack Agent Connection identity"
         assert all(row.get("outcome") in {"ok", "error_result", "returned"} for row in timed if row["event"] == "tool.completed")
+        # Live trace context (issue #8, B1): the front door mints the Voice Call's context, and
+        # Orchestrator work, Prompt Turns, and ACP requests carry what they minted at start.
+        call_trace = {"trace_id": CALL_TRACE_ID, "span_id": CALL_SPAN_ID}
+        orchestrated = [row for row in timed if row["event"].startswith(("model.", "tool."))]
+        assert orchestrated and all(row.get("trace_id") == call_trace["trace_id"]
+                                    and row.get("parent_span_id") == call_trace["span_id"] for row in orchestrated)
+        spans_by_request = {}
+        for row in orchestrated:
+            spans_by_request.setdefault(row.get("request_id") or row.get("tool_call_id"), set()).add(row["span_id"])
+        assert all(len(spans) == 1 for spans in spans_by_request.values()), "one span per model request or tool call"
+        turns = [json.loads(row["detail"]) for row in rows if row["event"] == "acp.turn.started"]
+        assert turns and all(t.get("trace_id") != call_trace["trace_id"] and t.get("link_trace_id") == call_trace["trace_id"]
+                             and t.get("link_span_id") == call_trace["span_id"] for t in turns), "turns are linked work traces"
+        prompts = [row for row in timed if row["event"] == "acp.sent" and row.get("method") == "session/prompt"]
+        assert prompts and all(any(p.get("trace_id") == t["trace_id"] and p.get("parent_span_id") == t["span_id"] for t in turns)
+                               for p in prompts), "session/prompt is a child of its Prompt Turn"
+        requests = {row["rpc_id"]: row for row in timed if row["event"] == "acp.sent" and row.get("method")}
+        answers = [row for row in timed if row["event"] == "acp.received" and not row.get("method") and row.get("rpc_id") in requests]
+        assert answers and all(a.get("span_id") == requests[a["rpc_id"]].get("span_id") for a in answers), "responses name their request"
         received = next(row for row in timed if row["event"] == "live.received" and row.get("type") == "session.input_transcript.delta")
         assert received["end_ms"] >= received["start_ms"] and received["queue_ms"] >= 0
         assert isinstance(received.get("content_text"), str) and received.get("content_kind") == "caller"

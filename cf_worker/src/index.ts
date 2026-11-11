@@ -10,7 +10,8 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { ADMIN_HTML } from "./admin";
 import { OPERATOR_TIMING_HTML } from "./operator_timing";
 import { operatorCallContent } from "./operator_content";
-import { type ActivityRow, type CallRow, logsRequest, producerFields, projectLogs, projectSpans, tracesRequest } from "./otlp";
+import { formatTraceparent, isTraceContext, newRootContext } from "./trace_context";
+import { type ActivityRow, type CallRow, logsRequest, openRecordedSpanIds, producerFields, projectLogs, projectSpans, tracesRequest } from "./otlp";
 import { observeTwilio, processTwilioJobs } from "./provider_timing";
 import { LANDING_HTML } from "./landing";
 import { PAIR_HTML } from "./pair_page";
@@ -683,6 +684,11 @@ function diagnosticsEvents(env: Env, verbose: boolean): Response {
 // rows. Spans are matched across the whole call, up to the cap.
 const OTLP_MAX_ROWS = 20_000;
 const OTLP_LOG_PAGE = 500;
+// Cross-call span lookups: 90 IDs per query (D1 allows 100 bound parameters), at most 10
+// queries and 1,000 rows each. Exceeding either bound is reported as truncation.
+const OTLP_CROSS_CALL_BATCH = 90;
+const OTLP_CROSS_CALL_BATCHES = 10;
+const OTLP_CROSS_CALL_ROWS = 1_000;
 
 /**
  * Metadata-only OTLP/JSON bodies, ready to POST unchanged to a receiver's /v1/logs or
@@ -695,7 +701,7 @@ async function otlpExport(env: Env, params: URLSearchParams, signal: "logs" | "t
   if (!/^CA[\w-]{1,78}$/.test(callSid) || !/^\d+$/.test(rawAfter) || !Number.isSafeInteger(after)) {
     return jsonResponse({ error: "valid call_sid and nonnegative integer after are required" }, 400);
   }
-  const call = await env.DB.prepare("SELECT call_sid, status, started_at, ended_at FROM voice_calls WHERE call_sid = ?")
+  const call = await env.DB.prepare("SELECT call_sid, status, started_at, ended_at, trace_id, span_id FROM voice_calls WHERE call_sid = ?")
     .bind(callSid).first<CallRow>();
   if (!call) return jsonResponse({ error: "unknown call" }, 404);
   if (signal === "logs") {
@@ -711,8 +717,24 @@ async function otlpExport(env: Env, params: URLSearchParams, signal: "logs" | "t
   const rows = await env.DB.prepare(
     "SELECT id, ts, source, event, detail FROM call_activity WHERE call_sid = ? ORDER BY id LIMIT ?",
   ).bind(callSid, OTLP_MAX_ROWS + 1).all<ActivityRow>();
-  const truncated = rows.results.length > OTLP_MAX_ROWS;
-  return jsonResponse(tracesRequest(await projectSpans(call, rows.results.slice(0, OTLP_MAX_ROWS))), 200,
+  let truncated = rows.results.length > OTLP_MAX_ROWS;
+  const own = rows.results.slice(0, OTLP_MAX_ROWS);
+  // Work started here may have ended under a later call. Its end rows stay where they were
+  // observed; fetch them by span ID (indexed) so the interval can complete.
+  const open = openRecordedSpanIds(own);
+  if (open.length > OTLP_CROSS_CALL_BATCH * OTLP_CROSS_CALL_BATCHES) truncated = true;
+  const later: ActivityRow[] = [];
+  for (let i = 0; i < Math.min(open.length, OTLP_CROSS_CALL_BATCH * OTLP_CROSS_CALL_BATCHES); i += OTLP_CROSS_CALL_BATCH) {
+    const batch = open.slice(i, i + OTLP_CROSS_CALL_BATCH);
+    const found = await env.DB.prepare(
+      `SELECT id, ts, source, event, detail FROM call_activity
+        WHERE json_extract(detail, '$.span_id') IN (${batch.map(() => "?").join(", ")}) AND call_sid != ?
+        ORDER BY id LIMIT ?`,
+    ).bind(...batch, callSid, OTLP_CROSS_CALL_ROWS + 1).all<ActivityRow>();
+    if (found.results.length > OTLP_CROSS_CALL_ROWS) truncated = true;
+    later.push(...found.results.slice(0, OTLP_CROSS_CALL_ROWS));
+  }
+  return jsonResponse(tracesRequest(await projectSpans(call, [...own, ...later])), 200,
     { "x-dogwalk-truncated": String(truncated) });
 }
 
@@ -1255,6 +1277,8 @@ async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response
     "x-dogwalk-live-session-id": liveSessionId,
     "x-dogwalk-identity": assignment.identity_hash,
   });
+  const traceparent = await callTraceparent(env, context.callSid);
+  if (traceparent) headers.set("traceparent", traceparent);
   const prepare = await object.fetch("https://voice-session/prepare", { method: "POST", headers });
   if (!prepare.ok) {
     await decideLiveCall(env, liveSessionId, "reject", { status_code: prepare.status === 409 ? 486 : 500 });
@@ -1313,15 +1337,26 @@ async function decideLiveCall(
 
 async function recordCallStarted(env: Env, phone: string, callSid: string): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
+  // The Voice Call's trace context is minted only when its row is created, here where the call
+  // begins. A repeated start keeps it, and a row created without one never gains one later.
+  const context = newRootContext();
   await env.DB.prepare(
     `INSERT INTO voice_calls
-       (call_sid, phone_number, status, started_at, last_activity_at)
-     VALUES (?, ?, 'in-progress', ?, ?)
+       (call_sid, phone_number, status, started_at, last_activity_at, trace_id, span_id)
+     VALUES (?, ?, 'in-progress', ?, ?, ?, ?)
      ON CONFLICT(call_sid) DO UPDATE SET
        phone_number = excluded.phone_number,
        status = CASE WHEN voice_calls.ended_at IS NULL THEN 'in-progress' ELSE voice_calls.status END,
        last_activity_at = excluded.last_activity_at`,
-  ).bind(callSid, phone, now, now).run();
+  ).bind(callSid, phone, now, now, context.traceId, context.spanId).run();
+}
+
+/** The Voice Call's recorded trace context as a `traceparent`, or none for older calls. */
+async function callTraceparent(env: Env, callSid: string): Promise<string | null> {
+  const row = await env.DB.prepare("SELECT trace_id, span_id FROM voice_calls WHERE call_sid = ?")
+    .bind(callSid).first<{ trace_id: string | null; span_id: string | null }>();
+  const context = { traceId: row?.trace_id ?? undefined, spanId: row?.span_id ?? undefined };
+  return isTraceContext(context) ? formatTraceparent(context) : null;
 }
 
 // Diagnostics are a separate projection. They never dispatch harness events or

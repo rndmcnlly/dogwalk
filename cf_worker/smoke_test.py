@@ -10,6 +10,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import os
 import shutil
 import signal
@@ -531,6 +532,33 @@ def run_tests(
     status, body = get(base_url, "/admin/api/otlp/v1/traces?call_sid=CA_TEST2", operator_headers)
     require(status == 200 and isinstance(json.loads(body)["resourceSpans"], list),
             "OTLP traces export unavailable")
+    # The front door mints each Voice Call's W3C trace context once, when the call begins.
+    traced = json.loads(subprocess.run(
+        [project_wrangler(), "d1", "execute", "dogwalk", "--local", "--json", "--command",
+         "SELECT trace_id, span_id FROM voice_calls WHERE call_sid = 'CA_TEST2'"],
+        cwd=WORKER_DIR, check=True, capture_output=True, text=True).stdout)[0]["results"]
+    require(traced and re.fullmatch(r"(?!0{32})[0-9a-f]{32}", traced[0]["trace_id"] or "")
+            and re.fullmatch(r"(?!0{16})[0-9a-f]{16}", traced[0]["span_id"] or ""), f"call trace context not minted: {traced}")
+    # A Prompt Turn started in one call and ended in another: the start's export completes the
+    # span by looking the end up across calls (indexed by span_id in real D1).
+    # 96 turns, so the lookup needs more than one 90-ID batch.
+    turn_trace, turn_span = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"
+    turn_spans = [turn_span] + [f"{n + 1:016x}" for n in range(95)]
+    def turn_row(call_sid: str, event: str, span: str, extra: str) -> str:
+        return (f"INSERT INTO call_activity (call_sid, ts, source, direction, event, detail) VALUES ('{call_sid}', 1, 'acp', "
+                f"'internal', '{event}', json_object('acp_session_id', 'ses_{span}', 'started_ms', 1000, 'ts_ms', 1000, "
+                f"'trace_id', '{turn_trace}', 'span_id', '{span}'{extra}));")
+    subprocess.run([project_wrangler(), "d1", "execute", "dogwalk", "--local", "--command",
+        f"INSERT OR REPLACE INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at, ended_at) VALUES "
+        f"('CA_XCALL_A', '{TEST_PHONE}', 'completed', 1, 2, 2), ('CA_XCALL_B', '{TEST_PHONE}', 'completed', 3, 4, 4);"
+        + "".join(turn_row("CA_XCALL_A", "acp.turn.started", span, "") for span in turn_spans)
+        + "".join(turn_row("CA_XCALL_B", "acp.turn.stopped", span, ", 'ended_ms', 3500, 'stop_reason', 'end_turn'")
+                  for span in turn_spans)],
+        cwd=WORKER_DIR, check=True, stdout=subprocess.DEVNULL)
+    status, body = get(base_url, "/admin/api/otlp/v1/traces?call_sid=CA_XCALL_A", operator_headers)
+    spans = [s for rs in json.loads(body)["resourceSpans"] for ss in rs["scopeSpans"] for s in ss["spans"]]
+    completed = {s["spanId"] for s in spans if s["name"] == "acp.prompt_turn" and s["traceId"] == turn_trace}
+    require(status == 200 and completed == set(turn_spans), f"cross-call Prompt Turns not all completed: {len(completed)}/96")
     for path, expected in (("logs?call_sid=CA_UNKNOWN", 404), ("logs?call_sid=CA_TEST2&after=-1", 400), ("traces?after=0", 400)):
         require(get(base_url, "/admin/api/otlp/v1/" + path, operator_headers)[0] == expected,
                 f"invalid OTLP query accepted: {path}")

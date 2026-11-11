@@ -556,7 +556,26 @@ Worker Version ID (`version_metadata` binding, exported as `service.version`) an
 older rows keep a Resource without either, rather than borrowing today's build.
 Orchestrator tools record their own outcome (`ok`, `error_result` for `ok:false`,
 `returned` with no flag, or `threw`, which emits `tool.failed`), and tool span status
-follows it. `tool.completed` rows from before outcomes were recorded stay `Unset`. Attributes come from a server-side allowlist: content,
+follows it. `tool.completed` rows from before outcomes were recorded stay `Unset`.
+
+Live operations carry W3C trace context recorded when they start (`src/trace_context.ts`).
+The front door mints each Voice Call's context into `voice_calls.trace_id`/`span_id` and
+hands it to the Durable Object as a `traceparent` header. Model requests and Orchestrator
+tools are child spans of that call context, snapshotted at start. Each Prompt Turn is its
+own trace, and it records the initiating call as a link, not a parent. Its end row is
+journaled under whichever call observed it; the traces export for the starting call
+looks recorded spans' ends up across calls by `span_id` (indexed; beyond 900 open
+spans or 1,000 rows per lookup, `x-dogwalk-truncated` is set). Between calls, a tool or
+ACP request that completes is journaled under the scope captured when it started. The turn's context is persisted with its Managed Session: if eviction loses the
+turn, the reload records `acp.turn.interrupted`, which names the span but never
+completes it, since the actual end was not observed.
+Each ACP request is a span whose parent is its Prompt Turn (`session/prompt`) or the call;
+the response row names the request's span. Rows record `trace_id`, `span_id`,
+`parent_span_id`, and for turns `link_trace_id`/`link_span_id`; the export uses those
+and matches recorded starts to ends by span ID, marking spans
+`dogwalk.context=recorded_at_start`. Older rows and calls keep derived IDs. Apply
+`migrations/2026-11-10-voice-call-trace.sql` remotely before deploying this, and to any
+existing local D1 state (or delete `.wrangler/state/v3/d1`). Attributes come from a server-side allowlist: content,
 Aliases, error strings, and thought tails are dropped and counted in
 `droppedAttributesCount`, whatever the page's Show content setting.
 

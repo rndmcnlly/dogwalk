@@ -16,6 +16,7 @@ import {
 } from "./invitations";
 import { PAIR_BUILD } from "./pair_page";
 import { producerFields } from "./otlp";
+import { childOf, newRootContext, parseTraceparent, spanFields, type TraceContext } from "./trace_context";
 
 const ACP_PORT = 8765;
 const WORKSPACE = "/home/daytona";
@@ -85,6 +86,9 @@ interface ManagedSession {
   // Epoch milliseconds, for spoken "how long" readouts; absent in older projections.
   turnStartedAt?: number | null;
   turnEndedAt?: number | null;
+  // The current or latest Prompt Turn's own trace, minted at its start, with the Voice Call
+  // context that started it as a link (not a parent): the turn may outlive that call.
+  turnTrace?: (TraceContext & { link: TraceContext | null }) | null;
 }
 
 interface ToolCallActivity {
@@ -334,6 +338,9 @@ interface PendingRpc {
   resolve: (result: Record<string, unknown>) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  trace: { context: TraceContext; parent: TraceContext | null };
+  // Journal scope at send, for a response that arrives between calls.
+  scope: { callSid: string | null; liveSessionId: string | null };
 }
 
 export const ORCHESTRATOR_TOOLS = [
@@ -806,6 +813,9 @@ export class VoiceSession {
   private acp: WebSocket | null = null;
   private liveSessionId: string | null = null;
   private callSid: string | null = null;
+  // The Voice Call's trace context, from the front door's `traceparent`. Operations snapshot it
+  // when they start; nothing reads it back at completion.
+  private callTrace: TraceContext | null = null;
   private phone: string | null = null;
   private sandboxId: string | null = null;
   private attachedSandboxId: string | null = null;
@@ -967,7 +977,10 @@ export class VoiceSession {
       return new Response(null, { status: 202 });
     }
     this.phone = request.headers.get("x-dogwalk-phone");
+    const previousCallSid = this.callSid;
     this.callSid = request.headers.get("x-dogwalk-call-sid");
+    const incomingTrace = parseTraceparent(request.headers.get("traceparent"));
+    if (incomingTrace || this.callSid !== previousCallSid) this.callTrace = incomingTrace;
     const incomingSandboxId = request.headers.get("x-dogwalk-sandbox-id");
     const incomingLiveSessionId = request.headers.get("x-dogwalk-live-session-id");
     if (!this.phone || !this.callSid || !incomingSandboxId || !incomingLiveSessionId) {
@@ -1243,6 +1256,10 @@ export class VoiceSession {
           session.stopReason = null;
           session.turnEndedAt = Date.now();
           session.failure = "The previous Prompt Turn was interrupted by a disconnected Agent Connection.";
+          // Detection, not the turn's end: this row names the turn's persisted span but cannot
+          // complete it, since when the work actually stopped was never observed.
+          await this.record("acp.turn.interrupted", { alias: session.alias, acp_session_id: session.acpSessionId,
+            started_ms: session.turnStartedAt, detected_ms: session.turnEndedAt, ...spanFields(session.turnTrace ?? null) });
         }
       } catch (error) {
         session.sessionState = "unavailable";
@@ -2672,16 +2689,18 @@ export class VoiceSession {
     const requestId = crypto.randomUUID();
     const started = Date.now();
     const scope = { callSid: this.callSid, liveSessionId: this.liveSessionId };
-    this.timing("model.started", { request_id: requestId, context_items: this.orchestratorContext.length });
+    const span = spanFields(this.callTrace && childOf(this.callTrace), this.callTrace);
+    this.timing("model.started", { request_id: requestId, context_items: this.orchestratorContext.length, ...span });
     try {
-      return await this.orchestratorModelRequest(requestId, started, scope);
+      return await this.orchestratorModelRequest(requestId, started, scope, span);
     } catch (error) {
-      this.timing("model.failed", { request_id: requestId, ms: Date.now() - started }, Date.now(), scope);
+      this.timing("model.failed", { request_id: requestId, ms: Date.now() - started, ...span }, Date.now(), scope);
       throw error;
     }
   }
 
-  private async orchestratorModelRequest(requestId: string, started: number, scope: { callSid: string | null; liveSessionId: string | null }): Promise<unknown[]> {
+  private async orchestratorModelRequest(requestId: string, started: number,
+    scope: { callSid: string | null; liveSessionId: string | null }, span: Record<string, string>): Promise<unknown[]> {
     // Any /v1/responses-compatible endpoint works here; OpenAI is the default deployment.
     const base = (this.env.ORCHESTRATOR_API_BASE ?? "https://api.openai.com/v1").replace(/\/$/, "");
     const response = await fetch(`${base}/responses`, {
@@ -2702,10 +2721,10 @@ export class VoiceSession {
       }),
       signal: AbortSignal.timeout(60_000),
     });
-    this.timing("model.headers", { request_id: requestId, status: response.status, ms: Date.now() - started }, Date.now(), scope);
+    this.timing("model.headers", { request_id: requestId, status: response.status, ms: Date.now() - started, ...span }, Date.now(), scope);
     if (!response.ok) throw new Error(`Orchestrator model ${response.status}: ${(await response.text()).slice(0, 200)}`);
     const body = await response.json<{ output?: unknown[]; usage?: Record<string, unknown> }>();
-    this.timing("model.completed", { request_id: requestId, ms: Date.now() - started,
+    this.timing("model.completed", { request_id: requestId, ms: Date.now() - started, ...span,
       tool_call_ids: (body.output ?? []).filter((item: any) => item.type === "function_call").map((item: any) => item.call_id) }, Date.now(), scope);
     await this.record("orchestrator.model", { request_id: requestId, started_ms: started, ms: Date.now() - started, usage: body.usage ?? null }, scope);
     const inputTokens = Number(body.usage?.input_tokens);
@@ -2834,7 +2853,9 @@ export class VoiceSession {
 
   private async executeOrchestratorTool(item: Record<string, any>): Promise<unknown> {
     const started = Date.now();
-    const metadata = { tool_call_id: item.call_id, name: item.name };
+    const metadata = { tool_call_id: item.call_id, name: item.name,
+      ...spanFields(this.callTrace && childOf(this.callTrace), this.callTrace) };
+    const origin = { callSid: this.callSid, liveSessionId: this.liveSessionId };
     this.timing("tool.started", metadata);
     // Outcome as the tool itself reported it: `ok` when it said ok:true, `error_result` when it
     // returned ok:false, `returned` when its result carries no ok flag, `threw` on an exception.
@@ -2843,10 +2864,10 @@ export class VoiceSession {
       const result = await this.executeOrchestratorToolInner(item);
       const ok = result && typeof result === "object" ? (result as { ok?: unknown }).ok : undefined;
       this.timing("tool.completed", { ...metadata, ms: Date.now() - started,
-        outcome: ok === true ? "ok" : ok === false ? "error_result" : "returned" });
+        outcome: ok === true ? "ok" : ok === false ? "error_result" : "returned" }, Date.now(), this.completionScope(origin));
       return result;
     } catch (error) {
-      this.timing("tool.failed", { ...metadata, ms: Date.now() - started, outcome: "threw" });
+      this.timing("tool.failed", { ...metadata, ms: Date.now() - started, outcome: "threw" }, Date.now(), this.completionScope(origin));
       throw error;
     }
   }
@@ -3090,8 +3111,12 @@ export class VoiceSession {
     await this.persistSessions();
 
     session.turnState = "in_progress";
-    session.turnStartedAt = Date.now();
+    const startedMs = session.turnStartedAt = Date.now();
     session.turnEndedAt = null;
+    // Persisted with the session, so the turn's end carries the same context under a later
+    // call or after eviction. Captured locally too: completion never rereads mutable state.
+    const turnTrace = session.turnTrace = { ...newRootContext(), link: this.callTrace };
+    const turnSpan = spanFields(turnTrace);
     await this.persistSessions();
     // Beginning a Prompt Turn follows that session, until the caller says otherwise or sends
     // another (DOMAIN.md, Followed Session). The turn_started earcon stands in for follow_started.
@@ -3102,18 +3127,18 @@ export class VoiceSession {
     void this.acpRequest("session/prompt", {
       sessionId: session.acpSessionId,
       prompt: [{ type: "text", text: prompt }],
-    }, 55 * 60 * 1000).then(async (result) => {
+    }, 55 * 60 * 1000, turnTrace).then(async (result) => {
       session.turnState = "stopped";
-      session.stopReason = String(result.stopReason ?? "unknown");
-      session.turnEndedAt = Date.now();
+      const stopReason = session.stopReason = String(result.stopReason ?? "unknown");
+      const endedMs = session.turnEndedAt = Date.now();
       closeOpenToolCalls(session);
       if (session.unsaid.trim()) this.feedPush("agent", session.unsaid.trim(), { who: session.alias, lane: "report" });
       this.feedPush("system", `${session.alias}'s turn ended (${session.stopReason})`, { lane: "event" });
       await this.persistSessions();
-      await this.record("acp.turn.stopped", { alias: session.alias, acp_session_id: session.acpSessionId,
-        started_ms: session.turnStartedAt, ended_ms: session.turnEndedAt,
-        ms: session.turnEndedAt - (session.turnStartedAt ?? session.turnEndedAt),
-        stop_reason: session.stopReason, thoughts: this.thoughts.get(session.id) ?? null });
+      await this.record("acp.turn.stopped", { alias: session.alias, acp_session_id: session.acpSessionId, ...turnSpan,
+        // Lifecycle times from locals: a later turn may have replaced the session's fields by now.
+        started_ms: startedMs, ended_ms: endedMs, ms: endedMs - startedMs,
+        stop_reason: stopReason, thoughts: this.thoughts.get(session.id) ?? null });
       // How a turn ended matters more than that it ended: each stop reason gets its own
       // earcon and opening clause.
       const ending = turnEnding(session.stopReason);
@@ -3126,13 +3151,13 @@ export class VoiceSession {
     }).catch(async (error) => {
       session.turnState = "failed";
       session.stopReason = null;
-      session.turnEndedAt = Date.now();
+      const endedMs = session.turnEndedAt = Date.now();
       session.failure = `Prompt Turn failed: ${errorMessage(error)}`;
       closeOpenToolCalls(session);
       await this.persistSessions();
-      await this.record("acp.turn.failed", { alias: session.alias, acp_session_id: session.acpSessionId,
-        started_ms: session.turnStartedAt, ended_ms: session.turnEndedAt,
-        ms: session.turnEndedAt - (session.turnStartedAt ?? session.turnEndedAt),
+      await this.record("acp.turn.failed", { alias: session.alias, acp_session_id: session.acpSessionId, ...turnSpan,
+        // Lifecycle times from locals: a later turn may have replaced the session's fields by now.
+        started_ms: startedMs, ended_ms: endedMs, ms: endedMs - startedMs,
         message: errorMessage(error), thoughts: this.thoughts.get(session.id) ?? null });
       await this.noteSinceGreeting(`${session.alias}'s turn failed`);
       this.queueEarcon("turn_failed");
@@ -3140,7 +3165,9 @@ export class VoiceSession {
       const agentTermination = error instanceof AgentTerminatedError ? error.termination.reason : undefined;
       await this.orchestratorEvent(`[harness event] turn_failed: ${JSON.stringify({ alias: session.alias, followed, error: errorMessage(error), agent_termination: agentTermination })}`);
     });
-    await this.record("acp.turn.started", { alias: session.alias, acp_session_id: session.acpSessionId, started_ms: session.turnStartedAt });
+    await this.record("acp.turn.started", { alias: session.alias, acp_session_id: session.acpSessionId,
+      started_ms: startedMs, ...turnSpan,
+      ...(turnTrace.link ? { link_trace_id: turnTrace.link.traceId, link_span_id: turnTrace.link.spanId } : {}) });
     this.queueEarcon("turn_started");
     return {
       ok: true, alias: session.alias, turn_state: session.turnState, following: session.alias, stopped_following: previous,
@@ -3590,8 +3617,13 @@ export class VoiceSession {
       return;
     }
     const update = message.params?.update as { sessionUpdate?: unknown; content?: { type?: unknown; text?: unknown } } | undefined;
+    // A response names the span of the request it answers, from that request's own record.
+    const pendingAnswer = message.id !== undefined && !message.method && connectionId === this.acpConnectionId
+      ? this.pendingRpc.get(message.id) ?? null : null;
+    const answered = pendingAnswer?.trace ?? null;
     this.timing("acp.received", {
       rpc_id: message.id, method: message.method, agent_connection_id: connectionId,
+      ...spanFields(answered?.context ?? null, answered?.parent ?? null),
       session_id: message.params?.sessionId,
       update: (message.params?.update as { sessionUpdate?: unknown } | undefined)?.sessionUpdate,
       tool_call_id: (message.params?.update as { toolCallId?: unknown } | undefined)?.toolCallId,
@@ -3602,7 +3634,7 @@ export class VoiceSession {
       ...(message.method === "session/update" && update?.sessionUpdate === "agent_message_chunk" &&
         update.content?.type === "text" && typeof update.content.text === "string"
         ? { content_text: update.content.text, content_kind: "agent_report" } : {}),
-    }, receivedMs);
+    }, receivedMs, pendingAnswer ? this.completionScope(pendingAnswer.scope) : undefined);
     if (message.id !== undefined && !message.method) {
       const pending = this.pendingRpc.get(message.id);
       if (!pending) return;
@@ -3910,16 +3942,20 @@ export class VoiceSession {
     })}`);
   }
 
-  private acpRequest(method: string, params: Record<string, unknown>, timeoutMs = 30_000): Promise<Record<string, unknown>> {
+  // Each request is its own span, a child of `parent` (the Prompt Turn for session/prompt,
+  // otherwise the Voice Call snapshot at send time) or a new root when there is neither.
+  private acpRequest(method: string, params: Record<string, unknown>, timeoutMs = 30_000,
+    parent: TraceContext | null = this.callTrace): Promise<Record<string, unknown>> {
     const id = this.rpcId++;
+    const trace = { context: parent ? childOf(parent) : newRootContext(), parent };
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRpc.delete(id);
         reject(new Error(`${method} timed out`));
       }, timeoutMs);
-      this.pendingRpc.set(id, { resolve, reject, timer });
+      this.pendingRpc.set(id, { resolve, reject, timer, trace, scope: { callSid: this.callSid, liveSessionId: this.liveSessionId } });
       try {
-        this.sendAcp({ jsonrpc: "2.0", id, method, params });
+        this.sendAcp({ jsonrpc: "2.0", id, method, params }, trace);
       } catch (error) {
         clearTimeout(timer);
         this.pendingRpc.delete(id);
@@ -3928,7 +3964,7 @@ export class VoiceSession {
     });
   }
 
-  private sendAcp(message: unknown): void {
+  private sendAcp(message: unknown, trace: PendingRpc["trace"] | null = null): void {
     if (!this.acp || this.acp.readyState !== WebSocket.OPEN) throw new Error("ACP connection is unavailable");
     this.acp.send(JSON.stringify(message));
     const rpc = message as JsonRpcMessage;
@@ -3937,7 +3973,7 @@ export class VoiceSession {
       ? rpc.params.prompt.filter((block: any) => block?.type === "text" && typeof block.text === "string")
         .map((block: any) => block.text).join("\n") : undefined;
     this.timing("acp.sent", { rpc_id: rpc.id, method: rpc.method, session_id: rpc.params?.sessionId,
-      agent_connection_id: this.acpConnectionId,
+      agent_connection_id: this.acpConnectionId, ...spanFields(trace?.context ?? null, trace?.parent ?? null),
       ...(prompt !== undefined ? { content_text: prompt, content_kind: "acp_prompt" } : {}) });
   }
 
@@ -4214,6 +4250,15 @@ export class VoiceSession {
     });
     if (!response.ok) throw new Error(`Daytona ${response.status}: ${(await response.text()).slice(0, 200)}`);
     return response.json<T>();
+  }
+
+  /**
+   * Journal scope for an operation's completion: the current voice session when one is
+   * attached (unchanged in-call behavior), otherwise the scope captured at the operation's start,
+   * so work finishing between calls is still observed rather than dropped.
+   */
+  private completionScope(origin: { callSid: string | null; liveSessionId: string | null }) {
+    return this.liveSessionId ? { callSid: this.callSid, liveSessionId: this.liveSessionId } : origin;
   }
 
   private timing(event: string, detail: Record<string, unknown> = {}, tsMs = Date.now(),
