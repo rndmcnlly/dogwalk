@@ -16,7 +16,7 @@ import {
 } from "./invitations";
 import { PAIR_BUILD } from "./pair_page";
 import { producerFields } from "./otlp";
-import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, type TraceContext } from "./trace_context";
+import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, type TraceContext, withTraceparent } from "./trace_context";
 
 const ACP_PORT = 8765;
 const WORKSPACE = "/home/daytona";
@@ -3964,7 +3964,9 @@ export class VoiceSession {
   }
 
   // Each request is its own span, a child of `parent` (the Prompt Turn for session/prompt,
-  // otherwise the Voice Call snapshot at send time) or a new root when there is neither.
+  // otherwise the Voice Call snapshot at send time) or a new root when there is neither. The
+  // span travels in `_meta.traceparent`, since the upgrade headers cannot name each request.
+  // Responses to Agent-initiated requests and notifications carry none: they are not our spans.
   private acpRequest(method: string, params: Record<string, unknown>, timeoutMs = 30_000,
     parent: TraceContext | null = this.callTrace): Promise<Record<string, unknown>> {
     const id = this.rpcId++;
@@ -3976,7 +3978,7 @@ export class VoiceSession {
       }, timeoutMs);
       this.pendingRpc.set(id, { resolve, reject, timer, trace, scope: { callSid: this.callSid, liveSessionId: this.liveSessionId } });
       try {
-        this.sendAcp({ jsonrpc: "2.0", id, method, params }, trace);
+        this.sendAcp({ jsonrpc: "2.0", id, method, params: withTraceparent(params, trace.context) }, trace);
       } catch (error) {
         clearTimeout(timer);
         this.pendingRpc.delete(id);

@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields } from "./src/trace_context.ts";
+import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, withTraceparent } from "./src/trace_context.ts";
 import { type ActivityRow, type CallRow, logsRequest, msToNanos, openRecordedSpanIds, projectLogs, projectSpans, tracesRequest } from "./src/otlp.ts";
 
 const projectCall = async (call: CallRow, rows: ActivityRow[]) => ({ logs: await projectLogs(call, rows), spans: await projectSpans(call, rows) });
@@ -210,6 +210,13 @@ for (const bad of [null, "", `00-${"0".repeat(32)}-${root.spanId}-01`, `00-${roo
 }
 assert.deepEqual(spanFields(child, root), { trace_id: root.traceId, span_id: child.spanId, parent_span_id: root.spanId });
 assert.ok(!("parent_span_id" in spanFields(newRootContext(), root)), "a parent from another trace is a link, not a parent");
+// ACP `_meta.traceparent` (B3): merged into existing `_meta`, never tracestate or baggage.
+const metaParams = { sessionId: "s", _meta: { "vendor.example/flag": true, traceparent: "stale" } };
+assert.deepEqual(withTraceparent(metaParams, child), { sessionId: "s",
+  _meta: { "vendor.example/flag": true, traceparent: formatTraceparent(child) } });
+assert.equal(metaParams._meta.traceparent, "stale", "the caller's params are not mutated");
+assert.deepEqual(withTraceparent({ cwd: "/w" }, child), { cwd: "/w", _meta: { traceparent: formatTraceparent(child) } });
+assert.deepEqual(withTraceparent({ _meta: ["odd"] }, child), { _meta: { traceparent: formatTraceparent(child) } });
 
 // Context recorded at operation start (B1) wins over derivation, and matches by span ID.
 const callCtx = newRootContext(), modelCtx = childOf(callCtx), turnCtx = newRootContext(), promptRpc = childOf(turnCtx);

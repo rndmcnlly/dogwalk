@@ -588,6 +588,16 @@ path or key), and reasoning effort on `model.started`; the provider's `x-request
 response `id`, served `model`, and input/output token counts on `model.completed`; and
 `error_type` on `model.failed`.
 
+Each ACP request Dogwalk sends carries its own span (the one on its `acp.sent` row) in
+`params._meta.traceparent`, merged into any existing `_meta`; the ACP extensibility spec
+reserves that key, and upgrade headers cannot name individual requests. No `tracestate`,
+`baggage`, credentials, or content go in `_meta`. Notifications (`session/cancel`) and
+responses to Agent-initiated requests carry none: they are not Dogwalk spans. The Sandbox
+gateway forwards `_meta` unchanged and logs a metadata-only `acp_trace_context` line
+(`SANDBOX_ACP_GATEWAY.md`). OpenCode 2.2.6 accepts the key, but its ACP layer does not read it,
+and nothing here gives the Sandbox an OTLP endpoint, so ACP spans end at the request/response
+boundary.
+
 Model request and Orchestrator tool spans follow the Development GenAI semantic conventions
 pinned at `open-telemetry/semantic-conventions-genai@e6658f14c9d9ea0760825f029cb82e7673f48fab`
 (2026-11-06; `src/otlp.ts` lists every adopted attribute). Model spans are named

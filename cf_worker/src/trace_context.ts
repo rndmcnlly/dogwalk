@@ -45,6 +45,16 @@ export function parseTraceparent(value: string | null | undefined): TraceContext
   return isTraceContext(context) ? context : null;
 }
 
+/**
+ * ACP request params carrying `context` in `_meta.traceparent` (issue #8, B3), the reserved key
+ * from the ACP extensibility spec. Other `_meta` keys are kept; tracestate and baggage are never
+ * added, since Dogwalk has no vendor state to pass and `_meta` must not carry credentials or content.
+ */
+export function withTraceparent(params: Record<string, unknown>, context: TraceContext): Record<string, unknown> {
+  const meta = params._meta && typeof params._meta === "object" && !Array.isArray(params._meta) ? params._meta : {};
+  return { ...params, _meta: { ...meta, traceparent: formatTraceparent(context) } };
+}
+
 /** Journal detail fields for a span observation; the projection reads exactly these. */
 export function spanFields(context: TraceContext | null, parent: TraceContext | null = null): Record<string, string> {
   if (!context) return {};

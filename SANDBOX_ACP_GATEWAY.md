@@ -35,6 +35,36 @@ The gateway forwards text frames without changing their JSON-RPC content,
 ignores binary frames as required by the RFD, drains Agent stderr separately,
 and caps each message at 1 MiB.
 
+### Trace context
+
+Dogwalk puts each ACP request's own span in `params._meta.traceparent`, the key the
+ACP extensibility spec reserves for W3C Trace Context; WebSocket upgrade headers are
+per connection, so they cannot name a request. The gateway writes each accepted
+text message's payload to Agent stdin unchanged, `_meta` included, plus the newline
+that delimits stdio messages (binary frames are ignored and oversized ones rejected,
+as before). It observes rather than enforces: when a client
+message carries `_meta.traceparent`, it logs one metadata-only line after writing it
+to Agent stdin, for example
+
+```text
+INFO acp_trace_context {"connection_id":"…","rpc_id":4,"method":"session/prompt","trace_id":"…","span_id":"…","received_ms":1794379289234,"forwarded_ms":1794379289234}
+```
+
+An invalid value (anything but a version-00 traceparent with nonzero IDs) is logged
+as `"traceparent":"invalid"`, never echoed, and still forwarded unchanged, since the
+gateway is a bridge, not a policy point. Params, other `_meta` keys, and content are
+never logged; an `rpc_id` or `method` that is not a short plain token is logged as
+`"invalid"`. The gateway has no OpenTelemetry SDK or exporter: the Sandbox has no
+collector, so these lines go to the gateway's log only.
+
+OpenCode `2.2.6` accepts `initialize` and `session/new` carrying `_meta.traceparent`
+without error (checked locally). Its source (`anomalyco/opencode` at `6b1db275`,
+newer than the 2.2.6 tag, not verified against it) wraps each ACP request in its own span
+(`cli.acp.<method>`) exported only when an OTLP endpoint is configured, and nothing in
+its ACP layer reads `_meta.traceparent`, so those spans do not join Dogwalk's trace.
+Nothing in this repository gives the Sandbox an OTLP endpoint (the live snapshot's
+environment was not inspected), so OpenCode should export no spans there.
+
 ## Run
 
 Inside a sandbox:
@@ -168,7 +198,8 @@ uv run --script sandbox_acp_gateway.py test
 
 It checks health, readiness, the connection ID header, single-connection
 exclusion, bidirectional text forwarding, binary-frame handling, subprocess
-stderr isolation, and connection-slot recovery. The first Daytona deployment
+stderr isolation, connection-slot recovery, byte-faithful forwarding of `_meta`
+with its trace-context log line (valid and invalid), and OOM reporting. The first Daytona deployment
 also passed a real authenticated-preview `initialize` and `session/new` round
 trip against OpenCode `1.18.4`, and snapshot `dogwalk-acp-20261107-v2` passed a
 full in-sandbox Prompt Turn against OpenCode `2.2.5`.

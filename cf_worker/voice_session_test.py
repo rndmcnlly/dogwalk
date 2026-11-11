@@ -52,6 +52,11 @@ OPENAI_WEBHOOK_KEY = secrets.token_bytes(32)
 OPENAI_WEBHOOK_SECRET = "whsec_" + base64.b64encode(OPENAI_WEBHOOK_KEY).decode()
 
 
+def without_meta(message: dict) -> dict:
+    """A request's params apart from `_meta`, whose trace context is checked on its own."""
+    return {key: value for key, value in message["params"].items() if key != "_meta"}
+
+
 class SocketMocks:
     def __init__(self) -> None:
         self.live = None
@@ -900,7 +905,7 @@ async def run_protocol(identity: str) -> None:
         created = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/new"
         )
-        assert created["params"] == {"cwd": "/home/daytona", "mcpServers": []}
+        assert without_meta(created) == {"cwd": "/home/daytona", "mcpServers": []}
         prompt_request = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/prompt"
         )
@@ -1008,6 +1013,16 @@ async def run_protocol(identity: str) -> None:
         requests = {row["rpc_id"]: row for row in timed if row["event"] == "acp.sent" and row.get("method")}
         answers = [row for row in timed if row["event"] == "acp.received" and not row.get("method") and row.get("rpc_id") in requests]
         assert answers and all(a.get("span_id") == requests[a["rpc_id"]].get("span_id") for a in answers), "responses name their request"
+        # ACP propagation (issue #8, B3): each request carries its own journaled span as
+        # `_meta.traceparent` and nothing else in `_meta` (so session/prompt's, matching its row
+        # above, is a child of the Prompt Turn); responses and notifications carry none.
+        wire = {m["id"]: m for m in mocks.acp_seen if m.get("method") and "id" in m}
+        for rpc_id, row in requests.items():
+            meta = wire[rpc_id]["params"].get("_meta")
+            assert meta == {"traceparent": f"00-{row['trace_id']}-{row['span_id']}-01"}, (rpc_id, meta, row)
+        assert {"initialize", "session/new", "session/prompt"} <= {wire[i]["method"] for i in requests}
+        assert all("_meta" not in (m.get("params") or {}) and "_meta" not in (m.get("result") or {})
+                   for m in mocks.acp_seen if not m.get("method") or "id" not in m), "only our requests carry trace context"
         # Responses propagation (issue #8, B2): each model request carries its own span as a
         # version-00 traceparent and its request_id as X-Client-Request-Id; the provider's
         # correlation metadata, never content, is journaled on the headers and completed rows.
@@ -1054,21 +1069,21 @@ async def run_protocol(identity: str) -> None:
         listed = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/list"
         )
-        assert listed["params"] == {}
+        assert without_meta(listed) == {}
         listed = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/list"
         )
-        assert listed["params"] == {"cursor": "2"}
+        assert without_meta(listed) == {"cursor": "2"}
         resumed = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/resume"
         )
-        assert resumed["params"] == {
+        assert without_meta(resumed) == {
             "sessionId": PERSISTED_SESSION_ID, "cwd": "/home/daytona/parser", "mcpServers": [],
         }
         closed = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/close"
         )
-        assert closed["params"] == {"sessionId": PERSISTED_SESSION_ID}
+        assert without_meta(closed) == {"sessionId": PERSISTED_SESSION_ID}
         leashed = await next_matching(mocks.live_messages, appended("commentary", LEASH_SAY))
         assert leashed["delegation_id"] == "del-3"
         discovered = OrchestratorMock.tool_output("h3-discover")
@@ -1151,12 +1166,12 @@ async def run_protocol(identity: str) -> None:
             return lambda item: item.get("method") == "session/resume" and item["params"]["sessionId"] == session_id
 
         restored = await next_matching(mocks.acp_messages, resume_of("acp-session-test"))
-        assert restored["params"] == {"sessionId": "acp-session-test", "cwd": "/home/daytona", "mcpServers": []}
+        assert without_meta(restored) == {"sessionId": "acp-session-test", "cwd": "/home/daytona", "mcpServers": []}
         await next_matching(mocks.acp_messages, lambda item: item.get("method") == "session/list")
         repaired = await next_matching(mocks.acp_messages, resume_of("acp-session-test"))
         assert repaired["params"]["cwd"] == "/home/daytona/honeydozer", repaired
         dozer_restored = await next_matching(mocks.acp_messages, resume_of("acp-session-honeydozer"))
-        assert dozer_restored["params"] == {
+        assert without_meta(dozer_restored) == {
             "sessionId": "acp-session-honeydozer", "cwd": "/home/daytona/honeydozer", "mcpServers": [],
         }
         assert not any(m.get("method") == "session/load" for m in mocks.acp_seen)

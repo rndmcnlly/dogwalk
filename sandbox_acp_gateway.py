@@ -18,7 +18,9 @@ import shutil
 import signal
 import socket
 import sys
+import re
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from aiohttp import ClientSession, WSMsgType, WSServerHandshakeError, web
@@ -113,6 +115,34 @@ def request_key(message: object) -> str | None:
     return None
 
 
+TRACEPARENT = re.compile(r"00-(?!0{32})([0-9a-f]{32})-(?!0{16})([0-9a-f]{16})-[0-9a-f]{2}")
+LOG_TOKEN = re.compile(r"[A-Za-z0-9_./-]{1,64}")
+
+
+def trace_fields(message: object) -> dict | None:
+    """The W3C trace context a client message carries in `_meta.traceparent` (ACP extensibility),
+    as metadata only. None when there is no traceparent; an invalid one is reported, never echoed."""
+    if not isinstance(message, dict) or not isinstance(message.get("params"), dict):
+        return None
+    meta = message["params"].get("_meta")
+    if not isinstance(meta, dict) or "traceparent" not in meta:
+        return None
+    # Only bounded scalars reach the log: an id or method of another shape, or oversized, is a marker.
+    rpc_id, method = message.get("id"), message.get("method")
+    fields: dict = {
+        "rpc_id": rpc_id if (isinstance(rpc_id, int) and not isinstance(rpc_id, bool))
+        or (isinstance(rpc_id, str) and LOG_TOKEN.fullmatch(rpc_id)) else "invalid",
+        "method": method if isinstance(method, str) and LOG_TOKEN.fullmatch(method) else "invalid",
+    }
+    # fullmatch, not match: `$` would accept a trailing newline the Worker's parser rejects.
+    match = TRACEPARENT.fullmatch(meta["traceparent"]) if isinstance(meta["traceparent"], str) else None
+    if match:
+        fields.update(trace_id=match[1], span_id=match[2])
+    else:
+        fields["traceparent"] = "invalid"
+    return fields
+
+
 class AcpGateway:
     """Own one WebSocket-to-stdio ACP Agent connection at a time."""
 
@@ -183,7 +213,7 @@ class AcpGateway:
                 limit=MAX_MESSAGE_BYTES + 1,
             )
             self._process = process
-            await self._bridge(websocket, process, oom_before)
+            await self._bridge(websocket, process, oom_before, connection_id)
         except Exception:
             LOG.exception("connection_failed connection_id=%s", connection_id)
             if not websocket.closed:
@@ -204,6 +234,7 @@ class AcpGateway:
         websocket: web.WebSocketResponse,
         process: asyncio.subprocess.Process,
         oom_before: dict[Path, int],
+        connection_id: str,
     ) -> None:
         assert process.stdin is not None
         assert process.stdout is not None
@@ -220,6 +251,7 @@ class AcpGateway:
         async def websocket_to_agent() -> None:
             async for message in websocket:
                 if message.type == WSMsgType.TEXT:
+                    received_ms = time.time_ns() // 1_000_000
                     encoded = message.data.encode("utf-8")
                     if len(encoded) > MAX_MESSAGE_BYTES:
                         await websocket.close(code=1009, message=b"Message too large")
@@ -228,8 +260,15 @@ class AcpGateway:
                     key = request_key(parsed)
                     if key is not None and "method" in parsed:
                         pending[key] = parsed["id"]
+                    # Forwarded as received, `_meta` included: the bridge observes trace
+                    # context but is not a policy point, so even an invalid value passes on.
                     process.stdin.write(encoded + b"\n")
                     await process.stdin.drain()
+                    if (trace := trace_fields(parsed)) is not None:
+                        LOG.info("acp_trace_context %s", json.dumps({
+                            "connection_id": connection_id, **trace,
+                            "received_ms": received_ms, "forwarded_ms": time.time_ns() // 1_000_000,
+                        }, separators=(",", ":")))
                 elif message.type == WSMsgType.ERROR:
                     raise websocket.exception() or RuntimeError("WebSocket failed")
 
@@ -332,6 +371,9 @@ def create_app(gateway: AcpGateway) -> web.Application:
 
 async def fake_agent() -> None:
     while line := await asyncio.to_thread(sys.stdin.buffer.readline):
+        if stdin_log := os.environ.get("DOGWALK_TEST_STDIN_LOG"):
+            with open(stdin_log, "ab") as file:
+                file.write(line)
         message = json.loads(line)
         events = os.environ.get("DOGWALK_TEST_MEMORY_EVENTS")
         if message.get("method") == "session/prompt" and events:
@@ -354,6 +396,12 @@ async def run_test() -> None:
     (cgroups / "gateway" / "memory.max").write_text("max\n")
     (cgroups / "proc-cgroup").write_text("0::/gateway\n")
     os.environ["DOGWALK_TEST_MEMORY_EVENTS"] = str(cgroups / "memory.events")
+    stdin_log = cgroups / "agent-stdin"
+    os.environ["DOGWALK_TEST_STDIN_LOG"] = str(stdin_log)
+    logged: list[str] = []
+    capture = logging.Handler()
+    capture.emit = lambda record: logged.append(record.getMessage())
+    LOG.addHandler(capture)
     gateway = AcpGateway(Path.cwd(), fake_command, cgroups, cgroups / "proc-cgroup")
     assert gateway.cgroups == [cgroups / "gateway", cgroups]
     runner = web.AppRunner(create_app(gateway))
@@ -401,6 +449,28 @@ async def run_test() -> None:
             await websocket.send_json(follow_up)
             echoed = await websocket.receive_json(timeout=3)
             assert echoed == follow_up
+
+            # Trace context in `_meta` reaches the Agent byte for byte, beside unrelated keys,
+            # and the bridge logs metadata about it; an invalid value is logged and still sent.
+            trace_id, span_id = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"
+            traced = ('{"jsonrpc":"2.0","id":"t-1","method":"session/new","params":{"cwd":"/w",'
+                      f'"_meta": {{"vendor.example/x": [1, 2], "traceparent": "00-{trace_id}-{span_id}-01"}}}}}}')
+            invalid = ('{"jsonrpc":"2.0","id":2,"method":"session/list","params":'
+                       '{"_meta":{"traceparent":"00-SECRET-not-a-span-01"}}}')
+            for text in (traced, invalid):
+                await websocket.send_str(text)
+                await websocket.receive_json(timeout=3)
+            assert stdin_log.read_bytes().splitlines()[-2:] == [traced.encode(), invalid.encode()]
+            records = [json.loads(line.split(" ", 1)[1]) for line in logged if line.startswith("acp_trace_context ")]
+            assert len(records) == 2, logged
+            valid_record, invalid_record = records
+            assert valid_record.keys() == {"connection_id", "rpc_id", "method", "trace_id", "span_id", "received_ms", "forwarded_ms"}
+            assert (valid_record["connection_id"], valid_record["rpc_id"], valid_record["method"]) == (connection_id, "t-1", "session/new")
+            assert (valid_record["trace_id"], valid_record["span_id"]) == (trace_id, span_id)
+            assert valid_record["forwarded_ms"] >= valid_record["received_ms"] > 0
+            assert invalid_record["traceparent"] == "invalid" and "trace_id" not in invalid_record
+            assert (invalid_record["rpc_id"], invalid_record["method"]) == (2, "session/list")
+            assert "SECRET" not in "\n".join(logged) and "vendor.example" not in "\n".join(logged)
             await websocket.close()
 
             for _ in range(30):
@@ -432,9 +502,22 @@ async def run_test() -> None:
             assert closing.type == WSMsgType.CLOSE and websocket.close_code == 1011, closing
             assert json.loads(closing.extra)["reason"] == "out_of_memory", closing
     finally:
+        LOG.removeHandler(capture)
         await runner.cleanup()
         shutil.rmtree(cgroups, ignore_errors=True)
-    print("sandbox ACP gateway: 13 checks passed")
+    # Same acceptance rule as the Worker's parseTraceparent, and only bounded scalars logged.
+    good = "00-" + "4bf92f3577b34da6a3ce929d0e0e4736" + "-" + "00f067aa0ba902b7" + "-01"
+    traced = lambda value, **top: trace_fields({"jsonrpc": "2.0", "id": 1, "method": "session/new", **top,
+                                                "params": {"_meta": {"traceparent": value}}})
+    assert traced(good)["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
+    for bad in (good + "\n", good + "\r", good.upper(), "00-" + "0" * 32 + "-00f067aa0ba902b7-01",
+                good[:36] + "0" * 16 + good[52:], "ff" + good[2:], good[:-2] + "0g", 7):
+        assert traced(bad)["traceparent"] == "invalid" and "trace_id" not in traced(bad), bad
+    secret = "SECRET_SENTINEL_" + "x" * 80
+    odd = traced(good, id={"nested": secret}, method=secret)
+    assert odd["rpc_id"] == "invalid" and odd["method"] == "invalid" and secret not in json.dumps(odd), odd
+    assert traced(good, id=True)["rpc_id"] == "invalid" and traced(good, id="req-7")["rpc_id"] == "req-7"
+    print("sandbox ACP gateway: 22 checks passed, plus traceparent and log-field rules")
 
 
 def parser() -> argparse.ArgumentParser:
