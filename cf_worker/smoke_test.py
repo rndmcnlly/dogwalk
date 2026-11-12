@@ -1502,18 +1502,26 @@ def identity_checks(base_url: str, token: str) -> None:
         require(f">{phrase}</Say></Gather>" in body, f"identity round {number} does not say its phrase: {body}")
         return stream[1], action[1].replace("&amp;", "&"), phrase
 
-    def answer(body: str, form: dict, number: int, path: str, user: int, seconds: float, first_sample: int, take: int = 0) -> str:
-        """A matched answer: its stream is scored, and the result step speaks what follows."""
+    def answer(body: str, form: dict, number: int, path: str, user: int, seconds: float, first_sample: int, take: int = 0,
+               audio: bytes | None = None, stored: float | None = None) -> str:
+        """A matched answer: its stream is scored (steady audio at the stop, or `audio` whose end
+        starts a speculative score of `stored` seconds before the transcript), and the result
+        step speaks what follows."""
         stream, action, phrase = round_of(body, form["CallSid"], number, path, user, take)
         name = f"identity-round-{number:02d}" + (f"-{take}" if take else "")
         redirect = []
         def heard() -> None:
+            for _ in range(40 if stored is not None else 0):
+                rows = d1_local(f"SELECT spec_speech_seconds FROM challenge_rounds WHERE call_sid = '{form['CallSid']}' AND round = {number}")
+                if rows and rows[0]["spec_speech_seconds"] == stored:
+                    break
+                time.sleep(0.25)
             _, twiml = post(base_url, action, {**form, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)
             match = re.fullmatch(rf'<Response><Stop><Stream name="{name}"/></Stop>{received_cue}'
                                  rf'<Redirect method="POST">(/voice/identity/result\?[^<]+)</Redirect></Response>', twiml)
             require(match is not None, f"identity matched phrase: {twiml}")
             redirect.append(match[1].replace("&amp;", "&"))
-        practice_stream(base_url, stream, token, number, seconds, first_sample, heard, take)
+        practice_stream(base_url, stream, token, number, audio or steady_audio(seconds, first_sample), heard, take)
         status, result = post(base_url, redirect[0], form, token)
         require(status == 200, f"identity result {number}: {status} {result}")
         return result
@@ -1538,7 +1546,10 @@ def identity_checks(base_url: str, token: str) -> None:
     for sid, sample, said, outcome, enforcement in (("CA_ID_2", 6000, "Voice matched.", "match", "admit"),
                                                     ("CA_ID_3", 3000, "Voice not matched.", "no_match", "require_roaming")):
         _, body = post(base_url, "/voice", call(sid), token)
-        body = answer(body, call(sid), 1, "home", uid, 3.0, sample)
+        # The match round's score starts when the answer ends, before its transcript (#18).
+        speculative = sid == "CA_ID_2"
+        body = answer(body, call(sid), 1, "home", uid, 3.0, sample, audio=answer_audio(sample, (2.0, True), (1.0, False)) if speculative else None,
+                      stored=3.7 if speculative else None)
         require(body == f'<Response><Say voice="Polly.Joanna">{said}</Say>{connect}', f"{outcome} Home level: {body}")
         require(identity(sid)["outcome"] == outcome and identity(sid)["enforcement"] == enforcement, f"identity: {identity(sid)}")
     require(d1_local(f"SELECT challenges_completed AS n FROM users WHERE id = {uid}")[0]["n"] == 3, "completed challenges not counted")
@@ -1606,7 +1617,9 @@ def identity_checks(base_url: str, token: str) -> None:
     _, body = post(base_url, "/voice", form, token)
     require("I'll learn it now." in body and "never a recording" in body and "5 sentences" in body, f"enrollment intro: {body}")
     for number in range(1, 7):
-        body = answer(body, form, number, "enroll", eid, 0.4 if number == 2 else 3.0, 6000)
+        # The first answer is embedded speculatively, from the end of the answer.
+        body = answer(body, form, number, "enroll", eid, 0.4 if number == 2 else 3.0, 6000,
+                      audio=answer_audio(6000, (2.0, True), (1.0, False)) if number == 1 else None, stored=3.7 if number == 1 else None)
         if number == 2:
             require("I didn't get enough of that one. Here's another." in body, f"enrollment short answer: {body}")
         elif number < 6:
@@ -1639,6 +1652,9 @@ def identity_checks(base_url: str, token: str) -> None:
     require(len(scored) == 6 and all("cosine" in r and "speech_seconds" in r and "wait_ms" in r and isinstance(r.get("cold"), bool) for r in scored),
             f"scored identity rounds: {scored}")
     require(all("transcript" not in r and "phrase" not in r and "embedding" not in r for r in rounds), "Call Activity kept identity speech")
+    spec = [r for r in rounds if r.get("speculative")]
+    require(len(spec) == 2 and all(r["head_start_ms"] > 0 and r["speech_seconds"] == 3.7 for r in spec)
+            and [r["outcome"] for r in spec] == ["match", "collected"], f"speculative identity rounds: {spec}")
     require({"identity.started", "identity.escape", "identity.who", "identity.result", "identity.repeat"} <= {row["event"] for row in rows},
             f"identity events: {sorted({row['event'] for row in rows})}")
 
