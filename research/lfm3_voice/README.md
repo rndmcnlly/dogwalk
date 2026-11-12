@@ -5,6 +5,7 @@ hypotheses and controls. All audio and conversations are synthetic. Raw local
 requests, transcripts, WAVs, and timing evidence live in ignored `artifacts/`.
 
 Outcome: [FINDINGS.md](FINDINGS.md). Machine-readable aggregates: [RESULTS.json](RESULTS.json).
+Round two (separately scored organs): [PLAN2.md](PLAN2.md), [FINDINGS2.md](FINDINGS2.md), [RESULTS2.json](RESULTS2.json).
 
 ## Boundary to reproduce
 
@@ -161,3 +162,34 @@ The installed server advertises greedy text sampling and a sentinel/random seed;
 its realtime API does not expose per-response seed/temperature overrides. Native
 call IDs also vary and can perturb later context. Inspect provenance and exact
 event traces; repeated scores are not independent-caller statistics.
+
+## Round two reproduction
+
+GPU lease required for LFM steps; never run Parakeet while LFM is generating.
+Each output directory must be fresh. `heldout2_cases.json` was authored by a
+separate agent (see FINDINGS2) and is scored once.
+
+```sh
+cd research/lfm3_voice
+uv run --script router_organ.py main --output artifacts/round2/router-main
+uv run --script router_organ.py analyze --input artifacts/round2/router-main
+uv run --script router_organ.py heldout --analysis artifacts/round2/router-main/analysis.json --output artifacts/round2/router-heldout
+uv run --script speech_organ.py render --output artifacts/round2/speech --repeats 3
+uv run --script speech_organ.py manifest --output artifacts/round2/speech
+HF_HUB_OFFLINE=1 uv run --offline --no-project --script transcription.py --batch artifacts/round2/speech/audio-manifest.json --output-dir artifacts/round2/speech/parakeet
+uv run --script speech_organ.py score --output artifacts/round2/speech --asr-dir artifacts/round2/speech/parakeet
+uv run --script composite.py run --output artifacts/round2/composite --analysis artifacts/round2/router-main/analysis.json
+uv run --script composite.py manifest --output artifacts/round2/composite
+HF_HUB_OFFLINE=1 uv run --offline --no-project --script transcription.py --batch artifacts/round2/composite/audio-manifest.json --output-dir artifacts/round2/composite/parakeet
+uv run --script composite.py score --output artifacts/round2/composite --asr-dir artifacts/round2/composite/parakeet
+python3 -B judge_packets.py composite
+python3 -B judge_packets.py speech
+python3 -B judge_packets.py orchestrator
+python3 -B judge_packets.py orchestrator --heldout heldout2_cases.json
+python3 -B summarize2.py
+```
+
+Judges and Orchestrator stand-ins are fresh-context agents given only the
+packets under `artifacts/round2/packets/` (keys withheld); their saved outputs
+go to `artifacts/round2/judges/{composite,speech,orchestrator-main,orchestrator-heldout}.json`
+before `summarize2.py`. Model assignments per role are recorded in `RESULTS2.json`.

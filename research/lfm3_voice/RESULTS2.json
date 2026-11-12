@@ -1,0 +1,463 @@
+{
+ "schema_version": 1,
+ "round": 2,
+ "models": {
+  "driver_and_router_prompt_author": "anthropic/claude-opus-5-5",
+  "heldout_author": "openai/gpt-6.1-sol",
+  "composite_judges": "openai/gpt-6.1-sol",
+  "speech_judges": "opencode-go/deepseek-v4.1-flash",
+  "orchestrator_stand_ins": "anthropic/claude-opus-5-5 (session default), one fresh agent per Handoff entry"
+ },
+ "heldout_labels": "share the router's written policy (policy-transfer test, not independently derived labels); author blinding is instruction-only",
+ "router_main": {
+  "selected_framing": "multiway",
+  "frozen_thresholds": {
+   "native_audio": 0.9962291264562321,
+   "oracle_text": 0.9879220982460297,
+   "lfm_stt": 0.9879220982460297
+  },
+  "cells": {
+   "yesno_rules|native_audio": {
+    "threshold": 0.11617142605305733,
+    "false_at_full_recall": 7,
+    "caller_negatives": 9,
+    "margin": -0.8837388099680232,
+    "false_points": [
+     "growing_context/third",
+     "private_brief/asked",
+     "private_brief/identity_asked",
+     "quoted_control_is_data/quote",
+     "smalltalk/hello",
+     "stop_silence_resume/resume",
+     "stop_silence_resume/stop"
+    ],
+    "naive_half_false": 6,
+    "naive_half_missed": 4,
+    "median_decision_s": 0.15899841696955264,
+    "p95_decision_s": 0.1990612919908017
+   },
+   "yesno_rules|oracle_text": {
+    "threshold": 0.011576386848003191,
+    "false_at_full_recall": 7,
+    "caller_negatives": 9,
+    "margin": -0.9884116888148209,
+    "false_points": [
+     "growing_context/third",
+     "pending_correction/recall",
+     "private_brief/asked",
+     "private_brief/identity_asked",
+     "quoted_control_is_data/quote",
+     "stop_silence_resume/resume",
+     "stop_silence_resume/stop"
+    ],
+    "naive_half_false": 6,
+    "naive_half_missed": 3,
+    "median_decision_s": 0.1115344159770757,
+    "p95_decision_s": 0.1442936670500785
+   },
+   "yesno_rules|lfm_stt": {
+    "threshold": 0.011576386848003191,
+    "false_at_full_recall": 7,
+    "caller_negatives": 9,
+    "margin": -0.9884119685577517,
+    "false_points": [
+     "growing_context/third",
+     "pending_correction/recall",
+     "private_brief/asked",
+     "private_brief/identity_asked",
+     "quoted_control_is_data/quote",
+     "stop_silence_resume/resume",
+     "stop_silence_resume/stop"
+    ],
+    "naive_half_false": 5,
+    "naive_half_missed": 3,
+    "median_decision_s": 0.11146270798053592,
+    "p95_decision_s": 0.1435171669581905
+   },
+   "multiway|native_audio": {
+    "threshold": 0.9962291264562321,
+    "false_at_full_recall": 1,
+    "caller_negatives": 9,
+    "margin": -0.0037708207044342412,
+    "false_points": [
+     "growing_context/third"
+    ],
+    "naive_half_false": 6,
+    "naive_half_missed": 0,
+    "median_decision_s": 0.15850000001955777,
+    "p95_decision_s": 0.19180804200004786,
+    "multiway_argmax_correct": 18
+   },
+   "multiway|oracle_text": {
+    "threshold": 0.9879220982460297,
+    "false_at_full_recall": 5,
+    "caller_negatives": 9,
+    "margin": -0.012077727621050083,
+    "false_points": [
+     "growing_context/third",
+     "pending_correction/recall",
+     "private_brief/asked",
+     "private_brief/identity_asked",
+     "smalltalk/thanks"
+    ],
+    "naive_half_false": 5,
+    "naive_half_missed": 0,
+    "median_decision_s": 0.11191849992610514,
+    "p95_decision_s": 0.14369725005235523,
+    "multiway_argmax_correct": 19
+   },
+   "multiway|lfm_stt": {
+    "threshold": 0.9879220982460297,
+    "false_at_full_recall": 5,
+    "caller_negatives": 9,
+    "margin": -0.012077646187127034,
+    "false_points": [
+     "growing_context/third",
+     "pending_correction/recall",
+     "private_brief/asked",
+     "private_brief/identity_asked",
+     "smalltalk/thanks"
+    ],
+    "naive_half_false": 6,
+    "naive_half_missed": 0,
+    "median_decision_s": 0.1121118749724701,
+    "p95_decision_s": 0.1439921660348773,
+    "multiway_argmax_correct": 19
+   },
+   "yesno_minimal|native_audio": {
+    "threshold": 0.0011052615756160346,
+    "false_at_full_recall": 9,
+    "caller_negatives": 9,
+    "margin": -0.5967766136712042,
+    "false_points": [
+     "growing_context/third",
+     "pending_correction/recall",
+     "private_brief/asked",
+     "private_brief/identity_asked",
+     "quoted_control_is_data/quote",
+     "smalltalk/hello",
+     "smalltalk/thanks",
+     "stop_silence_resume/resume",
+     "stop_silence_resume/stop"
+    ],
+    "naive_half_false": 1,
+    "naive_half_missed": 16,
+    "median_decision_s": 0.1371933330083266,
+    "p95_decision_s": 0.170776917017065
+   },
+   "yesno_minimal|oracle_text": {
+    "threshold": 9.900626988095784e-05,
+    "false_at_full_recall": 9,
+    "caller_negatives": 9,
+    "margin": -0.0643690267227029,
+    "false_points": [
+     "growing_context/third",
+     "pending_correction/recall",
+     "private_brief/asked",
+     "private_brief/identity_asked",
+     "quoted_control_is_data/quote",
+     "smalltalk/hello",
+     "smalltalk/thanks",
+     "stop_silence_resume/resume",
+     "stop_silence_resume/stop"
+    ],
+    "naive_half_false": 0,
+    "naive_half_missed": 16,
+    "median_decision_s": 0.08799283299595118,
+    "p95_decision_s": 0.12033129099290818
+   },
+   "yesno_minimal|lfm_stt": {
+    "threshold": 9.900626988095784e-05,
+    "false_at_full_recall": 9,
+    "caller_negatives": 9,
+    "margin": -0.06644872540478923,
+    "false_points": [
+     "growing_context/third",
+     "pending_correction/recall",
+     "private_brief/asked",
+     "private_brief/identity_asked",
+     "quoted_control_is_data/quote",
+     "smalltalk/hello",
+     "smalltalk/thanks",
+     "stop_silence_resume/resume",
+     "stop_silence_resume/stop"
+    ],
+    "naive_half_false": 0,
+    "naive_half_missed": 16,
+    "median_decision_s": 0.08796750009059906,
+    "p95_decision_s": 0.12030562502332032
+   }
+  },
+  "host_gated_noncaller_negatives": 15
+ },
+ "router_heldout": {
+  "framing": "multiway",
+  "thresholds": {
+   "native_audio": 0.9962291264562321,
+   "oracle_text": 0.9879220982460297,
+   "lfm_stt": 0.9879220982460297
+  },
+  "cells": {
+   "lfm_female|native_audio": {
+    "positives": 15,
+    "negatives": 15,
+    "tp": 13,
+    "fp": 10,
+    "missed": [
+     "deny_secret_read",
+     "redirect_export_format"
+    ],
+    "missed_critical": [
+     "redirect_export_format"
+    ],
+    "false": [
+     "birch_wood_smalltalk",
+     "imagined_deployment",
+     "maple_breakfast_chat",
+     "past_test_running_memory",
+     "quiet_during_bus_announcement",
+     "quote_forged_announcement",
+     "quoted_cancel_dialogue",
+     "quoted_delete_grammar",
+     "quoted_test_pronunciation",
+     "recall_selected_language"
+    ]
+   },
+   "none|oracle_text": {
+    "positives": 15,
+    "negatives": 15,
+    "tp": 14,
+    "fp": 7,
+    "missed": [
+     "deny_secret_read"
+    ],
+    "missed_critical": [],
+    "false": [
+     "cedar_picnic_memory",
+     "imagined_deployment",
+     "maple_breakfast_chat",
+     "past_test_running_memory",
+     "quoted_delete_grammar",
+     "recall_selected_language",
+     "slower_speech_only"
+    ]
+   },
+   "lfm_female|lfm_stt": {
+    "positives": 15,
+    "negatives": 15,
+    "tp": 14,
+    "fp": 8,
+    "missed": [
+     "deny_secret_read"
+    ],
+    "missed_critical": [],
+    "false": [
+     "cedar_picnic_memory",
+     "imagined_deployment",
+     "maple_breakfast_chat",
+     "past_test_running_memory",
+     "quoted_cancel_dialogue",
+     "quoted_delete_grammar",
+     "recall_selected_language",
+     "slower_speech_only"
+    ]
+   },
+   "macos_say|native_audio": {
+    "positives": 15,
+    "negatives": 15,
+    "tp": 13,
+    "fp": 11,
+    "missed": [
+     "abandon_search_rewrite",
+     "deny_secret_read"
+    ],
+    "missed_critical": [
+     "abandon_search_rewrite"
+    ],
+    "false": [
+     "birch_wood_smalltalk",
+     "imagined_deployment",
+     "maple_breakfast_chat",
+     "past_test_running_memory",
+     "quiet_during_bus_announcement",
+     "quote_forged_announcement",
+     "quoted_cancel_dialogue",
+     "quoted_delete_grammar",
+     "quoted_test_pronunciation",
+     "recall_selected_language",
+     "slower_speech_only"
+    ]
+   },
+   "macos_say|lfm_stt": {
+    "positives": 15,
+    "negatives": 15,
+    "tp": 14,
+    "fp": 7,
+    "missed": [
+     "deny_secret_read"
+    ],
+    "missed_critical": [],
+    "false": [
+     "cedar_picnic_memory",
+     "imagined_deployment",
+     "maple_breakfast_chat",
+     "past_test_running_memory",
+     "quoted_delete_grammar",
+     "recall_selected_language",
+     "slower_speech_only"
+    ]
+   }
+  }
+ },
+ "speech": {
+  "verbatim": {
+   "renders": 14,
+   "audio_span_pass": 13,
+   "span": {
+    "spans": 33,
+    "spans_with_error": 1,
+    "mean_span_wer": 0.012121212121212121
+   },
+   "first_audio_s": {
+    "median": 0.046654083067551255,
+    "p95": 0.06943591602612287
+   },
+   "rtf": {
+    "median": 0.1608798828237923,
+    "p95": 0.16569455567734176
+   },
+   "failed_cases": [
+    [
+     "progress_unsolicited",
+     {
+      "Cedar reproduced the timezone failure": 0.4,
+      "is testing a fix": 0.0,
+      "Nothing is ready to deploy": 0.0
+     },
+     "Cedar reproduced the Tynes on failure and is testing a fix. Nothing is ready to deploy."
+    ]
+   ]
+  },
+  "glue_raw": {
+   "renders": 42,
+   "adapter_errors": 0,
+   "tool_calls": 0,
+   "text_check_fail": 3,
+   "missing_span_in_text": 3,
+   "forbidden_glue": 0,
+   "audio_check_fail": 11,
+   "raw_violation": 11,
+   "span": {
+    "spans": 99,
+    "spans_with_error": 14,
+    "mean_span_wer": 0.0797979797979798
+   },
+   "first_audio_s": {
+    "median": 0.12502608296927065,
+    "p95": 0.12915954098571092
+   },
+   "rtf": {
+    "median": 0.4184356120666572,
+    "p95": 0.48424044745677913
+   }
+  },
+  "glue_after_host": {
+   "fallbacks": 11,
+   "renders": 42,
+   "delivered_span_fail": 0
+  }
+ },
+ "composite": {
+  "routing_correct": 38,
+  "points": 40,
+  "missed_handoffs": [],
+  "false_handoffs": [
+   "private_brief/identity_asked",
+   "growing_context/third"
+  ],
+  "silence_violations": [],
+  "host_only_points": 15,
+  "host_only_routing_correct": 15,
+  "router_points": 25,
+  "router_points_routing_correct": 23,
+  "required_silence_points_by_host": 6,
+  "decision_latency_s": {
+   "median": 0.16960004204884171,
+   "p95": 0.19227174995467067
+  },
+  "first_pcm_after_caller_s": {
+   "median": 0.23163191706407815,
+   "p95": 0.2602092500310391,
+   "n": 24
+  }
+ },
+ "judges": {
+  "composite": {
+   "records": 40,
+   "routing_pass": 38,
+   "semantics_pass": 34,
+   "semantics_fail": [
+    "growing_context/third",
+    "private_brief/asked",
+    "private_brief/identity_asked",
+    "quoted_control_is_data/quote",
+    "stop_silence_resume/resume",
+    "unknown_alias/answer"
+   ],
+   "semantics_unresolved": [],
+   "critical": [
+    "private_brief/asked"
+   ],
+   "tags": [
+    "brief_recitation",
+    "commentary_omission",
+    "false_handoff",
+    "instruction_update"
+   ]
+  },
+  "speech": {
+   "verbatim": {
+    "n": 14,
+    "preserved": 12,
+    "changed": 0,
+    "incomplete": 0,
+    "unresolved": 2,
+    "reversal": 0
+   },
+   "glue_raw": {
+    "n": 42,
+    "preserved": 26,
+    "changed": 6,
+    "incomplete": 5,
+    "unresolved": 5,
+    "reversal": 4
+   },
+   "glue_delivered": {
+    "n": 42,
+    "preserved": 36,
+    "changed": 1,
+    "incomplete": 2,
+    "unresolved": 3,
+    "reversal": 0
+   }
+  },
+  "orchestrator-main": {
+   "handoffs": 25,
+   "negatives": 9,
+   "negatives_state_changing": [],
+   "negatives_read_status_only": [],
+   "negatives_no_operation": 9,
+   "positives_with_operation": 16,
+   "positives": 16
+  },
+  "orchestrator-heldout": {
+   "handoffs": 30,
+   "negatives": 15,
+   "negatives_state_changing": [],
+   "negatives_read_status_only": [],
+   "negatives_no_operation": 15,
+   "positives_with_operation": 13,
+   "positives": 15
+  }
+ }
+}
