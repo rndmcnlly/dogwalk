@@ -8,9 +8,9 @@ import { pathToFileURL } from 'node:url';
 
 const temp = await mkdtemp(join(tmpdir(), 'dogwalk-app-test-'));
 try {
-  const result = await build({ stdin: { contents: 'export {default as worker} from "./src/index"; export {VoiceSession} from "./src/voice_session"; export * from "./src/app_frontend";', resolveDir: process.cwd() }, bundle: true, platform: 'node', format: 'esm', write: false, loader: { '.pcm': 'binary', '.md': 'text' } });
+  const result = await build({ stdin: { contents: 'export {default as worker} from "./src/index"; export {default as localWorker} from "./src/local_trial_entry"; export {localAppTrial} from "./src/local_app_trial"; export {VoiceSession} from "./src/voice_session"; export * from "./src/app_frontend";', resolveDir: process.cwd() }, bundle: true, platform: 'node', format: 'esm', write: false, loader: { '.pcm': 'binary', '.md': 'text' } });
   const file = join(temp, 'test.mjs'); await writeFile(file, result.outputFiles[0].text);
-  const { worker, VoiceSession, appAuthorized, parseAppFrame } = await import(pathToFileURL(file));
+  const { worker, localWorker, localAppTrial, VoiceSession, appAuthorized, parseAppFrame } = await import(pathToFileURL(file));
   const token = 'x'.repeat(43); // deliberately public fixture, never a deployed capability
   const digest = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))).toString('hex');
   const env = { APP_FRONTEND_ENABLED: 'true', APP_FRONTEND_TOKEN_SHA256: digest, APP_FRONTEND_OWNER_PHONE: '+15555550101' };
@@ -26,10 +26,10 @@ try {
   for (const raw of [envelope(input, 'x', 'stale'), envelope({ ...input, delivery: 'audio' }), envelope({ ...input, end_ms: -1 }), envelope({ ...input, end_ms: 2 }), envelope({ ...input, delta: '語'.repeat(15000) }), envelope({ type: 'session.closed' }), envelope({ type: 'resolve_permission' }), 'x'.repeat(32769), new Uint8Array(1), '{}']) assert.throws(() => parseAppFrame(raw, 'generation'));
 
   // Worker owns identity. Untrusted x-dogwalk-* headers never reach the object.
-  let registered = true, assigned = true, routed, providerRequests = [];
+  let registered = true, assigned = true, routed, providerRequests = [], providerId = 'existing-sandbox';
   env.DB = { prepare(sql) { return { bind(...args) { this.args = args; return this; }, async first() {
     if (sql.includes('registrations')) return registered ? { phone_number: env.APP_FRONTEND_OWNER_PHONE } : null;
-    if (sql.includes('sandbox_assignments')) return assigned ? { phone_number: env.APP_FRONTEND_OWNER_PHONE, identity_hash: 'server-identity', provider_id: 'existing-sandbox' } : null;
+    if (sql.includes('sandbox_assignments')) return assigned ? { phone_number: env.APP_FRONTEND_OWNER_PHONE, identity_hash: 'server-identity', provider_id: providerId } : null;
   }, async run() { return { meta: { changes: 1 } }; } }; } };
   env.VOICE_SESSIONS = { idFromName(name) { assert.equal(name, 'server-identity'); return name; }, get() { return { async fetch(url, options) { routed = { url, options }; return new Response(null, { status: 204 }); } }; } };
   const originalFetch = globalThis.fetch;
@@ -44,6 +44,19 @@ try {
   assert.equal(providerRequests.length, 1, 'missing identity must not provision anything');
   assert.equal((await worker.fetch(request(), { ...env, APP_FRONTEND_ENABLED: 'false' }, {})).status, 404);
   assert.equal((await worker.fetch(request(undefined, 'Basic YWRhbTpwYXNz'), env, {})).status, 401);
+  const localEnv = { ...env, DEPLOYMENT_ENVIRONMENT: 'local-app-trial', LOCAL_APP_TRIAL_ENABLED: 'true', LOCAL_APP_TRIAL_ACP_URL: 'http://127.0.0.1:18782/acp', LOCAL_APP_TRIAL_WORKSPACE: '/private/var/folders/test/dogwalk-local-trial-test/workspace' };
+  assert(localAppTrial(localEnv));
+  for (const invalid of [{ DEPLOYMENT_ENVIRONMENT: 'production' }, { LOCAL_APP_TRIAL_ACP_URL: 'https://remote.invalid/acp' }, { LOCAL_APP_TRIAL_ACP_URL: 'http://127.0.0.1:18782/acp?token=x' }, { LOCAL_APP_TRIAL_WORKSPACE: '/Users/adam/Desktop' }]) assert.throws(() => localAppTrial({ ...localEnv, ...invalid }));
+  registered = assigned = true; providerId = 'local-agent-trial';
+  const providerBeforeLocal = providerRequests.length;
+  assert.equal((await worker.fetch(request(), localEnv, {})).status, 204);
+  assert.equal(providerRequests.length, providerBeforeLocal, 'local adapter must never call Daytona');
+  assert.equal((await worker.fetch(request(), { ...localEnv, DEPLOYMENT_ENVIRONMENT: 'production' }, {})).status, 503);
+  assert.equal(providerRequests.length, providerBeforeLocal, 'production cannot activate local hosting or fall through to provider');
+  for (const path of ['/admin', '/voice', '/pair', '/healthz']) assert.equal((await localWorker.fetch(new Request('http://127.0.0.1:18781' + path), localEnv, {})).status, 404);
+  assert.equal((await localWorker.fetch(new Request('http://127.0.0.1:18781/app/frontend', { headers: { authorization: `Bearer ${token}`, upgrade: 'websocket' } }), localEnv, {})).status, 204);
+  assert.equal((await localWorker.fetch(request(), { ...localEnv, DEPLOYMENT_ENVIRONMENT: 'production' }, {})).status, 503);
+  assert.equal(providerRequests.length, providerBeforeLocal);
   globalThis.fetch = originalFetch;
 
   const NativeResponse = globalThis.Response;
@@ -206,6 +219,16 @@ try {
   await pstn.cleanupVoice('test complete');
   if (pstn.timingTimer) clearTimeout(pstn.timingTimer);
   if (pstn.transcriptSaveTimer) clearTimeout(pstn.transcriptSaveTimer);
+  session.env = { ...localEnv, DB: db };
+  session.acpReady = true;
+  const localCreated = await session.createManagedSession('Local', '.');
+  assert.equal(localCreated.ok, true);
+  assert.equal(rpc.filter(m => m.method === 'session/new').at(-1).params.cwd, localEnv.LOCAL_APP_TRIAL_WORKSPACE);
+  await assert.rejects(() => session.createManagedSession('Outside', '/home/daytona'));
+  await assert.rejects(() => session.daytona('/sandbox/anything/start', 'POST'));
+  for (const name of ['restart_sandbox', 'play_audio', 'pair_browser', 'discover_persisted_sessions', 'create_invitation']) {
+    assert.equal((await session.executeOrchestratorToolInner({ name, arguments: '{}' })).ok, false, `local trial must not dispatch ${name}`);
+  }
   if (session.timingTimer) clearTimeout(session.timingTimer);
   if (session.transcriptSaveTimer) clearTimeout(session.transcriptSaveTimer);
   console.log('app frontend auth, binding, protocol and Orchestrator/ACP integration checks passed');

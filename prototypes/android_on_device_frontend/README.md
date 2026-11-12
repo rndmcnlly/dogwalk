@@ -16,6 +16,79 @@ with the screen locked. Optional silent text chat uses the screen and a non-micr
 Fixture mode remains available. No production credential, deployed WSS session, real Sandbox
 trial or physical-phone verification is claimed. See the [operator runbook](../../cf_worker/README.md#adam-only-on-device-trial-not-deployed-by-this-change).
 
+## Approved side-channel: local Worker and local ACP, not production
+
+The current trial does **not** deploy this branch or touch production D1, Daytona,
+the production Sandbox, the shared OpenCode service, or Tailscale configuration.
+`local_trial.py` starts a private loopback Worker with a fresh local D1/DO store and
+the existing ACP Gateway running real `opencode acp` in a disposable macOS directory.
+The real Session Orchestrator and ACP Agent both use `openai/gpt-6.1-sol`.
+
+```sh
+uv run --script local_trial.py start
+# Prints only process/port/path metadata. Keep its returned STATE directory.
+uv run --script local_trial.py prove --state STATE
+uv run --script local_trial.py stop --state STATE
+```
+
+`start` reads only `OPENAI_API_KEY` from the explicitly authorized
+`/Users/adam/Desktop/dogwalk/.env` (override with `--provider-env`). It never sources that
+file, prints a credential, or passes a secret as a command argument. It creates one
+32-byte app token at `STATE/app-token`, provider configuration and evidence as 0600
+files, under a 0700 private temporary directory. The workspace is `STATE/workspace`;
+synthetic Registration `+15555550199` and a `provider='local'` assignment exist only in
+the generated local schema. No production database or Managed Session is copied.
+
+The generated Wrangler config has no production resource IDs, routes, cron, or remote
+bindings. All D1 commands explicitly use `--local` and `STATE/persist`; secret discovery
+is confined to the generated `STATE/cf/.dev.vars`. The dedicated local entrypoint accepts
+only `/app/frontend` and `/app/heartbeat`; admin, PSTN, browser and other paths return
+404. The provider adapter is enabled only when `DEPLOYMENT_ENVIRONMENT=local-app-trial`
+and `LOCAL_APP_TRIAL_ENABLED=true`, with fixed `LOCAL_APP_TRIAL_ACP_URL` on IPv4 loopback
+and `LOCAL_APP_TRIAL_WORKSPACE` under the private disposable trial directory. Invalid
+configuration, including `production`, fails closed rather than falling through to
+Daytona. The production Wrangler configuration is unchanged.
+
+Default ports are Worker **18781** and Gateway **18782**, both bound to `127.0.0.1`.
+Busy ports fail rather than taking over a service; 8770 is refused. No fake hosting API
+pretends to be Daytona. Hosting mutation, audio, browser, discovery/load and invitation
+tools are unsupported in this local mode. Create Managed Session accepts only directory
+`.` (or the exact configured root), and the Orchestrator is explicitly told it is local,
+disposable and not a security sandbox. Existing session tools and ACP permissions remain
+real. OpenCode ACP starts its documented private server, using isolated HOME/XDG paths
+and database, not the shared service. V2 permissions deny shell, external paths, network
+tools, Code Mode and subagents; reads within the workspace are allowed, and only
+`trial-marker.txt` and `permission-marker.txt` may be edited, with `ask` permission.
+Configuration/instructions cannot be edited. These application permissions are **not an
+OS sandbox**: the macOS process still runs as the operator. Use only harmless tasks.
+
+`prove` sends actual typed Handoffs, never scripted model replies. A real model creates
+Fir, starts a real ACP Prompt Turn, presents a real three-choice Permission Request,
+and receives an explicit User Handoff selecting **Allow once**. The Agent writes and
+reads back the harmless marker; the harness checks its exact bytes and a real
+`acp.turn.stopped` event (`end_turn`). It disconnects and reconnects, asks for retained
+status without replaying the task, and saves private wire/telemetry evidence. A failed
+or completed proof is not automatically retried on the same state. The first development
+attempt correctly reached a real permission but watched the wrong telemetry table and
+timed out; the corrected fresh-state proof completed successfully. No permissions were
+weakened to make it pass.
+
+For a phone trial, the parent/operator separately exposes an unused tailnet TLS port,
+for example `tailscale serve --bg --https=8443 http://127.0.0.1:18781`. This script never
+runs that command. Use `wss://<Mac-tailnet-DNS>:8443/app/frontend` in Android's **Real
+Orchestrator** mode and manually enter the token from the private file. The existing v5
+APK needs no protocol or TLS changes. Tailscale terminates TLS and proxies only to the
+loopback Worker; the local entrypoint marks that trusted internal hop as HTTPS for the
+unchanged app authorization check. The app still requires WSS with normal certificate
+validation. Do not expose the ACP port or use Funnel. Local token authority is solely
+this synthetic trial, not production identity. Existing ready/ack/unknown, revocation
+lease, explicit reconnect and no-replay semantics are unchanged.
+
+Leave the supervisor running for the parent handoff. Its process IDs and exact paths are
+in `STATE/runtime.json`; `stop` validates the supervisor's state argument, terminates
+only its child process groups, waits for its own ports to close, and preserves private
+evidence. Removing a tailnet Serve route is a separate operator action.
+
 ## Adam-only trial (0.5, versionCode 5)
 
 This update preserves native UI v4, package/signing, endpoint/backend/model settings,

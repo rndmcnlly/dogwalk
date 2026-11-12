@@ -1,4 +1,7 @@
 export interface Env {
+  LOCAL_APP_TRIAL_ENABLED?: string;
+  LOCAL_APP_TRIAL_ACP_URL?: string;
+  LOCAL_APP_TRIAL_WORKSPACE?: string;
   APP_FRONTEND_ENABLED?: string;
   APP_FRONTEND_TOKEN_SHA256?: string;
   APP_FRONTEND_OWNER_PHONE?: string;

@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { localAppTrial } from "./local_app_trial";
 import { APP_LEASE_MS, APP_PROTOCOL, parseAppFrame } from "./app_frontend";
 import { DEFAULT_THEME, THEMES, type Theme } from "./themes";
 import { VOICE_AGENT_SKILL_INDEX, voiceAgentSkill } from "./voice_agent_skills";
@@ -1099,6 +1100,7 @@ export class VoiceSession {
   }
 
   private async attachAppFrontend(request: Request): Promise<Response> {
+    const local = localAppTrial(this.env);
     if (this.env.APP_FRONTEND_ENABLED !== "true") return new Response("not found", { status: 404 });
     const phone = request.headers.get("x-dogwalk-phone");
     const sandbox = request.headers.get("x-dogwalk-sandbox-id");
@@ -1158,13 +1160,14 @@ export class VoiceSession {
       // first frame in the gap between ready and the call_started queue reservation.
       // No caller-ID assertion, new sandbox claim, or forced provider voice change.
       socket.send(JSON.stringify({ v: APP_PROTOCOL, type: "frontend.ready", attachment, agent_ready: this.acpReady, lease_ms: APP_LEASE_MS }));
-      this.sendLive({ type: "session.commentary.append", delegation_id: null, content: "Dogwalk. App connected. What would you like to work on?" }, true);
+      this.sendLive({ type: "session.commentary.append", delegation_id: null, content: local ? "Dogwalk. Local disposable workspace connected, not production. What would you like to try?" : "Dogwalk. App connected. What would you like to work on?" }, true);
       this.agentConnecting = !this.acpReady;
       this.liveAttached = true;
       this.appStarting = false;
       const started = this.orchestratorEvent(`[harness event] call_started: ${JSON.stringify({ ...this.voiceContextSnapshot(), source: "on_device_frontend", caller_id: null,
+        ...(local ? { hosting: { kind: "local_process_trial", workspace: local.workspace, security_sandbox: false } } : {}),
         capabilities: { typed_input: true, recognized_speech: true, text_display: true, local_speech: true, audio_clips: false, recordings: false, telephony: false, provider_voice: false },
-        note: "App frontend: receipts mean display or local playback only, never authorization. Brief and Following are background. No cloud audio, recording, acoustic pairing, menu, provider voice or Theme switch. Existing session and Permission Request tools remain available." })}${this.agentConnecting ? `\n[harness event] agent_connecting: ${JSON.stringify({ note: ACP_STARTING_ERROR })}` : ""}\n${this.appStartupEvents.splice(0).join("\n")}`);
+        note: "App frontend: receipts mean display or local playback only, never authorization. Brief and Following are background. No cloud audio, recording, acoustic pairing, menu, provider voice or Theme switch. Existing session and Permission Request tools remain available." })}${this.agentConnecting ? `\n[harness event] agent_connecting: ${JSON.stringify({ note: local ? "The local ACP Agent is still starting." : ACP_STARTING_ERROR })}` : ""}\n${this.appStartupEvents.splice(0).join("\n")}`);
       for (const message of this.appStartupMessages.splice(0)) this.sendLive(message);
       this.renewAppLease();
       await started;
@@ -1252,7 +1255,7 @@ export class VoiceSession {
     if (this.acpReady && this.acp?.readyState === WebSocket.OPEN) return;
     const gaveUp = this.acpGaveUp;
     this.ensureAcp();
-    throw new Error(gaveUp ? ACP_UNAVAILABLE_ERROR : ACP_STARTING_ERROR);
+    throw new Error(localAppTrial(this.env) ? (gaveUp ? "The local ACP Agent is unavailable." : "The local ACP Agent is still starting.") : gaveUp ? ACP_UNAVAILABLE_ERROR : ACP_STARTING_ERROR);
   }
 
   // The preview URL and token for the ACP port are cached per Sandbox (memory and storage)
@@ -1274,6 +1277,13 @@ export class VoiceSession {
   }
 
   private async openAcpSocket(sandboxId: string): Promise<WebSocket> {
+    const local = localAppTrial(this.env);
+    if (local) {
+      if (sandboxId !== "local-agent-trial") throw new Error("not the local trial assignment");
+      const response = await fetch(local.acpUrl, { headers: { Upgrade: "websocket" } });
+      if (!response.webSocket) throw new Error(`Local ACP Gateway upgrade failed (${response.status})`);
+      return response.webSocket;
+    }
     const upgrade = async (preview: AcpPreview) => {
       const url = new URL(preview.url);
       url.pathname = "/acp";
@@ -2853,7 +2863,7 @@ export class VoiceSession {
       },
       body: JSON.stringify({
         model: endpoint.model,
-        instructions: orchestratorInstructions(this.theme),
+        instructions: orchestratorInstructions(this.theme) + (localAppTrial(this.env) ? `\nLOCAL OPERATOR TRIAL: this is a local macOS process, not Daytona or a security sandbox. The only allowed directory for create_managed_session is '.' (the configured disposable workspace ${localAppTrial(this.env)!.workspace}). Never claim production work or sandbox hosting. Hosting mutation, browser, invitation, discovery/loading and cloud audio tools are unsupported. Use existing session operations. Keep the trial small; do not launch unrelated work.` : ""),
         input: [...this.pinnedMemory(), ...this.orchestratorContext],
         tools: ORCHESTRATOR_TOOLS,
         parallel_tool_calls: true,
@@ -3027,6 +3037,10 @@ export class VoiceSession {
   }
 
   private async executeOrchestratorToolInner(item: Record<string, any>): Promise<unknown> {
+    const local = localAppTrial(this.env);
+    if (local && !["brief", "say", "create_managed_session", "begin_prompt_turn", "inspect_managed_session", "list_managed_sessions", "follow_managed_session", "stop_following", "cancel_prompt_turn", "resolve_permission", "set_alias", "close_managed_session", "inspect_call_state", "end_call"].includes(String(item.name))) {
+      return { ok: false, error: "Unsupported in the local disposable-workspace trial; no hosting operation performed." };
+    }
     if (this.appFrontend && ["start_recording", "play_audio", "pair_browser", "set_earcon_style", "set_theme", "open_recovery_menu"].includes(String(item.name))) {
       return { ok: false, error: "Unsupported by the on-device frontend; no audio/telephony operation was performed." };
     }
@@ -3241,8 +3255,10 @@ export class VoiceSession {
     if (Array.from(this.sessions.values()).some((item) => item.sessionState !== "closed" && item.alias.toLowerCase() === alias.toLowerCase())) {
       throw new Error(`alias ${alias} is already in use`);
     }
-    const cwd = workspaceDirectory(directoryInput);
-    if (cwd !== WORKSPACE) {
+    const local = localAppTrial(this.env);
+    if (local && ![".", local.workspace].includes(directoryInput.trim())) throw new Error("local trial sessions must use the configured workspace (directory '.')");
+    const cwd = local ? local.workspace : workspaceDirectory(directoryInput);
+    if (!local && cwd !== WORKSPACE) {
       const check = await this.sandboxExecute(`test -d ${shellQuote(cwd)}`, 15);
       if (check.exitCode !== 0) throw new Error(`directory ${relativeDirectory(cwd)} does not exist in the Workspace`);
     }
@@ -4428,6 +4444,7 @@ export class VoiceSession {
   }
 
   private async daytona<T>(path: string, method: "GET" | "POST" = "GET"): Promise<T> {
+    if (localAppTrial(this.env)) throw new Error("Provider hosting is disabled in the local app trial");
     const base = (this.env.DAYTONA_API_BASE ?? "https://app.daytona.io/api").replace(/\/$/, "");
     const response = await fetch(`${base}${path}`, {
       method,

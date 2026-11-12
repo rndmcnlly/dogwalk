@@ -26,6 +26,7 @@ import { INVITATION_STATUS_SQL, redemptionStatements, USABLE_FOR_PHONE_SQL } fro
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
 import { appAuthorized } from "./app_frontend";
+import { localAppTrial } from "./local_app_trial";
 export { TerminalRelay, VoiceSession };
 
 // --- env ----------------------------------------------------------------
@@ -310,6 +311,7 @@ class DaytonaApiError extends Error {
 }
 
 async function daytonaFetch<T>(env: Env, path: string, init: RequestInit = {}): Promise<T> {
+  if (localAppTrial(env)) throw new Error("Provider hosting is unavailable in the local app trial");
   const response = await fetch(`${daytonaBase(env)}${path}`, {
     ...init,
     headers: {
@@ -1116,6 +1118,8 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
 }
 
 async function handleAppFrontend(req: Request, env: Env, path: string): Promise<Response> {
+  let local;
+  try { local = localAppTrial(env); } catch { return new Response("invalid local hosting configuration", { status: 503 }); }
   if (env.APP_FRONTEND_ENABLED !== "true") return new Response("not found", { status: 404 });
   if (!await appAuthorized(req, env)) return new Response("unauthorized", { status: 401 });
   const phone = env.APP_FRONTEND_OWNER_PHONE!;
@@ -1124,6 +1128,7 @@ async function handleAppFrontend(req: Request, env: Env, path: string): Promise<
   // replacements. This trial may only wake an existing assignment.
   const assignment = await getAssignment(env, phone);
   if (!assignment?.provider_id) return new Response("configured owner has no existing sandbox", { status: 409 });
+  if (local && assignment.provider_id !== "local-agent-trial") return new Response("not the isolated local assignment", { status: 409 });
   const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(assignment.identity_hash));
   const headers = new Headers({ "x-dogwalk-phone": phone, "x-dogwalk-sandbox-id": assignment.provider_id,
     "x-dogwalk-identity": assignment.identity_hash });
@@ -1135,7 +1140,7 @@ async function handleAppFrontend(req: Request, env: Env, path: string): Promise<
     return object.fetch("https://voice-session/app/heartbeat", { method: "POST", headers });
   }
   if (req.method !== "GET" || req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("websocket required", { status: 426 });
-  try {
+  if (!local) try {
     const sandbox = await getDaytonaSandbox(env, assignment.provider_id);
     if (["error", "build_failed", "destroyed"].includes(sandbox.state)) return new Response("existing sandbox unavailable", { status: 409 });
     if (["stopped", "archived", "paused"].includes(sandbox.state)) {
