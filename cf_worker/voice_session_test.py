@@ -68,6 +68,8 @@ class SocketMocks:
     def __init__(self) -> None:
         self.live = None
         self.live_event = 0
+        # Set to have GPT-Live reject the next output fixture, naming it by event_id.
+        self.reject_next_fixture = False
         self.acp_messages: asyncio.Queue[dict] = asyncio.Queue()
         self.live_messages: asyncio.Queue[dict] = asyncio.Queue()
         self.acp_connected = asyncio.Event()
@@ -197,6 +199,12 @@ class SocketMocks:
 
     async def ack_fixture(self, socket, client_event_id: str | None) -> None:
         self.live_event += 1
+        if self.reject_next_fixture:
+            self.reject_next_fixture = False
+            await socket.send(json.dumps({"type": "error", "event_id": f"evt-error-{self.live_event}", "error": {
+                "type": "invalid_request_error", "code": "fixture_rejected", "message": "Fixture rejected.",
+                "client_event_id": client_event_id}}))
+            return
         await socket.send(json.dumps({"type": "session.output_audio.fixture.playing",
                                       "event_id": f"evt-playing-{self.live_event}", "client_event_id": client_event_id}))
         await asyncio.sleep(0.05)
@@ -1228,6 +1236,7 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live({**delegation("del-4", 10050), "event_id": "evt-del-4"})
         await mocks.send_live({**delegation("del-4", 10050), "event_id": "evt-del-4-again"})
         await wait_for(lambda: any(path == "/live/sessions/live-test/hangup" for path, _ in DaytonaMock.openai_requests), 4)
+        await wait_for(outputs_back("h4-end"))
         assert OrchestratorMock.tool_output("h4-end")["status"] == "ending call"
         assert not any(m.get("type") == "session.commentary.append" and m.get("delegation_id") == "del-4"
                        for m in mocks.seen), "end_call spoke a farewell of its own"
@@ -1295,10 +1304,20 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(dtmf("1"))
         status = await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append" and "Juniper" in item.get("content", ""))
         assert status["content"].startswith("Juniper is resting") and status["delegation_id"] is None, status
+        # GPT-Live rejects the silence fixture by its event_id: the held instruction goes out
+        # at once, well inside the 2.1 s unconfirmed-playback fallback.
+        mocks.reject_next_fixture = True
         await mocks.send_live(dtmf("#"))
         await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
-        stop = await next_matching(mocks.live_messages, of_type("session.instructions.append"))
+        stop = await next_matching(mocks.live_messages, of_type("session.instructions.append"), 1)
         assert "pressed pound" in stop["content"]
+        def fixture_rejections() -> list[dict]:
+            return [json.loads(row["detail"]) for row in call_activity_rows("CA_VOICE_TEST2")
+                    if row["event"] == "voice.fixture.rejected"]
+        await wait_for(fixture_rejections)
+        rejected_fixture = fixture_rejections()
+        assert rejected_fixture and rejected_fixture[-1]["label"] == "stop_talking", rejected_fixture
+        assert rejected_fixture[-1]["message"] == "Fixture rejected.", rejected_fixture
         await mocks.send_live(transcript("output", "The parser handles nested quotes now.", 20000, 22000))
         await mocks.send_live(dtmf("0"))
         repeat = await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append" and "word for word" in item.get("content", ""))
