@@ -974,7 +974,8 @@ async def run_protocol(identity: str) -> None:
         assert finished["delegation_id"] is None
         handoff = OrchestratorMock.user_message("[handoff del-1]")
         assert "Caller: Start a session called Juniper to build a tiny verified artifact." in handoff
-        assert "Voice: On it." in handoff
+        # The Voice spoke after the offset, so its words wait for the next handoff.
+        assert "Voice: On it." not in handoff
         stopped = OrchestratorMock.user_message("turn_stopped")
         assert '"stop_reason":"end_turn"' in stopped and "Bridge report complete." in stopped
         rejected = OrchestratorMock.tool_output("h1-say-url")
@@ -1021,6 +1022,15 @@ async def run_protocol(identity: str) -> None:
         assert reported["delegation_id"] == "del-2"
         handoff = OrchestratorMock.user_message("[handoff del-2]")
         assert "Caller: What did it report?" in handoff and "Juniper" not in handoff
+        # Each word is handed over once: the earlier request is not resent.
+        assert "Voice: On it." in handoff and "Start a session" not in handoff, handoff
+        # The caller goes on past the offset and no new handoff comes: the rest still
+        # reaches the Orchestrator, under the handoff it continues.
+        await mocks.send_live(transcript("input", " And whether the tests passed.", 6400, 7400))
+        await wait_for(lambda: any("[continued del-2]" in str(item.get("content"))
+                                   for _, payload in OrchestratorMock.requests for item in payload["input"]))
+        continued = OrchestratorMock.user_message("[continued del-2]")
+        assert "Caller: And whether the tests passed." in continued and "What did it report" not in continued, continued
         inspected = OrchestratorMock.tool_output("h2-inspect")
         assert inspected["alias"] == "Juniper" and inspected["stop_reason"] == "end_turn"
         # The failed searches after the turn made its closing words the latest remark.
@@ -1108,7 +1118,8 @@ async def run_protocol(identity: str) -> None:
             assert row["ts_ms"] >= start["ts_ms"] and row["ms"] >= 0
         queued = next(row for row in timed if row["event"] == "handoff.queued" and row["delegation_id"] == "del-2")
         started = next(row for row in timed if row["event"] == "handoff.started" and row["delegation_id"] == "del-2")
-        assert queued["ts_ms"] - started["ts_ms"] >= 300
+        # No transcript wait: GPT-Live sends the transcript before the delegation.
+        assert 0 <= queued["ts_ms"] - started["ts_ms"] < 300, (started, queued)
         content = await asyncio.to_thread(operator_content, "CA_VOICE_TEST")
         kinds = {entry["kind"] for entry in content["entries"]}
         assert {"caller", "voice", "handoff", "say", "acp_prompt", "agent_report"} <= kinds, kinds

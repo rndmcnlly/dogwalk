@@ -534,7 +534,11 @@ The Voice Agent is two components (see `../DOMAIN.md`). The Voice Frontend is
 delegation (a Handoff) when the caller asks about work. The Session Orchestrator
 runs inside the Durable Object as a Responses API tool loop on
 `ORCHESTRATOR_MODEL` (default `gpt-6.1-sol`, `low` reasoning effort). It reads the
-call transcript up to each delegation, operates Managed Sessions through the
+call transcript up to each delegation's offset (each transcript delta once, with
+no wait: GPT-Live sends them before the delegation), plus a Continuation
+(`[continued <id>]`) when the caller keeps talking past the offset and no new
+delegation comes; `delegation_probe.py` at the repository root measures both
+against synthetic callers on the real GPT-Live API. It operates Managed Sessions through the
 neutral operations (`create_managed_session` (`session/new` rooted in an
 existing directory under `/home/daytona`, checked with `test -d` through the
 Daytona toolbox), `begin_prompt_turn`, `inspect_managed_session`,

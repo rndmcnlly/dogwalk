@@ -176,6 +176,23 @@ function boundTranscript(entries: TranscriptEntry[]): TranscriptEntry[] {
   return kept;
 }
 
+// One transcript delta, as heard: the unit Handoffs are cut from. Entries merge deltas for
+// reading; cutting a merged entry by time resends its earlier words in the next Handoff.
+interface HeardWord {
+  role: TranscriptEntry["role"];
+  text: string;
+  startMs: number;
+  taken: boolean;
+}
+
+// Caller speech after a Handoff's offset, before the Voice answers and with no newer
+// Handoff, goes to the Orchestrator once the caller has been quiet this long. Probes
+// (delegation_probe.py) found GPT-Live delegating at a pause mid-request and never again
+// for the rest, so a spoken correction or the real question was otherwise lost.
+const CONTINUATION_QUIET_MS = 1200;
+// The Voice often starts over the caller's last word; words begun this soon after still count.
+const CONTINUATION_OVERLAP_MS = 600;
+
 function lastWords(entries: TranscriptEntry[]): string[] {
   return entries.slice(-4).map((entry) => `${entry.role}: ${entry.text.trim().slice(-300)}`);
 }
@@ -796,6 +813,7 @@ ${theme.genre} You may use the theme in say and brief text, at the register the 
 
 Inputs arrive as messages:
 - [handoff <delegation_id>] blocks carry the recent call transcript when the Voice Frontend asks for help. Transcripts contain recognition mistakes, fragments, and corrections; act on the latest intent. When an action matters and a detail is missing, ask through say rather than guessing. A newer handoff may correct or supersede an older one; preserve unrelated work.
+- [continued <delegation_id>] blocks carry what the caller went on to say after that handoff, before the Voice Frontend answered and without a new handoff: often a correction or the rest of the request. Treat it as part of that handoff, act on the latest intent, and answer with its delegation_id; if you already acted on the earlier words, set it right.
 - [harness event] lines are Session Management notifications (call started or ended, Prompt Turn stopped, Permission Request). They are not caller speech.
 
 Your outputs go only through tools. Plain assistant text is discarded.
@@ -927,7 +945,10 @@ export class VoiceSession {
   private timingClockId = crypto.randomUUID();
   // The build and environment observing each row, as OTel Resource identity.
   private get producer() { return producerFields(this.env); }
-  private transcriptCutMs = 0;
+  private heard: HeardWord[] = [];
+  // The latest Handoff, for continuations: its offset and where the Voice next spoke after it.
+  private lastHandoff: { id: string; offsetMs: number; voiceAtMs: number } | null = null;
+  private continuationTimer: ReturnType<typeof setTimeout> | null = null;
   private transcriptSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private acpMessageChain: Promise<void> = Promise.resolve();
   private liveMessageChain: Promise<void> = Promise.resolve();
@@ -2605,6 +2626,17 @@ export class VoiceSession {
     const delta = String(message.delta ?? "");
     if (!delta) return;
     this.feedSpeech(role, delta);
+    const startMs = Number(message.start_ms ?? 0);
+    this.heard.push({ role, text: delta, startMs, taken: false });
+    if (this.heard.length > 1000) this.heard = this.heard.slice(-1000);
+    const handoff = this.lastHandoff;
+    if (handoff && startMs > handoff.offsetMs) {
+      if (role === "voice") handoff.voiceAtMs = Math.min(handoff.voiceAtMs, startMs);
+      else if (startMs < handoff.voiceAtMs + CONTINUATION_OVERLAP_MS) {
+        if (this.continuationTimer) clearTimeout(this.continuationTimer);
+        this.continuationTimer = setTimeout(() => void this.forwardContinuation(), CONTINUATION_QUIET_MS);
+      }
+    }
     const last = this.transcript.at(-1);
     if (last && last.role === role) {
       last.text += delta;
@@ -2659,23 +2691,41 @@ export class VoiceSession {
       return;
     }
     // The delegation carries no task text: the task is the transcript up to its offset.
-    // Late transcript deltas for the same utterance get a short grace period.
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    // GPT-Live sends every delta up to the offset before the delegation (12 of 12 in
+    // delegation_probe.py), so there is nothing to wait for.
     const lines = this.takeTranscript(offsetMs);
+    if (Number.isFinite(offsetMs)) this.lastHandoff = { id: delegationId, offsetMs, voiceAtMs: Infinity };
     await this.record("voice.delegation.received", { delegation_id: delegationId, started_ms: startedMs, ms: Date.now() - startedMs });
     this.timing("handoff.queued", { delegation_id: delegationId,
       content_text: lines.join("\n") || "(no new transcript)", content_kind: "handoff" });
     await this.orchestratorEvent(`[handoff ${delegationId}]\n${lines.join("\n") || "(no new transcript)"}`);
   }
 
-  // Conversation since the last handoff, up to offsetMs; advances the cut so the next
-  // handoff or event does not repeat it.
-  private takeTranscript(offsetMs = Infinity): string[] {
-    const lines = this.transcript
-      .filter((entry) => entry.endMs > this.transcriptCutMs && entry.startMs <= offsetMs + 1500)
-      .map((entry) => `${entry.role === "caller" ? "Caller" : "Voice"}: ${entry.text.trim()}`);
-    this.transcriptCutMs = Math.max(this.transcriptCutMs, Math.min(offsetMs, this.transcript.at(-1)?.endMs ?? 0));
-    return lines;
+  // Words not yet handed over that began by offsetMs, as speaker lines; each word is handed
+  // over once, so the next handoff or event never repeats it.
+  private takeTranscript(offsetMs = Infinity, include: (word: HeardWord) => boolean = () => true): string[] {
+    const lines: { role: HeardWord["role"]; text: string }[] = [];
+    for (const word of this.heard) {
+      if (word.taken || word.startMs > offsetMs || !include(word)) continue;
+      word.taken = true;
+      const last = lines.at(-1);
+      if (last?.role === word.role) last.text += word.text;
+      else lines.push({ role: word.role, text: word.text });
+    }
+    return lines.map((line) => `${line.role === "caller" ? "Caller" : "Voice"}: ${line.text.trim()}`).filter((line) => !line.endsWith(": "));
+  }
+
+  // Caller speech that went on after the latest Handoff without a new one: often a
+  // correction, or the rest of the request. The Orchestrator answers it under that Handoff.
+  private async forwardContinuation(): Promise<void> {
+    this.continuationTimer = null;
+    const handoff = this.lastHandoff;
+    if (!handoff || !this.liveAttached || this.recording) return;
+    const lines = this.takeTranscript(handoff.voiceAtMs + CONTINUATION_OVERLAP_MS - 1,
+      (word) => word.role === "caller" && word.startMs > handoff.offsetMs);
+    if (!lines.length) return;
+    await this.record("voice.continuation.forwarded", { delegation_id: handoff.id, lines: lines.length });
+    await this.orchestratorEvent(`[continued ${handoff.id}]\n${lines.join("\n")}`);
   }
 
   private async orchestratorEvent(text: string): Promise<void> {
@@ -4372,7 +4422,10 @@ export class VoiceSession {
     this.follow = null;
     this.delegations.clear();
     this.transcript = [];
-    this.transcriptCutMs = 0;
+    this.heard = [];
+    this.lastHandoff = null;
+    if (this.continuationTimer) clearTimeout(this.continuationTimer);
+    this.continuationTimer = null;
     this.liveCloseReason = null;
     this.liveError = null;
     this.cleaningUpVoice = false;

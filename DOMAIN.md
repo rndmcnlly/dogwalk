@@ -794,7 +794,9 @@ Unlike a Paired Browser, a Human Takeover in use keeps the Sandbox awake, bounde
 
 The Voice Frontend's request for Session Orchestrator help, carrying the recent call transcript rather than a structured task. A later Handoff may continue, correct, cancel, or be independent of an earlier one; the Orchestrator decides which, preserving unrelated work. Speech or context sent in answer to a Handoff references it. Handoffs have no completion event: the Orchestrator's final speech request is the answer.
 
-**Not:** A Prompt Turn or an Assignment. One Handoff may start several Prompt Turns or none.
+A Handoff carries each transcribed word once: the words since the previous Handoff, up to the moment the Voice Frontend asked. The Voice Frontend may ask at a pause in the middle of a request and not ask again for the rest, so what the caller goes on to say after a Handoff, before the Voice Frontend answers and with no newer Handoff, reaches the Orchestrator as that Handoff's **Continuation**, once the caller pauses. A Continuation belongs to its Handoff: it is usually a correction or the rest of the request, and is answered under the same Handoff.
+
+**Not:** A Prompt Turn or an Assignment. One Handoff may start several Prompt Turns or none. A Continuation is not a new Handoff: the Voice Frontend did not ask for it.
 
 ### Client-Provided Tool
 
