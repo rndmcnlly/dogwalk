@@ -67,6 +67,7 @@ def without_meta(message: dict) -> dict:
 class SocketMocks:
     def __init__(self) -> None:
         self.live = None
+        self.live_event = 0
         self.acp_messages: asyncio.Queue[dict] = asyncio.Queue()
         self.live_messages: asyncio.Queue[dict] = asyncio.Queue()
         self.acp_connected = asyncio.Event()
@@ -180,16 +181,27 @@ class SocketMocks:
                 message = json.loads(raw)
                 self.seen.append(message)
                 await self.live_messages.put(message)
-                # GPT-Live acknowledges each output fixture once its mixer drains.
+                # GPT-Live accepts each output fixture, then reports when its mixer drains;
+                # appends are acknowledged on the session timeline. Each ack echoes event_id.
                 if message.get("type") == "session.output_audio.fixture.play":
-                    asyncio.create_task(self.ack_fixture(socket))
+                    asyncio.create_task(self.ack_fixture(socket, message.get("event_id")))
+                elif message.get("type", "").endswith(".append"):
+                    self.live_event += 1
+                    await socket.send(json.dumps({
+                        "type": message["type"].replace(".append", ".appended"), "event_id": f"evt-ack-{self.live_event}",
+                        "client_event_id": message.get("event_id"), "start_ms": 600, "end_ms": 800,
+                    }))
             return
 
         await socket.close(1008, "unknown mock path")
 
-    async def ack_fixture(self, socket) -> None:
+    async def ack_fixture(self, socket, client_event_id: str | None) -> None:
+        self.live_event += 1
+        await socket.send(json.dumps({"type": "session.output_audio.fixture.playing",
+                                      "event_id": f"evt-playing-{self.live_event}", "client_event_id": client_event_id}))
         await asyncio.sleep(0.05)
-        await socket.send(json.dumps({"type": "session.output_audio.fixture.played"}))
+        await socket.send(json.dumps({"type": "session.output_audio.fixture.played",
+                                      "event_id": f"evt-played-{self.live_event}", "client_event_id": client_event_id}))
 
     async def send_live(self, message: dict) -> None:
         assert self.live is not None
@@ -276,7 +288,6 @@ AGENT_PROMPT = (
 STARTED_SAY = "Juniper is on it."
 FINISHED_SAY = "Juniper finished; it reports the artifact is verified."
 REPORTED_SAY = "Juniper says the artifact is verified."
-FAREWELL_SAY = "Talk soon."
 SWITCH_SAY = "Switching themes; a new voice will pick up in a moment."
 PERSISTED_SESSION_ID = "ses_earlier0parser"
 PERSISTED_TITLE = "Earlier parser work"
@@ -364,10 +375,7 @@ ORCHESTRATOR_SCRIPT = [
         call("h3-escape", "create_managed_session", alias="Escape", directory="../etc"),
     ]),
     ("[handoff del-3]", lambda ctx: [call("h3-say", "say", text=LEASH_SAY, delegation_id="del-3")]),
-    ("[handoff del-4]", lambda ctx: [
-        call("h4-say", "say", text=FAREWELL_SAY, delegation_id="del-4"),
-        call("h4-end", "end_call"),
-    ]),
+    ("[handoff del-4]", lambda ctx: [call("h4-end", "end_call")]),
     # Second call: a turn that fails mid-command: its running command ends with it.
     ("[handoff del-f]", lambda ctx: [call("f-begin", "begin_prompt_turn", alias="Juniper", prompt=FAIL_PROMPT)]),
     ("turn_failed", lambda ctx: [call("f-inspect", "inspect_managed_session", alias="Juniper")]),
@@ -471,7 +479,7 @@ STEP_IDS = [
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say", "f-begin", "f-inspect", "o-begin", "o-inspect",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
-    "h4-say", "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
+    "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
     "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist",
     "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5", "kB-html", "k3-say", "k3-theme",
     "k2-dramaturgy", "kC-donate", "kD-practice",
@@ -959,6 +967,13 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(delegation("del-1", 2150))
         work_brief = await next_matching(mocks.live_messages, appended("thinking", WORK_BRIEF))
         assert work_brief["delegation_id"] == "del-1"
+        # Every sideband command carries an event_id, so an error names the command it rejects.
+        assert isinstance(work_brief.get("event_id"), str), work_brief
+        await mocks.send_live({"type": "error", "event_id": "evt-error-1", "error": {
+            "type": "invalid_request_error", "code": "append_rejected", "message": "Append rejected.",
+            "client_event_id": work_brief["event_id"]}})
+        await mocks.send_live({"type": "session.usage.updated", "event_id": "evt-usage-1",
+                               "usage": {"seconds": 6.0}, "context_window": {"usage_ratio": 0.0087}})
         created = await next_matching(
             mocks.acp_messages, lambda item: item.get("method") == "session/new"
         )
@@ -1056,6 +1071,20 @@ async def run_protocol(identity: str) -> None:
         kinds = {row["event"] for row in timed}
         assert {"live.received", "live.sent", "handoff.started", "handoff.queued", "model.started",
                 "model.headers", "model.completed", "tool.started", "tool.completed", "acp.sent", "acp.received"} <= kinds, kinds
+        # Sideband correlation (#29): sends carry event_ids, acks and errors are tied back to them.
+        sent = [row for row in timed if row["event"] == "live.sent"]
+        assert sent and all(isinstance(row.get("event_id"), str) for row in sent), sent
+        acked = [row for row in timed if row["event"] == "live.received" and row["type"] == "session.thinking.appended"
+                 and row.get("client_event_id") == work_brief["event_id"]]
+        assert acked and acked[0]["command_delegation_id"] == "del-1" and acked[0]["start_ms"] == 600, acked
+        assert any(row["event"] == "live.received" and row["type"] == "session.output_audio.fixture.playing"
+                   and row.get("command_type") == "session.output_audio.fixture.play" for row in timed)
+        details = {row["event"]: json.loads(row["detail"]) for row in rows}
+        rejected_append = details["voice.live.command.rejected"]
+        assert rejected_append["type"] == "session.thinking.append" and rejected_append["delegation_id"] == "del-1", rejected_append
+        assert rejected_append["code"] == "append_rejected", rejected_append
+        assert details["voice.live.usage"]["seconds"] == 6.0 and details["voice.live.usage"]["usage_ratio"] == 0.0087
+        assert "voice.live.error" not in events, "a rejected command is not a call error"
         # Producer identity and tool outcomes are recorded as rows are written.
         assert all(row.get("deployment_environment") == "local-test" for row in timed), "rows not stamped with their environment"
         acp_rows = [row for row in timed if row["event"] in {"acp.sent", "acp.received"}]
@@ -1190,13 +1219,18 @@ async def run_protocol(identity: str) -> None:
         assert escape["ok"] is False and "inside the Workspace" in escape["error"], escape
         assert any("test -d" in command and "honeydozer" in command for command in DaytonaMock.executed)
 
-        # Handoff 4: farewell and end_call in one response; hangup follows the farewell.
+        # Handoff 4: the Voice Frontend already said goodbye, so end_call hangs up at once,
+        # with no farewell of the Orchestrator's own. The delegation arrives three times: a
+        # replay after an attach keeps its event_id, and a repeat under a new one is still
+        # the same delegation; each is one handoff.
         await mocks.send_live(transcript("input", "Thanks, hang up now.", 9000, 10000))
-        await mocks.send_live(delegation("del-4", 10050))
-        farewell = await next_matching(mocks.live_messages, appended("commentary", FAREWELL_SAY))
-        assert farewell["delegation_id"] == "del-4"
-        await wait_for(lambda: any(path == "/live/sessions/live-test/hangup" for path, _ in DaytonaMock.openai_requests), 10)
+        await mocks.send_live({**delegation("del-4", 10050), "event_id": "evt-del-4"})
+        await mocks.send_live({**delegation("del-4", 10050), "event_id": "evt-del-4"})
+        await mocks.send_live({**delegation("del-4", 10050), "event_id": "evt-del-4-again"})
+        await wait_for(lambda: any(path == "/live/sessions/live-test/hangup" for path, _ in DaytonaMock.openai_requests), 4)
         assert OrchestratorMock.tool_output("h4-end")["status"] == "ending call"
+        assert not any(m.get("type") == "session.commentary.append" and m.get("delegation_id") == "del-4"
+                       for m in mocks.seen), "end_call spoke a farewell of its own"
 
         # Between calls: the provider closes the sideband, which ends the voice session and
         # writes the next welcome; the Agent asks for permission while nobody is on the line;
@@ -1206,6 +1240,9 @@ async def run_protocol(identity: str) -> None:
         greeting_request = OrchestratorMock.greeting_requests[-1]
         assert greeting_request["tools"] and greeting_request["model"] == "gpt-6.1-sol"
         assert "call_ended" in json.dumps(greeting_request["input"])
+        handoffs = [item for item in greeting_request["input"]
+                    if item.get("role") == "user" and "[handoff del-4]" in str(item.get("content"))]
+        assert len(handoffs) == 1, handoffs
         await mocks.acp.send(json.dumps({
             "jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission",
             "params": {

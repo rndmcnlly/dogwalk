@@ -989,8 +989,16 @@ rows, hidden from the ordinary diagnostic tree and the Voice Agent's activity
 summary. They record sideband receipt and message-chain wait (`queue_ms`), transcript
 delta character counts and provider media offsets, handoff preparation, model
 request/headers/completion/failure, tool start/end, ACP send/receipt, and actual
-sideband sends versus appends held behind menus or fixtures. Request IDs, tool-call
-IDs, delegation IDs, and voice-session IDs support joins. `clock_id` and `seq`
+sideband sends versus appends held behind menus or fixtures. Every sideband command
+carries an `event_id` (`<kind>-<n>`, such as `commentary-12`); acks and errors that
+echo it as `client_event_id` are recorded with the command's type and delegation ID,
+and the provider's `start_ms`/`end_ms` on an append ack place that say or brief on the
+media clock. An error naming a command is recorded as `voice.live.command.rejected`
+(or `voice.fixture.rejected`), not as a call-level `voice.live.error`. Server events
+replayed on attach are dropped by `event_id` (`live.replayed`), and a delegation
+repeated under a new one is one handoff. `session.usage.updated` is recorded as
+`voice.live.usage` (cumulative `seconds`, context `usage_ratio`) for observation only.
+Request IDs, tool-call IDs, delegation IDs, and voice-session IDs support joins. `clock_id` and `seq`
 identify local observation order across Durable Object resets; database insertion
 order is not observation order because timing rows are batched.
 
@@ -1006,8 +1014,8 @@ the pending batch, and failed writes are logged rather than delaying speech.
 Millisecond timestamp units do not imply millisecond measurement accuracy.
 Provider `start_ms`, `end_ms`, and `offset_ms` belong to the voice session's media
 clock, not the server's Unix clock. Output transcript receipt is not audio playout;
-fixture acknowledgements indicate the provider mixer drained, not arrival at the
-telephone. No full-call audio is retained by this instrumentation.
+`fixture.playing` means the provider accepted a fixture and `fixture.played` that its
+mixer drained, neither arrival at the telephone. No full-call audio is retained by this instrumentation.
 
 The Twilio incoming number must send status callbacks to:
 
