@@ -8,3 +8,4 @@ logs/
 __pycache__/
 .ruff_cache/
 dist/
+research/lfm3_voice/artifacts/

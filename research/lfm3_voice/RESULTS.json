@@ -1,0 +1,1555 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-12",
+  "verdict": "blocked_by_boundary_failures",
+  "scope": "Synthetic offline local feasibility screen, no production tasks or real calls.",
+  "model": "LiquidAI/LFM3-Audio-2B-GGUF Q8_0",
+  "runtime": "llama.cpp b12110-cd959bae9",
+  "hardware": "Apple M3 Max 40 GPU cores, 64 GiB unified memory",
+  "primary": [
+    {
+      "strategy": "user_envelope",
+      "input_mode": "native_audio",
+      "v1": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 28,
+        "missed_handoff": 4,
+        "false_handoff_points": 8,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 12,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 0.6823896249989048,
+          "p95": 2.207653500023298,
+          "max": 2.762084292015061
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 20,
+          "p50": 0.24930145801045,
+          "p95": 0.44727004203014076,
+          "max": 0.460234040976502
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 20,
+          "p50": 0.14449904102366418,
+          "p95": 0.15629070799332112,
+          "max": 0.16057858406566083
+        },
+        "native_generation_realtime_factor": {
+          "n": 20,
+          "p50": 0.18267548651860316,
+          "p95": 0.1965059686021099,
+          "max": 0.19910484850351212
+        }
+      },
+      "v2": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 30,
+        "missed_handoff": 3,
+        "false_handoff_points": 7,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 13,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 0.7597508749458939,
+          "p95": 1.721968041965738,
+          "max": 2.926276750047691
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 20,
+          "p50": 0.2550460840575397,
+          "p95": 0.448189957998693,
+          "max": 0.47476004192139953
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 20,
+          "p50": 0.14615583303384483,
+          "p95": 0.16086016700137407,
+          "max": 0.16305545798968524
+        },
+        "native_generation_realtime_factor": {
+          "n": 20,
+          "p50": 0.18728249231874847,
+          "p95": 0.19901826455273655,
+          "max": 0.20912273753310728
+        }
+      }
+    },
+    {
+      "strategy": "user_envelope",
+      "input_mode": "oracle_text",
+      "v1": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 28,
+        "missed_handoff": 3,
+        "false_handoff_points": 9,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 13,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 0.33522266696672887,
+          "p95": 1.8961312079336494,
+          "max": 2.6421302079688758
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 18,
+          "p50": 0.21480637497734278,
+          "p95": 0.3338058750377968,
+          "max": 0.3338058750377968
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 18,
+          "p50": 0.14957116707228124,
+          "p95": 0.20131954096723348,
+          "max": 0.20131954096723348
+        },
+        "native_generation_realtime_factor": {
+          "n": 18,
+          "p50": 0.19255422585874013,
+          "p95": 0.21117229816809413,
+          "max": 0.21117229816809413
+        }
+      },
+      "v2": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 29,
+        "missed_handoff": 3,
+        "false_handoff_points": 8,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 13,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 0.3725806250004098,
+          "p95": 1.6095316250575706,
+          "max": 2.0783167500048876
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 19,
+          "p50": 0.20985066692810506,
+          "p95": 0.3115274579031393,
+          "max": 0.3115274579031393
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 19,
+          "p50": 0.13679141597822309,
+          "p95": 0.16840399999637157,
+          "max": 0.16840399999637157
+        },
+        "native_generation_realtime_factor": {
+          "n": 19,
+          "p50": 0.18744856771869917,
+          "p95": 0.2161325270814511,
+          "max": 0.2161325270814511
+        }
+      }
+    },
+    {
+      "strategy": "user_envelope",
+      "input_mode": "lfm_stt",
+      "v1": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 28,
+        "missed_handoff": 4,
+        "false_handoff_points": 8,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 12,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 1.0160682920832187,
+          "p95": 1.9454674170119688,
+          "max": 2.6638732079882175
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 20,
+          "p50": 0.24081608408596367,
+          "p95": 0.35127754195127636,
+          "max": 0.35307541606016457
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 20,
+          "p50": 0.1689316249685362,
+          "p95": 0.1964279169915244,
+          "max": 0.2047755840467289
+        },
+        "native_generation_realtime_factor": {
+          "n": 20,
+          "p50": 0.20366593749617767,
+          "p95": 0.2237151136016889,
+          "max": 0.23546805554476108
+        }
+      },
+      "v2": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 28,
+        "missed_handoff": 4,
+        "false_handoff_points": 8,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 12,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 0.7458169579040259,
+          "p95": 2.013341542100534,
+          "max": 2.7545567920897156
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 20,
+          "p50": 0.24063779204152524,
+          "p95": 0.34946166607551277,
+          "max": 0.3677253749920055
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 20,
+          "p50": 0.14987933402881026,
+          "p95": 0.19149849994573742,
+          "max": 0.2004955830052495
+        },
+        "native_generation_realtime_factor": {
+          "n": 20,
+          "p50": 0.19670446533321714,
+          "p95": 0.21015903288831136,
+          "max": 0.22529447674588843
+        }
+      }
+    },
+    {
+      "strategy": "tool_envelope",
+      "input_mode": "native_audio",
+      "v1": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 28,
+        "missed_handoff": 3,
+        "false_handoff_points": 9,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 13,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 0.6063885410549119,
+          "p95": 2.406008541933261,
+          "max": 2.5267493330175057
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 18,
+          "p50": 0.31311341596301645,
+          "p95": 0.5344355419510975,
+          "max": 0.5344355419510975
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 18,
+          "p50": 0.18184304190799594,
+          "p95": 0.20763929095119238,
+          "max": 0.20763929095119238
+        },
+        "native_generation_realtime_factor": {
+          "n": 18,
+          "p50": 0.21069540565612874,
+          "p95": 0.23623586909563624,
+          "max": 0.23623586909563624
+        }
+      },
+      "v2": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 30,
+        "missed_handoff": 3,
+        "false_handoff_points": 7,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 13,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 0.9774794999975711,
+          "p95": 2.2067670000251383,
+          "max": 2.6314340829849243
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 20,
+          "p50": 0.3410470000235364,
+          "p95": 0.5611780829494819,
+          "max": 0.6061050420394167
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 20,
+          "p50": 0.1885864589130506,
+          "p95": 0.2701646670466289,
+          "max": 0.294810084044002
+        },
+        "native_generation_realtime_factor": {
+          "n": 20,
+          "p50": 0.21607805870635452,
+          "p95": 0.24712889384578116,
+          "max": 0.33191679253978956
+        }
+      }
+    },
+    {
+      "strategy": "tool_envelope",
+      "input_mode": "oracle_text",
+      "v1": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 32,
+        "missed_handoff": 1,
+        "false_handoff_points": 7,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 15,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 0.2825871250825003,
+          "p95": 2.219842000049539,
+          "max": 2.609915875014849
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 18,
+          "p50": 0.2439286250155419,
+          "p95": 0.46002533298451453,
+          "max": 0.46002533298451453
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 18,
+          "p50": 0.17294862493872643,
+          "p95": 0.234094874933362,
+          "max": 0.234094874933362
+        },
+        "native_generation_realtime_factor": {
+          "n": 18,
+          "p50": 0.2068768174138584,
+          "p95": 0.23520256579534984,
+          "max": 0.23520256579534984
+        }
+      },
+      "v2": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 31,
+        "missed_handoff": 2,
+        "false_handoff_points": 7,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 14,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 0.3547501659486443,
+          "p95": 2.4607043330324814,
+          "max": 2.817858124966733
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 19,
+          "p50": 0.2240479999454692,
+          "p95": 0.4015580409904942,
+          "max": 0.4015580409904942
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 19,
+          "p50": 0.15568720898590982,
+          "p95": 0.21572695800568908,
+          "max": 0.21572695800568908
+        },
+        "native_generation_realtime_factor": {
+          "n": 19,
+          "p50": 0.1991136474657651,
+          "p95": 0.2159105685071457,
+          "max": 0.2159105685071457
+        }
+      }
+    },
+    {
+      "strategy": "tool_envelope",
+      "input_mode": "lfm_stt",
+      "v1": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 30,
+        "missed_handoff": 3,
+        "false_handoff_points": 7,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 13,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 0.8763345840852708,
+          "p95": 2.2621698749717325,
+          "max": 3.0885170829715207
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 20,
+          "p50": 0.20941512507852167,
+          "p95": 0.3307126669678837,
+          "max": 0.3572098750155419
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 20,
+          "p50": 0.1435585420113057,
+          "p95": 0.18723179202061146,
+          "max": 0.19953812507446855
+        },
+        "native_generation_realtime_factor": {
+          "n": 20,
+          "p50": 0.1910907173418485,
+          "p95": 0.2117358610335299,
+          "max": 0.21353575311877648
+        }
+      },
+      "v2": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 30,
+        "missed_handoff": 3,
+        "false_handoff_points": 7,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 3,
+        "missing_holding_ack": 13,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 0.7598042091121897,
+          "p95": 2.135864249896258,
+          "max": 2.787205083994195
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 20,
+          "p50": 0.22186475002672523,
+          "p95": 0.3410337920067832,
+          "max": 0.3757371249375865
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 20,
+          "p50": 0.14720975002273917,
+          "p95": 0.17693849990610033,
+          "max": 0.1892685421044007
+        },
+        "native_generation_realtime_factor": {
+          "n": 20,
+          "p50": 0.19564347734331022,
+          "p95": 0.20397635867677466,
+          "max": 0.21146555243629137
+        }
+      }
+    },
+    {
+      "strategy": "reconstructed",
+      "input_mode": "native_audio",
+      "v1": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 19,
+        "missed_handoff": 0,
+        "false_handoff_points": 21,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 16,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 1.636663250043057,
+          "p95": 2.3912158330203965,
+          "max": 3.829648832906969
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 3,
+          "p50": 1.5089932499686256,
+          "p95": 1.872105540940538,
+          "max": 1.872105540940538
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 3,
+          "p50": 0.08762254100292921,
+          "p95": 0.08876141591463238,
+          "max": 0.08876141591463238
+        },
+        "native_generation_realtime_factor": {
+          "n": 3,
+          "p50": 0.18111685805860067,
+          "p95": 0.1880971874925308,
+          "max": 0.1880971874925308
+        }
+      },
+      "v2": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 18,
+        "missed_handoff": 0,
+        "false_handoff_points": 22,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 1,
+        "missing_holding_ack": 16,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 1.692069375072606,
+          "p95": 2.3291487080277875,
+          "max": 2.5442039580084383
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 2,
+          "p50": 2.035836249939166,
+          "p95": 2.035836249939166,
+          "max": 2.035836249939166
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 2,
+          "p50": 0.15656124998349696,
+          "p95": 0.15656124998349696,
+          "max": 0.15656124998349696
+        },
+        "native_generation_realtime_factor": {
+          "n": 2,
+          "p50": 0.19336312177455833,
+          "p95": 0.19336312177455833,
+          "max": 0.19336312177455833
+        }
+      }
+    },
+    {
+      "strategy": "reconstructed",
+      "input_mode": "oracle_text",
+      "v1": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 18,
+        "missed_handoff": 0,
+        "false_handoff_points": 22,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 16,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 1.3514404580928385,
+          "p95": 1.5568455419270322,
+          "max": 2.7266280830372125
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 2,
+          "p50": 1.5439772920217365,
+          "p95": 1.5439772920217365,
+          "max": 1.5439772920217365
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 2,
+          "p50": 0.14687970804516226,
+          "p95": 0.14687970804516226,
+          "max": 0.14687970804516226
+        },
+        "native_generation_realtime_factor": {
+          "n": 2,
+          "p50": 0.19182864570375685,
+          "p95": 0.19182864570375685,
+          "max": 0.19182864570375685
+        }
+      },
+      "v2": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 20,
+        "missed_handoff": 0,
+        "false_handoff_points": 20,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 2,
+        "missing_holding_ack": 16,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 1.4387068750802428,
+          "p95": 2.118861333001405,
+          "max": 2.6084815829526633
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 4,
+          "p50": 1.547503083012998,
+          "p95": 1.6244117500027642,
+          "max": 1.6244117500027642
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 4,
+          "p50": 0.13989858306013048,
+          "p95": 0.1574628750095144,
+          "max": 0.1574628750095144
+        },
+        "native_generation_realtime_factor": {
+          "n": 4,
+          "p50": 0.19870257167440286,
+          "p95": 0.20114021378838898,
+          "max": 0.20114021378838898
+        }
+      }
+    },
+    {
+      "strategy": "reconstructed",
+      "input_mode": "lfm_stt",
+      "v1": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 17,
+        "missed_handoff": 0,
+        "false_handoff_points": 23,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 16,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 1.4464597920887172,
+          "p95": 1.7301043340703472,
+          "max": 3.0795777089660987
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 1,
+          "p50": 1.5386454170802608,
+          "p95": 1.5386454170802608,
+          "max": 1.5386454170802608
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 1,
+          "p50": 0.11894625006243587,
+          "p95": 0.11894625006243587,
+          "max": 0.11894625006243587
+        },
+        "native_generation_realtime_factor": {
+          "n": 1,
+          "p50": 0.18793925134791517,
+          "p95": 0.18793925134791517,
+          "max": 0.18793925134791517
+        }
+      },
+      "v2": {
+        "points": 40,
+        "positive": 16,
+        "negative": 24,
+        "routing_pass": 19,
+        "missed_handoff": 1,
+        "false_handoff_points": 20,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 2,
+        "missing_holding_ack": 15,
+        "complete_response_s": {
+          "n": 40,
+          "p50": 1.5520391670288518,
+          "p95": 2.2961052510654554,
+          "max": 2.698216082993895
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 5,
+          "p50": 1.4285477499943227,
+          "p95": 1.618656790931709,
+          "max": 1.618656790931709
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 5,
+          "p50": 0.13939154101535678,
+          "p95": 0.16560904204379767,
+          "max": 0.16560904204379767
+        },
+        "native_generation_realtime_factor": {
+          "n": 5,
+          "p50": 0.19024141235734404,
+          "p95": 0.20273980821498713,
+          "max": 0.20273980821498713
+        }
+      }
+    }
+  ],
+  "supplementary": {
+    "normalized_native_repetitions": {
+      "strategy": "tool_envelope",
+      "policy": "v2",
+      "aggregate": {
+        "points": 120,
+        "positive": 48,
+        "negative": 72,
+        "routing_pass": 92,
+        "missed_handoff": 7,
+        "false_handoff_points": 21,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 9,
+        "missing_holding_ack": 41,
+        "complete_response_s": {
+          "n": 120,
+          "p50": 0.7518014590023085,
+          "p95": 2.273546624928713,
+          "max": 2.430070291971788
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 58,
+          "p50": 0.27400800003670156,
+          "p95": 0.43649691704194993,
+          "max": 0.5551342910621315
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 58,
+          "p50": 0.15378495899494737,
+          "p95": 0.19721408293116838,
+          "max": 0.20026341697666794
+        },
+        "native_generation_realtime_factor": {
+          "n": 58,
+          "p50": 0.198435627262757,
+          "p95": 0.21891929687626543,
+          "max": 0.2230858670569629
+        }
+      },
+      "repetitions": [
+        {
+          "points": 40,
+          "positive": 16,
+          "negative": 24,
+          "routing_pass": 30,
+          "missed_handoff": 3,
+          "false_handoff_points": 7,
+          "duplicate_calls": 0,
+          "malformed_calls": 0,
+          "transport_errors": 0,
+          "raw_silence_violations": 3,
+          "missing_holding_ack": 13,
+          "complete_response_s": {
+            "n": 40,
+            "p50": 0.7948810419766232,
+            "p95": 2.1144711669767275,
+            "max": 2.3186792080523446
+          },
+          "first_pcm_including_input_replay_s": {
+            "n": 20,
+            "p50": 0.24553820805158466,
+            "p95": 0.4169977910351008,
+            "max": 0.43649691704194993
+          },
+          "response_request_to_first_pcm_s": {
+            "n": 20,
+            "p50": 0.14286050002556294,
+            "p95": 0.155498499982059,
+            "max": 0.16667020798195153
+          },
+          "native_generation_realtime_factor": {
+            "n": 20,
+            "p50": 0.18626453730736528,
+            "p95": 0.191931111104269,
+            "max": 0.19582632812671363
+          }
+        },
+        {
+          "points": 40,
+          "positive": 16,
+          "negative": 24,
+          "routing_pass": 31,
+          "missed_handoff": 2,
+          "false_handoff_points": 7,
+          "duplicate_calls": 0,
+          "malformed_calls": 0,
+          "transport_errors": 0,
+          "raw_silence_violations": 3,
+          "missing_holding_ack": 14,
+          "complete_response_s": {
+            "n": 40,
+            "p50": 0.7415132080204785,
+            "p95": 2.284313249983825,
+            "max": 2.430070291971788
+          },
+          "first_pcm_including_input_replay_s": {
+            "n": 19,
+            "p50": 0.27288870804477483,
+            "p95": 0.5551342910621315,
+            "max": 0.5551342910621315
+          },
+          "response_request_to_first_pcm_s": {
+            "n": 19,
+            "p50": 0.1642693750327453,
+            "p95": 0.19878333306405693,
+            "max": 0.19878333306405693
+          },
+          "native_generation_realtime_factor": {
+            "n": 19,
+            "p50": 0.20140090046905276,
+            "p95": 0.2191533909508701,
+            "max": 0.2191533909508701
+          }
+        },
+        {
+          "points": 40,
+          "positive": 16,
+          "negative": 24,
+          "routing_pass": 31,
+          "missed_handoff": 2,
+          "false_handoff_points": 7,
+          "duplicate_calls": 0,
+          "malformed_calls": 0,
+          "transport_errors": 0,
+          "raw_silence_violations": 3,
+          "missing_holding_ack": 14,
+          "complete_response_s": {
+            "n": 40,
+            "p50": 0.8262686659581959,
+            "p95": 2.273546624928713,
+            "max": 2.3971125000389293
+          },
+          "first_pcm_including_input_replay_s": {
+            "n": 19,
+            "p50": 0.30648091610055417,
+            "p95": 0.5393517919583246,
+            "max": 0.5393517919583246
+          },
+          "response_request_to_first_pcm_s": {
+            "n": 19,
+            "p50": 0.18290079198777676,
+            "p95": 0.20026341697666794,
+            "max": 0.20026341697666794
+          },
+          "native_generation_realtime_factor": {
+            "n": 19,
+            "p50": 0.2084947387743341,
+            "p95": 0.2230858670569629,
+            "max": 0.2230858670569629
+          }
+        }
+      ]
+    },
+    "heldout_negatives": {
+      "native_audio": {
+        "points": 12,
+        "positive": 0,
+        "negative": 12,
+        "routing_pass": 7,
+        "missed_handoff": 0,
+        "false_handoff_points": 5,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 0,
+        "complete_response_s": {
+          "n": 12,
+          "p50": 1.535674583981745,
+          "p95": 3.2670887500280514,
+          "max": 3.2670887500280514
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 7,
+          "p50": 0.5171817920636386,
+          "p95": 0.6288368329405785,
+          "max": 0.6288368329405785
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 7,
+          "p50": 0.0868431250564754,
+          "p95": 0.0911136670038104,
+          "max": 0.0911136670038104
+        },
+        "native_generation_realtime_factor": {
+          "n": 7,
+          "p50": 0.1796915481026178,
+          "p95": 0.18425829985062592,
+          "max": 0.18425829985062592
+        }
+      },
+      "oracle_text": {
+        "points": 12,
+        "positive": 0,
+        "negative": 12,
+        "routing_pass": 6,
+        "missed_handoff": 0,
+        "false_handoff_points": 6,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 0,
+        "complete_response_s": {
+          "n": 12,
+          "p50": 1.1027050830889493,
+          "p95": 2.545623500016518,
+          "max": 2.545623500016518
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 6,
+          "p50": 0.3103764579864219,
+          "p95": 0.3291580840013921,
+          "max": 0.3291580840013921
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 6,
+          "p50": 0.11974408302921802,
+          "p95": 0.12679429107811302,
+          "max": 0.12679429107811302
+        },
+        "native_generation_realtime_factor": {
+          "n": 6,
+          "p50": 0.18853995767737314,
+          "p95": 0.19505609718556838,
+          "max": 0.19505609718556838
+        }
+      },
+      "lfm_stt": {
+        "points": 12,
+        "positive": 0,
+        "negative": 12,
+        "routing_pass": 6,
+        "missed_handoff": 0,
+        "false_handoff_points": 6,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 0,
+        "complete_response_s": {
+          "n": 12,
+          "p50": 1.3184006670489907,
+          "p95": 3.7743460839847103,
+          "max": 3.7743460839847103
+        },
+        "first_pcm_including_input_replay_s": {
+          "n": 6,
+          "p50": 0.3117805840447545,
+          "p95": 0.32155595801305026,
+          "max": 0.32155595801305026
+        },
+        "response_request_to_first_pcm_s": {
+          "n": 6,
+          "p50": 0.12077520799357444,
+          "p95": 0.12398391694296151,
+          "max": 0.12398391694296151
+        },
+        "native_generation_realtime_factor": {
+          "n": 6,
+          "p50": 0.18257808168224682,
+          "p95": 0.19011209482818636,
+          "max": 0.19011209482818636
+        }
+      }
+    },
+    "paired_frontend": {
+      "clean": {
+        "native_audio": {
+          "points": 2,
+          "positive": 2,
+          "negative": 0,
+          "routing_pass": 2,
+          "missed_handoff": 0,
+          "false_handoff_points": 0,
+          "duplicate_calls": 0,
+          "malformed_calls": 0,
+          "transport_errors": 0,
+          "raw_silence_violations": 0,
+          "missing_holding_ack": 2,
+          "complete_response_s": {
+            "n": 2,
+            "p50": 0.46819783304817975,
+            "p95": 0.46819783304817975,
+            "max": 0.46819783304817975
+          },
+          "first_pcm_including_input_replay_s": null,
+          "response_request_to_first_pcm_s": null,
+          "native_generation_realtime_factor": null
+        },
+        "oracle_text": {
+          "points": 2,
+          "positive": 2,
+          "negative": 0,
+          "routing_pass": 2,
+          "missed_handoff": 0,
+          "false_handoff_points": 0,
+          "duplicate_calls": 0,
+          "malformed_calls": 0,
+          "transport_errors": 0,
+          "raw_silence_violations": 0,
+          "missing_holding_ack": 2,
+          "complete_response_s": {
+            "n": 2,
+            "p50": 0.33745237498078495,
+            "p95": 0.33745237498078495,
+            "max": 0.33745237498078495
+          },
+          "first_pcm_including_input_replay_s": null,
+          "response_request_to_first_pcm_s": null,
+          "native_generation_realtime_factor": null
+        },
+        "lfm_stt": {
+          "points": 2,
+          "positive": 2,
+          "negative": 0,
+          "routing_pass": 2,
+          "missed_handoff": 0,
+          "false_handoff_points": 0,
+          "duplicate_calls": 0,
+          "malformed_calls": 0,
+          "transport_errors": 0,
+          "raw_silence_violations": 0,
+          "missing_holding_ack": 2,
+          "complete_response_s": {
+            "n": 2,
+            "p50": 0.5331322918646038,
+            "p95": 0.5331322918646038,
+            "max": 0.5331322918646038
+          },
+          "first_pcm_including_input_replay_s": null,
+          "response_request_to_first_pcm_s": null,
+          "native_generation_realtime_factor": null
+        }
+      },
+      "pstn_8khz": {
+        "native_audio": {
+          "points": 2,
+          "positive": 2,
+          "negative": 0,
+          "routing_pass": 2,
+          "missed_handoff": 0,
+          "false_handoff_points": 0,
+          "duplicate_calls": 0,
+          "malformed_calls": 0,
+          "transport_errors": 0,
+          "raw_silence_violations": 0,
+          "missing_holding_ack": 2,
+          "complete_response_s": {
+            "n": 2,
+            "p50": 0.4677652920363471,
+            "p95": 0.4677652920363471,
+            "max": 0.4677652920363471
+          },
+          "first_pcm_including_input_replay_s": null,
+          "response_request_to_first_pcm_s": null,
+          "native_generation_realtime_factor": null
+        },
+        "oracle_text": {
+          "points": 2,
+          "positive": 2,
+          "negative": 0,
+          "routing_pass": 2,
+          "missed_handoff": 0,
+          "false_handoff_points": 0,
+          "duplicate_calls": 0,
+          "malformed_calls": 0,
+          "transport_errors": 0,
+          "raw_silence_violations": 0,
+          "missing_holding_ack": 2,
+          "complete_response_s": {
+            "n": 2,
+            "p50": 0.331239250022918,
+            "p95": 0.331239250022918,
+            "max": 0.331239250022918
+          },
+          "first_pcm_including_input_replay_s": null,
+          "response_request_to_first_pcm_s": null,
+          "native_generation_realtime_factor": null
+        },
+        "lfm_stt": {
+          "points": 2,
+          "positive": 2,
+          "negative": 0,
+          "routing_pass": 2,
+          "missed_handoff": 0,
+          "false_handoff_points": 0,
+          "duplicate_calls": 0,
+          "malformed_calls": 0,
+          "transport_errors": 0,
+          "raw_silence_violations": 0,
+          "missing_holding_ack": 2,
+          "complete_response_s": {
+            "n": 2,
+            "p50": 0.5568607919849455,
+            "p95": 0.5568607919849455,
+            "max": 0.5568607919849455
+          },
+          "first_pcm_including_input_replay_s": null,
+          "response_request_to_first_pcm_s": null,
+          "native_generation_realtime_factor": null
+        }
+      }
+    },
+    "http_text_smoke": [
+      {
+        "arm": "reconstructed-lfm_stt-r1",
+        "points": 11,
+        "positive": 2,
+        "negative": 9,
+        "routing_pass": 4,
+        "missed_handoff": 0,
+        "false_handoff_points": 7,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 2,
+        "complete_response_s": {
+          "n": 11,
+          "p50": 0.4352866249391809,
+          "p95": 0.5175446670036763,
+          "max": 0.5175446670036763
+        },
+        "first_pcm_including_input_replay_s": null,
+        "response_request_to_first_pcm_s": null,
+        "native_generation_realtime_factor": null
+      },
+      {
+        "arm": "reconstructed-oracle_text-r1",
+        "points": 11,
+        "positive": 2,
+        "negative": 9,
+        "routing_pass": 3,
+        "missed_handoff": 0,
+        "false_handoff_points": 8,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 2,
+        "complete_response_s": {
+          "n": 11,
+          "p50": 0.2971968329511583,
+          "p95": 0.5223326249979436,
+          "max": 0.5223326249979436
+        },
+        "first_pcm_including_input_replay_s": null,
+        "response_request_to_first_pcm_s": null,
+        "native_generation_realtime_factor": null
+      },
+      {
+        "arm": "tool_envelope-lfm_stt-r1",
+        "points": 11,
+        "positive": 2,
+        "negative": 9,
+        "routing_pass": 6,
+        "missed_handoff": 1,
+        "false_handoff_points": 4,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 1,
+        "complete_response_s": {
+          "n": 11,
+          "p50": 0.4313398750964552,
+          "p95": 0.542236082139425,
+          "max": 0.542236082139425
+        },
+        "first_pcm_including_input_replay_s": null,
+        "response_request_to_first_pcm_s": null,
+        "native_generation_realtime_factor": null
+      },
+      {
+        "arm": "tool_envelope-oracle_text-r1",
+        "points": 11,
+        "positive": 2,
+        "negative": 9,
+        "routing_pass": 6,
+        "missed_handoff": 1,
+        "false_handoff_points": 4,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 1,
+        "complete_response_s": {
+          "n": 11,
+          "p50": 0.3063012500060722,
+          "p95": 0.48723045794758946,
+          "max": 0.48723045794758946
+        },
+        "first_pcm_including_input_replay_s": null,
+        "response_request_to_first_pcm_s": null,
+        "native_generation_realtime_factor": null
+      },
+      {
+        "arm": "user_envelope-lfm_stt-r1",
+        "points": 11,
+        "positive": 2,
+        "negative": 9,
+        "routing_pass": 6,
+        "missed_handoff": 0,
+        "false_handoff_points": 5,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 2,
+        "complete_response_s": {
+          "n": 11,
+          "p50": 0.4104981659911573,
+          "p95": 0.6179572909604758,
+          "max": 0.6179572909604758
+        },
+        "first_pcm_including_input_replay_s": null,
+        "response_request_to_first_pcm_s": null,
+        "native_generation_realtime_factor": null
+      },
+      {
+        "arm": "user_envelope-oracle_text-r1",
+        "points": 11,
+        "positive": 2,
+        "negative": 9,
+        "routing_pass": 6,
+        "missed_handoff": 0,
+        "false_handoff_points": 5,
+        "duplicate_calls": 0,
+        "malformed_calls": 0,
+        "transport_errors": 0,
+        "raw_silence_violations": 0,
+        "missing_holding_ack": 2,
+        "complete_response_s": {
+          "n": 11,
+          "p50": 0.2923864999320358,
+          "p95": 0.618297667009756,
+          "max": 0.618297667009756
+        },
+        "first_pcm_including_input_replay_s": null,
+        "response_request_to_first_pcm_s": null,
+        "native_generation_realtime_factor": null
+      }
+    ]
+  },
+  "excluded_diagnostic": {
+    "source": "matrix-native-v1/reconstructed-native_audio-r1.json",
+    "points": 40,
+    "reason": "Current caller audio could be incorrectly labelled historical during reconstruction. Replaced by a corrected matched run."
+  },
+  "caveats": [
+    "Main matrices retain historical raw-WAV ASR; explicit 16 kHz preprocessing was tested separately and used for repetitions.",
+    "Native conversation has no male voice selector; staged male TTS is host emulation.",
+    "First PCM is not first useful speech or actual acoustic playout.",
+    "No real backend coding tasks, carrier calls, permissions, deployments, or engineering side effects.",
+    "Independent ASR and judge labels do not establish acoustic truth or production reliability."
+  ],
+  "cancellation": {
+    "cancel-isolated": {
+      "actual_playback": false,
+      "native_duplex_proven": false,
+      "request_to_first_audio_s": 0.09447704197373241,
+      "first_audio_observed_while_response_active": true,
+      "cancel_to_done_s": 0.023762999917380512,
+      "response_status": "cancelled",
+      "audio_delta_events_received_after_cancel": 2,
+      "new_turn_completed": true,
+      "received_audio_tail_s": 0.18
+    },
+    "cancel-overlap": {
+      "actual_playback": false,
+      "native_duplex_proven": false,
+      "request_to_first_audio_s": 0.09870466601569206,
+      "first_audio_observed_while_response_active": true,
+      "caller_audio_sent_before_cancel": true,
+      "cancel_to_done_s": 0.03907850000541657,
+      "response_status": "cancelled",
+      "audio_delta_events_received_after_cancel": 6,
+      "new_turn_completed": true,
+      "received_audio_tail_s": 0.5
+    }
+  },
+  "paired_asr": [
+    {
+      "truth": "Ask Cedar to change the checkout label to Continue. Do not deploy.",
+      "condition": "clean",
+      "explicit_16khz_normalization": false,
+      "recognized": "Ask Cedar to change the checkout label to continue. Do not deploy.",
+      "elapsed_s": 0.25665762496646494
+    },
+    {
+      "truth": "Ask Cedar to change the checkout label to Continue. Do not deploy.",
+      "condition": "clean",
+      "explicit_16khz_normalization": true,
+      "recognized": "Ask Cedar to change the checkout label to continue. Do not deploy.",
+      "elapsed_s": 0.1840700840111822
+    },
+    {
+      "truth": "Ask Cedar to change the checkout label to Continue. Do not deploy.",
+      "condition": "pstn_8khz",
+      "explicit_16khz_normalization": false,
+      "recognized": "Okay.",
+      "elapsed_s": 0.08925112499855459
+    },
+    {
+      "truth": "Ask Cedar to change the checkout label to Continue. Do not deploy.",
+      "condition": "pstn_8khz",
+      "explicit_16khz_normalization": true,
+      "recognized": "Ask Cedar to change the checkout label to continue. Do not deploy.",
+      "elapsed_s": 0.18421520898118615
+    },
+    {
+      "truth": "Correction: the label should say Review, not Continue. Still don't deploy.",
+      "condition": "clean",
+      "explicit_16khz_normalization": false,
+      "recognized": "Correction. The label should say review, not continue. Still don't deploy.",
+      "elapsed_s": 0.21652412496041507
+    },
+    {
+      "truth": "Correction: the label should say Review, not Continue. Still don't deploy.",
+      "condition": "clean",
+      "explicit_16khz_normalization": true,
+      "recognized": "Correction. The label should say review, not continue. Still don't deploy.",
+      "elapsed_s": 0.22161041700746864
+    },
+    {
+      "truth": "Correction: the label should say Review, not Continue. Still don't deploy.",
+      "condition": "pstn_8khz",
+      "explicit_16khz_normalization": false,
+      "recognized": "Correct. The label should say, not still don't apply.",
+      "elapsed_s": 0.17674341599922627
+    },
+    {
+      "truth": "Correction: the label should say Review, not Continue. Still don't deploy.",
+      "condition": "pstn_8khz",
+      "explicit_16khz_normalization": true,
+      "recognized": "Correction. The label should say review, not continue. Still don't deploy.",
+      "elapsed_s": 0.21460791595745832
+    }
+  ],
+  "waveform_review": {
+    "files": 670,
+    "errors": 0,
+    "method": "Parakeet v3 via parakeet-mlx 0.7.0, waveform-relative word timestamps; not listening"
+  },
+  "judging": {
+    "records": 756,
+    "packets": [
+      {
+        "packet": "arm_233b1dedbe80",
+        "group": "analysis-v1",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 8,
+        "semantic_fail": 32,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_2eda6d13df4a",
+        "group": "analysis-v1",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 13,
+        "semantic_fail": 27,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_4699e4c624a1",
+        "group": "analysis-v1",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 11,
+        "semantic_fail": 29,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_9b3eccbe028d",
+        "group": "analysis-v1",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 9,
+        "semantic_fail": 31,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_ae4015637cf1",
+        "group": "analysis-v1",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 12,
+        "semantic_fail": 28,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_c07e0b2134d8",
+        "group": "analysis-v1",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 11,
+        "semantic_fail": 29,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_cf37e83f3c5c",
+        "group": "analysis-v1",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 14,
+        "semantic_fail": 26,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_edb944d01786",
+        "group": "analysis-v1",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 13,
+        "semantic_fail": 27,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_17a030827278",
+        "group": "analysis-v2",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 12,
+        "semantic_fail": 28,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_8f134b4dbe68",
+        "group": "analysis-v2",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 13,
+        "semantic_fail": 27,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_b33b2a28e042",
+        "group": "analysis-v2",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 7,
+        "semantic_fail": 33,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_bd677e8d42df",
+        "group": "analysis-v2",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 10,
+        "semantic_fail": 29,
+        "semantic_unresolved": 1
+      },
+      {
+        "packet": "arm_d6fd62d5543e",
+        "group": "analysis-v2",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 9,
+        "semantic_fail": 31,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_f0b7596160dd",
+        "group": "analysis-v2",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 14,
+        "semantic_fail": 26,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_1ab5b9325054",
+        "group": "judge-followups",
+        "model": "openai/gpt-6.1-sol",
+        "records": 9,
+        "semantic_pass": 5,
+        "semantic_fail": 3,
+        "semantic_unresolved": 1
+      },
+      {
+        "packet": "arm_3c5dc4dc3b58",
+        "group": "judge-followups",
+        "model": "openai/gpt-6.1-sol",
+        "records": 36,
+        "semantic_pass": 13,
+        "semantic_fail": 22,
+        "semantic_unresolved": 1
+      },
+      {
+        "packet": "arm_63cffbac275c",
+        "group": "judge-followups",
+        "model": "openai/gpt-6.1-sol",
+        "records": 22,
+        "semantic_pass": 9,
+        "semantic_fail": 13,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_b55a5c121572",
+        "group": "judge-followups",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 13,
+        "semantic_fail": 27,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_c0d5e74c4684",
+        "group": "judge-followups",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 11,
+        "semantic_fail": 28,
+        "semantic_unresolved": 1
+      },
+      {
+        "packet": "arm_cb08969b6aa4",
+        "group": "judge-followups",
+        "model": "openai/gpt-6.1-sol",
+        "records": 40,
+        "semantic_pass": 12,
+        "semantic_fail": 28,
+        "semantic_unresolved": 0
+      },
+      {
+        "packet": "arm_d837999ce965",
+        "group": "judge-followups",
+        "model": "openai/gpt-6.1-sol",
+        "records": 9,
+        "semantic_pass": 2,
+        "semantic_fail": 7,
+        "semantic_unresolved": 0
+      }
+    ],
+    "interpretation": "Record-level tallies, not potentially inaccurate free-text judge summary counts. Includes sampled revised arms, not every primary semantic predicate."
+  }
+}
