@@ -1740,10 +1740,11 @@ async def run_protocol(identity: str) -> None:
                 "discover_persisted_sessions", "load_persisted_session", "set_alias",
                 "close_managed_session", "list_workspace_projects", "create_invitation", "list_invitations",
                 "set_invitation_recipient", "revoke_invitation", "inspect_registration", "start_voice_donation",
-                "start_challenge_practice",
+                "start_challenge_practice", "start_reenrollment",
             }
             assert "start_voice_donation together in the same response" in payload["instructions"]
             assert "start_challenge_practice together in the same response" in payload["instructions"]
+            assert "start_reenrollment together in the same response" in payload["instructions"]
             assert "invite-someone" in payload["instructions"]
             assert "Never create a session in home and tell it to work in another directory" in payload["instructions"]
             assert "from what I know, unverified" in payload["instructions"]

@@ -60,7 +60,7 @@ Owns realtime audio transport, speech turn detection, browser or telephone media
 
 ### Access Control
 
-Owns Registration, Handles, Homes, Voice References, the Identity Check,
+Owns Registration, Handles, Homes, Voice References and Re-enrollment, the Identity Check,
 Challenge Practice, Invite Codes, and Invitations at the PSTN boundary. A User is identified by a
 spoken Handle, never by a personal name, birth date, or account number, and
 proves it by voice in an Identity Check before the Voice Agent answers. Caller
@@ -347,8 +347,28 @@ phrases in the new setting, and the new reference replaces the old one
 outright: earlier enrollment does not blend in. It is the voice counterpart of
 re-homing a number, and neither happens automatically.
 
-**Not:** Adaptive enrollment, or a Voice Donation (which never touches a Voice
-Reference).
+The User asks the Voice Agent for it in conversation ("re-enroll my voice"),
+which hands the call to a deterministic, speech-only ritual and gets the call
+back when it ends. Re-enrollment replaces the credential every later Identity
+Check is scored against, so it is never weaker than what it protects, and its
+check is enforced even while the Identity Check is in shadow mode. It is
+reached only from an admitted call (today, a Home call), and asks as many
+Identity Challenges as Roaming, each of which must match the current Voice
+Reference: one that does not ends it. Wrong phrases and too little speech never
+count as failures, as in any Identity Check. Then the User repeats first-call
+enrollment's phrases from the new setting, and the new Voice Reference must
+itself still match the old one at the Identity Challenge's threshold, so a
+different speaker cannot take over after someone else passed the check. Any
+other end (stop, silence, too few answers, a verifier error, a reference in
+another embedding space) leaves the Voice Reference unchanged, and the caller
+hears so. A User without a Voice Reference has nothing to replace and gets
+first-call enrollment on their next Home call instead. Like a Voice Reference
+itself, Re-enrollment keeps no audio, and its collected embeddings are deleted
+when it ends.
+
+**Not:** Adaptive enrollment, first-call enrollment, Challenge Practice (which
+never changes a Voice Reference), or a Voice Donation (which never touches a
+Voice Reference).
 
 ### Identity Check
 
@@ -1043,6 +1063,7 @@ These canonical terms name Voice Agent tools as well as core methods. Narration 
 - Challenge Practice is not a Voice Donation: its audio is scored in memory and discarded, never kept.
 - A shadow Identity Check is not enforcement: it records what it would have done and withholds nothing from a Home call.
 - First-call enrollment is not Re-enrollment: it creates a User's first Voice Reference and never replaces one.
+- Re-enrollment's check is not a shadow Identity Check: it decides whether the Voice Reference is replaced, even while the Identity Check only reports.
 - Saying "someone else" is not naming a Handle: it only asks who is calling.
 - The count of completed Home challenges is Access Control state, not Memory; it changes how the ritual is taught, never what it decides.
 
@@ -1122,6 +1143,7 @@ The following language appears in Git history and is not canonical for productio
 - User reaping is not implemented; only Sandbox reaping is. When it is: its age; that reaping a User moves their Handle into `retired_handles` for the same 90-day quarantine as renaming (the table's `user_id` then names a reaped User), clears the Home, deletes the Voice Reference, and sets `users.reaped_at`; whether it also reaps a Sandbox not yet reaped; and what becomes of the Voice Session Durable Object (its Memory, transcripts, and archives), which no reaping deletes today. Transcripts also live outside it: every Voice Call's caller and Voice Agent speech is kept as diagnostic text in `call_activity`, linked to the User through `voice_calls.user_id`, with no retention period; whether reaping a User strips that text, and whether call text should expire independently of reaping, is undecided. A proposal for these points is on issue #25.
 - Should the Identity Check ever collect more voice evidence during the conversation, or does whole-call collection need its own consent and retention decision?
 - Shadow Identity Check: what evidence (genuine and impostor levels across conditions, wrong-phrase and thin-speech rates, `wait_ms`) is enough to turn on enforcement, and does enforcement start with Home calls before Roaming exists? Should the registration prompt also accept a Handle, so a User calling from a phone that is not a Home can be challenged in shadow mode? Should Roaming challenges against a User count toward that User's taught-once count, or Challenge Practice rounds toward it? Registration's enrollment does not yet create the new Sandbox while it runs, and does not use the spoken Invite Code as speech.
+- Re-enrollment: a User whose voice no longer matches from any setting (illness, a changed voice, or a verifier whose new embedding space cannot compare with the old reference) cannot re-enroll by voice. What recovers them, and what proves it is them, is undecided; today it is the operator deleting the Voice Reference so first-call enrollment runs again on the next Home call. Should Re-enrollment also be reachable after Roaming admission, and should it require that this call's own Identity Check matched? Should failed Re-enrollment checks count toward a Handle's attempt limits, since, like Challenge Practice, each one tells the caller a level? Should the Session Orchestrator learn the outcome when the call returns to it?
 - Voice Donations: how long is donated audio kept? Today it stays until the operator deletes it on request or decides otherwise; a fixed retention period, and whether the consent script should state it, is undecided. Should a donor be able to delete their own session by voice without an identifier being spoken to them?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
 

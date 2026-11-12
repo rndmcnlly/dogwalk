@@ -28,6 +28,7 @@ import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
 import { handleVoiceVerify, warmSpeaker } from "./voice_verify";
 import { handlePracticeHeard, handlePracticeResult, handlePracticeStream, practiceReceived, practiceStreamStop, practiceTone, startPractice } from "./challenge_practice";
+import { handleReenrollmentHeard, handleReenrollmentResult, reenrollmentStreamStop, startReenrollment } from "./reenrollment";
 import {
   type Exits, handleIdentityHeard, handleIdentityResult, handleIdentityStream, handleIdentityWho, identityStreamStop, startHomeCheck,
   startRegistrationEnrollment,
@@ -1219,6 +1220,9 @@ export default {
     if (url.pathname.startsWith("/voice/identity")) {
       return handleIdentity(req, env, ctx, url);
     }
+    if (url.pathname.startsWith("/voice/reenrollment")) {
+      return handleReenrollment(req, env, ctx, url);
+    }
     if (url.pathname === "/voice/status" && req.method === "POST") {
       return handleCallStatus(req, env, ctx);
     }
@@ -1385,6 +1389,7 @@ async function handleAfterLive(req: Request, env: Env, ctx: ExecutionContext): P
   if (handoff?.action === "rejoin") return twiml(Redirect("/voice"));
   if (handoff?.action === "donation") return twiml(Redirect("/voice/donation"));
   if (handoff?.action === "practice") return twiml(Redirect("/voice/practice"));
+  if (handoff?.action === "reenrollment") return twiml(Redirect("/voice/reenrollment"));
   return recoveryMenu(handoff?.action === "recovery" ? "Recovery options. " : "Voice dropped. ");
 }
 
@@ -1726,6 +1731,32 @@ async function handlePractice(req: Request, env: Env, ctx: ExecutionContext, url
     // A failed round webhook still stops its stream, which would otherwise keep listening.
     const stop = url.pathname === "/voice/practice/heard" ? practiceStreamStop(url) : "";
     return twiml(stop + Say("Challenge practice stopped because of an error. Back to Dogwalk.") + Redirect("/voice"));
+  }
+  return new Response("not found", { status: 404 });
+}
+
+// --- /voice/reenrollment: Re-enrollment (reenrollment.ts) ----------------
+
+// The call's User replaces their Voice Reference after passing its check; every path ends back at
+// /voice. Its rounds stream to /voice/identity/stream, so only the Gather actions live here.
+async function handleReenrollment(req: Request, env: Env, ctx: ExecutionContext, url: URL): Promise<Response> {
+  if (req.method !== "POST") return new Response("not found", { status: 404 });
+  if (!(await twilioSignatureValid(req, env)).valid) return new Response("forbidden", { status: 403 });
+  const form = await req.clone().formData();
+  const from = normalizePhone(form.get("From"));
+  const callSid = String(form.get("CallSid") ?? "");
+  if (!from || !callSid) return twiml(Hangup());
+  const log = (event: string, detail: Record<string, unknown>) => audit(env, event, from, callSid, detail);
+  try {
+    if (url.pathname === "/voice/reenrollment") return twiml(await startReenrollment(env, ctx, url, form, log));
+    if (url.pathname === "/voice/reenrollment/heard") return twiml(await handleReenrollmentHeard(env, ctx, url, form, log));
+    if (url.pathname === "/voice/reenrollment/result") return twiml(await handleReenrollmentResult(env, ctx, url, form, log));
+  } catch (error) {
+    await log("reenrollment.error", { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+    // Collected embeddings go with the rounds. A failed round webhook still stops its stream.
+    await env.DB.prepare("DELETE FROM challenge_rounds WHERE call_sid = ?").bind(callSid).run().catch(() => {});
+    const stop = url.pathname === "/voice/reenrollment/heard" ? reenrollmentStreamStop(url) : "";
+    return twiml(stop + Say("Re-enrollment stopped because of an error. Your voice profile is unchanged. Back to Dogwalk.") + Redirect("/voice"));
   }
   return new Response("not found", { status: 404 });
 }
@@ -2115,7 +2146,7 @@ function activityMetadata(event: string): {
   const source = event.startsWith("sandbox.") ? "hosting"
     : event.startsWith("menu.") ? "menu"
     : event.startsWith("registration.") || event.startsWith("caller.") || event.startsWith("claim.") || event.startsWith("confirm.")
-      || event.startsWith("identity.") ? "access"
+      || event.startsWith("identity.") || event.startsWith("reenrollment.") ? "access"
     : event.startsWith("acp.") ? "acp"
     : "voice";
   const direction = event.endsWith(".speech") || event === "call.entered" || event.startsWith("call.")
