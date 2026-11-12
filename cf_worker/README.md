@@ -498,8 +498,11 @@ the base, base+3 to base+5, and base+1442. Each worktree keeps its own local D1.
 The smoke test's Voice Donation checks use wrangler dev's local R2. A local D1
 created before `migrations/2026-11-11-call-handoff-donation.sql`,
 `migrations/2026-11-12-challenge-practice.sql`,
-`migrations/2026-11-12-speculative-scoring.sql`, or
-`migrations/2026-11-13-identity-check.sql` needs those files applied with
+`migrations/2026-11-12-speculative-scoring.sql`,
+`migrations/2026-11-13-identity-check.sql`,
+`migrations/2026-11-14-reenrollment.sql`,
+`migrations/2026-11-14-roaming-admission.sql`, or
+`migrations/2026-11-15-spoken-pairing.sql` needs those files applied with
 `--local` once, since `schema.sql` only creates missing tables.
 
 The smoke test runs `wrangler dev -c wrangler.toml -c speaker_mock.toml`, so the
@@ -701,7 +704,9 @@ strictly durable unattended turns.
 ## Paired Browser
 
 Before deploying spoken pairing, apply `migrations/2026-11-15-spoken-pairing.sql`
-to D1. It discards pending acoustic codes and removes decode-failure telemetry,
+to D1 while no call is in progress, then deploy with `deploy.py` at once: code
+from before this change cannot write the new `nameplate` column, so a
+`pair_browser` from an old Durable Object in between fails. It discards pending acoustic codes and removes decode-failure telemetry,
 but does not touch accepted browser credentials in Durable Object storage:
 
 ```bash
