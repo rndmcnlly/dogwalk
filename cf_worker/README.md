@@ -143,8 +143,10 @@ Each row's `detail` names `user_id`, `provider_id`, `last_call_at`, and
 To pause deletion, set `SANDBOX_REAP_MODE = "dry-run"` under `[vars]` in
 `wrangler.toml` and deploy (or change the variable in the Cloudflare dashboard,
 which the next `wrangler deploy` overwrites with the file's value). A reap
-already started stays started: pausing stops new reaps and provider deletions,
-and the pass resumes pending deletions once `delete` is back. In production a pass
+already started stays started. A pause applies to passes that start after the
+deploy: one already running keeps its `delete` mode until it finishes, and
+Daytona completes deletions it has accepted. Later passes start no reaps and
+send no deletions, and resume pending deletions once `delete` is back. In production a pass
 runs only on that schedule, so the first candidates appear after the next 10:17
 UTC following a deploy. Locally, `wrangler dev --test-scheduled` exposes
 `/__scheduled?cron=17+10+*+*+*`, which the smoke test uses.
