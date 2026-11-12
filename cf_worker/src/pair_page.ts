@@ -617,8 +617,6 @@ async function claim(code) {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ code }),
-      // A hung request would leave the form disabled; a timeout lands in the catch below.
-      signal: AbortSignal.timeout(10000),
     });
     body = await response.json().catch(() => ({}));
   } catch (error) {
@@ -648,7 +646,7 @@ async function waitForAnswer(ticket) {
     await sleep(1000);
     let response, body;
     try {
-      response = await fetch("/pair/claim/status", { headers: { authorization: "Bearer " + ticket }, signal: AbortSignal.timeout(5000) });
+      response = await fetch("/pair/claim/status", { headers: { authorization: "Bearer " + ticket } });
       body = await response.json().catch(() => ({}));
     } catch (error) {
       log("claim status check failed: " + error.message);
