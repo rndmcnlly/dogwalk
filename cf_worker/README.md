@@ -434,7 +434,7 @@ transcript, phrase, embedding, or audio. `voice_calls.identity` is untouched:
 it records how the call was admitted.
 
 Apply `migrations/2026-11-14-reenrollment.sql` remotely before deploying this (it
-recreates the transient `call_handoffs` to allow `reenrollment`):
+rebuilds `call_handoffs` to allow `reenrollment`, copying any pending handoff):
 
 ```bash
 npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-14-reenrollment.sql

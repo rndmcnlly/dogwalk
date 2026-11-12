@@ -1764,14 +1764,17 @@ def reenrollment_checks(base_url: str, token: str) -> None:
         require(row["ritual"] == ritual and f">{row['phrase']}</Say></Gather>" in body, f"re-enrollment round {number} ritual: {row}")
         return stream[1], action[1].replace("&amp;", "&"), row["phrase"]
 
-    def answer(body: str, form: dict, number: int, phase: str, seconds: float, sample: int) -> str:
+    def answer(body: str, form: dict, number: int, phase: str, seconds: float, sample: int, retried: bool = False) -> str:
+        """A matched answer; `retried` posts its transcript twice, as a Twilio retry would."""
         stream, action, phrase = round_of(body, form["CallSid"], number, phase, "identity" if phase == "check" else "enrollment")
         redirect = []
         def heard() -> None:
-            _, twiml = post(base_url, action, {**form, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)
+            responses = [post(base_url, action, {**form, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)[1]
+                         for _ in range(2 if retried else 1)]
+            require(len(set(responses)) == 1, f"a retried matched phrase answered differently: {responses}")
             match = re.fullmatch(rf'<Response><Stop><Stream name="identity-round-{number:02d}"/></Stop>{received_cue}'
-                                 rf'<Redirect method="POST">(/voice/reenrollment/result\?[^<]+)</Redirect></Response>', twiml)
-            require(match is not None, f"re-enrollment matched phrase: {twiml}")
+                                 rf'<Redirect method="POST">(/voice/reenrollment/result\?[^<]+)</Redirect></Response>', responses[0])
+            require(match is not None, f"re-enrollment matched phrase: {responses[0]}")
             redirect.append(match[1].replace("&amp;", "&"))
         practice_stream(base_url, stream, token, number, steady_audio(seconds, sample), heard)
         status, result = post(base_url, redirect[0], form, token)
@@ -1805,7 +1808,7 @@ def reenrollment_checks(base_url: str, token: str) -> None:
     body = say(body, form, 2, "check", "the purple cow jumped")
     require(re.match(rf'<Response><Stop><Stream name="identity-round-02"/></Stop>{received_cue}<Say[^>]*>That wasn\'t the sentence\.', body),
             f"check wrong phrase: {body}")
-    body = answer(body, form, 3, "check", 3.0, 6000)
+    body = answer(body, form, 3, "check", 3.0, 6000, retried=True)
     require("Voice matched.</Say>" in body and "That's you." not in body, f"check round 3: {body}")
     body = answer(body, form, 4, "check", 3.0, 6000)
     require("Voice matched. That's you. Now the new profile: 5 sentences" in body and "&amp;start=4&amp;round=5&amp;" in body,

@@ -63,7 +63,9 @@ const outOfRounds = (round: number, progress: Progress) => round - progress.star
 
 /** Every path's end: rounds (and collected embeddings) deleted, the outcome logged, and back to the Voice Agent. */
 async function end(env: Env, callSid: string, log: Log, detail: Record<string, unknown>, spoken: string): Promise<string> {
-  await clearRounds(env, callSid);
+  // Best-effort: a committed replacement must still be reported as one, and clearRounds's own
+  // hourly sweep (or the route's error path) removes what a failure leaves.
+  await clearRounds(env, callSid).catch(() => {});
   await log("reenrollment.result", detail);
   return Say(`${spoken} Back to Dogwalk.`) + RETURN;
 }
@@ -132,6 +134,11 @@ export async function handleReenrollmentHeard(env: Env, ctx: ExecutionContext, u
   const stop = stopTake(ritual, round, take);
   const row = await readRound(env, callSid, round);
   const subject = await callSubject(env, callSid);
+  const toResult = stop + receivedCuePlay(env, url, ritual) +
+    `<Redirect method="POST">/voice/reenrollment/result?${query({ ...progress, silent: 0 }).replace(/&/g, "&amp;")}&amp;round=${round}</Redirect>`;
+  // A retried callback for a take already matched goes on to its result rather than ending the ritual.
+  if (row && subject && row.ritual === ritual && row.user_id === subject.id && row.take === take && (row.state === "scoring" || row.state === "scored")
+    && isAccountSid(account)) return toResult;
   if (!row || !subject?.embedding || row.ritual !== ritual || row.user_id !== subject.id || row.state !== "listening" || row.take !== take
     || !isAccountSid(account)) {
     return stop + await end(env, callSid, log, { phase: progress.phase, outcome: "lost_round" }, `Re-enrollment stopped. ${UNCHANGED}`);
@@ -168,8 +175,7 @@ export async function handleReenrollmentHeard(env: Env, ctx: ExecutionContext, u
     case "matched":
       await markScoring(env, callSid, round);
       // The cue plays while the verifier scores, so it costs the caller no extra wait.
-      return stop + receivedCuePlay(env, url, ritual) +
-        `<Redirect method="POST">/voice/reenrollment/result?${query({ ...progress, silent: 0 }).replace(/&/g, "&amp;")}&amp;round=${round}</Redirect>`;
+      return toResult;
   }
 }
 
