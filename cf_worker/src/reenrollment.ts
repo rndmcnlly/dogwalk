@@ -16,7 +16,8 @@
 //
 // Rounds have the Identity Challenge's shape and rules (challenge_rounds.ts) and share the
 // Identity Check's streams and cues (/voice/identity/stream, tone, received); only the Gather
-// actions are this module's. Webhook URLs carry the phase and progress; Twilio signs them.
+// actions are this module's. Webhook URLs carry the phase, progress, and the version of the
+// Voice Reference the check began against; Twilio signs them.
 import { isAccountSid, Say } from "./caller_stream";
 import {
   answerOf, awaitScore, CALL_SID, clearRounds, judge, markScoring, MATCH_COSINE, nextTake, openRound, readRound, receivedCuePlay,
@@ -38,35 +39,44 @@ type Log = (event: string, detail: Record<string, unknown>) => Promise<void>;
 const RETURN = '<Redirect method="POST">/voice</Redirect>';
 const UNCHANGED = "Your voice profile is unchanged.";
 
-interface Subject { id: number; identity_hash: string; embedding_space: string | null; embedding: string | null }
+interface Subject { id: number; identity_hash: string; embedding_space: string | null; embedding: string | null; version: string }
 
-/** This Voice Call's User and their Voice Reference, as callUser resolves the User. */
+/**
+ * This Voice Call's User and their Voice Reference, as callUser resolves the User. version is a
+ * digest of the reference, so the ritual can tell that it is still the one its check began
+ * against: a replacement by another call meanwhile ends this one unchanged.
+ */
 async function callSubject(env: Env, callSid: string): Promise<Subject | null> {
-  return env.DB.prepare(
+  const row = await env.DB.prepare(
     `SELECT u.id, u.identity_hash, vr.embedding_space, vr.embedding
        FROM voice_calls c JOIN users u ON u.id = c.user_id LEFT JOIN voice_references vr ON vr.user_id = u.id
       WHERE c.call_sid = ? AND u.reaped_at IS NULL`,
-  ).bind(callSid).first<Subject>();
+  ).bind(callSid).first<Omit<Subject, "version">>();
+  if (!row) return null;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${row.embedding_space}\n${row.embedding}`));
+  const version = [...new Uint8Array(digest).slice(0, 8)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return { ...row, version };
 }
 
 // start is the round before the phase began, so enrollment gets its own MAX_ROUNDS budget while
 // round numbers stay increasing, and a stopped stream's late score never lands on a new round.
-interface Progress { phase: Phase; silent: number; judged: number; start: number }
+interface Progress { phase: Phase; silent: number; judged: number; start: number; ref: string }
 function progressOf(url: URL): Progress | null {
   const phase = url.searchParams.get("phase");
-  if (phase !== "check" && phase !== "enroll") return null;
+  const ref = url.searchParams.get("ref") ?? "";
+  if ((phase !== "check" && phase !== "enroll") || !/^[0-9a-f]{16}$/.test(ref)) return null;
   const count = (name: string) => Number(url.searchParams.get(name) ?? "0") || 0;
-  return { phase, silent: count("silent"), judged: count("judged"), start: count("start") };
+  return { phase, silent: count("silent"), judged: count("judged"), start: count("start"), ref };
 }
-const query = (p: Progress) => `phase=${p.phase}&silent=${p.silent}&judged=${p.judged}&start=${p.start}`;
+const query = (p: Progress) => `phase=${p.phase}&silent=${p.silent}&judged=${p.judged}&start=${p.start}&ref=${p.ref}`;
 const outOfRounds = (round: number, progress: Progress) => round - progress.start >= MAX_ROUNDS[progress.phase];
 
 /** Every path's end: rounds (and collected embeddings) deleted, the outcome logged, and back to the Voice Agent. */
 async function end(env: Env, callSid: string, log: Log, detail: Record<string, unknown>, spoken: string): Promise<string> {
-  // Best-effort: a committed replacement must still be reported as one, and clearRounds's own
-  // hourly sweep (or the route's error path) removes what a failure leaves.
+  // Best-effort: a committed replacement must still be reported as one. clearRounds's own hourly
+  // sweep (or the call's end) removes what a failure leaves, and a lost event loses no state.
   await clearRounds(env, callSid).catch(() => {});
-  await log("reenrollment.result", detail);
+  await log("reenrollment.result", detail).catch(() => {});
   return Say(`${spoken} Back to Dogwalk.`) + RETURN;
 }
 
@@ -118,7 +128,7 @@ export async function startReenrollment(env: Env, ctx: ExecutionContext, url: UR
   return Say("Re-enrolling replaces your voice profile with one from how you're calling now. " +
     `First, a voice check against your current profile: ${ROAMING_CHALLENGES} sentences, and each must match. ` +
     "After each tone, repeat the sentence once in your normal voice. Say stop to cancel.") +
-    await roundTwiml(env, ctx, url, callSid, account, 1, { phase: "check", silent: 0, judged: 0, start: 0 }, subject);
+    await roundTwiml(env, ctx, url, callSid, account, 1, { phase: "check", silent: 0, judged: 0, start: 0, ref: subject.version }, subject);
 }
 
 /** /voice/reenrollment/heard: the round's transcript decides whether its audio is scored at all. */
@@ -143,6 +153,7 @@ export async function handleReenrollmentHeard(env: Env, ctx: ExecutionContext, u
     || !isAccountSid(account)) {
     return stop + await end(env, callSid, log, { phase: progress.phase, outcome: "lost_round" }, `Re-enrollment stopped. ${UNCHANGED}`);
   }
+  if (subject.version !== progress.ref) return stop + await lostReference(env, callSid, log, progress, subject);
   const answer = answerOf(row.phrase, String(form.get("SpeechResult") ?? ""), take);
   switch (answer.kind) {
     case "stop":
@@ -200,6 +211,7 @@ export async function handleReenrollmentResult(env: Env, ctx: ExecutionContext, 
   if (!subject?.embedding || !row || row.ritual !== ritual || row.user_id !== subject.id || (row.state !== "scoring" && row.state !== "scored")) {
     return end(env, callSid, log, { phase: progress.phase, outcome: "lost_round" }, `Re-enrollment stopped. ${UNCHANGED}`);
   }
+  if (subject.version !== progress.ref) return lostReference(env, callSid, log, progress, subject);
   const verdict = judge(row);
   await log("reenrollment.round", { phase: progress.phase, round, outcome: verdict.outcome, ...scoreDetail(row), ...scoreTiming(row, wait_ms) });
   // Enrollment keeps a collected answer's embedding until the new Voice Reference is computed.
@@ -207,7 +219,7 @@ export async function handleReenrollmentResult(env: Env, ctx: ExecutionContext, 
     await env.DB.prepare("DELETE FROM challenge_rounds WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
   }
   const next = (spoken: string, judged = progress.judged, phase = progress.phase, start = progress.start) =>
-    nextRound(env, ctx, url, callSid, account, log, round, { phase, silent: 0, judged, start }, subject, spoken);
+    nextRound(env, ctx, url, callSid, account, log, round, { phase, silent: 0, judged, start, ref: progress.ref }, subject, spoken);
 
   if (verdict.outcome === "unscored") {
     if (verdict.error) {
@@ -234,6 +246,11 @@ export async function handleReenrollmentResult(env: Env, ctx: ExecutionContext, 
   return next(`${verdict.spoken} That's you. Now the new profile: ${ENROLL_ANSWERS} sentences, ` +
     "from the phone and place you'll usually call from. After each tone, repeat the sentence once.", 0, "enroll", round);
 }
+
+/** The Voice Reference changed after the check began (another call re-enrolled): nothing more changes here. */
+const lostReference = (env: Env, callSid: string, log: Log, progress: Progress, subject: Subject) =>
+  end(env, callSid, log, { phase: progress.phase, user_id: subject.id, outcome: "lost_reference" },
+    "Your voice profile changed during this call, so I've left it as it is now.");
 
 /** Cosine similarity of two embeddings, or null when they cannot be compared. */
 function cosine(a: number[], b: number[]): number | null {

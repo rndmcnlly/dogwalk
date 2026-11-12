@@ -1758,7 +1758,8 @@ def reenrollment_checks(base_url: str, token: str) -> None:
     def round_of(body: str, sid: str, number: int, phase: str, ritual: str = "identity") -> tuple[str, str, str]:
         name = f"identity-round-{number:02d}"
         stream = re.search(rf'<Start><Stream name="{name}" url="wss://dogwalk\.tools(/voice/identity/stream/[^"]+)" track="inbound_track">', body)
-        action = re.search(rf'action="(/voice/reenrollment/heard\?phase={phase}&amp;silent=\d&amp;judged=\d&amp;start=\d+&amp;round={number}&amp;take=0)"', body)
+        action = re.search(rf'action="(/voice/reenrollment/heard\?phase={phase}&amp;silent=\d&amp;judged=\d&amp;start=\d+&amp;ref=[0-9a-f]{{16}}'
+                           rf'&amp;round={number}&amp;take=0)"', body)
         require(stream and action and "<Play>https://dogwalk.tools/voice/identity/tone.wav</Play>" in body, f"re-enrollment round {number}: {body}")
         row = d1_local(f"SELECT phrase, ritual FROM challenge_rounds WHERE call_sid = '{sid}' AND round = {number}")[0]
         require(row["ritual"] == ritual and f">{row['phrase']}</Say></Gather>" in body, f"re-enrollment round {number} ritual: {row}")
@@ -1811,7 +1812,7 @@ def reenrollment_checks(base_url: str, token: str) -> None:
     body = answer(body, form, 3, "check", 3.0, 6000, retried=True)
     require("Voice matched.</Say>" in body and "That's you." not in body, f"check round 3: {body}")
     body = answer(body, form, 4, "check", 3.0, 6000)
-    require("Voice matched. That's you. Now the new profile: 5 sentences" in body and "&amp;start=4&amp;round=5&amp;" in body,
+    require("Voice matched. That's you. Now the new profile: 5 sentences" in body and re.search(r"&amp;start=4&amp;ref=[0-9a-f]{16}&amp;round=5&amp;", body),
             f"check passed: {body}")
     for number in range(5, 11):
         body = answer(body, form, number, "enroll", 0.4 if number == 6 else 3.0, 6000)
@@ -1860,11 +1861,23 @@ def reenrollment_checks(base_url: str, token: str) -> None:
     require(reference() == near and d1_local("SELECT COUNT(*) AS n FROM challenge_rounds WHERE call_sid = 'CA_REENROLL_STOP'")[0]["n"] == 0,
             "stopped re-enrollment changed the reference or kept rows")
 
+    # Another call replaces the reference after this one's check began: this one changes nothing.
+    set_reference(near)
+    form = call("CA_REENROLL_RACE")
+    _, body = post(base_url, "/voice/reenrollment", form, token)
+    body = answer(body, form, 1, "check", 3.0, 8000)
+    set_reference(json.dumps([1.0] * 192))
+    _, action, phrase = round_of(body, "CA_REENROLL_RACE", 2, "check")
+    _, body = post(base_url, action, {**form, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)
+    require(body == '<Response><Stop><Stream name="identity-round-02"/></Stop><Say voice="Polly.Joanna">Your voice profile changed during this '
+            f'call, so I\'ve left it as it is now. Back to Dogwalk.</Say>{connect}', f"reference changed mid-ritual: {body}")
+    require(reference() == json.dumps([1.0] * 192), "a stale ritual changed the newer reference")
+
     # Call Activity: under access, with every outcome and never speech or an embedding.
     rows = d1_local("SELECT source, event, detail FROM call_activity WHERE call_sid LIKE 'CA_REENROLL%' AND event LIKE 'reenrollment.%' ORDER BY id")
     require(rows and all(row["source"] == "access" for row in rows), f"re-enrollment activity source: {rows[:2]}")
     results = [json.loads(row["detail"])["outcome"] for row in rows if row["event"] == "reenrollment.result"]
-    require(results == ["reenrolled", "failed", "discontinuous", "stopped"], f"re-enrollment results: {results}")
+    require(results == ["reenrolled", "failed", "discontinuous", "stopped", "lost_reference"], f"re-enrollment results: {results}")
     require(not any({"phrase", "transcript", "embedding"} & json.loads(row["detail"]).keys() for row in rows),
             "Call Activity kept re-enrollment speech")
     require({"reenrollment.unavailable", "reenrollment.started", "reenrollment.round", "reenrollment.checked"} <= {row["event"] for row in rows},

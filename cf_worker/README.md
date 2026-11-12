@@ -403,7 +403,9 @@ runs on the round engine of `src/challenge_rounds.ts`, with the Identity
 Check's streams and cues (`/voice/identity/stream`, `tone.wav`,
 `received.wav`) and its own Gather actions, `/voice/reenrollment/heard` and
 `/voice/reenrollment/result`, whose URLs carry `phase` (`check` or `enroll`),
-`silent`, `judged`, and `start`.
+`silent`, `judged`, `start`, and `ref`, a digest of the Voice Reference the check
+began against: if another call replaces it meanwhile, the next webhook ends this
+ritual unchanged (`lost_reference`).
 
 - **check:** `identity` rounds against the current reference, as many as
   Roaming (`ROAMING_CHALLENGES`, 3), each at least `MATCH_COSINE`. A `no_match`
