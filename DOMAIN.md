@@ -303,7 +303,8 @@ starts the Identity Check with that User's Handle and one Identity Challenge.
 A Home expires 90 days after its last successful call. Any User who passes the
 Identity Check may make the calling number their Home, displacing that number's
 previous User, who still gets in by naming their Handle. Re-homing is rare; the
-usual alternative is Roaming.
+usual alternative is Roaming. Only Registration re-homes today; re-homing after a
+Roaming admission, at the User's explicit spoken request, is not built.
 
 **Not:** The User's identity or proof of it. Caller ID only selects which
 Handle the Identity Check starts with.
@@ -411,11 +412,11 @@ is reported in Call Activity and to the Session Orchestrator, with what an
 enforcing check would have done (admit, require Roaming, deny, or undecided),
 but it never withholds entry from a Home call: whatever the level, a failed or
 unscorable challenge, a verifier error, or the caller saying stop, the call
-connects to the Voice Agent as before. Admission by Roaming is not built, so a
-caller who names another User's Handle takes that User's three Identity
-Challenges, hears each level, is told that calling as themselves from another
-phone is coming soon, and the call ends; they are never admitted as that User.
-Failed attempts are recorded but pause nothing yet.
+connects to the Voice Agent as before. Unless Roaming admission is on (see
+Roaming), a caller who names another User's Handle takes that User's three
+Identity Challenges, hears each level, is told that calling as themselves from
+another phone is coming soon, and the call ends; they are never admitted as that
+User. Shadow Roaming records no attempts and pauses nothing.
 
 ### Identity Challenge
 
@@ -483,7 +484,29 @@ Using Dogwalk from a number that is not the User's Home, such as an office
 phone, a friend's phone, or a payphone: the caller names their Handle and takes
 three Identity Challenges. Roaming grants the same access as a Home call and
 leaves the Home unchanged. In shadow mode (see Identity Check) the challenges
-run and are recorded, but Roaming admits nobody yet.
+run and are recorded, but Roaming admits nobody.
+
+**Roaming admission** is configuration, off by default, and the first place the
+Identity Check withholds or grants access. When it is on, an unregistered
+caller's greeting asks for a two-word Dogwalk name as well as invite words, and
+a caller who names a Handle there (or at another User's Home check) takes that
+User's three challenges, hearing each level. All three must match: the first
+unmatched voice on a matched phrase ends the attempt, since no later round could
+change the decision and each would be one more level to tune an impersonation
+against. Passing admits the caller as that User for the rest of the Voice Call,
+and returning to the Voice Agent later in the call does not check again. Wrong
+phrases, thin speech, silence, and stop end or prolong an attempt but are never
+failures. Failed attempts in the last day pause Roaming for that Handle (three)
+and from that calling number across Handles (five); the Home call is never
+paused. A pause that begins during an attempt also stops its admission. An
+attempt is recorded before its first challenge, so hanging up after hearing a
+level cannot hide a failure, and a Handle takes one attempt at a time, so calls
+in parallel cannot all start before any has failed; an attempt that outlives its hold on the Handle (minutes) ends without a verdict. Only an attempt recorded
+under admission can admit. The User's next call that was not itself admitted by
+Roaming (their first call too) says, after the caller-ID clause, how many calls
+got in as them from other phones and how many voice checks as them failed, since
+their last call from home; never which numbers or when. An Opening that never
+reached the caller leaves the notice for the next call.
 
 **Not:** A reduced access tier, or re-homing.
 
@@ -585,7 +608,7 @@ A caller who passes the Identity Check talks first: the Voice Call connects to t
 
 **Context:** Voice Interaction
 
-The first words of a Voice Call, composed deterministically by Dogwalk with no model call on the critical path, after the Identity Check: a terse identity clause (the carrier's STIR/SHAKEN attestation), any failed Identity Check attempts against the User's Handle since their last call, the product name, a welcome line, and an invitation to speak. How the caller got in (Home or Roaming, the challenge's outcome and the level the caller already heard, or that they enrolled just now, and in shadow mode what enforcement would have done) is told to the Session Orchestrator with the Opening as context, never spoken by the Voice Frontend: the caller heard their level moments before, and the Session Orchestrator mentions it only when asked. The welcome line was written by one short Session Orchestrator model call when the previous Voice Call ended; deterministic clauses about Managed Session changes since then (a Prompt Turn stopped or failed, a Permission Request arrived, a recording was saved) and about an abnormal previous ending are added at connection. A User's first call after Registration gets a fixed welcome instead, and the Session Orchestrator follows it with a short spoken tour while the new Sandbox is created. The Session Orchestrator is told the Opening's exact words and does not repeat them.
+The first words of a Voice Call, composed deterministically by Dogwalk with no model call on the critical path, after the Identity Check: a terse identity clause (the carrier's STIR/SHAKEN attestation), any Roaming as the User since their last call from home (calls admitted and voice checks failed, counted, on a call not itself admitted by Roaming; see Roaming), the product name, a welcome line, and an invitation to speak. How the caller got in (Home or Roaming, the challenge's outcome and the level the caller already heard, or that they enrolled just now, and in shadow mode what enforcement would have done) is told to the Session Orchestrator with the Opening as context, never spoken by the Voice Frontend: the caller heard their level moments before, and the Session Orchestrator mentions it only when asked. The welcome line was written by one short Session Orchestrator model call when the previous Voice Call ended; deterministic clauses about Managed Session changes since then (a Prompt Turn stopped or failed, a Permission Request arrived, a recording was saved) and about an abnormal previous ending are added at connection. A User's first call after Registration gets a fixed welcome instead, and the Session Orchestrator follows it with a short spoken tour while the new Sandbox is created. The Session Orchestrator is told the Opening's exact words and does not repeat them.
 
 ### Keypad Conventions
 
@@ -1142,8 +1165,9 @@ The following language appears in Git history and is not canonical for productio
 - Challenge Practice tells a caller how their voice scores, round after round, so it is also an oracle for tuning an impersonation (a recording or voice converter) before a real Identity Check. Today only the User reaches it, from inside an admitted call; should practice rounds count toward the same attempt limits once enforcement exists?
 - User reaping is not implemented; only Sandbox reaping is. When it is: its age; that reaping a User moves their Handle into `retired_handles` for the same 90-day quarantine as renaming (the table's `user_id` then names a reaped User), clears the Home, deletes the Voice Reference, and sets `users.reaped_at`; whether it also reaps a Sandbox not yet reaped; and what becomes of the Voice Session Durable Object (its Memory, transcripts, and archives), which no reaping deletes today. Transcripts also live outside it: every Voice Call's caller and Voice Agent speech is kept as diagnostic text in `call_activity`, linked to the User through `voice_calls.user_id`, with no retention period; whether reaping a User strips that text, and whether call text should expire independently of reaping, is undecided. A proposal for these points is on issue #25.
 - Should the Identity Check ever collect more voice evidence during the conversation, or does whole-call collection need its own consent and retention decision?
-- Shadow Identity Check: what evidence (genuine and impostor levels across conditions, wrong-phrase and thin-speech rates, `wait_ms`) is enough to turn on enforcement, and does enforcement start with Home calls before Roaming exists? Should the registration prompt also accept a Handle, so a User calling from a phone that is not a Home can be challenged in shadow mode? Should Roaming challenges against a User count toward that User's taught-once count, or Challenge Practice rounds toward it? Registration's enrollment does not yet create the new Sandbox while it runs, and does not use the spoken Invite Code as speech.
+- Shadow Identity Check: what evidence (genuine and impostor levels across conditions, wrong-phrase and thin-speech rates, `wait_ms`) is enough to turn on enforcement, and does enforcement start with Home calls before Roaming exists? The registration prompt accepts a Handle only while Roaming admission is on; should it also do so in shadow mode, so a User calling from a phone that is not a Home can be challenged without being admitted? Should Roaming challenges against a User count toward that User's taught-once count, or Challenge Practice rounds toward it? Registration's enrollment does not yet create the new Sandbox while it runs, and does not use the spoken Invite Code as speech.
 - Re-enrollment: a User whose voice no longer matches from any setting (illness, a changed voice, or a verifier whose new embedding space cannot compare with the old reference) cannot re-enroll by voice. What recovers them, and what proves it is them, is undecided; today it is the operator deleting the Voice Reference so first-call enrollment runs again on the next Home call. Should Re-enrollment also be reachable after Roaming admission, and should it require that this call's own Identity Check matched? Should failed Re-enrollment checks count toward a Handle's attempt limits, since, like Challenge Practice, each one tells the caller a level? Should the Session Orchestrator learn the outcome when the call returns to it?
+- Roaming admission: what evidence turns it on (it rests on the same small sample as the threshold: no human impostors or clone test yet)? Should several rounds combine into one decision (a mean or a majority over more, cheaper rounds) instead of every round passing on its own? Should Roaming speak a coarser level than Home, or none, since each level is feedback for tuning an impersonation? Are three failures per Handle and five per number per day right, given that pausing a Handle is also a way for anyone to keep its User from Roaming for a day, and that one attempt at a time lets a caller who holds a call open keep the User from Roaming for its length? A User who only roams never hears the Roaming notice, which waits for a call not admitted by Roaming; should it reach them some other way? Re-homing after a Roaming admission (explicit, spoken, confirmed) is not built.
 - Voice Donations: how long is donated audio kept? Today it stays until the operator deletes it on request or decides otherwise; a fixed retention period, and whether the consent script should state it, is undecided. Should a donor be able to delete their own session by voice without an identifier being spoken to them?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
 

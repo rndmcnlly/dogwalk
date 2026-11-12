@@ -7,8 +7,11 @@
 // - home: a call from a User's Home hears their Handle and one Identity Challenge, then
 //   connects. Full instructions until the User has completed TERSE_AFTER challenges.
 // - roaming: a caller who names another User's Handle takes three Identity Challenges against
-//   that User's Voice Reference. Admission by Roaming is not built, so they are never admitted:
-//   they hear it is coming soon, and the call ends.
+//   that User's Voice Reference. Unless Roaming admission is on (ROAMING_ADMISSION, off by
+//   default), they are never admitted: they hear it is coming soon, and the call ends. When it
+//   is on, the unregistered greeting also accepts a Handle, three passed challenges admit the
+//   caller as that User (the Home unchanged), the first unmatched voice ends the attempt, and
+//   failed attempts pause Roaming per Handle and per calling number (roaming_attempts).
 // - enroll: a User without a Voice Reference repeats ENROLL_ANSWERS phrases instead, and their
 //   Voice Reference is computed from the answers' embeddings; then the call connects.
 // - register: the same enrollment at the end of Registration; then the call ends.
@@ -31,6 +34,20 @@ import type { Env } from "./types";
 export const TERSE_AFTER = 3;
 /** Identity Challenges a caller who names a Handle takes, and Re-enrollment's check (reenrollment.ts) with them. */
 export const ROAMING_CHALLENGES = 3;
+// Roaming admission's attempt limits: failed attempts (an unmatched voice on a matched phrase;
+// wrong phrases and thin speech never count) in the trailing window pause Roaming for a Handle,
+// or from a calling number across Handles, until they age out of it.
+const ROAMING_FAILURES_PER_HANDLE = 3;
+const ROAMING_FAILURES_PER_NUMBER = 5;
+const ROAMING_WINDOW_SECONDS = 86400;
+// A Handle takes one Roaming attempt at a time; an attempt whose call never reported its end
+// stops holding the Handle after this long (eight rounds take a few minutes).
+const ROAMING_ACTIVE_SECONDS = 600;
+// Attempts are kept for the User's next Home Opening, then pruned past this age, read or not.
+const ROAMING_KEEP_SECONDS = 90 * 86400;
+
+/** Whether passing Roaming's challenges admits the caller (configuration; shadow when off). */
+export const roamingAdmits = (env: Env) => env.ROAMING_ADMISSION === "on";
 /** Answers enrollment collects, and the fewest with enough speech that make a Voice Reference. */
 export const ENROLL_ANSWERS = 5;
 export const MIN_ENROLL_ANSWERS = 3;
@@ -84,10 +101,11 @@ const outOfRounds = (round: number, progress: Progress) => round - progress.star
 /**
  * Record how the check ended: on the Voice Call (the Opening tells the Session Orchestrator, and
  * a re-entry to /voice skips the check) and in Call Activity. `enforcement` is what an
- * enforcing check would have done; in shadow mode nothing is withheld.
+ * enforcing check would have done; in shadow mode nothing is withheld. Only Roaming admission
+ * enforces (shadow false), on the attempts it decides.
  */
-async function conclude(env: Env, callSid: string, log: Log, identity: Record<string, unknown>): Promise<void> {
-  const record = { ...identity, shadow: true };
+async function conclude(env: Env, callSid: string, log: Log, identity: Record<string, unknown>, shadow = true): Promise<void> {
+  const record = { ...identity, shadow };
   await env.DB.prepare("UPDATE voice_calls SET identity = ? WHERE call_sid = ?").bind(JSON.stringify(record), callSid).run();
   await clearRounds(env, callSid);
   await log("identity.result", record);
@@ -222,15 +240,76 @@ async function startEnrollment(
 
 /** A caller named another User's Handle: Roaming's three Identity Challenges against that User's Voice Reference. */
 async function startRoaming(
-  env: Env, ctx: ExecutionContext, url: URL, callSid: string, account: string, log: Log, round: number, subject: Subject, from: Path,
+  env: Env, ctx: ExecutionContext, url: URL, form: FormData, log: Log, round: number, subject: Subject, from: Path | "greeting",
 ): Promise<string> {
+  const callSid = String(form.get("CallSid") ?? "");
+  const account = String(form.get("AccountSid") ?? "");
   await log("identity.started", { path: "roaming", user_id: subject.id, from });
   if (!subject.enrolled) {
     await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "no_voice_reference", enforcement: "deny" });
     return after("roaming", `${subject.handle} has no enrolled voice yet, so that name works only from its home phone for now. Goodbye.`);
   }
+  if (roamingAdmits(env)) {
+    const phone = String(form.get("From") ?? "");
+    const paused = await roamingPause(env, subject.id, phone);
+    if (paused) {
+      await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "paused", paused, enforcement: "deny" }, false);
+      return after("roaming", paused === "handle"
+        ? `Too many failed tries as ${subject.handle} from other phones today. Call from its home phone, or try again tomorrow. Goodbye.`
+        : "Too many failed voice checks from this phone today. Try again tomorrow. Goodbye.");
+    }
+    // Recorded before the first challenge, so hanging up after hearing a level cannot hide a
+    // failure. One statement claims the Handle, so calls in parallel cannot all start before any
+    // has failed: another call's attempt is in progress until its check concludes or it ends.
+    await env.DB.prepare("DELETE FROM roaming_attempts WHERE started_at < unixepoch() - ?").bind(ROAMING_KEEP_SECONDS).run();
+    const claimed = await env.DB.prepare(
+      `INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at)
+       SELECT ?1, ?2, ?3, unixepoch() WHERE NOT EXISTS (
+         SELECT 1 FROM roaming_attempts a JOIN voice_calls c ON c.call_sid = a.call_sid
+          WHERE a.user_id = ?2 AND a.call_sid != ?1 AND a.started_at > unixepoch() - ?4 AND a.admitted_at IS NULL
+            AND a.failures = 0 AND c.identity IS NULL AND c.ended_at IS NULL)
+       ON CONFLICT(call_sid, user_id) DO NOTHING`,
+    ).bind(callSid, subject.id, phone, ROAMING_ACTIVE_SECONDS).run();
+    if (!claimed.meta.changes && !await roamingAttempt(env, callSid, subject.id)) {
+      await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "busy", enforcement: "deny" }, false);
+      return after("roaming", `Someone is already checking as ${subject.handle}. Try again in a few minutes. Goodbye.`);
+    }
+  }
   return Say(`Checking ${subject.handle}. ${ROAMING_CHALLENGES} sentences. After each tone, repeat the sentence once in your normal voice.`) +
     await roundTwiml(env, ctx, url, callSid, account, round + 1, fresh("roaming", subject.id, round), subject);
+}
+
+/** This call's Roaming attempt as this User, if it started one while admission was on, and whether it outlived its hold on the Handle. */
+async function roamingAttempt(env: Env, callSid: string, userId: number): Promise<{ expired: boolean } | null> {
+  return env.DB.prepare(
+    "SELECT started_at <= unixepoch() - ? AS expired FROM roaming_attempts WHERE call_sid = ? AND user_id = ?",
+  ).bind(ROAMING_ACTIVE_SECONDS, callSid, userId).first<{ expired: number }>().then((row) => (row ? { expired: row.expired === 1 } : null));
+}
+
+/** Whether Roaming is paused for this Handle or from this number by recent failed attempts. */
+async function roamingPause(env: Env, userId: number, phone: string): Promise<"handle" | "number" | null> {
+  const row = await env.DB.prepare(
+    `SELECT COALESCE(SUM(user_id = ?1), 0) AS handle, COALESCE(SUM(phone_number = ?2), 0) AS number FROM roaming_attempts
+      WHERE failures > 0 AND started_at > unixepoch() - ?3 AND (user_id = ?1 OR phone_number = ?2)`,
+  ).bind(userId, phone, ROAMING_WINDOW_SECONDS).first<{ handle: number; number: number }>();
+  if ((row?.handle ?? 0) >= ROAMING_FAILURES_PER_HANDLE) return "handle";
+  if ((row?.number ?? 0) >= ROAMING_FAILURES_PER_NUMBER) return "number";
+  return null;
+}
+
+/**
+ * The unregistered greeting's way into Roaming, when admission is on: a Handle among the
+ * words starts that User's challenges. Null when no Handle was named (or admission is off).
+ */
+export async function startRoamingFromGreeting(
+  env: Env, ctx: ExecutionContext, url: URL, form: FormData, heard: string[], log: Log,
+): Promise<string | null> {
+  if (!roamingAdmits(env) || !CALL_SID.test(String(form.get("CallSid") ?? "")) || !env.SPEAKER
+    || !isAccountSid(String(form.get("AccountSid") ?? ""))) return null;
+  const subject = await namedUser(env, heard);
+  if (!subject) return null;
+  await clearRounds(env, String(form.get("CallSid")));
+  return startRoaming(env, ctx, url, form, log, 0, subject, "greeting");
 }
 
 // --- heard --------------------------------------------------------------
@@ -305,7 +384,7 @@ export async function handleIdentityHeard(
   if (escape) {
     await skipRound(env, callSid, round);
     await log("identity.escape", { path: progress.path, round, to: escape.to, ...(escape.to === "user" ? { user_id: escape.user.id } : {}) });
-    if (escape.to === "user") return stop + await startRoaming(env, ctx, url, callSid, account, log, round, escape.user, progress.path);
+    if (escape.to === "user") return stop + await startRoaming(env, ctx, url, form, log, round, escape.user, progress.path);
     if (escape.to === "who") return stop + whoPrompt(1);
     await conclude(env, callSid, log, { path: progress.path, user_id: subject.id, outcome: escape.to, enforcement: "undecided" });
     return stop + (escape.to === "registration" ? await exits.registration(answer.heard) : exits.donation());
@@ -359,7 +438,7 @@ export async function handleIdentityWho(
     }
     if (isAccountSid(account)) {
       await clearRounds(env, callSid);
-      return startRoaming(env, ctx, url, callSid, account, log, 0, escape.user, "home");
+      return startRoaming(env, ctx, url, form, log, 0, escape.user, "home");
     }
   }
   if (escape?.to === "registration" || escape?.to === "donation") {
@@ -419,10 +498,65 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
       enforcement: verdict.outcome === "no_match" ? "require_roaming" : "admit" });
     return after("home", verdict.spoken);
   }
-  if (progress.judged + 1 < ROAMING_CHALLENGES) return next(verdict.spoken, progress.judged + 1, passed);
+  const judged = progress.judged + 1;
+  // Admission enforces only an attempt it recorded, so a call that began in shadow mode stays
+  // shadow if the flag turns on mid-call.
+  const attempt = roamingAdmits(env) ? await roamingAttempt(env, callSid, subject.id) : null;
+  if (attempt) {
+    // Past ROAMING_ACTIVE_SECONDS another call may hold the Handle, so this attempt ends
+    // without a verdict: it can neither admit nor add a failure behind that call's pause check.
+    // The writes below repeat the expiry condition, so the decision and the write are one statement.
+    const expired = async () => {
+      await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "expired", enforcement: "deny", judged, passed }, false);
+      return after("roaming", "That took too long. Call again to start over. Goodbye.");
+    };
+    if (attempt.expired) return expired();
+    // The first unmatched voice fails the attempt, since no later round could change the
+    // decision and each would be one more level to tune an impersonation against.
+    // Every judged round must have passed; by construction it has, since a failure ends here.
+    if (verdict.outcome === "no_match" || passed !== judged) {
+      const failed = await env.DB.prepare(
+        "UPDATE roaming_attempts SET failures = failures + 1 WHERE call_sid = ? AND user_id = ? AND started_at > unixepoch() - ?",
+      ).bind(callSid, subject.id, ROAMING_ACTIVE_SECONDS).run();
+      if (!failed.meta.changes) return expired();
+      await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "failed", enforcement: "deny", judged, passed }, false);
+      return after("roaming", `${verdict.spoken} I can't let you in as ${subject.handle} this time. Goodbye.`);
+    }
+    if (judged < ROAMING_CHALLENGES) return next(verdict.spoken, judged, passed);
+    // Failures by other calls since this attempt began still pause it: the pause, the expiry, and
+    // the admission are one statement, so no failure can land between the check and the write.
+    const phone = String(form.get("From") ?? "");
+    const admitted = await env.DB.prepare(
+      `UPDATE roaming_attempts SET admitted_at = unixepoch()
+        WHERE call_sid = ?1 AND user_id = ?2 AND started_at > unixepoch() - ?3
+          AND (SELECT COUNT(*) FROM roaming_attempts WHERE user_id = ?2 AND failures > 0 AND started_at > unixepoch() - ?4) < ?5
+          AND (SELECT COUNT(*) FROM roaming_attempts WHERE phone_number = ?6 AND failures > 0 AND started_at > unixepoch() - ?4) < ?7`,
+    ).bind(callSid, subject.id, ROAMING_ACTIVE_SECONDS, ROAMING_WINDOW_SECONDS, ROAMING_FAILURES_PER_HANDLE, phone, ROAMING_FAILURES_PER_NUMBER).run();
+    if (!admitted.meta.changes) {
+      const paused = await roamingPause(env, subject.id, phone);
+      if (!paused) return expired();
+      await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "paused", paused, enforcement: "deny", judged, passed }, false);
+      return after("roaming", `${verdict.spoken} Calls as ${subject.handle} from other phones are paused right now. Goodbye.`);
+    }
+    return admitRoaming(env, callSid, log, subject, verdict.spoken, judged);
+  }
+  if (judged < ROAMING_CHALLENGES) return next(verdict.spoken, judged, passed);
   await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: passed === ROAMING_CHALLENGES ? "passed" : "failed",
-    enforcement: passed === ROAMING_CHALLENGES ? "admit_roaming" : "deny", judged: progress.judged + 1, passed });
+    enforcement: passed === ROAMING_CHALLENGES ? "admit_roaming" : "deny", judged, passed });
   return after("roaming", `${verdict.spoken} Calling as yourself from another phone is coming soon. Until then, call from your home phone. Goodbye.`);
+}
+
+/**
+ * Three passed challenges, once the attempt's admitted_at is written: the call becomes the named
+ * User's, with a Home call's access, and the Home is unchanged. The User is written before the
+ * admission, so a failure between the two leaves an unadmitted call, which /voice resolves by
+ * its number as before.
+ */
+async function admitRoaming(env: Env, callSid: string, log: Log, subject: Subject, spoken: string, judged: number): Promise<string> {
+  await env.DB.prepare("UPDATE voice_calls SET user_id = ? WHERE call_sid = ?").bind(subject.id, callSid).run();
+  await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "passed", enforcement: "admit_roaming", judged,
+    passed: judged, admitted: true }, false);
+  return Say(`${spoken} Welcome, ${subject.handle}.`) + CONNECT;
 }
 
 // --- enrollment ---------------------------------------------------------

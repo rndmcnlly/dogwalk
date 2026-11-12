@@ -13,6 +13,9 @@ export interface Env {
   // Sandbox reaping (index.ts, reapSandboxes): days without a Voice Call, and dry-run or delete.
   SANDBOX_REAP_AGE_DAYS?: string;
   SANDBOX_REAP_MODE?: string;
+  // Roaming admission (identity_check.ts): "on" admits a caller who passes a named User's three
+  // Identity Challenges; anything else keeps Roaming in shadow mode.
+  ROAMING_ADMISSION?: string;
   OPENAI_PROJECT_ID: string;
   OPENAI_WEBHOOK_SECRET: string;
   OPENAI_LIVE_MODEL?: string;

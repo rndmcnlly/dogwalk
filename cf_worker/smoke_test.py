@@ -1883,6 +1883,182 @@ def reenrollment_checks(base_url: str, token: str) -> None:
     require({"reenrollment.unavailable", "reenrollment.started", "reenrollment.round", "reenrollment.checked"} <= {row["event"] for row in rows},
             f"re-enrollment events: {sorted({row['event'] for row in rows})}")
     set_reference("[0.5, 0.5]")
+STRANGER_PHONE = "+15555550124"
+STRANGER_PHONE_2 = "+15555550125"
+STRANGER_PHONE_3 = "+15555550126"
+
+
+def roaming_admission_checks(base_url: str, token: str) -> None:
+    """Roaming admission (ROAMING_ADMISSION on; identity_checks ran with it off): a caller from a
+    phone that is no Home names a Handle at the greeting, passes three challenges, and returns to
+    /voice as that User with the Home unchanged; an unmatched voice ends the attempt; recent
+    failures pause the Handle, and the calling number. The next Home Opening's notice is in
+    voice_session_test."""
+    received_cue = re.escape("<Play>https://dogwalk.tools/voice/identity/received.wav</Play>")
+    connect = '<Redirect method="POST">/voice</Redirect></Response>'
+    # Shadow mode wrote no attempts, though identity_checks ran Roaming claims.
+    require(d1_local("SELECT COUNT(*) AS n FROM roaming_attempts")[0]["n"] == 0, "shadow Roaming recorded attempts")
+    named = d1_local(f"SELECT id, home_phone, home_used_at FROM users WHERE handle = '{ROAMING_HANDLE}'")[0]
+    vid = named["id"]
+    others = [row["id"] for row in d1_local(
+        f"SELECT u.id FROM users u JOIN voice_references vr ON vr.user_id = u.id WHERE u.home_phone LIKE '{TEST_NUMBERS}' "
+        f"AND u.id != {vid} AND u.reaped_at IS NULL ORDER BY u.id LIMIT 3")]
+    require(len(others) >= 2, f"Roaming admission needs two other enrolled Users: {others}")
+
+    def call(sid: str, caller: str) -> dict:
+        return {"From": caller, "CallSid": sid, "AccountSid": TEST_ACCOUNT}
+
+    def identity(sid: str) -> dict | None:
+        row = d1_local(f"SELECT identity FROM voice_calls WHERE call_sid = '{sid}'")
+        return json.loads(row[0]["identity"]) if row and row[0]["identity"] else None
+
+    def answer(body: str, form: dict, number: int, first_sample: int, user: int = vid) -> str:
+        """A matched Roaming answer of steady audio, scored at the stream's stop."""
+        name = f"identity-round-{number:02d}"
+        stream = re.search(rf'<Start><Stream name="{name}" url="wss://dogwalk\.tools(/voice/identity/stream/[^"]+)"', body)
+        action = re.search(rf'action="(/voice/identity/heard\?path=roaming&amp;user={user}&amp;[^"]*&amp;round={number}&amp;take=0)"', body)
+        require(stream and action, f"Roaming round {number}: {body}")
+        phrase = d1_local(f"SELECT phrase FROM challenge_rounds WHERE call_sid = '{form['CallSid']}' AND round = {number}")[0]["phrase"]
+        redirect = []
+        def heard() -> None:
+            _, twiml = post(base_url, action[1].replace("&amp;", "&"), {**form, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)
+            match = re.fullmatch(rf'<Response><Stop><Stream name="{name}"/></Stop>{received_cue}'
+                                 rf'<Redirect method="POST">(/voice/identity/result\?[^<]+)</Redirect></Response>', twiml)
+            require(match is not None, f"Roaming matched phrase: {twiml}")
+            redirect.append(match[1].replace("&amp;", "&"))
+        practice_stream(base_url, stream[1], token, number, steady_audio(3.0, first_sample), heard)
+        status, result = post(base_url, redirect[0], form, token)
+        require(status == 200, f"Roaming result {number}: {status} {result}")
+        return result
+
+    def claim(form: dict, words: str) -> str:
+        post(base_url, "/voice", form, token)
+        return post(base_url, "/voice/claim?attempts=1", {**form, "SpeechResult": words, "Confidence": "0.9"}, token)[1]
+
+    # The unregistered greeting asks for a Handle too.
+    form = call("CA_RA_PASS", STRANGER_PHONE)
+    _, body = post(base_url, "/voice", form, token)
+    require("Say your two-word Dogwalk name, or your three invite words." in body, f"greeting with Roaming admission: {body}")
+    # Three passed challenges admit the caller as the named User, with each level spoken.
+    body = post(base_url, "/voice/claim?attempts=1", {**form, "SpeechResult": f"It's {ROAMING_HANDLE}.", "Confidence": "0.9"}, token)[1]
+    require(f"Checking {ROAMING_HANDLE}. 3 sentences." in body, f"Handle at the unregistered greeting: {body}")
+    body = answer(body, form, 1, 8000)
+    require("Strong voice match.</Say>" in body, f"admission round 1: {body}")
+    body = answer(body, form, 2, 6000)
+    require("Voice matched.</Say>" in body, f"admission round 2: {body}")
+    body = answer(body, form, 3, 8000)
+    require(body == f'<Response><Say voice="Polly.Joanna">Strong voice match. Welcome, {ROAMING_HANDLE}.</Say>{connect}', f"admitted: {body}")
+    require(identity("CA_RA_PASS") == {"path": "roaming", "user_id": vid, "outcome": "passed", "enforcement": "admit_roaming", "judged": 3,
+                                       "passed": 3, "admitted": True, "shadow": False}, f"admission identity: {identity('CA_RA_PASS')}")
+    attempt = d1_local("SELECT phone_number, failures, admitted_at FROM roaming_attempts WHERE call_sid = 'CA_RA_PASS'")
+    require(len(attempt) == 1 and attempt[0]["phone_number"] == STRANGER_PHONE and attempt[0]["failures"] == 0 and attempt[0]["admitted_at"],
+            f"admission attempt: {attempt}")
+    # Back at /voice the call is the named User's, without another check; the Home is unchanged.
+    status, body = post(base_url, "/voice", form, token)
+    require(status == 200 and "identity-round" not in body and "Dogwalk, for" not in body and "invite words" not in body,
+            f"admitted call at /voice: {body}")
+    require(d1_local("SELECT user_id FROM voice_calls WHERE call_sid = 'CA_RA_PASS'")[0]["user_id"] == vid, "admitted call lost its User")
+    after = d1_local(f"SELECT home_phone, home_used_at FROM users WHERE id = {vid}")[0]
+    require(after == {"home_phone": named["home_phone"], "home_used_at": named["home_used_at"]}, f"Roaming changed the Home: {after}")
+    via = d1_local("SELECT detail FROM call_activity WHERE call_sid = 'CA_RA_PASS' AND event = 'caller.registered' ORDER BY id DESC LIMIT 1")
+    require(via and json.loads(via[0]["detail"]).get("via") == "roaming" and json.loads(via[0]["detail"]).get("user_id") == vid,
+            f"admitted call's registration: {via}")
+
+    # The first unmatched voice ends the attempt and counts one failure; the call has no User.
+    form = call("CA_RA_FAIL", STRANGER_PHONE)
+    body = claim(form, ROAMING_HANDLE)
+    body = answer(body, form, 1, 3000)
+    require(body == f'<Response><Say voice="Polly.Joanna">Voice not matched. I can\'t let you in as {ROAMING_HANDLE} this time. Goodbye.</Say>'
+            "<Hangup/></Response>", f"failed attempt: {body}")
+    require(identity("CA_RA_FAIL") == {"path": "roaming", "user_id": vid, "outcome": "failed", "enforcement": "deny", "judged": 1, "passed": 0,
+                                       "shadow": False}, f"failed identity: {identity('CA_RA_FAIL')}")
+    require(d1_local("SELECT failures FROM roaming_attempts WHERE call_sid = 'CA_RA_FAIL'")[0]["failures"] == 1, "failure not counted")
+    require(d1_local("SELECT user_id FROM voice_calls WHERE call_sid = 'CA_RA_FAIL'")[0]["user_id"] is None, "a failed attempt got a User")
+    # Stop is no failure.
+    form = call("CA_RA_STOP", STRANGER_PHONE)
+    body = claim(form, ROAMING_HANDLE)
+    action = re.search(r'action="(/voice/identity/heard\?[^"]+)"', body)[1]
+    _, body = post(base_url, action.replace("&amp;", "&"), {**form, "SpeechResult": "stop", "Confidence": "0.9"}, token)
+    require(body.endswith("Goodbye.</Say><Hangup/></Response>"), f"Roaming stop: {body}")
+    require(d1_local("SELECT failures FROM roaming_attempts WHERE call_sid = 'CA_RA_STOP'")[0]["failures"] == 0, "stop counted as a failure")
+
+    # One attempt per Handle at a time: a second call waits until the first concludes or ends.
+    hold = call("CA_RA_HOLD", STRANGER_PHONE)
+    require(f"Checking {ROAMING_HANDLE}." in claim(hold, ROAMING_HANDLE), "first concurrent attempt")
+    form = call("CA_RA_BUSY", STRANGER_PHONE_2)
+    require(claim(form, ROAMING_HANDLE) == f'<Response><Say voice="Polly.Joanna">Someone is already checking as {ROAMING_HANDLE}. '
+            "Try again in a few minutes. Goodbye.</Say><Hangup/></Response>", "concurrent attempt")
+    require(identity("CA_RA_BUSY")["outcome"] == "busy", f"busy identity: {identity('CA_RA_BUSY')}")
+    post(base_url, "/voice/status", {"From": STRANGER_PHONE, "CallSid": "CA_RA_HOLD", "CallStatus": "completed", "CallDuration": "20"}, token)
+    form = call("CA_RA_AFTER", STRANGER_PHONE_2)
+    require(f"Checking {ROAMING_HANDLE}." in claim(form, ROAMING_HANDLE), "Handle held after the first call ended")
+    post(base_url, "/voice/status", {"From": STRANGER_PHONE_2, "CallSid": "CA_RA_AFTER", "CallStatus": "completed", "CallDuration": "20"}, token)
+
+    # An attempt admission did not record (the flag turned on mid-call) stays shadow, whatever its levels.
+    shadow_handle = d1_local(f"SELECT handle FROM users WHERE id = {others[1]}")[0]["handle"]
+    form = call("CA_RA_SHADOW", STRANGER_PHONE)
+    body = claim(form, shadow_handle)
+    d1_local("DELETE FROM roaming_attempts WHERE call_sid = 'CA_RA_SHADOW'")
+    for number in (1, 2, 3):
+        body = answer(body, form, number, 8000, user=others[1])
+    require("Calling as yourself from another phone is coming soon." in body and body.endswith("<Hangup/></Response>"), f"unrecorded attempt: {body}")
+    require(identity("CA_RA_SHADOW")["shadow"] is True and "admitted" not in identity("CA_RA_SHADOW"), f"{identity('CA_RA_SHADOW')}")
+    require(d1_local("SELECT user_id FROM voice_calls WHERE call_sid = 'CA_RA_SHADOW'")[0]["user_id"] is None, "an unrecorded attempt was admitted")
+
+    # An attempt that outlives its hold on the Handle ends without a verdict, adding no failure.
+    form = call("CA_RA_SLOW", STRANGER_PHONE)
+    body = claim(form, shadow_handle)
+    d1_local("UPDATE roaming_attempts SET started_at = unixepoch() - 700 WHERE call_sid = 'CA_RA_SLOW'")
+    body = answer(body, form, 1, 3000, user=others[1])
+    require(body == '<Response><Say voice="Polly.Joanna">That took too long. Call again to start over. Goodbye.</Say><Hangup/></Response>',
+            f"expired attempt: {body}")
+    require(identity("CA_RA_SLOW")["outcome"] == "expired"
+            and d1_local("SELECT failures FROM roaming_attempts WHERE call_sid = 'CA_RA_SLOW'")[0]["failures"] == 0, "expired attempt counted")
+
+    # Failures by other calls that land after an attempt began pause its admission (one statement decides).
+    form = call("CA_RA_LATE", STRANGER_PHONE)
+    body = claim(form, shadow_handle)
+    body = answer(body, form, 1, 8000, user=others[1])
+    body = answer(body, form, 2, 8000, user=others[1])
+    d1_local(f"INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at, failures) VALUES "
+             + ", ".join(f"('CA_RA_L{i}', {others[1]}, '{STRANGER_PHONE_2}', unixepoch() - 30, 1)" for i in range(3)))
+    body = answer(body, form, 3, 8000, user=others[1])
+    require(body == f'<Response><Say voice="Polly.Joanna">Strong voice match. Calls as {shadow_handle} from other phones are paused right now. '
+            "Goodbye.</Say><Hangup/></Response>", f"pause during an attempt: {body}")
+    require(identity("CA_RA_LATE")["outcome"] == "paused" and d1_local("SELECT user_id FROM voice_calls WHERE call_sid = 'CA_RA_LATE'")[0]["user_id"] is None
+            and d1_local("SELECT admitted_at FROM roaming_attempts WHERE call_sid = 'CA_RA_LATE'")[0]["admitted_at"] is None, "admitted while paused")
+
+    # A name that is no Handle and no Invite Code: the retry still offers both.
+    form = call("CA_RA_UNKNOWN", STRANGER_PHONE)
+    body = claim(form, "purple monkey")
+    require("I didn't recognize a Dogwalk name or invite words. Say your two-word Dogwalk name, or your invite words." in body,
+            f"retry with Roaming admission: {body}")
+
+    # Three recent failed attempts as a Handle pause it from every number; older ones have aged out.
+    d1_local(f"INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at, failures) VALUES "
+             f"('CA_RA_OLD', {vid}, '{STRANGER_PHONE_2}', unixepoch() - 2 * 86400, 1), "
+             f"('CA_RA_F2', {vid}, '{STRANGER_PHONE_2}', unixepoch() - 60, 1)")
+    form = call("CA_RA_OPEN", STRANGER_PHONE_2)
+    require(f"Checking {ROAMING_HANDLE}." in claim(form, ROAMING_HANDLE), "Roaming paused by failures outside the window")
+    d1_local(f"INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at, failures) VALUES "
+             f"('CA_RA_F3', {vid}, '{STRANGER_PHONE_2}', unixepoch() - 30, 1)")
+    form = call("CA_RA_PAUSED", STRANGER_PHONE_3)
+    body = claim(form, ROAMING_HANDLE)
+    require(body == f'<Response><Say voice="Polly.Joanna">Too many failed tries as {ROAMING_HANDLE} from other phones today. Call from its home phone, '
+            "or try again tomorrow. Goodbye.</Say><Hangup/></Response>", f"paused Handle: {body}")
+    require(identity("CA_RA_PAUSED")["outcome"] == "paused" and identity("CA_RA_PAUSED")["paused"] == "handle", f"{identity('CA_RA_PAUSED')}")
+    require(not d1_local("SELECT 1 FROM roaming_attempts WHERE call_sid = 'CA_RA_PAUSED'"), "a paused claim started an attempt")
+    # Five recent failures from one number, across Handles, pause it for every Handle.
+    rows = ", ".join(f"('CA_RA_N{i}', {others[i % 2]}, '{STRANGER_PHONE_3}', unixepoch() - 60, 1)" for i in range(4))
+    d1_local(f"INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at, failures) VALUES {rows}")
+    target = d1_local(f"SELECT handle FROM users WHERE id = {others[0]}")[0]["handle"]
+    form = call("CA_RA_NUMBER", STRANGER_PHONE_3)
+    require(f"Checking {target}." in claim(form, target), "four failures paused the number")
+    d1_local(f"INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at, failures) VALUES "
+             f"('CA_RA_N4', {others[1]}, '{STRANGER_PHONE_3}', unixepoch() - 60, 1)")
+    form = call("CA_RA_NUMBER2", STRANGER_PHONE_3)
+    require(claim(form, target) == '<Response><Say voice="Polly.Joanna">Too many failed voice checks from this phone today. Try again tomorrow. '
+            "Goodbye.</Say><Hangup/></Response>", "paused number")
 
 
 def project_wrangler() -> str | None:
@@ -1905,6 +2081,7 @@ DELETE FROM sandbox_assignments WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM sandbox_deletions WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM voice_references WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM retired_handles WHERE user_id NOT IN (SELECT id FROM users);
+DELETE FROM roaming_attempts WHERE user_id NOT IN (SELECT id FROM users) OR phone_number LIKE '{TEST_NUMBERS}';
 DELETE FROM provider_call_jobs WHERE root_call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
 DELETE FROM call_activity WHERE call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
 DELETE FROM call_handoffs WHERE phone_number LIKE '{TEST_NUMBERS}';
@@ -1990,6 +2167,14 @@ def main() -> int:
             return 1
         reap_delete_checks(DEFAULT_LOCAL, LOCAL_TOKEN, reap_users)
         print("Sandbox reaping checks passed (dry run, delete, 404, leftover deletion, recent, live, and unlinked callers, call while deletion pending, backoff and stuck, diagnostics race)")
+        # Roaming admission is configuration, off by default: it needs a restart too.
+        stop_worker(process)
+        process = start_worker(wrangler, registry, "ROAMING_ADMISSION:on")
+        if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
+            print("wrangler dev did not restart", file=sys.stderr)
+            return 1
+        roaming_admission_checks(DEFAULT_LOCAL, LOCAL_TOKEN)
+        print("Roaming admission checks passed (greeting Handle, admission with the Home unchanged, failure, stop, Handle and number pauses)")
         return 0
     finally:
         stop_worker(process)
