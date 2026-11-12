@@ -487,6 +487,7 @@ node --experimental-strip-types challenge_phrases_test.ts
 node --experimental-strip-types voice_verify_test.ts
 node --experimental-strip-types endpointer_test.ts
 node --experimental-strip-types operator_content_test.ts
+node --experimental-strip-types pairing_test.ts
 ```
 
 The local suites listen on 8787 (Worker), 8790-8792 (mocks), and 10229 (inspector).
@@ -699,12 +700,12 @@ strictly durable unattended turns.
 
 ## Paired Browser
 
-Before deploying spoken pairing, apply `migrations/2026-11-12-spoken-pairing.sql`
+Before deploying spoken pairing, apply `migrations/2026-11-15-spoken-pairing.sql`
 to D1. It discards pending acoustic codes and removes decode-failure telemetry,
 but does not touch accepted browser credentials in Durable Object storage:
 
 ```bash
-npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-12-spoken-pairing.sql
+npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-15-spoken-pairing.sql
 ```
 
 An optional, read-only second surface (`../DOMAIN.md`, Paired Browser). The
