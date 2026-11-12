@@ -1,5 +1,9 @@
 # On-device Voice Frontend (Android prototype)
 
+**Resume here:** [2026-11-11 checkpoint](CHECKPOINT.md) records the successful
+physical-phone permission/file-write trial, shutdown, preserved branches and
+private local recovery assets.
+
 A small Android app that runs the whole Voice Frontend on the phone: on-device speech
 recognition, a local Gemma 4 model for conversation and phrasing, and an offline
 text-to-speech voice. Only text crosses the network, to the Session Orchestrator. The
