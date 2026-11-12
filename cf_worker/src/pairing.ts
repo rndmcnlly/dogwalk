@@ -1,129 +1,82 @@
-// Paired Browser (DOMAIN.md): the server side of acoustic pairing.
-//
-// The System Menu plays a Pairing Code into the call as keypad (DTMF) tones; a browser in
-// earshot decodes it (src/pair_page.ts) and claims it. The code is 80 random bits plus six
-// Reed-Solomon parity bytes over GF(256), each byte sent as two 4-bit DTMF symbols: 32
-// symbols on a fixed clock. The Voice Agent picks the symbol rate from PAIRING_BAUDS (8 by
-// default: a 125 ms slot, four seconds in all). Each tone is short (60% of its slot, at most
-// 70 ms) and the rest of the slot is silence, so slower means longer gaps, not longer tones.
-// Speech codecs (G.711, G.723.1, low-rate Opus) pass even back-to-back 16 baud intact; what
-// breaks pairing is the room. A held tone's reverberation builds up to rival the next tone,
-// and a gap lets it decay. In a simulated reverberant room at 8 baud, 125 ms tones with no
-// gap decoded 1 frame in 6 and 70 ms tones with 55 ms gaps 10 in 10. The code is
-// systematic (the first 20 symbols are the data); the receiver tries each allowed rate,
-// runs a symbol clock, and treats unclear slots as erasures.
-
-import { SAMPLE_RATE, toBase64, type Clip } from "./audio";
-
-export const PAIRING_CODE_BYTES = 10;
-export const PAIRING_PARITY_BYTES = 6;
-export const PAIRING_BAUDS = [4, 6, 8, 12, 16] as const;
-export type PairingBaud = (typeof PAIRING_BAUDS)[number];
-export const PAIRING_DEFAULT_BAUD: PairingBaud = 8;
-// How much of each symbol slot the tone fills, at most; the rest is silence for echoes to decay.
-export const PAIRING_TONE_DUTY = 0.6;
-export const PAIRING_MAX_TONE_MS = 70;
+// Spoken Pairing Codes: a public rendezvous number and 16 secret bits. Not PAKE.
+// HTTPS, expiry, bounded guesses, and independent caller approval remain required.
 export const PAIRING_CODE_TTL_MS = 90_000;
 export const PAIRING_CONFIRM_MS = 30_000;
-// How long after the tones a missing claim means no browser decoded them.
-export const PAIRING_UNCLAIMED_MS = 10_000;
-// Anonymous decode-failure telemetry (POST /pair/decode-failed): a small body, a bounded table.
-export const DECODE_FAILURE_MAX_BYTES = 1024;
-export const DECODE_FAILURE_KEEP_ROWS = 500;
+export const PAIRING_MAX_ATTEMPTS = 5;
+export const PAIRING_GLOBAL_ATTEMPTS_PER_MINUTE = 120;
 export const PAIRED_IDLE_MS = 60 * 60_000;
 export const PAIRED_MAX_MS = 12 * 60 * 60_000;
 
-const ROWS = [697, 770, 852, 941];
-const COLS = [1209, 1336, 1477, 1633];
-const KEYPAD = ["123A", "456B", "789C", "*0#D"];
-const ALPHABET = "0123456789ABCD*#"; // nibble value -> keypad symbol
+// Complete PGP lists in byte order, lowercased. Like Magic Wormhole, use odd
+// then even. Do not filter: each list must retain all 256 entries for 16 bits.
+// Source: https://github.com/magic-wormhole/magic-wormhole/blob/master/src/wormhole/_wordlist.py
+export const PAIRING_EVEN_WORDS = (`
+aardvark absurd accrue acme adrift adult afflict ahead aimless algol allow alone ammo ancient apple artist
+assume athens atlas aztec baboon backfield backward banjo beaming bedlamp beehive beeswax befriend belfast berserk billiard
+bison blackjack blockade blowtorch bluebird bombast bookshelf brackish breadline breakup brickyard briefcase burbank button buzzard cement
+chairlift chatter checkup chisel choking chopper christmas clamshell classic classroom cleanup clockwork cobra commence concert cowbell
+crackdown cranky crowfoot crucial crumpled crusade cubic dashboard deadbolt deckhand dogsled dragnet drainage dreadful drifter dropper
+drumbeat drunken dupont dwelling eating edict egghead eightball endorse endow enlist erase escape exceed eyeglass eyetooth
+facial fallout flagpole flatfoot flytrap fracture framework freedom frighten gazelle geiger glitter glucose goggles goldfish gremlin
+guidance hamlet highchair hockey indoors indulge inverse involve island jawbone keyboard kickoff kiwi klaxon locale lockup
+merit minnow miser mohawk mural music necklace neptune newborn nightbird oakland obtuse offload optic orca payday
+peachy pheasant physique playhouse pluto preclude prefer preshrunk printer prowler pupil puppy python quadrant quiver quota
+ragtime ratchet rebirth reform regain reindeer rematch repay retouch revenge reward rhythm ribcage ringbolt robust rocker
+ruffled sailboat sawdust scallion scenic scorecard scotland seabird select sentence shadow shamrock showgirl skullcap skydive slingshot
+slowdown snapline snapshot snowcap snowslide solo southward soybean spaniel spearhead spellbind spheroid spigot spindle spyglass stagehand
+stagnate stairway standard stapler steamship sterling stockman stopwatch stormy sugar surmount suspense sweatband swelter tactics talon
+tapeworm tempest tiger tissue tonic topmost tracker transit trauma treadmill trojan trouble tumor tunnel tycoon uncut
+unearth unwind uproot upset upshot vapor village virus vulcan waffle wallet watchword wayside willow woodlark zulu
+`).trim().split(/\s+/);
+export const PAIRING_ODD_WORDS = (`
+adroitness adviser aftermath aggregate alkali almighty amulet amusement antenna applicant apollo armistice article asteroid atlantic atmosphere
+autopsy babylon backwater barbecue belowground bifocals bodyguard bookseller borderline bottomless bradbury bravado brazilian breakaway burlington businessman
+butterfat camelot candidate cannonball capricorn caravan caretaker celebrate cellulose certify chambermaid cherokee chicago clergyman coherence combustion
+commando company component concurrent confidence conformist congregate consensus consulting corporate corrosion councilman crossover crucifix cumbersome customer
+dakota decadence december decimal designing detector detergent determine dictator dinosaur direction disable disbelief disruptive distortion document
+embezzle enchanting enrollment enterprise equation equipment escapade eskimo everyday examine existence exodus fascinate filament finicky forever
+fortitude frequency gadgetry galveston getaway glossary gossamer graduate gravity guitarist hamburger hamilton handiwork hazardous headwaters hemisphere
+hesitate hideaway holiness hurricane hydraulic impartial impetus inception indigo inertia infancy inferno informant insincere insurgent integrate
+intention inventive istanbul jamaica jupiter leprosy letterhead liberty maritime matchmaker maverick medusa megaton microscope microwave midsummer
+millionaire miracle misnomer molasses molecule montana monument mosquito narrative nebula newsletter norwegian october ohio onlooker opulent
+orlando outfielder pacific pandemic pandora paperweight paragon paragraph paramount passenger pedigree pegasus penetrate perceptive performance pharmacy
+phonetic photograph pioneer pocketful politeness positive potato processor provincial proximate puberty publisher pyramid quantity racketeer rebellion
+recipe recover repellent replica reproduce resistor responsive retraction retrieval retrospect revenue revival revolver sandalwood sardonic saturday
+savagery scavenger sensation sociable souvenir specialist speculate stethoscope stupendous supportive surrender suspicious sympathy tambourine telephone therapist
+tobacco tolerance tomorrow torpedo tradition travesty trombonist truncated typewriter ultimate undaunted underfoot unicorn unify universe unravel
+upcoming vacancy vagabond vertigo virginia visitor vocalist voyager warranty waterloo whimsical wichita wilmington wyoming yesteryear yucatan
+`).trim().split(/\s+/);
 
-// --- Reed-Solomon encoder over GF(256), primitive polynomial 0x11d, generator roots 2^0..2^(n-1).
-const GF_EXP = new Uint8Array(512);
-const GF_LOG = new Uint8Array(256);
-{
-  let x = 1;
-  for (let i = 0; i < 255; i++) {
-    GF_EXP[i] = x;
-    GF_LOG[x] = i;
-    x <<= 1;
-    if (x & 0x100) x ^= 0x11d;
-  }
-  for (let i = 255; i < 512; i++) GF_EXP[i] = GF_EXP[i - 255];
-}
-const gfMul = (a: number, b: number) => (a && b ? GF_EXP[GF_LOG[a] + GF_LOG[b]] : 0);
-
-function polyMul(p: number[], q: number[]): number[] {
-  const r = new Array<number>(p.length + q.length - 1).fill(0);
-  for (let j = 0; j < q.length; j++) for (let i = 0; i < p.length; i++) r[i + j] ^= gfMul(p[i], q[j]);
-  return r;
-}
-
-export function rsEncode(message: number[], parity: number): number[] {
-  let generator = [1];
-  for (let i = 0; i < parity; i++) generator = polyMul(generator, [1, GF_EXP[i]]);
-  const out = [...message, ...new Array<number>(parity).fill(0)];
-  for (let i = 0; i < message.length; i++) {
-    const coef = out[i];
-    if (coef) for (let j = 1; j < generator.length; j++) out[i + j] ^= gfMul(generator[j], coef);
-  }
-  return [...message, ...out.slice(message.length)];
-}
-
-export function pairingSymbols(code: Uint8Array): string {
-  return rsEncode([...code], PAIRING_PARITY_BYTES).map((b) => ALPHABET[b >> 4] + ALPHABET[b & 15]).join("");
-}
-
-// The tones as a GPT-Live output fixture: mono PCM16 at 24 kHz, with a little silence around
-// them so the receiver's clock sees a clean start. Raised-cosine edges keep clicks from
-// splattering energy into the neighboring DTMF bins.
-export function pairingTones(code: Uint8Array, baud: PairingBaud = PAIRING_DEFAULT_BAUD, amplitude = 0.3): Clip {
-  const symbols = pairingSymbols(code);
-  const slot = SAMPLE_RATE / baud;
-  const lead = Math.round(0.3 * SAMPLE_RATE);
-  const ramp = Math.round(0.004 * SAMPLE_RATE);
-  const tone = Math.round(Math.min(slot * PAIRING_TONE_DUTY, (PAIRING_MAX_TONE_MS / 1000) * SAMPLE_RATE));
-  const samples = new Int16Array(2 * lead + Math.ceil(symbols.length * slot));
-  [...symbols].forEach((symbol, s) => {
-    const row = KEYPAD.findIndex((line) => line.includes(symbol));
-    const fr = ROWS[row];
-    const fc = COLS[KEYPAD[row].indexOf(symbol)];
-    const start = lead + Math.round(s * slot);
-    for (let n = 0; n < tone; n++) {
-      const edge = Math.min(n, tone - 1 - n);
-      const envelope = edge < ramp ? 0.5 - 0.5 * Math.cos((Math.PI * edge) / ramp) : 1;
-      const wave = Math.sin((2 * Math.PI * fr * n) / SAMPLE_RATE) + Math.sin((2 * Math.PI * fc * n) / SAMPLE_RATE);
-      samples[start + n] = Math.round(amplitude * envelope * wave * 32767);
-    }
-  });
-  return { base64: toBase64(new Uint8Array(samples.buffer)), seconds: samples.length / SAMPLE_RATE };
+export function newPairingCode(): { code: string; nameplate: string } {
+  let number: number;
+  // Rejection sampling for an unbiased 1–999 rendezvous number.
+  do { number = crypto.getRandomValues(new Uint16Array(1))[0]; } while (number >= 64_935);
+  const nameplate = String(number % 999 + 1);
+  const words = crypto.getRandomValues(new Uint8Array(2));
+  return { nameplate, code: `${nameplate}-${PAIRING_ODD_WORDS[words[0]]}-${PAIRING_EVEN_WORDS[words[1]]}` };
 }
 
-export function newPairingCode(): { bytes: Uint8Array; hex: string } {
-  const bytes = crypto.getRandomValues(new Uint8Array(PAIRING_CODE_BYTES));
-  return { bytes, hex: toHex(bytes) };
+export function normalizePairingCode(raw: string): { code: string; nameplate: string } | null {
+  const match = /^(\d{1,3})[\s-]+([a-z]+)[\s-]+([a-z]+)$/.exec(raw.trim().toLowerCase());
+  if (!match || Number(match[1]) < 1) return null;
+  // Unknown words still count as guesses, including ordinary transcription errors.
+  const nameplate = String(Number(match[1]));
+  return { nameplate, code: `${nameplate}-${match[2]}-${match[3]}` };
 }
 
 export function toHex(bytes: Uint8Array): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-
 export async function sha256Hex(text: string): Promise<string> {
   return toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))));
 }
-
-// Browser credentials name the Durable Object they belong to, so the Worker can route them;
-// only the secret half is checked, by hash, inside that object.
 export function newBrowserSecret(): string {
   return toHex(crypto.getRandomValues(new Uint8Array(24)));
 }
-
 export function splitCredential(credential: string | null): { identity: string; secret: string } | null {
   const match = /^([0-9a-f]{16,128})\.([0-9a-f]{32,128})$/.exec(credential ?? "");
   return match ? { identity: match[1], secret: match[2] } : null;
 }
-
-// Speakable descriptions for the confirmation: what kind of browser, and roughly where.
 export function describeBrowser(userAgent: string): string {
   const ua = userAgent || "";
   const browser = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox"
@@ -132,7 +85,6 @@ export function describeBrowser(userAgent: string): string {
     : /Mac OS X/.test(ua) ? "a Mac" : /Windows/.test(ua) ? "a Windows computer" : /Linux/.test(ua) ? "a Linux computer" : "an unknown device";
   return `${browser} on ${device}`;
 }
-
 export function describePlace(cf: { city?: unknown; region?: unknown; country?: unknown } | undefined): string {
   const parts = [cf?.city, cf?.region].filter((part): part is string => typeof part === "string" && part.length > 0);
   if (parts.length) return `near ${parts.join(", ")}`;

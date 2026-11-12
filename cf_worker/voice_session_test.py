@@ -11,7 +11,6 @@ import hashlib
 import hmac
 import json
 import logging
-import math
 import re
 import secrets
 import signal
@@ -304,7 +303,7 @@ SWITCH_SAY = "Switching themes; a new voice will pick up in a moment."
 PERSISTED_SESSION_ID = "ses_earlier0parser"
 PERSISTED_TITLE = "Earlier parser work"
 LEASH_SAY = "Rowan has gone home; Juniper is still with us."
-REPLAY_SAY = "The page heard them but could not read them; sending them again."
+REPLAY_SAY = "That pairing code expired; here is a fresh one."
 
 
 def call(call_id: str, name: str, **arguments) -> dict:
@@ -437,7 +436,7 @@ ORCHESTRATOR_SCRIPT = [
     # Preferences and pairing are voice operations; keypad digits stand in for asking here.
     ('"key":"6"', lambda ctx: [call("k6-style", "set_earcon_style", style="tonal")]),
     ('"key":"8"', lambda ctx: [call("k8-pair", "pair_browser")]),
-    # No browser claimed the first tones: the Orchestrator answers and plays them again.
+    # No browser claimed the first spoken code: offer a fresh one after expiry.
     ("[harness event] pairing_unclaimed", lambda ctx: [
         call("pu-say", "say", text=REPLAY_SAY, delegation_id=None),
         call("pu-pair", "pair_browser"),
@@ -784,43 +783,7 @@ def latest_user_text() -> str:
 # --- Paired Browser helpers ----------------------------------------------------
 
 CHROME_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
-DTMF_ROWS = [697, 770, 852, 941]
-DTMF_COLS = [1209, 1336, 1477, 1633]
-DTMF_KEYPAD = ["123A", "456B", "789C", "*0#D"]
-PAIRING_ALPHABET = "0123456789ABCD*#"
 REPORT_TEXT = "# Parser report\n\nAll green.\n"
-
-
-def decode_pairing_tones(audio_b64: str) -> str | None:
-    """Read the Pairing Code from a played fixture, as a browser would; None if it is not tones.
-
-    The fixture is exactly clocked (24 kHz, 0.3 s lead, 8 baud: a 125 ms slot opening with a
-    70 ms tone), so one Goertzel window early in each slot suffices; real browsers need the
-    symbol clock and ECC.
-    """
-    raw = base64.b64decode(audio_b64)
-    samples = [int.from_bytes(raw[i:i + 2], "little", signed=True) / 32768 for i in range(0, len(raw) - 1, 2)]
-    lead, slot, window = 7200, 3000, 1000
-    if len(samples) < lead + 32 * slot:
-        return None
-    symbols = []
-    for index in range(32):
-        x = samples[lead + index * slot + 250: lead + index * slot + 250 + window]
-        energy = sum(v * v for v in x) / window
-        powers = []
-        for frequency in DTMF_ROWS + DTMF_COLS:
-            c = 2 * math.cos(2 * math.pi * frequency / 24000)
-            s1 = s2 = 0.0
-            for v in x:
-                s1, s2 = v + c * s1 - s2, s1
-            powers.append(2 * (s1 * s1 + s2 * s2 - c * s1 * s2) / (window * window))
-        row = max(range(4), key=lambda i: powers[i])
-        col = max(range(4), key=lambda i: powers[4 + i])
-        if not energy or powers[row] + powers[4 + col] < 0.8 * energy:
-            return None
-        symbols.append(DTMF_KEYPAD[row][col])
-    nibbles = [PAIRING_ALPHABET.index(symbol) for symbol in symbols[:20]]
-    return bytes(nibbles[i] << 4 | nibbles[i + 1] for i in range(0, 20, 2)).hex()
 
 
 def pair_http(method: str, path: str, body: dict | None = None, headers: dict | None = None) -> tuple[int, dict]:
@@ -1390,44 +1353,68 @@ async def run_protocol(identity: str) -> None:
         await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"), 15)
         await wait_for(lambda: "k6-style" in {item.get("call_id") for _, payload in OrchestratorMock.requests for item in payload["input"] if item.get("type") == "function_call_output"}, 10)
 
-        # Pairing a browser (pair_browser, asked for by voice): the tones carry a Pairing Code, a
-        # browser claims it, the Voice Frontend names the browser, and a press of one accepts.
-        # Then the browser reads status and files.
-        async def next_pairing_code() -> str:
-            async with asyncio.timeout(20):
-                while True:
-                    played = await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
-                    if code := decode_pairing_tones(played["audio"]):
-                        return code
+        # The tool returns a spoken code, never an audio fixture. Read its result through the
+        # Orchestrator's actual tool-response lane, not from internal VoiceSession storage.
+        async def next_pairing_code(call_id: str) -> str:
+            await wait_for(outputs_back(call_id), 15)
+            result = OrchestratorMock.tool_output(call_id)
+            assert result["ok"] is True and result["expires_in_seconds"] == 90, result
+            code = result["code"]
+            assert re.fullmatch(r"[1-9]\d{0,2}-[a-z]+-[a-z]+", code), result
+            source = (WORKER_DIR / "src" / "pairing.ts").read_text()
+            odd = re.search(r"PAIRING_ODD_WORDS\s*=\s*\(`([^`]+)`", source).group(1).split()
+            even = re.search(r"PAIRING_EVEN_WORDS\s*=\s*\(`([^`]+)`", source).group(1).split()
+            assert len(set(odd)) == len(odd) == 256 and len(set(even)) == len(even) == 256
+            _, first, second = code.split("-")
+            assert first in odd and second in even, "PGP odd word precedes even word"
+            return code
 
-        # The first tones go unclaimed: a page reports that it heard them but could not decode
-        # them, and about ten seconds later the Orchestrator hears pairing_unclaimed with that
-        # count, answers, and plays them again.
+        fixture_count = sum(m.get("type") == "session.output_audio.fixture.play" for m in mocks.seen)
+        pairing_started = time.monotonic()
         await mocks.send_live(dtmf("8"))
-        unclaimed_code = await next_pairing_code()
-        assert (await asyncio.to_thread(pair_http, "POST", "/pair/decode-failed", {"stage": "ecc_failed", "padding": "x" * 2000}))[0] == 413
-        assert (await asyncio.to_thread(pair_http, "POST", "/pair/decode-failed", {"stage": "guess"}))[0] == 400
-        failure = {"stage": "ecc_failed", "baud": 8, "seconds": 4.1, "symbols_heard": 25, "erasures": 4}
-        assert (await asyncio.to_thread(pair_http, "POST", "/pair/decode-failed", failure))[0] == 204
-        await wait_for(lambda: "[harness event] pairing_unclaimed" in latest_user_text(), 15)
+        unclaimed_code = await next_pairing_code("k8-pair")
+        assert sum(m.get("type") == "session.output_audio.fixture.play" for m in mocks.seen) == fixture_count
+        # Exercise the real expiry timer: changing D1 alone would not advance the object's
+        # in-memory clock. This intentionally adds about 90 seconds to the suite.
+        await wait_for(lambda: "[harness event] pairing_unclaimed" in latest_user_text(), 100)
+        assert time.monotonic() - pairing_started >= 89, "no premature unclaimed notification"
         unclaimed = OrchestratorMock.user_message("[harness event] pairing_unclaimed")
-        assert '"baud":8' in unclaimed and '"decode_failures":1' in unclaimed, unclaimed
-        assert OrchestratorMock.tool_output("k8-pair")["ok"] is True
+        assert '"expired":true' in unclaimed and '"lifetime_seconds":90' in unclaimed, unclaimed
+        assert not any(key in unclaimed for key in ("baud", "decode_failures", "symbols_heard")), unclaimed
         await next_matching(mocks.live_messages, appended("commentary", REPLAY_SAY))
-        code = await next_pairing_code()
+        code = await next_pairing_code("pu-pair")
+        assert sum(m.get("type") == "session.output_audio.fixture.play" for m in mocks.seen) == fixture_count
         assert code != unclaimed_code
-        status, _ = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": unclaimed_code})
-        assert status == 404, "a new attempt retires the previous Pairing Code"
-        status, claim = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": code}, {"user-agent": CHROME_MAC})
+        nameplate = code.split("-")[0]
+        # A fresh attempt may legitimately reuse the public nameplate. In that case the
+        # stale secret is a guess against the new code; expiry is also tested below in D1.
+        if unclaimed_code.split("-")[0] != nameplate:
+            status, _ = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": unclaimed_code})
+            assert status == 404, "an expired Pairing Code cannot be claimed"
+        for malformed in (None, 123, "", "0-adroitness-aardvark", "1000-adroitness-aardvark", "1-one", "1-one-two-three", "x-one-two", "x" * 101):
+            status, body = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": malformed})
+            assert status == 400, (malformed, status, body)
+        assert (await asyncio.to_thread(d1, f"SELECT attempts FROM pairing_codes WHERE nameplate = '{nameplate}'")) == [{"attempts": 0}]
+        # Unknown words are guesses too, not a free dictionary oracle. Four failures leave
+        # the fifth guess available; concurrent correct claims can consume it only once.
+        for attempt in range(1, 5):
+            status, body = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": f"{nameplate}-notaword-notawordeither"})
+            assert status == 404, (status, body)
+            assert (await asyncio.to_thread(d1, f"SELECT attempts FROM pairing_codes WHERE nameplate = '{nameplate}'")) == [{"attempts": attempt}]
+        normalized = "  " + code.upper().replace("-", " -  ") + "  "
+        claims = await asyncio.gather(*(
+            asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": value}, {"user-agent": CHROME_MAC})
+            for value in (normalized, code.upper().replace("-", " "))
+        ))
+        assert sorted(status for status, _ in claims) == [200, 404], claims
+        status, claim = next(result for result in claims if result[0] == 200)
         assert status == 200 and claim["ticket"].startswith(identity + "."), (status, claim)
-        named = await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "pairing tones" in m.get("content", ""))
+        named = await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "submitted the pairing code" in m.get("content", ""))
         assert "Chrome on a Mac" in named["content"] and "press one" in named["content"]
         status, _ = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": code})
         assert status == 404, "a Pairing Code works once"
         ticket = {"authorization": f"Bearer {claim['ticket']}"}
         assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1] == {"state": "waiting"}
-        # Keys count again only once echoes of the tones have cleared (half a second).
-        await asyncio.sleep(0.6)
         await mocks.send_live(dtmf("1"))
         await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "browser is paired" in m.get("content", ""))
         accepted = (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1]
@@ -1448,7 +1435,7 @@ async def run_protocol(identity: str) -> None:
             # The live feed starts with a snapshot of what the call has said and done so far.
             feed = await recv_type(browser, "feed")
             assert feed.get("snapshot") and any(e["role"] == "system" and e.get("lane") == "keypad" and e["text"] == "keypad 8" for e in feed["entries"]), feed["entries"][-5:]
-            assert any(e["role"] == "orchestrator" and e.get("lane") == "say" and "pairing tones" in e["text"] for e in feed["entries"])
+            assert any(e["role"] == "orchestrator" and e.get("lane") == "say" and "pairing code" in e["text"].lower() for e in feed["entries"])
             await browser.send(json.dumps({"type": "list", "id": 1, "path": ""}))
             listing = await recv_type(browser, "list")
             assert listing["id"] == 1 and listing["path"] == "/home/daytona"
@@ -1757,6 +1744,9 @@ async def run_protocol(identity: str) -> None:
                 "set_invitation_recipient", "revoke_invitation", "inspect_registration", "start_voice_donation",
                 "start_challenge_practice", "start_reenrollment",
             }
+            pairing_tool = next(tool for tool in payload["tools"] if tool["name"] == "pair_browser")
+            assert pairing_tool["parameters"].get("properties", {}) == {}, pairing_tool
+            assert not pairing_tool["parameters"].get("required"), pairing_tool
             assert "start_voice_donation together in the same response" in payload["instructions"]
             assert "start_challenge_practice together in the same response" in payload["instructions"]
             assert "start_reenrollment together in the same response" in payload["instructions"]
@@ -1807,6 +1797,62 @@ def d1(sql: str) -> list[dict]:
     if result.returncode:
         raise RuntimeError(f"wrangler d1 execute exited {result.returncode}: {result.stderr.strip()[-2000:]}")
     return json.loads(result.stdout)[0]["results"]
+
+
+async def pairing_claim_checks(identity: str) -> None:
+    """D1-backed abuse/expiry cases after all call tests, with no production test hooks.
+
+    Failed claims never reach the VoiceSession, so seed rows directly to exercise the
+    public claim route without keeping another call open or spending another 90 seconds.
+    """
+    async def seed(nameplate: int, expired: bool = False) -> str:
+        code = f"{nameplate}-adroitness-aardvark"
+        digest = hashlib.sha256(code.encode()).hexdigest()
+        await asyncio.to_thread(d1, f"""
+            DELETE FROM pairing_codes WHERE nameplate = '{nameplate}';
+            INSERT INTO pairing_codes (code_hash, nameplate, identity_hash, expires_at, attempts)
+            VALUES ('{digest}', '{nameplate}', '{identity}', unixepoch() {'-' if expired else '+'} 90, 0)
+        """)
+        return code
+
+    await asyncio.to_thread(d1, "DELETE FROM pairing_claim_budget")
+    try:
+        expired = await seed(997, expired=True)
+        status, body = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": expired})
+        assert status == 404, (status, body)
+
+        exhausted = await seed(998)
+        for _ in range(5):
+            status, body = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": "998-unknownword-anotherunknownword"})
+            assert status == 404, (status, body)
+        assert await asyncio.to_thread(d1, "SELECT attempts FROM pairing_codes WHERE nameplate = '998'") == []
+        status, body = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": exhausted})
+        assert status == 404, (status, body)
+
+        await seed(999)
+        guesses = await asyncio.gather(*(
+            asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": "999-unknownword-anotherunknownword"})
+            for _ in range(8)
+        ))
+        assert all(status == 404 for status, _ in guesses), guesses
+        assert await asyncio.to_thread(d1, "SELECT attempts FROM pairing_codes WHERE nameplate = '999'") == []
+
+        # The 120th global request is allowed, the 121st is not. Seed the counter rather
+        # than issue 119 irrelevant requests. Avoid the minute edge while checking it.
+        if time.time() % 60 > 55:
+            await asyncio.sleep(61 - time.time() % 60)
+        await asyncio.to_thread(d1, "DELETE FROM pairing_claim_budget; INSERT INTO pairing_claim_budget (minute, attempts) VALUES (unixepoch() / 60, 119)")
+        status, body = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": "996-unknownword-anotherunknownword"})
+        assert status == 404, (status, body)
+        limited = await asyncio.gather(*(
+            asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": "996-unknownword-anotherunknownword"}, {
+                "cf-connecting-ip": f"192.0.2.{index}", "x-forwarded-for": f"198.51.100.{index}",
+            }) for index in range(1, 9)
+        ))
+        assert all(status == 429 for status, _ in limited), limited
+    finally:
+        # Do not poison other suites sharing this local fixture.
+        await asyncio.to_thread(d1, "DELETE FROM pairing_claim_budget; DELETE FROM pairing_codes WHERE nameplate IN ('997', '998', '999')")
 
 
 def outputs_back(*call_ids: str):
@@ -2090,6 +2136,7 @@ def main() -> int:
     try:
         asyncio.run(run_protocol(identity))
         asyncio.run(run_unobserved_end(restart))
+        asyncio.run(pairing_claim_checks(identity))
         print("voice session delegation checks passed")
         return 0
     except BaseException:

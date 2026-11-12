@@ -17,7 +17,8 @@ import { LANDING_HTML } from "./landing";
 import { PAIR_HTML } from "./pair_page";
 import { handleSounds } from "./sounds_page";
 import {
-  DECODE_FAILURE_KEEP_ROWS, DECODE_FAILURE_MAX_BYTES, describeBrowser, describePlace, sha256Hex, splitCredential,
+  PAIRING_MAX_ATTEMPTS, PAIRING_GLOBAL_ATTEMPTS_PER_MINUTE, normalizePairingCode,
+  describeBrowser, describePlace, sha256Hex, splitCredential,
 } from "./pairing";
 import type { Env } from "./types";
 import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
@@ -1037,14 +1038,32 @@ async function handlePair(req: Request, env: Env, url: URL): Promise<Response> {
     });
   }
   if (url.pathname === "/pair/claim" && req.method === "POST") {
+    // Shared D1 counters, not isolate-local memory or per-IP limits. Distributing
+    // guesses across browsers/addresses cannot bypass either budget.
+    const budget = await env.DB.batch([
+      env.DB.prepare("DELETE FROM pairing_claim_budget WHERE minute < unixepoch() / 60"),
+      env.DB.prepare(`INSERT INTO pairing_claim_budget (minute, attempts) VALUES (unixepoch() / 60, 1)
+        ON CONFLICT(minute) DO UPDATE SET attempts = attempts + 1 RETURNING attempts`),
+    ]);
+    const budgetRow = budget[1].results[0] as { attempts: number } | undefined;
+    if (Number(budgetRow?.attempts ?? Infinity) > PAIRING_GLOBAL_ATTEMPTS_PER_MINUTE) {
+      return jsonResponse({ error: "too many pairing attempts; try again in a minute" }, 429);
+    }
     const body = await req.json<{ code?: unknown }>().catch(() => ({ code: null }));
-    const code = typeof body.code === "string" ? body.code.toLowerCase() : "";
-    if (!/^[0-9a-f]{20}$/.test(code)) return jsonResponse({ error: "malformed pairing code" }, 400);
-    const codeHash = await sha256Hex(code);
-    // Single use: the claim consumes the row whether or not the caller accepts.
-    const row = await env.DB.prepare(
-      "DELETE FROM pairing_codes WHERE code_hash = ? AND expires_at > unixepoch() RETURNING identity_hash",
-    ).bind(codeHash).first<{ identity_hash: string }>();
+    const code = typeof body?.code === "string" && body.code.length <= 100 ? normalizePairingCode(body.code) : null;
+    if (!code) return jsonResponse({ error: "enter the number and two words, such as 123-adroitness-aardvark" }, 400);
+    const codeHash = await sha256Hex(code.code);
+    // A D1 batch is transactional: concurrent claims cannot overrun the five
+    // guesses or redeem a code twice. A successful claim spends the row too.
+    const claims = await env.DB.batch([
+      env.DB.prepare("UPDATE pairing_codes SET attempts = attempts + 1 WHERE nameplate = ? AND expires_at > unixepoch()")
+        .bind(code.nameplate),
+      env.DB.prepare("DELETE FROM pairing_codes WHERE nameplate = ? AND code_hash = ? AND attempts <= ? AND expires_at > unixepoch() RETURNING identity_hash")
+        .bind(code.nameplate, codeHash, PAIRING_MAX_ATTEMPTS),
+      env.DB.prepare("DELETE FROM pairing_codes WHERE attempts >= ? OR expires_at <= unixepoch()")
+        .bind(PAIRING_MAX_ATTEMPTS),
+    ]);
+    const row = claims[1].results[0] as { identity_hash: string } | undefined;
     if (!row) return jsonResponse({ error: "unknown or expired pairing code" }, 404);
     const cf = (req as Request & { cf?: { city?: unknown; region?: unknown; country?: unknown } }).cf;
     return voiceSessionFor(env, row.identity_hash).fetch("https://voice-session/pair/claim", {
@@ -1055,39 +1074,6 @@ async function handlePair(req: Request, env: Env, url: URL): Promise<Response> {
         "x-dogwalk-place": describePlace(cf),
       },
     });
-  }
-  // Anonymous decode-failure telemetry: a page heard Pairing Tones but could not decode them.
-  // Before a claim nothing says whose call it is, so only coarse diagnostics are kept, and
-  // only while some Pairing Code is outstanding; the table is trimmed to its newest rows.
-  if (url.pathname === "/pair/decode-failed" && req.method === "POST") {
-    const length = Number(req.headers.get("content-length") ?? "");
-    if (!Number.isFinite(length) || length <= 0 || length > DECODE_FAILURE_MAX_BYTES) {
-      return jsonResponse({ error: "body missing or too large" }, 413);
-    }
-    const text = await req.text();
-    if (text.length > DECODE_FAILURE_MAX_BYTES) return jsonResponse({ error: "body too large" }, 413);
-    let body: Record<string, unknown>;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      return jsonResponse({ error: "malformed report" }, 400);
-    }
-    if (body?.stage !== "ecc_failed" && body?.stage !== "ecc_unverified") return jsonResponse({ error: "unknown stage" }, 400);
-    const bounded = (value: unknown, max: number) =>
-      typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(max, value)) : null;
-    const seconds = bounded(body.seconds, 60);
-    await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO pairing_decode_failures (ts, stage, baud, seconds, symbols_heard, erasures)
-         SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM pairing_codes WHERE expires_at > unixepoch())`,
-      ).bind(
-        Date.now(), body.stage, bounded(body.baud, 64), seconds === null ? null : Math.round(seconds * 10) / 10,
-        bounded(body.symbols_heard, 64), bounded(body.erasures, 64),
-      ),
-      env.DB.prepare("DELETE FROM pairing_decode_failures WHERE id <= (SELECT MAX(id) FROM pairing_decode_failures) - ?")
-        .bind(DECODE_FAILURE_KEEP_ROWS),
-    ]);
-    return new Response(null, { status: 204 });
   }
   if (url.pathname === "/pair/claim/status" && req.method === "GET") {
     const ticket = splitCredential(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null);
