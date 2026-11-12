@@ -1,5 +1,16 @@
 # Local Voice Frontend research
 
+**Status: parked (2026-11-12), research branch only, never merged.** Round one
+(`PLAN.md`, `FINDINGS.md`) tested LFM3-Audio-2B Q8_0 as a monolithic GPT-Live
+replacement and failed on routing and authority boundaries. Round two
+(`PLAN2.md`, `FINDINGS2.md`) split it into router, speech and host organs: the
+probability-scored router overfit its tuning suite and failed held-out transfer,
+while verbatim TTS and an Orchestrator-always design held up. If resuming, start
+from the FINDINGS2 architecture (every caller turn is a Handoff; LFM only listens
+and speaks verbatim) and measure real Orchestrator latency on social turns.
+`artifacts/` (weights, WAVs, records, judge outputs) was discarded; rerun
+`runtime_setup.py download` to restore the pinned model.
+
 This is an isolated experiment, not a production adapter. See `PLAN.md` for the
 hypotheses and controls. All audio and conversations are synthetic. Raw local
 requests, transcripts, WAVs, and timing evidence live in ignored `artifacts/`.
