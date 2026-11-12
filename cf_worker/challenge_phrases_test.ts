@@ -5,6 +5,12 @@ import { HANDLE_WORDS } from "./src/handles.ts";
 import { EVEN_WORDS, ODD_WORDS } from "./src/invitations.ts";
 
 const reserved = new Set([...HANDLE_WORDS, ...EVEN_WORDS, ...ODD_WORDS, ...ESCAPE_WORDS]);
+// Operator feedback (#23): avoid pronunciation hesitation (aunt), bridge/beach confusion,
+// and the observed towel mishearing. Keep the existing sentence length and strict matcher.
+assert.ok(PHRASE_SLOTS.person.includes("Our friend"));
+assert.ok(PHRASE_SLOTS.area.includes("pathway"));
+const phraseWords = Object.values(PHRASE_SLOTS).flat().flatMap((filler) => filler.toLowerCase().split(/\s+/));
+for (const word of ["aunt", "beach", "towel"]) assert.ok(!phraseWords.includes(word), `${word} is hard to repeat over the phone`);
 // The written lists must already avoid reserved words: the load-time filter is a guard, not an editor.
 const source = await import("node:fs").then((fs) => fs.readFileSync(new URL("./src/challenge_phrases.ts", import.meta.url), "utf8"));
 for (const [slot, fillers] of Object.entries(PHRASE_SLOTS)) {
