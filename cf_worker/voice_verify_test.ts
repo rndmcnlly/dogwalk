@@ -6,14 +6,14 @@
 import assert from "node:assert/strict";
 import { hostSpeaker, userSpeaker, warmSpeaker } from "./src/voice_verify.ts";
 
-type Calls = { warms: number; verifies: number; objects: string[]; paths: string[] };
+type Calls = { warms: number; verifies: number; objects: string[]; paths: string[]; verified: Record<string, any>[] };
 
 function harness(options: { bound?: boolean; warm?: () => Promise<{ cold: boolean }>; verify?: () => Promise<unknown> }) {
-  const calls: Calls = { warms: 0, verifies: 0, objects: [], paths: [] };
+  const calls: Calls = { warms: 0, verifies: 0, objects: [], paths: [], verified: [] };
   const pending: Promise<unknown>[] = [];
   const SPEAKER = options.bound === false ? undefined : {
     warm: () => { calls.warms++; return (options.warm ?? (async () => ({ cold: true })))(); },
-    verify: async () => { calls.verifies++; return (options.verify ?? (async () => ({ cosineSimilarity: 0.6, embeddingSpace: "s", audioSeconds: 3, speechSeconds: 2 })))(); },
+    verify: async (input: Record<string, any>) => { calls.verifies++; calls.verified.push(input); return (options.verify ?? (async () => ({ cosineSimilarity: 0.6, embeddingSpace: "s", audioSeconds: 3, speechSeconds: 2 })))(); },
     embed: async () => ({ embedding: [1, 0], embeddingSpace: "s", audioSeconds: 3, speechSeconds: 2 }),
   };
   const env: Record<string, unknown> = { SPEAKER };
@@ -80,10 +80,17 @@ try {
   {
     const { env, calls } = harness({});
     const speaker = userSpeaker(env, "user-hash")!;
-    const result = await speaker.verify({ audio: new Int16Array(8000).buffer, format: "pcm_s16le", sampleRate: 8000,
-      reference: { embedding: [1, 0], embeddingSpace: "s" } });
+    const samples = Int16Array.from({ length: 8000 }, (_, i) => (i % 200) - 100);
+    const reference = { embedding: [0.6, 0.8], embeddingSpace: "s" };
+    const result = await speaker.verify({ audio: samples.slice().buffer, format: "pcm_s16le", sampleRate: 8000, reference });
     assert.deepEqual(result, { cosineSimilarity: 0.6, embeddingSpace: "s", audioSeconds: 3, speechSeconds: 2, cold: true });
     assert.deepEqual([calls.warms, calls.verifies], [1, 1]);
+    // The audio, its format and rate, and the reference cross the hop unchanged.
+    const sent = calls.verified[0];
+    assert.deepEqual(new Int16Array(sent.audio), samples);
+    assert.equal(sent.format, "pcm_s16le");
+    assert.equal(sent.sampleRate, 8000);
+    assert.deepEqual(sent.reference, reference);
     const embedded = await speaker.embed({ audio: new Int16Array(8000).buffer, format: "pcm_s16le", sampleRate: 8000 });
     assert.equal(embedded.embeddingSpace, "s");
   }

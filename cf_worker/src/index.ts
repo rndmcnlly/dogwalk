@@ -1284,7 +1284,12 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
       .bind(callSid).first<{ done: number }>();
     if (!checked?.done) {
       const log = (event: string, detail: Record<string, unknown>) => audit(env, event, from, callSid, detail);
-      const check = await startHomeCheck(env, ctx, new URL(req.url), form, user.id, log);
+      // Shadow mode never drops a Home caller: a check that cannot start is recorded, and the call connects.
+      const check = await startHomeCheck(env, ctx, new URL(req.url), form, user.id, log).catch(async (error) => {
+        await log("identity.error", { stage: "start", message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+        await endIdentity(env, callSid).catch(() => {});
+        return null;
+      });
       if (check) {
         // The check runs while the Sandbox wakes; the connection after it reports a broken one.
         ctx.waitUntil(wakeSandbox(env, ctx, user, from, callSid).catch((error) =>
@@ -1640,6 +1645,9 @@ async function handleCallStatus(req: Request, env: Env, ctx: ExecutionContext): 
   await audit(env, `call.${status}`, from, callSid, duration ? { duration } : {});
   deferTwilioObservation(env, ctx, form, callSid, receivedMs);
   if (terminal) {
+    // Rounds live only for the call: a hangup mid-ritual leaves no score or enrollment embedding behind.
+    await env.DB.prepare("DELETE FROM challenge_rounds WHERE call_sid = ?").bind(callSid).run()
+      .catch((error) => console.error("challenge round cleanup failed", error));
     // The telephone call is over: make sure the VoiceSession has noticed, even if the
     // GPT-Live sideband ended without telling it.
     try {
@@ -1714,6 +1722,7 @@ async function handlePractice(req: Request, env: Env, ctx: ExecutionContext, url
     if (url.pathname === "/voice/practice/result") return twiml(await handlePracticeResult(env, ctx, url, form, log));
   } catch (error) {
     await log("practice.error", { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+    await env.DB.prepare("DELETE FROM challenge_rounds WHERE call_sid = ?").bind(callSid).run().catch(() => {});
     // A failed round webhook still stops its stream, which would otherwise keep listening.
     const stop = url.pathname === "/voice/practice/heard" ? practiceStreamStop(url) : "";
     return twiml(stop + Say("Challenge practice stopped because of an error. Back to Dogwalk.") + Redirect("/voice"));
@@ -1758,8 +1767,7 @@ async function handleIdentity(req: Request, env: Env, ctx: ExecutionContext, url
     await log("identity.error", { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
     // Shadow mode: an error never keeps a Home caller out. A failed round webhook still stops its stream.
     const stop = url.pathname === "/voice/identity/heard" ? identityStreamStop(url) : "";
-    await env.DB.prepare("UPDATE voice_calls SET identity = ? WHERE call_sid = ?")
-      .bind(JSON.stringify({ outcome: "error", enforcement: "undecided", shadow: true }), callSid).run();
+    await endIdentity(env, callSid).catch(() => {});
     const path = url.searchParams.get("path");
     if (path === "roaming" || path === "register" || url.pathname === "/voice/identity/who") {
       return twiml(stop + Say("The voice check stopped because of an error. Goodbye.") + Hangup());
@@ -1767,6 +1775,16 @@ async function handleIdentity(req: Request, env: Env, ctx: ExecutionContext, url
     return twiml(stop + Say("The voice check stopped because of an error.") + Redirect("/voice"));
   }
   return new Response("not found", { status: 404 });
+}
+
+// An Identity Check that ended in an error: recorded as done (so /voice connects rather than
+// retrying it), and its rounds, enrollment embeddings included, deleted.
+async function endIdentity(env: Env, callSid: string): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare("UPDATE voice_calls SET identity = ? WHERE call_sid = ?")
+      .bind(JSON.stringify({ outcome: "error", enforcement: "undecided", shadow: true }), callSid),
+    env.DB.prepare("DELETE FROM challenge_rounds WHERE call_sid = ?").bind(callSid),
+  ]);
 }
 
 // --- /voice/claim: receive spoken words --------------------------------
@@ -2019,9 +2037,16 @@ async function bindClaim(
   // The Handle is how the User will name themselves from any other phone: say it twice. Then
   // Registration enrolls the new User's Voice Reference (identity_check.ts), when it can.
   const registered = `Registered. Your name on Dogwalk is ${handle}. Again: ${handle}. This phone is now your home.`;
-  const newUser = await env.DB.prepare("SELECT id FROM users WHERE handle = ? AND reaped_at IS NULL").bind(handle).first<{ id: number }>();
   const log = (event: string, detail: Record<string, unknown>) => audit(env, event, from, callSid, detail);
-  const enrollment = newUser ? await startRegistrationEnrollment(env, ctx, new URL(req.url), form, newUser.id, log, registered) : null;
+  // The Registration is committed: an enrollment that cannot start still ends with the Handle spoken.
+  let enrollment: string | null = null;
+  try {
+    const newUser = await env.DB.prepare("SELECT id FROM users WHERE handle = ? AND reaped_at IS NULL").bind(handle).first<{ id: number }>();
+    enrollment = newUser ? await startRegistrationEnrollment(env, ctx, new URL(req.url), form, newUser.id, log, registered) : null;
+  } catch (error) {
+    await log("identity.error", { stage: "registration", message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+    await env.DB.prepare("DELETE FROM challenge_rounds WHERE call_sid = ?").bind(callSid).run().catch(() => {});
+  }
   return twiml(enrollment ?? Say(`${registered} Goodbye.`) + Hangup());
 }
 

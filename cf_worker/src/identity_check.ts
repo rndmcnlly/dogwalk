@@ -19,7 +19,7 @@
 // Webhook URLs carry the path and progress; Twilio signs them, so a caller cannot alter them.
 import { isAccountSid, Say } from "./caller_stream";
 import {
-  answerOf, awaitScore, CALL_SID, clearRounds, handleChallengeStream, judge, markScoring, MIN_SPEECH_SECONDS, nextTake,
+  answerOf, awaitScore, CALL_SID, clearRounds, handleChallengeStream, judge, markScoring, MAX_REPEATS, MIN_SPEECH_SECONDS, nextTake,
   openRound, readRound, receivedCuePlay, type Ritual, scoreDetail, scoreTiming, skipRound, stopTake, takeTwiml,
 } from "./challenge_rounds";
 import { HANDLE_WORDS } from "./handles";
@@ -64,16 +64,20 @@ async function subjectOf(env: Env, userId: number): Promise<Subject | null> {
   ).bind(userId).first<Subject>();
 }
 
-// Carried in each round's webhook URLs.
-interface Progress { path: Path; user: number; silent: number; judged: number; passed: number }
+// Carried in each round's webhook URLs. start is the round before the path began, so a path
+// entered mid-call (Roaming after a Handle is named) gets its own MAX_ROUNDS budget while round
+// numbers stay increasing, and a stopped stream's late score can never land on a new round.
+interface Progress { path: Path; user: number; silent: number; judged: number; passed: number; start: number }
 function progressOf(url: URL): Progress | null {
   const path = url.searchParams.get("path") as Path;
   const user = Number(url.searchParams.get("user"));
   if (!PATHS.includes(path) || !Number.isSafeInteger(user) || user <= 0) return null;
   const count = (name: string) => Number(url.searchParams.get(name) ?? "0") || 0;
-  return { path, user, silent: count("silent"), judged: count("judged"), passed: count("passed") };
+  return { path, user, silent: count("silent"), judged: count("judged"), passed: count("passed"), start: count("start") };
 }
-const query = (p: Progress) => `path=${p.path}&user=${p.user}&silent=${p.silent}&judged=${p.judged}&passed=${p.passed}`;
+const query = (p: Progress) => `path=${p.path}&user=${p.user}&silent=${p.silent}&judged=${p.judged}&passed=${p.passed}&start=${p.start}`;
+const fresh = (path: Path, user: number, start = 0): Progress => ({ path, user, silent: 0, judged: 0, passed: 0, start });
+const outOfRounds = (round: number, progress: Progress) => round - progress.start >= MAX_ROUNDS[progress.path];
 
 // --- outcomes -----------------------------------------------------------
 
@@ -153,7 +157,7 @@ async function nextRound(
   env: Env, ctx: ExecutionContext, url: URL, callSid: string, account: string, log: Log, round: number, progress: Progress,
   subject: Subject, spoken: string,
 ): Promise<string> {
-  if (round >= MAX_ROUNDS[progress.path]) {
+  if (outOfRounds(round, progress)) {
     if (progress.path === "enroll" || progress.path === "register") return finishEnrollment(env, callSid, log, progress, spoken);
     await conclude(env, callSid, log, { path: progress.path, user_id: subject.id, outcome: "undecided",
       enforcement: progress.path === "home" ? "require_roaming" : "deny", judged: progress.judged, passed: progress.passed });
@@ -190,7 +194,7 @@ export async function startHomeCheck(
     ? `Dogwalk, for ${subject.handle}. Your sentence.`
     : `Dogwalk, for ${subject.handle}. To check that it's you, repeat the sentence after the tone, once, in your normal voice. ` +
       "If you're someone else, say so.";
-  return Say(greeting) + await roundTwiml(env, ctx, url, callSid, account, 1, { path: "home", user: subject.id, silent: 0, judged: 0, passed: 0 }, subject);
+  return Say(greeting) + await roundTwiml(env, ctx, url, callSid, account, 1, fresh("home", subject.id), subject);
 }
 
 /** The end of Registration: the new User enrolls their Voice Reference, then the call ends. Null when it cannot run. */
@@ -213,7 +217,7 @@ async function startEnrollment(
   return Say(`${lead} So Dogwalk can recognize your voice from any phone, I'll learn it now. ` +
     "I keep a voice profile, never a recording, and it never changes from your calls; you can redo it later. " +
     `After each tone, repeat the sentence once in your normal voice. ${ENROLL_ANSWERS} sentences. Say stop to skip.`) +
-    await roundTwiml(env, ctx, url, callSid, account, 1, { path, user: subject.id, silent: 0, judged: 0, passed: 0 }, subject);
+    await roundTwiml(env, ctx, url, callSid, account, 1, fresh(path, subject.id), subject);
 }
 
 /** A caller named another User's Handle: Roaming's three Identity Challenges against that User's Voice Reference. */
@@ -226,7 +230,7 @@ async function startRoaming(
     return after("roaming", `${subject.handle} has no enrolled voice yet, so that name works only from its home phone for now. Goodbye.`);
   }
   return Say(`Checking ${subject.handle}. ${ROAMING_CHALLENGES} sentences. After each tone, repeat the sentence once in your normal voice.`) +
-    await roundTwiml(env, ctx, url, callSid, account, round + 1, { path: "roaming", user: subject.id, silent: 0, judged: 0, passed: 0 }, subject);
+    await roundTwiml(env, ctx, url, callSid, account, round + 1, fresh("roaming", subject.id, round), subject);
 }
 
 // --- heard --------------------------------------------------------------
@@ -240,7 +244,8 @@ export async function handleIdentityHeard(
   const progress = progressOf(url);
   const round = Number(url.searchParams.get("round"));
   const take = Number(url.searchParams.get("take") ?? "0") || 0;
-  if (!progress || !CALL_SID.test(callSid) || !Number.isInteger(round) || round < 1 || round > MAX_ROUNDS[progress.path]) return CONNECT;
+  if (!progress || !CALL_SID.test(callSid) || !Number.isInteger(round) || round < 1 || round <= progress.start
+    || round > progress.start + MAX_ROUNDS[progress.path]) return CONNECT;
   const ritual = ritualOf(progress.path);
   const stop = stopTake(ritual, round, take);
   const row = await readRound(env, callSid, round);
@@ -286,9 +291,16 @@ export async function handleIdentityHeard(
   // Not the phrase: a Handle, an invite, donating, or someone else steers the call; anything else is a wrong phrase.
   const escape = progress.path === "register" ? null : await escapeOf(env, answer.heard);
   if (escape?.to === "user" && escape.user.id === subject.id) {
-    // The caller said the name they are being checked as: hear the same sentence again.
-    await nextTake(env, callSid, round, take);
-    return stop + Say("Your sentence.") + await identityTake(env, ctx, url, callSid, account, round, take + 1, row.phrase, progress, subject);
+    // The caller said the name they are being checked as: hear the same sentence again, within
+    // the same replay limit as a request to repeat it.
+    if (take < MAX_REPEATS) {
+      await nextTake(env, callSid, round, take);
+      return stop + Say("Your sentence.") + await identityTake(env, ctx, url, callSid, account, round, take + 1, row.phrase, progress, subject);
+    }
+    await skipRound(env, callSid, round);
+    await log("identity.round", { path: progress.path, round, outcome: "repeat_limit" });
+    return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: 0 }, subject,
+      "No more repeats of that one. Here's another.");
   }
   if (escape) {
     await skipRound(env, callSid, round);
@@ -335,11 +347,15 @@ export async function handleIdentityWho(
   const escape = await escapeOf(env, heard);
   await log("identity.who", { attempt, to: escape?.to ?? "unknown", ...(escape?.to === "user" ? { user_id: escape.user.id } : {}) });
   if (escape?.to === "user") {
-    // Naming this phone's own User is the Home check after all: one challenge, then connect.
-    if (escape.user.id === homeUserId && escape.user.enrolled && isAccountSid(account)) {
+    // Naming this phone's own User is the Home check after all: one challenge then connect, or
+    // first-call enrollment when they have no Voice Reference yet. Never Roaming on their own Home.
+    if (escape.user.id === homeUserId && isAccountSid(account)) {
       await clearRounds(env, callSid);
+      if (!escape.user.enrolled) {
+        return startEnrollment(env, ctx, url, callSid, account, escape.user, "enroll", log, `Dogwalk, for ${escape.user.handle}.`);
+      }
       return Say(`Dogwalk, for ${escape.user.handle}. Your sentence.`) +
-        await roundTwiml(env, ctx, url, callSid, account, 1, { path: "home", user: escape.user.id, silent: 0, judged: 0, passed: 0 }, escape.user);
+        await roundTwiml(env, ctx, url, callSid, account, 1, fresh("home", escape.user.id), escape.user);
     }
     if (isAccountSid(account)) {
       await clearRounds(env, callSid);

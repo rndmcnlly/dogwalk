@@ -358,8 +358,13 @@ what enforcement would have done.
 
 Without `SPEAKER` or an `AccountSid` (local dev, most tests), `/voice` records
 `identity` as `unavailable` and connects at once. An exception in an identity
-webhook records `error` and connects a Home path (Roaming and Registration paths
-hang up). Webhook URLs carry `path`, `user`, and progress; Twilio signs them.
+webhook, or in starting the check from `/voice`, records `error` and connects a
+Home path (Roaming and Registration paths hang up; a Registration whose
+enrollment cannot start still speaks the Handle). Webhook URLs carry `path`,
+`user`, progress, and `start` (the round before the path began, so a path entered
+mid-call gets its own round budget); Twilio signs them. A call's rounds, and with
+them any enrollment embeddings, are deleted whenever a path ends, on an error,
+and when the call's terminal status arrives.
 
 Call Activity (source `access`): `identity.started` (`path`, `user_id`, `terse`),
 `identity.round` (`path`, `round`, `outcome`, `cosine` or for enrollment none,

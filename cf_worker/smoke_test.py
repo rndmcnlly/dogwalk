@@ -1466,6 +1466,7 @@ ENROLL_HANDLE = "acrobat albatross"
 ROAMING_PHONE = "+15555550122"
 ENROLL_PHONE = "+15555550120"
 REGISTER_PHONE = "+15555550121"
+REGISTER_FAIL_PHONE = "+15555550123"
 
 
 def identity_checks(base_url: str, token: str) -> None:
@@ -1474,7 +1475,7 @@ def identity_checks(base_url: str, token: str) -> None:
     a User without a Voice Reference enrolls instead; Registration ends with enrollment."""
     received_cue = re.escape("<Play>https://dogwalk.tools/voice/identity/received.wav</Play>")
     home = d1_local(f"SELECT id, handle, home_phone FROM users WHERE home_phone LIKE '{TEST_NUMBERS}' AND reaped_at IS NULL "
-                    f"AND home_phone NOT IN ('{ROAMING_PHONE}', '{ENROLL_PHONE}', '{REGISTER_PHONE}') LIMIT 1")[0]
+                    f"AND home_phone NOT IN ('{ROAMING_PHONE}', '{ENROLL_PHONE}', '{REGISTER_PHONE}', '{REGISTER_FAIL_PHONE}') LIMIT 1")[0]
     uid, handle, phone = home["id"], home["handle"], home["home_phone"]
     d1_local(f"INSERT OR REPLACE INTO voice_references (user_id, embedding_space, embedding, enrolled_at) "
              f"VALUES ({uid}, 'mock-speaker-space', '[0.5, 0.5]', unixepoch()); UPDATE users SET challenges_completed = 0 WHERE id = {uid}")
@@ -1496,7 +1497,7 @@ def identity_checks(base_url: str, token: str) -> None:
         name = f"identity-round-{number:02d}" + (f"-{take}" if take else "")
         stream = re.search(rf'<Start><Stream name="{name}" url="wss://dogwalk\.tools(/voice/identity/stream/[^"]+)" track="inbound_track">', body)
         action = re.search(rf'action="(/voice/identity/heard\?path={path}&amp;user={user}&amp;silent=\d&amp;judged=\d&amp;passed=\d'
-                           rf'&amp;round={number}&amp;take={take})"', body)
+                           rf'&amp;start=\d+&amp;round={number}&amp;take={take})"', body)
         require(stream and action and "<Play>https://dogwalk.tools/voice/identity/tone.wav</Play>" in body, f"identity round {number}: {body}")
         phrase = d1_local(f"SELECT phrase FROM challenge_rounds WHERE call_sid = '{sid}' AND round = {number}")[0]["phrase"]
         require(f">{phrase}</Say></Gather>" in body, f"identity round {number} does not say its phrase: {body}")
@@ -1610,6 +1611,73 @@ def identity_checks(base_url: str, token: str) -> None:
     _, body = post(base_url, "/voice", call("CA_ID_10"), token)
     body = say("CA_ID_10", 1, "home", uid, body, "I want to donate")
     require(body.endswith('<Redirect method="POST">/voice/donation</Redirect></Response>'), f"donate from the greeting: {body}")
+
+    def failing_rounds(*sids: str) -> None:
+        """Make inserting a challenge round fail for these calls (none: stop failing)."""
+        sql = "DROP TRIGGER IF EXISTS test_fail_rounds;"
+        if sids:
+            names = ", ".join(f"'{sid}'" for sid in sids)
+            sql += (f"\nCREATE TRIGGER test_fail_rounds BEFORE INSERT ON challenge_rounds WHEN NEW.call_sid IN ({names})\n"
+                    "BEGIN SELECT RAISE(ABORT, 'test failure'); END;")
+        with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as handle:
+            handle.write(sql)
+        subprocess.run([project_wrangler(), "d1", "execute", "dogwalk", "--local", "--file", handle.name],
+                       cwd=WORKER_DIR, check=True, stdout=subprocess.DEVNULL)
+        os.unlink(handle.name)
+
+    # Saying the Handle being checked replays the sentence, but only as often as a repeat request.
+    _, body = post(base_url, "/voice", call("CA_ID_11"), token)
+    for take in range(4):
+        _, action, _ = round_of(body, "CA_ID_11", 1, "home", uid, take)
+        _, body = post(base_url, action, {**call("CA_ID_11"), "SpeechResult": f"it's {handle}", "Confidence": "0.9"}, token)
+        if take < 3:
+            require(f"<Say voice=\"Polly.Joanna\">Your sentence.</Say>" in body, f"own Handle replay {take}: {body}")
+    require("No more repeats of that one. Here's another." in body, f"own Handle past the replay limit: {body}")
+    round_of(body, "CA_ID_11", 2, "home", uid)
+
+    # A check that cannot start (here, its first round cannot be stored) connects the Home caller.
+    failing_rounds("CA_ID_BROKEN", "CA_ID_REGFAIL")
+    status, body = post(base_url, "/voice", call("CA_ID_BROKEN"), token)
+    require(status == 200 and "identity-round" not in body and body.startswith("<Response>"), f"check start failure: {status} {body}")
+    require(identity("CA_ID_BROKEN")["outcome"] == "error", f"start failure identity: {identity('CA_ID_BROKEN')}")
+    # Registration is committed even when its enrollment cannot start: the Handle is still spoken.
+    form = call("CA_ID_REGFAIL", REGISTER_FAIL_PHONE)
+    post(base_url, "/voice", form, token)
+    post(base_url, "/voice/claim?attempts=1", {**form, "SpeechResult": LOCAL_INVITE, "Confidence": "0.9"}, token)
+    _, body = post(base_url, "/voice/confirm?attempts=1", {**form, "SpeechResult": "yes", "Confidence": "0.9"}, token)
+    require(re.fullmatch(r'<Response><Say voice="Polly.Joanna">Registered\. Your name on Dogwalk is [a-z]+ [a-z]+\. Again: [a-z]+ [a-z]+\. '
+                         r'This phone is now your home\. Goodbye\.</Say><Hangup/></Response>', body) is not None, f"registration enrollment failure: {body}")
+    failing_rounds()
+
+    # An unenrolled Home User who says someone else, then their own Handle, enrolls; never Roaming.
+    _, body = post(base_url, "/voice", call("CA_ID_SELF", ENROLL_PHONE), token)
+    body = say("CA_ID_SELF", 1, "enroll", eid, body, "I'm someone else", ENROLL_PHONE)
+    require('action="/voice/identity/who?attempt=1"' in body, f"unenrolled someone else: {body}")
+    _, body = post(base_url, "/voice/identity/who?attempt=1", {**call("CA_ID_SELF", ENROLL_PHONE), "SpeechResult": f"it's {ENROLL_HANDLE}"}, token)
+    require("I'll learn it now." in body and "<Hangup/>" not in body, f"unenrolled own Handle: {body}")
+    body = say("CA_ID_SELF", 1, "enroll", eid, body, "stop", ENROLL_PHONE)
+    require(body.endswith(f'Skipping enrollment. I\'ll ask again next call.</Say>{connect}'), f"unenrolled own Handle, stop: {body}")
+
+    # A Handle named late in enrollment still gets Roaming's own round budget.
+    _, body = post(base_url, "/voice", call("CA_ID_LATE", ENROLL_PHONE), token)
+    for number in range(1, 8):
+        body = say("CA_ID_LATE", number, "enroll", eid, body, "the purple cow jumped", ENROLL_PHONE)
+        require("That wasn't the sentence." in body, f"late Handle, wrong phrase {number}: {body}")
+    body = say("CA_ID_LATE", 8, "enroll", eid, body, f"this is {ROAMING_HANDLE}", ENROLL_PHONE)
+    require(f"Checking {ROAMING_HANDLE}." in body and "&amp;start=8&amp;round=9&amp;" in body, f"late Handle: {body}")
+    body = say("CA_ID_LATE", 9, "roaming", vid, body, "stop", ENROLL_PHONE)
+    require(body.endswith('<Say voice="Polly.Joanna">Goodbye.</Say><Hangup/></Response>'), f"late Roaming round accepted: {body}")
+
+    # A hangup mid-enrollment leaves no embedding behind once the call's terminal status arrives.
+    form = call("CA_ID_HANGUP", ENROLL_PHONE)
+    _, body = post(base_url, "/voice", form, token)
+    body = answer(body, form, 1, "enroll", eid, 3.0, 6000)
+    require(d1_local("SELECT COUNT(*) AS n FROM challenge_rounds WHERE call_sid = 'CA_ID_HANGUP' AND embedding IS NOT NULL")[0]["n"] == 1,
+            "no collected enrollment answer before the hangup")
+    status, _ = post(base_url, "/voice/status", {"From": ENROLL_PHONE, "CallSid": "CA_ID_HANGUP", "CallStatus": "completed", "CallDuration": "40"}, token)
+    require(status == 204 and d1_local("SELECT COUNT(*) AS n FROM challenge_rounds WHERE call_sid = 'CA_ID_HANGUP'")[0]["n"] == 0,
+            f"enrollment rows kept after a hangup: {status}")
+    require(d1_local(f"SELECT COUNT(*) AS n FROM voice_references WHERE user_id = {eid}")[0]["n"] == 0, "an abandoned enrollment stored a reference")
 
     # First-call enrollment: a User without a Voice Reference repeats five phrases, hears no levels,
     # and leaves with one computed from the answers' embeddings.
