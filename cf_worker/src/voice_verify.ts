@@ -3,8 +3,9 @@
 // User's Voice Reference; GET /admin/api/voice-verify/health warms the model and embeds a
 // synthetic signal, reporting whether that request loaded the model. Neither returns nor logs audio or embeddings, and neither
 // authorizes anything: thresholds and decisions belong to the Identity Check.
-// warmSpeaker readies the verifier when a call arrives.
-import type { Env, SpeakerAudio } from "./types";
+// warmSpeaker readies the verifier when a call arrives, and userSpeaker routes a User's
+// challenges through their VoiceSession so they are scored where it was warmed.
+import type { Env, SpeakerAudio, SpeakerReference, SpeakerVerifier } from "./types";
 
 const MAX_WAV_BYTES = 1 << 20; // 30 s at 16 kHz is 960,000 bytes of samples.
 
@@ -63,24 +64,80 @@ function syntheticAudio(): SpeakerAudio {
   return { audio: samples.buffer, format: "pcm_s16le", sampleRate: rate };
 }
 
+// --- the verifier, hosted by a User's VoiceSession ----------------------
+//
+// A verifier instance is warm only on the machine that loaded it (speaker_worker/README.md,
+// Latency), and Cloudflare routes each webhook and Media Stream of a call independently, so a
+// warm from /voice rarely helps the stream that scores a challenge seconds later. A Durable
+// Object stays in the location where it was created, one single-threaded instance at a time,
+// and a Service Binding call runs on the same thread of the same server as its caller
+// (Cloudflare docs, Service bindings and Durable Objects data location, 2026-11). So every
+// warm and score for one User goes through that User's VoiceSession, which calls SPEAKER from
+// one place, and the instance it warmed at call arrival is the one that scores.
+
+const SPEAKER_META = "x-dogwalk-speaker";
+
 /**
- * Starts loading the verifier in the background ahead of scoring (a Home call, Challenge
- * Practice), so a challenge later in the call skips the 3–5 s model load. With a userId it
- * first checks that the User has a Voice Reference; without one the caller already has. A
- * verifier instance is warm only on the machine that ran it (speaker_worker/README.md,
- * Latency), so this helps scoring that runs where the call's webhooks run. Returns nothing
- * to await: the work goes to waitUntil and never delays TwiML, and every failure, including
- * an unbound SPEAKER, is logged and dropped.
+ * SPEAKER as seen from the VoiceSession keyed by this identity hash. Same calls, same errors
+ * (a message starting with the verifier's code), plus `cold` on each result: whether that
+ * score had to load the model, the observation that shows whether warming reached it.
  */
-export function warmSpeaker(env: Env, ctx: Pick<ExecutionContext, "waitUntil">, userId?: number): void {
+export function userSpeaker(env: Env, identityHash: string): SpeakerVerifier | null {
+  if (!env.SPEAKER) return null;
+  const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(identityHash));
+  const call = async <T>(op: string, input?: SpeakerAudio & { reference?: SpeakerReference }): Promise<T> => {
+    const meta = input ? { sampleRate: input.sampleRate, reference: input.reference } : null;
+    const response = await object.fetch(`https://voice-session/speaker/${op}`, {
+      method: "POST", body: input?.audio, headers: meta ? { [SPEAKER_META]: JSON.stringify(meta) } : {},
+    });
+    const result = await response.json<T & { error?: string }>();
+    if (result.error) throw new Error(result.error);
+    return result;
+  };
+  return {
+    warm: () => call("warm"),
+    embed: (input) => call("embed", input),
+    verify: (input) => call("verify", input),
+  };
+}
+
+/** The VoiceSession's side of userSpeaker: /speaker/warm, /speaker/embed, /speaker/verify. */
+export async function hostSpeaker(env: Env, request: Request, op: string): Promise<Response> {
   const speaker = env.SPEAKER;
+  if (!speaker) return Response.json({ error: "unavailable: no verifier" });
+  if (request.method !== "POST" || !["warm", "embed", "verify"].includes(op)) return new Response("not found", { status: 404 });
+  try {
+    const started = Date.now();
+    // warm() first, as health does, so each result says whether it loaded the model (cold)
+    // apart from queueing behind another request in the same isolate.
+    const { cold } = await speaker.warm();
+    if (op === "warm") {
+      console.log("speaker warm", { cold, ms: Date.now() - started, hosted: true });
+      return Response.json({ cold });
+    }
+    const meta = JSON.parse(request.headers.get(SPEAKER_META) ?? "{}") as { sampleRate?: number; reference?: SpeakerReference };
+    const audio: SpeakerAudio = { audio: await request.arrayBuffer(), format: "pcm_s16le", sampleRate: Number(meta.sampleRate) };
+    if (op === "embed") return Response.json({ ...await speaker.embed(audio), cold });
+    if (!meta.reference) throw new Error("invalid-input: no reference");
+    return Response.json({ ...await speaker.verify({ ...audio, reference: meta.reference }), cold });
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+/**
+ * Starts loading the verifier in the background ahead of scoring (an Identity Check,
+ * enrollment, Challenge Practice), so a challenge later in the call skips the 3–5 s model
+ * load. With an identity hash the warm goes through that User's VoiceSession, where their
+ * challenges are scored (userSpeaker); without one it warms this machine. Returns nothing to
+ * await: the work goes to waitUntil and never delays TwiML, and every failure, including an
+ * unbound SPEAKER, is logged and dropped.
+ */
+export function warmSpeaker(env: Env, ctx: Pick<ExecutionContext, "waitUntil">, identityHash?: string): void {
+  const speaker = identityHash ? userSpeaker(env, identityHash) : env.SPEAKER;
   if (!speaker) return;
   ctx.waitUntil((async () => {
     try {
-      if (userId !== undefined) {
-        const enrolled = await env.DB.prepare("SELECT 1 AS ok FROM voice_references WHERE user_id = ?").bind(userId).first();
-        if (!enrolled) return;
-      }
       const started = Date.now();
       const { cold } = await speaker.warm();
       console.log("speaker warm", { cold, ms: Date.now() - started });

@@ -733,7 +733,8 @@ def run_tests(
         donation_checks(base_url, token)
         # Practice scores through the mock speaker Worker that runs beside local dev.
         practice_checks(base_url, token)
-    print("33 core checks plus operator/provider timing, Voice Donation, and Challenge Practice checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
+        identity_checks(base_url, token)
+    print("33 core checks plus operator/provider timing, Voice Donation, Challenge Practice, and Identity Check checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
     return 0
 
 
@@ -1273,7 +1274,7 @@ def practice_checks(base_url: str, token: str) -> None:
         require(stream and action and "<Play>https://dogwalk.tools/voice/practice/tone.wav</Play>" in body, f"round {number}: {body}")
         # A one-second pause ends the answer: "auto" waited up to four seconds after a car caller's last word.
         require('<Gather input="speech" speechTimeout="1" timeout="5" ' in body, f"round {number} Gather timing: {body}")
-        phrase = d1_local(f"SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]["phrase"]
+        phrase = d1_local(f"SELECT phrase FROM challenge_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]["phrase"]
         require(f">{phrase}</Say></Gather>" in body, f"round {number} does not say its phrase: {body}")
         hints = re.search(r'hints="([^"]*)"', body)[1].split(",")
         require(hints[0] == "stop" and all(word.rstrip(".").lower() in hints for word in phrase.split()
@@ -1284,7 +1285,7 @@ def practice_checks(base_url: str, token: str) -> None:
     def speculative_stored(number: int, seconds: float) -> None:
         """Wait until the stream has stored the speculative score of its first `seconds` of audio."""
         for _ in range(40):
-            rows = d1_local(f"SELECT spec_speech_seconds FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")
+            rows = d1_local(f"SELECT spec_speech_seconds FROM challenge_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")
             if rows and rows[0]["spec_speech_seconds"] == seconds:
                 return
             time.sleep(0.25)
@@ -1292,7 +1293,7 @@ def practice_checks(base_url: str, token: str) -> None:
 
     def scored(number: int, body: str, audio: bytes, stored: float | None = None) -> str:
         stream, action = round_of(body, number)
-        phrase = d1_local(f"SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]["phrase"]
+        phrase = d1_local(f"SELECT phrase FROM challenge_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]["phrase"]
         redirect = []
         def heard() -> None:
             if stored is not None:
@@ -1311,7 +1312,7 @@ def practice_checks(base_url: str, token: str) -> None:
     # Round 1: one wrong content word (a misheard prompt) is a wrong phrase, not scored, and the
     # stream is stopped.
     stream, action = round_of(body, 1)
-    phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 1")[0]["phrase"]
+    phrase = d1_local("SELECT phrase FROM challenge_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 1")[0]["phrase"]
     misheard = phrase.rstrip(".").rsplit(" ", 1)[0] + " cow"
     status, body = post(base_url, action, {**call, "SpeechResult": misheard, "Confidence": "0.9"}, token)
     require(re.match(rf'<Response><Stop><Stream name="practice-round-01"/></Stop>{received_cue}<Say[^>]*>That wasn\'t the sentence\. Here\'s another\.', body)
@@ -1336,7 +1337,7 @@ def practice_checks(base_url: str, token: str) -> None:
     # "Say that again" replays the same phrase as a new take with its own stream, counting nothing;
     # the stopped take refuses a late stream.
     old_stream, action = round_of(body, 8)
-    phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 8")[0]["phrase"]
+    phrase = d1_local("SELECT phrase FROM challenge_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 8")[0]["phrase"]
     status, body = post(base_url, action, {**call, "SpeechResult": "Say that again?", "Confidence": "0.9"}, token)
     require(body.startswith('<Response><Stop><Stream name="practice-round-08"/></Stop><Say voice="Polly.Joanna">Again.</Say>')
             and f">{phrase}</Say></Gather>" in body and "Here's another" not in body and "received.wav" not in body, f"repeat: {body}")
@@ -1354,7 +1355,7 @@ def practice_checks(base_url: str, token: str) -> None:
     status, body = post(base_url, action, {**call, "SpeechResult": "Stop.", "Confidence": "0.9"}, token)
     require(body.startswith('<Response><Stop><Stream name="practice-round-09"/></Stop>') and "Practice over. Back to Dogwalk." in body
             and "received.wav" not in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'), f"stop: {body}")
-    require(d1_local("SELECT COUNT(*) AS n FROM practice_rounds WHERE call_sid = 'CA_PRACTICE'")[0]["n"] == 0, "rounds kept after stop")
+    require(d1_local("SELECT COUNT(*) AS n FROM challenge_rounds WHERE call_sid = 'CA_PRACTICE'")[0]["n"] == 0, "rounds kept after stop")
 
     # An empty transcript moves on; a second in a row ends practice. Both are logged as silent.
     status, body = post(base_url, "/voice/practice", call, token)
@@ -1404,13 +1405,13 @@ def practice_checks(base_url: str, token: str) -> None:
         practice_stream(base_url, stream, token, number, answer_audio(8000, (2.0, True), (1.0, False)), heard, take=take)
         time.sleep(1)
         row = d1_local("SELECT state, spec_seq, spec_started_ms, spec_cosine, spec_speech_seconds, spec_error, cosine, speculative "
-                       f"FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]
+                       f"FROM challenge_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]
         require(row == {"state": "skipped", "spec_seq": None, "spec_started_ms": None, "spec_cosine": None, "spec_speech_seconds": None,
                         "spec_error": None, "cosine": None, "speculative": 0}, f"round {number} kept a speculative score: {row}")
         return answer[0]
 
     # A wrong phrase discards the score its answer started.
-    phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 5")[0]["phrase"]
+    phrase = d1_local("SELECT phrase FROM challenge_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 5")[0]["phrase"]
     body = discarded(5, body, phrase.rstrip(".").rsplit(" ", 1)[0] + " cow")
     require("That wasn't the sentence." in body, f"wrong phrase after an answer end: {body}")
     # So does a repeat request past the replay limit.
@@ -1458,6 +1459,188 @@ def practice_checks(base_url: str, token: str) -> None:
     require(events.count("practice.started") == 4 and events.count("practice.ended") == 4 and "practice.unavailable" in events
             and events.count("practice.repeat") == 6,
             f"practice activity: {events}")
+
+
+ROAMING_HANDLE = "anchor antelope"
+ENROLL_HANDLE = "acrobat albatross"
+ROAMING_PHONE = "+15555550122"
+ENROLL_PHONE = "+15555550120"
+REGISTER_PHONE = "+15555550121"
+
+
+def identity_checks(base_url: str, token: str) -> None:
+    """Shadow Identity Check: a Home call hears its Handle and one challenge, then connects
+    whatever the level; a caller who names another Handle takes three and is never admitted;
+    a User without a Voice Reference enrolls instead; Registration ends with enrollment."""
+    received_cue = re.escape("<Play>https://dogwalk.tools/voice/identity/received.wav</Play>")
+    home = d1_local(f"SELECT id, handle, home_phone FROM users WHERE home_phone LIKE '{TEST_NUMBERS}' AND reaped_at IS NULL "
+                    f"AND home_phone NOT IN ('{ROAMING_PHONE}', '{ENROLL_PHONE}', '{REGISTER_PHONE}') LIMIT 1")[0]
+    uid, handle, phone = home["id"], home["handle"], home["home_phone"]
+    d1_local(f"INSERT OR REPLACE INTO voice_references (user_id, embedding_space, embedding, enrolled_at) "
+             f"VALUES ({uid}, 'mock-speaker-space', '[0.5, 0.5]', unixepoch()); UPDATE users SET challenges_completed = 0 WHERE id = {uid}")
+    d1_local(f"INSERT INTO users (handle, identity_hash, invite_code, registered_at, home_phone, home_used_at) VALUES "
+             f"('{ROAMING_HANDLE}', 'mock-identity-roaming', '{LOCAL_INVITE}', unixepoch(), '{ROAMING_PHONE}', unixepoch()), "
+             f"('{ENROLL_HANDLE}', 'mock-identity-enroll', '{LOCAL_INVITE}', unixepoch(), '{ENROLL_PHONE}', unixepoch())")
+    vid = d1_local(f"SELECT id FROM users WHERE handle = '{ROAMING_HANDLE}'")[0]["id"]
+    eid = d1_local(f"SELECT id FROM users WHERE handle = '{ENROLL_HANDLE}'")[0]["id"]
+    d1_local(f"INSERT INTO voice_references (user_id, embedding_space, embedding, enrolled_at) VALUES ({vid}, 'mock-speaker-space', '[0.5, 0.5]', unixepoch())")
+
+    def call(sid: str, caller: str = phone) -> dict:
+        return {"From": caller, "CallSid": sid, "AccountSid": TEST_ACCOUNT}
+
+    def identity(sid: str) -> dict | None:
+        row = d1_local(f"SELECT identity FROM voice_calls WHERE call_sid = '{sid}'")
+        return json.loads(row[0]["identity"]) if row and row[0]["identity"] else None
+
+    def round_of(body: str, sid: str, number: int, path: str, user: int, take: int = 0) -> tuple[str, str, str]:
+        name = f"identity-round-{number:02d}" + (f"-{take}" if take else "")
+        stream = re.search(rf'<Start><Stream name="{name}" url="wss://dogwalk\.tools(/voice/identity/stream/[^"]+)" track="inbound_track">', body)
+        action = re.search(rf'action="(/voice/identity/heard\?path={path}&amp;user={user}&amp;silent=\d&amp;judged=\d&amp;passed=\d'
+                           rf'&amp;round={number}&amp;take={take})"', body)
+        require(stream and action and "<Play>https://dogwalk.tools/voice/identity/tone.wav</Play>" in body, f"identity round {number}: {body}")
+        phrase = d1_local(f"SELECT phrase FROM challenge_rounds WHERE call_sid = '{sid}' AND round = {number}")[0]["phrase"]
+        require(f">{phrase}</Say></Gather>" in body, f"identity round {number} does not say its phrase: {body}")
+        return stream[1], action[1].replace("&amp;", "&"), phrase
+
+    def answer(body: str, form: dict, number: int, path: str, user: int, seconds: float, first_sample: int, take: int = 0) -> str:
+        """A matched answer: its stream is scored, and the result step speaks what follows."""
+        stream, action, phrase = round_of(body, form["CallSid"], number, path, user, take)
+        name = f"identity-round-{number:02d}" + (f"-{take}" if take else "")
+        redirect = []
+        def heard() -> None:
+            _, twiml = post(base_url, action, {**form, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)
+            match = re.fullmatch(rf'<Response><Stop><Stream name="{name}"/></Stop>{received_cue}'
+                                 rf'<Redirect method="POST">(/voice/identity/result\?[^<]+)</Redirect></Response>', twiml)
+            require(match is not None, f"identity matched phrase: {twiml}")
+            redirect.append(match[1].replace("&amp;", "&"))
+        practice_stream(base_url, stream, token, number, seconds, first_sample, heard, take)
+        status, result = post(base_url, redirect[0], form, token)
+        require(status == 200, f"identity result {number}: {status} {result}")
+        return result
+
+    def say(sid: str, number: int, path: str, user: int, body: str, words: str, caller: str = phone) -> str:
+        _, action, _ = round_of(body, sid, number, path, user)
+        return post(base_url, action, {**call(sid, caller), "SpeechResult": words, "Confidence": "0.9"}, token)[1]
+
+    connect = '<Redirect method="POST">/voice</Redirect></Response>'
+    # A Home call: the Handle, full instructions, one challenge, the level, then the Voice Agent.
+    status, body = post(base_url, "/voice", call("CA_ID_1"), token)
+    require(status == 200 and f"Dogwalk, for {handle}. To check that it's you" in body and "If you're someone else, say so." in body
+            and "<Dial" not in body, f"Home greeting: {body}")
+    body = answer(body, call("CA_ID_1"), 1, "home", uid, 3.0, 8000)
+    require(body == f'<Response><Say voice="Polly.Joanna">Strong voice match.</Say>{connect}', f"strong Home level: {body}")
+    require(identity("CA_ID_1") == {"path": "home", "user_id": uid, "outcome": "strong_match", "level": "Strong voice match.",
+                                    "enforcement": "admit", "shadow": True}, f"identity: {identity('CA_ID_1')}")
+    status, body = post(base_url, "/voice", call("CA_ID_1"), token)
+    # Re-entry goes straight to the connection step (this fixture's User shares the mock's one Sandbox, so it may not dial).
+    require(status == 200 and "identity-round" not in body and "Dogwalk, for" not in body, f"the check ran again on re-entry: {body}")
+    # Shadow mode: a voice that does not match still connects, and the record says what enforcement would do.
+    for sid, sample, said, outcome, enforcement in (("CA_ID_2", 6000, "Voice matched.", "match", "admit"),
+                                                    ("CA_ID_3", 3000, "Voice not matched.", "no_match", "require_roaming")):
+        _, body = post(base_url, "/voice", call(sid), token)
+        body = answer(body, call(sid), 1, "home", uid, 3.0, sample)
+        require(body == f'<Response><Say voice="Polly.Joanna">{said}</Say>{connect}', f"{outcome} Home level: {body}")
+        require(identity(sid)["outcome"] == outcome and identity(sid)["enforcement"] == enforcement, f"identity: {identity(sid)}")
+    require(d1_local(f"SELECT challenges_completed AS n FROM users WHERE id = {uid}")[0]["n"] == 3, "completed challenges not counted")
+
+    # Teach once, then go terse. A wrong phrase, a repeat, too little speech, then stop.
+    _, body = post(base_url, "/voice", call("CA_ID_4"), token)
+    require(f"Dogwalk, for {handle}. Your sentence.</Say>" in body and "someone else" not in body, f"terse greeting: {body}")
+    _, _, phrase = round_of(body, "CA_ID_4", 1, "home", uid)
+    body = say("CA_ID_4", 1, "home", uid, body, phrase.rstrip(".").rsplit(" ", 1)[0] + " cow")
+    require(re.match(rf'<Response><Stop><Stream name="identity-round-01"/></Stop>{received_cue}<Say[^>]*>That wasn\'t the sentence\. Here\'s another\.', body)
+            and "/voice/identity/result" not in body, f"identity wrong phrase: {body}")
+    body = say("CA_ID_4", 2, "home", uid, body, "say that again")
+    require(body.startswith('<Response><Stop><Stream name="identity-round-02"/></Stop><Say voice="Polly.Joanna">Again.</Say>'), f"identity repeat: {body}")
+    body = answer(body, call("CA_ID_4"), 2, "home", uid, 0.4, 6000, take=1)
+    require("Not enough to judge. Here's another." in body and "matched" not in body, f"identity not enough speech: {body}")
+    body = say("CA_ID_4", 3, "home", uid, body, "stop")
+    require(body == f'<Response><Stop><Stream name="identity-round-03"/></Stop><Say voice="Polly.Joanna">Skipping the voice check.</Say>{connect}',
+            f"identity stop: {body}")
+    require(identity("CA_ID_4")["outcome"] == "stopped", f"identity: {identity('CA_ID_4')}")
+    require(d1_local(f"SELECT challenges_completed AS n FROM users WHERE id = {uid}")[0]["n"] == 3, "an unscored check counted")
+
+    # Someone else, who names another User's Handle: three challenges against that User, never admitted.
+    _, body = post(base_url, "/voice", call("CA_ID_5"), token)
+    body = say("CA_ID_5", 1, "home", uid, body, "I'm someone else")
+    require(body.startswith('<Response><Stop><Stream name="identity-round-01"/></Stop>') and 'action="/voice/identity/who?attempt=1"' in body
+            and "Who's calling?" in body, f"someone else: {body}")
+    _, body = post(base_url, "/voice/identity/who?attempt=1", {**call("CA_ID_5"), "SpeechResult": f"it's {ROAMING_HANDLE}"}, token)
+    require(f"Checking {ROAMING_HANDLE}. 3 sentences." in body, f"named Handle: {body}")
+    body = answer(body, call("CA_ID_5"), 1, "roaming", vid, 3.0, 8000)
+    require("Strong voice match.</Say>" in body and "<Hangup/>" not in body, f"roaming round 1: {body}")
+    body = answer(body, call("CA_ID_5"), 2, "roaming", vid, 3.0, 6000)
+    require("Voice matched.</Say>" in body, f"roaming round 2: {body}")
+    body = answer(body, call("CA_ID_5"), 3, "roaming", vid, 3.0, 3000)
+    require(body == '<Response><Say voice="Polly.Joanna">Voice not matched. Calling as yourself from another phone is coming soon. '
+            'Until then, call from your home phone. Goodbye.</Say><Hangup/></Response>', f"roaming end: {body}")
+    require(identity("CA_ID_5") == {"path": "roaming", "user_id": vid, "outcome": "failed", "enforcement": "deny", "judged": 3, "passed": 2,
+                                    "shadow": True}, f"roaming identity: {identity('CA_ID_5')}")
+    require(d1_local("SELECT user_id FROM voice_calls WHERE call_sid = 'CA_ID_5'")[0]["user_id"] == uid, "a roaming claim was admitted")
+    # A Handle said at the greeting starts its challenges at once; stop ends the call.
+    _, body = post(base_url, "/voice", call("CA_ID_6"), token)
+    body = say("CA_ID_6", 1, "home", uid, body, f"this is {ROAMING_HANDLE}")
+    require(f"Checking {ROAMING_HANDLE}." in body, f"Handle at the greeting: {body}")
+    body = say("CA_ID_6", 2, "roaming", vid, body, "stop")
+    require(body.endswith('<Say voice="Polly.Joanna">Goodbye.</Say><Hangup/></Response>'), f"roaming stop: {body}")
+    # Someone else who names no known Handle hears the question once more, then a polite end.
+    post(base_url, "/voice", call("CA_ID_7"), token)
+    _, body = post(base_url, "/voice/identity/who?attempt=1", {**call("CA_ID_7"), "SpeechResult": "purple monkey"}, token)
+    require('action="/voice/identity/who?attempt=2"' in body, f"unknown name, first: {body}")
+    _, body = post(base_url, "/voice/identity/who?attempt=2", {**call("CA_ID_7"), "SpeechResult": "purple monkey"}, token)
+    require("I don't know that name." in body and body.endswith("<Hangup/></Response>"), f"unknown name, second: {body}")
+    # An invite or donating from the greeting.
+    _, body = post(base_url, "/voice", call("CA_ID_8"), token)
+    body = say("CA_ID_8", 1, "home", uid, body, "I have an invite")
+    require('action="/voice/claim?attempts=1"' in body and "Say your three invite words." in body, f"invite from the greeting: {body}")
+    _, body = post(base_url, "/voice", call("CA_ID_9"), token)
+    body = say("CA_ID_9", 1, "home", uid, body, LOCAL_INVITE)
+    require('action="/voice/confirm?attempts=1"' in body and "I heard: ahead, almighty, apple." in body, f"Invite Code from the greeting: {body}")
+    _, body = post(base_url, "/voice", call("CA_ID_10"), token)
+    body = say("CA_ID_10", 1, "home", uid, body, "I want to donate")
+    require(body.endswith('<Redirect method="POST">/voice/donation</Redirect></Response>'), f"donate from the greeting: {body}")
+
+    # First-call enrollment: a User without a Voice Reference repeats five phrases, hears no levels,
+    # and leaves with one computed from the answers' embeddings.
+    form = call("CA_ID_ENROLL", ENROLL_PHONE)
+    _, body = post(base_url, "/voice", form, token)
+    require("I'll learn it now." in body and "never a recording" in body and "5 sentences" in body, f"enrollment intro: {body}")
+    for number in range(1, 7):
+        body = answer(body, form, number, "enroll", eid, 0.4 if number == 2 else 3.0, 6000)
+        if number == 2:
+            require("I didn't get enough of that one. Here's another." in body, f"enrollment short answer: {body}")
+        elif number < 6:
+            require(body.startswith("<Response><Start><Stream") and "match" not in body, f"enrollment round {number}: {body}")
+    require(body == f'<Response><Say voice="Polly.Joanna">Thanks. Your voice is enrolled.</Say>{connect}', f"enrollment end: {body}")
+    reference = d1_local(f"SELECT embedding_space, embedding FROM voice_references WHERE user_id = {eid}")
+    vector = json.loads(reference[0]["embedding"]) if reference else []
+    require(reference and reference[0]["embedding_space"] == "mock-speaker-space" and len(vector) == 192
+            and abs(sum(v * v for v in vector) - 1) < 1e-9, f"enrolled reference: {reference}")
+    require(identity("CA_ID_ENROLL")["outcome"] == "enrolled" and identity("CA_ID_ENROLL")["enrolled_now"] is True
+            and identity("CA_ID_ENROLL")["answers"] == 5, f"enrollment identity: {identity('CA_ID_ENROLL')}")
+    require(d1_local("SELECT COUNT(*) AS n FROM challenge_rounds WHERE call_sid = 'CA_ID_ENROLL'")[0]["n"] == 0, "enrollment rows kept")
+
+    # Registration ends with the same enrollment; stop skips it and ends the call.
+    form = call("CA_ID_REGISTER", REGISTER_PHONE)
+    post(base_url, "/voice", form, token)
+    post(base_url, "/voice/claim?attempts=1", {**form, "SpeechResult": LOCAL_INVITE, "Confidence": "0.9"}, token)
+    _, body = post(base_url, "/voice/confirm?attempts=1", {**form, "SpeechResult": "yes", "Confidence": "0.9"}, token)
+    rid = d1_local(f"SELECT id FROM users WHERE home_phone = '{REGISTER_PHONE}'")[0]["id"]
+    require("Registered. Your name on Dogwalk is" in body and "I'll learn it now." in body, f"registration enrollment: {body}")
+    body = say("CA_ID_REGISTER", 1, "register", rid, body, "stop", REGISTER_PHONE)
+    require(body.endswith("Skipping enrollment. I'll ask again next call. Goodbye.</Say><Hangup/></Response>"), f"registration skip: {body}")
+
+    # Call Activity: identity.* under access, every scored round with its score, wait, and cold flag,
+    # and never a transcript or phrase.
+    rows = d1_local("SELECT source, event, detail FROM call_activity WHERE call_sid LIKE 'CA_ID_%' AND event LIKE 'identity.%' ORDER BY id")
+    require(rows and all(row["source"] == "access" for row in rows), f"identity activity source: {rows[:2]}")
+    rounds = [json.loads(row["detail"]) for row in rows if row["event"] == "identity.round"]
+    scored = [r for r in rounds if r["outcome"] in ("strong_match", "match", "no_match")]
+    require(len(scored) == 6 and all("cosine" in r and "speech_seconds" in r and "wait_ms" in r and isinstance(r.get("cold"), bool) for r in scored),
+            f"scored identity rounds: {scored}")
+    require(all("transcript" not in r and "phrase" not in r and "embedding" not in r for r in rounds), "Call Activity kept identity speech")
+    require({"identity.started", "identity.escape", "identity.who", "identity.result", "identity.repeat"} <= {row["event"] for row in rows},
+            f"identity events: {sorted({row['event'] for row in rows})}")
 
 
 def project_wrangler() -> str | None:

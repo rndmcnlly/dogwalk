@@ -28,6 +28,10 @@ import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
 import { handleVoiceVerify, warmSpeaker } from "./voice_verify";
 import { handlePracticeHeard, handlePracticeResult, handlePracticeStream, practiceReceived, practiceStreamStop, practiceTone, startPractice } from "./challenge_practice";
+import {
+  type Exits, handleIdentityHeard, handleIdentityResult, handleIdentityStream, handleIdentityWho, identityStreamStop, startHomeCheck,
+  startRegistrationEnrollment,
+} from "./identity_check";
 import { asksToDonate, donationConsent, donationTone, handleDonationConsent, handleDonationRound, handleDonationStream } from "./voice_donation";
 export { TerminalRelay, VoiceSession };
 
@@ -1201,7 +1205,7 @@ export default {
       return handleClaim(req, env);
     }
     if (url.pathname === "/voice/confirm" && req.method === "POST") {
-      return handleConfirm(req, env);
+      return handleConfirm(req, env, ctx);
     }
     if (url.pathname === "/voice/menu" && req.method === "POST") {
       return handleMenu(req, env);
@@ -1211,6 +1215,9 @@ export default {
     }
     if (url.pathname.startsWith("/voice/practice")) {
       return handlePractice(req, env, ctx, url);
+    }
+    if (url.pathname.startsWith("/voice/identity")) {
+      return handleIdentity(req, env, ctx, url);
     }
     if (url.pathname === "/voice/status" && req.method === "POST") {
       return handleCallStatus(req, env, ctx);
@@ -1259,38 +1266,36 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
     });
   }
 
-  // Caller ID selects the User whose Home this is. The Identity Check will ask for evidence
-  // here; until it exists, the Home alone admits the caller, as the phone number did before.
+  // Caller ID selects the User whose Home this is, and the Identity Check (shadow mode,
+  // identity_check.ts) asks for evidence once per call: it is scored and reported but never
+  // withholds entry, so every Home caller still connects afterwards.
   const user = await homeUser(env, from);
   if (user) {
-    // The verifier's model load takes seconds; start it now, on this machine, so the
-    // Identity Challenge does not wait for it. Background only: TwiML never waits.
-    warmSpeaker(env, ctx, user.id);
+    // The verifier's model load takes seconds; start it now, in the User's VoiceSession where
+    // their challenges are scored, so the Identity Challenge does not wait for it. Background
+    // only: TwiML never waits.
+    warmSpeaker(env, ctx, user.identity_hash);
     await env.DB.batch([
       env.DB.prepare("UPDATE users SET last_seen_at = unixepoch(), home_used_at = unixepoch() WHERE id = ?").bind(user.id),
       env.DB.prepare("UPDATE voice_calls SET user_id = ? WHERE call_sid = ?").bind(user.id, callSid),
     ]);
     await audit(env, "caller.registered", from, callSid, { user_id: user.id, via: "home" });
+    const checked = await env.DB.prepare("SELECT identity IS NOT NULL AS done FROM voice_calls WHERE call_sid = ?")
+      .bind(callSid).first<{ done: number }>();
+    if (!checked?.done) {
+      const log = (event: string, detail: Record<string, unknown>) => audit(env, event, from, callSid, detail);
+      const check = await startHomeCheck(env, ctx, new URL(req.url), form, user.id, log);
+      if (check) {
+        // The check runs while the Sandbox wakes; the connection after it reports a broken one.
+        ctx.waitUntil(wakeSandbox(env, ctx, user, from, callSid).catch((error) =>
+          audit(env, "sandbox.error", from, callSid, { message: String(error instanceof Error ? error.message : error).slice(0, 200) })));
+        return twiml(check);
+      }
+    }
     // Talk first: the caller reaches the Voice Agent at once while the Sandbox wakes in
     // parallel. Only a Sandbox the provider reports broken goes to deterministic recovery.
     try {
-      const { assignment, sandbox } = await resolveSandbox(env, user);
-      if (sandbox && ["error", "build_failed", "destroyed"].includes(sandbox.state)) {
-        await audit(env, "sandbox.unavailable", from, callSid, { state: sandbox.state });
-        return recoveryMenu("Workspace unavailable. ");
-      }
-      if (sandbox && ["stopped", "archived", "paused"].includes(sandbox.state)) {
-        const started = await daytonaFetch<DaytonaSandbox>(env, `/sandbox/${encodeURIComponent(sandbox.id)}/start`, { method: "POST" });
-        await updateAssignment(env, user, started, sandbox.id);
-        await audit(env, "sandbox.start.requested", from, callSid, { state: sandbox.state });
-      } else {
-        const state = sandbox?.state ?? assignment.state;
-        await audit(env, state === "started" ? "sandbox.ready" : "sandbox.waking", from, callSid, { state });
-      }
-      // The VoiceSession starts reaching the Agent while Twilio and GPT-Live set up the call.
-      if (assignment.provider_id) {
-        ctx.waitUntil(prewarmVoiceSession(env, user, from, assignment.provider_id));
-      }
+      if ((await wakeSandbox(env, ctx, user, from, callSid)) === "broken") return recoveryMenu("Workspace unavailable. ");
       if (!env.OPENAI_PROJECT_ID) throw new Error("OPENAI_PROJECT_ID is not configured");
       const context = await sipContextCapability(env, callSid);
       const sipUri = `sip:${env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls;secure=true?x-dogwalk-context=${encodeURIComponent(context)}`;
@@ -1310,6 +1315,27 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
       "To donate voice samples for research, say donate.",
     "/voice/claim", 1, [...invites.map((i) => i.code_words), "donate"],
   ));
+}
+
+// Start the User's Sandbox if it is stopped and the VoiceSession reaching its Agent, without
+// waiting for either. "broken" when the provider reports the Sandbox unusable.
+async function wakeSandbox(env: Env, ctx: ExecutionContext, user: User, from: string, callSid: string): Promise<"broken" | "ok"> {
+  const { assignment, sandbox } = await resolveSandbox(env, user);
+  if (sandbox && ["error", "build_failed", "destroyed"].includes(sandbox.state)) {
+    await audit(env, "sandbox.unavailable", from, callSid, { state: sandbox.state });
+    return "broken";
+  }
+  if (sandbox && ["stopped", "archived", "paused"].includes(sandbox.state)) {
+    const started = await daytonaFetch<DaytonaSandbox>(env, `/sandbox/${encodeURIComponent(sandbox.id)}/start`, { method: "POST" });
+    await updateAssignment(env, user, started, sandbox.id);
+    await audit(env, "sandbox.start.requested", from, callSid, { state: sandbox.state });
+  } else {
+    const state = sandbox?.state ?? assignment.state;
+    await audit(env, state === "started" ? "sandbox.ready" : "sandbox.waking", from, callSid, { state });
+  }
+  // The VoiceSession starts reaching the Agent while Twilio and GPT-Live set up the call.
+  if (assignment.provider_id) ctx.waitUntil(prewarmVoiceSession(env, user, from, assignment.provider_id));
+  return "ok";
 }
 
 async function prewarmVoiceSession(env: Env, user: User, phone: string, sandboxId: string): Promise<void> {
@@ -1695,6 +1721,54 @@ async function handlePractice(req: Request, env: Env, ctx: ExecutionContext, url
   return new Response("not found", { status: 404 });
 }
 
+// --- /voice/identity: the Identity Check (identity_check.ts) -------------
+
+// Before the Voice Agent: a Home call's check or first-call enrollment, Roaming's challenges
+// for a caller who names another Handle, and enrollment at the end of Registration.
+async function handleIdentity(req: Request, env: Env, ctx: ExecutionContext, url: URL): Promise<Response> {
+  if (url.pathname === "/voice/identity/tone.wav" && req.method === "GET") return practiceTone();
+  if (url.pathname === "/voice/identity/received.wav" && req.method === "GET") return practiceReceived();
+  const stream = /^\/voice\/identity\/stream\/([A-Za-z0-9._-]{1,300})$/.exec(url.pathname);
+  if (stream && req.method === "GET") {
+    const signed = (await twilioSignatureValid(req, env, "wss")).valid || (await twilioSignatureValid(req, env)).valid;
+    if (!signed) return new Response("forbidden", { status: 403 });
+    return handleIdentityStream(req, env, ctx, stream[1]);
+  }
+  if (req.method !== "POST") return new Response("not found", { status: 404 });
+  if (!(await twilioSignatureValid(req, env)).valid) return new Response("forbidden", { status: 403 });
+  const form = await req.clone().formData();
+  const from = normalizePhone(form.get("From"));
+  const callSid = String(form.get("CallSid") ?? "");
+  if (!from || !callSid) return twiml(Hangup());
+  const log = (event: string, detail: Record<string, unknown>) => audit(env, event, from, callSid, detail);
+  const exits: Exits = {
+    registration: (heard) => inviteTwiml(env, from, callSid, heard),
+    donation: () => {
+      ctx.waitUntil(audit(env, "donation.requested", from, callSid, { via: "identity check" }));
+      return Redirect("/voice/donation");
+    },
+  };
+  try {
+    if (url.pathname === "/voice/identity/heard") return twiml(await handleIdentityHeard(env, ctx, url, form, log, exits));
+    if (url.pathname === "/voice/identity/result") return twiml(await handleIdentityResult(env, ctx, url, form, log));
+    if (url.pathname === "/voice/identity/who") {
+      return twiml(await handleIdentityWho(env, ctx, url, form, log, exits, (await homeUser(env, from))?.id ?? null));
+    }
+  } catch (error) {
+    await log("identity.error", { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+    // Shadow mode: an error never keeps a Home caller out. A failed round webhook still stops its stream.
+    const stop = url.pathname === "/voice/identity/heard" ? identityStreamStop(url) : "";
+    await env.DB.prepare("UPDATE voice_calls SET identity = ? WHERE call_sid = ?")
+      .bind(JSON.stringify({ outcome: "error", enforcement: "undecided", shadow: true }), callSid).run();
+    const path = url.searchParams.get("path");
+    if (path === "roaming" || path === "register" || url.pathname === "/voice/identity/who") {
+      return twiml(stop + Say("The voice check stopped because of an error. Goodbye.") + Hangup());
+    }
+    return twiml(stop + Say("The voice check stopped because of an error.") + Redirect("/voice"));
+  }
+  return new Response("not found", { status: 404 });
+}
+
 // --- /voice/claim: receive spoken words --------------------------------
 
 async function handleClaim(req: Request, env: Env): Promise<Response> {
@@ -1736,26 +1810,38 @@ async function handleClaim(req: Request, env: Env): Promise<Response> {
     );
   }
 
-  // Read back and ask for confirmation. Stash the matched code in a D1
-  // claim_attempt row so the confirm step can pick it up by callSid.
-  // The PGPfone ritual: machine echoes what it heard, caller confirms.
-  const words = match.split(" ");
+  return twiml(await inviteReadback(env, from, callSid, match, attempts));
+}
+
+// Read back and ask for confirmation. Stash the matched code in a D1 claim_attempt row so the
+// confirm step can pick it up by callSid. The PGPfone ritual: machine echoes what it heard,
+// caller confirms.
+async function inviteReadback(env: Env, from: string, callSid: string, match: string, attempts: number): Promise<string> {
   await env.DB.prepare(
     `INSERT OR REPLACE INTO claim_attempt (call_sid, phone_number, code_words, ts)
      VALUES (?, ?, ?, ?)`,
   )
     .bind(callSid, from, match, Math.floor(Date.now() / 1000))
     .run();
+  const readback = `I heard: ${match.split(" ").join(", ")}. Say yes to confirm, or again to retry.`;
+  return GatherSpeech(readback, "/voice/confirm", attempts, ["yes", "again"]);
+}
 
-  const readback = `I heard: ${words.join(", ")}. Say yes to confirm, or again to retry.`;
-  return twiml(
-    GatherSpeech(readback, "/voice/confirm", attempts, ["yes", "again"]),
-  );
+// The Identity Check's way into Registration: an Invite Code heard there goes straight to its
+// readback; a mention of an invite asks for the words.
+async function inviteTwiml(env: Env, from: string, callSid: string, heard: string[]): Promise<string> {
+  await audit(env, "claim.ritual.start", from, callSid, { via: "identity check" });
+  const invites = await usableInviteCodes(env, from);
+  for (let i = 0; i + WORDS_REQUIRED <= heard.length; i++) {
+    const match = matchInviteCode(heard.slice(i, i + WORDS_REQUIRED), invites);
+    if (match) return inviteReadback(env, from, callSid, match, 1);
+  }
+  return GatherSpeech("Say your three invite words.", "/voice/claim", 1, invites.map((i) => i.code_words));
 }
 
 // --- /voice/confirm: yes/retry on readback -----------------------------
 
-async function handleConfirm(req: Request, env: Env): Promise<Response> {
+async function handleConfirm(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const sig = await twilioSignatureValid(req, env);
   if (!sig.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
@@ -1786,7 +1872,7 @@ async function handleConfirm(req: Request, env: Env): Promise<Response> {
   const retry = ["again", "retry", "no", "nope", "replay", "repeat", "wrong"].includes(said);
 
   if (affirmed) {
-    return bindClaim(env, from, callSid, pending.code_words);
+    return bindClaim(env, ctx, req, form, from, callSid, pending.code_words);
   }
 
   if (retry || attempts >= MAX_ATTEMPTS) {
@@ -1893,6 +1979,9 @@ async function handleMenu(req: Request, env: Env): Promise<Response> {
 
 async function bindClaim(
   env: Env,
+  ctx: ExecutionContext,
+  req: Request,
+  form: FormData,
   from: string,
   callSid: string,
   codeWords: string,
@@ -1927,10 +2016,13 @@ async function bindClaim(
 
   await audit(env, "registration.success", from, callSid, { invitation: redeemed.meta.changes > 0 });
 
-  // The Handle is how the User will name themselves from any other phone: say it twice.
-  return twiml(
-    Say(`Registered. Your name on Dogwalk is ${handle}. Again: ${handle}. This phone is now your home. Goodbye.`) + Hangup(),
-  );
+  // The Handle is how the User will name themselves from any other phone: say it twice. Then
+  // Registration enrolls the new User's Voice Reference (identity_check.ts), when it can.
+  const registered = `Registered. Your name on Dogwalk is ${handle}. Again: ${handle}. This phone is now your home.`;
+  const newUser = await env.DB.prepare("SELECT id FROM users WHERE handle = ? AND reaped_at IS NULL").bind(handle).first<{ id: number }>();
+  const log = (event: string, detail: Record<string, unknown>) => audit(env, event, from, callSid, detail);
+  const enrollment = newUser ? await startRegistrationEnrollment(env, ctx, new URL(req.url), form, newUser.id, log, registered) : null;
+  return twiml(enrollment ?? Say(`${registered} Goodbye.`) + Hangup());
 }
 
 // --- helpers ------------------------------------------------------------
@@ -1997,7 +2089,8 @@ function activityMetadata(event: string): {
 } {
   const source = event.startsWith("sandbox.") ? "hosting"
     : event.startsWith("menu.") ? "menu"
-    : event.startsWith("registration.") || event.startsWith("caller.") || event.startsWith("claim.") || event.startsWith("confirm.") ? "access"
+    : event.startsWith("registration.") || event.startsWith("caller.") || event.startsWith("claim.") || event.startsWith("confirm.")
+      || event.startsWith("identity.") ? "access"
     : event.startsWith("acp.") ? "acp"
     : "voice";
   const direction = event.endsWith(".speech") || event === "call.entered" || event.startsWith("call.")

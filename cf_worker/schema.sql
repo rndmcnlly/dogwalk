@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS users (
   last_seen_at INTEGER,
   home_phone TEXT UNIQUE,
   home_used_at INTEGER,
-  reaped_at INTEGER
+  reaped_at INTEGER,
+  -- Scored Home Identity Challenges, so the ritual is taught in full only the first few times.
+  challenges_completed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_invite ON users(invite_code);
@@ -124,7 +126,10 @@ CREATE TABLE IF NOT EXISTS voice_calls (
   trace_id TEXT,
   span_id TEXT,
   -- The call's User once known; a roaming call's number will not identify it.
-  user_id INTEGER REFERENCES users(id)
+  user_id INTEGER REFERENCES users(id),
+  -- How the caller got in (JSON), written once when the Identity Check concludes; the
+  -- Opening tells the Session Orchestrator. See identity_check.ts.
+  identity TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_voice_calls_user ON voice_calls(user_id, started_at);
@@ -179,16 +184,20 @@ CREATE TABLE IF NOT EXISTS call_handoffs (
   created_at INTEGER NOT NULL
 );
 
--- Transient state of one Challenge Practice round, shared by the round's webhooks and its
--- Media Stream: the phrase, the current take (each replay of the phrase on request gets a new
--- stream), whether its transcript matched, and the verifier's result. The spec_ columns hold
--- the latest speculative score, started at the end of the answer before the transcript arrived
--- (discarded unused unless the phrase matched); heard_ms and speculative record whether it was
--- used and its head start. Never audio or an embedding. A round's row is deleted once its result
--- is spoken, and every row of a call when practice ends.
-CREATE TABLE IF NOT EXISTS practice_rounds (
+-- Transient state of one challenge round (challenge_rounds.ts) of Challenge Practice, the
+-- Identity Check, or enrollment, shared by the round's webhooks and its Media Stream: the
+-- phrase, the User it is scored against or enrolls, the current take (each replay of the
+-- phrase on request gets a new stream), whether its transcript matched, and the verifier's
+-- result. The spec_ columns hold the latest speculative score, started at the end of the answer
+-- before the transcript arrived (discarded unused unless the phrase matched); heard_ms and
+-- speculative record whether it was used and its head start. Never audio. An enrollment round
+-- keeps its answer's embedding until the Voice Reference is computed; every row of a ritual is
+-- deleted when the ritual ends.
+CREATE TABLE IF NOT EXISTS challenge_rounds (
   call_sid TEXT NOT NULL,
   round INTEGER NOT NULL,
+  ritual TEXT NOT NULL CHECK (ritual IN ('practice', 'identity', 'enrollment')),
+  user_id INTEGER NOT NULL,
   phrase TEXT NOT NULL,
   take INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL CHECK (state IN ('listening', 'scoring', 'scored', 'skipped')),
@@ -196,12 +205,18 @@ CREATE TABLE IF NOT EXISTS practice_rounds (
   cosine REAL,
   speech_seconds REAL,
   error TEXT,
+  cold INTEGER,
+  embedding_space TEXT,
+  embedding TEXT,
   heard_ms INTEGER,
   spec_seq INTEGER,
   spec_started_ms INTEGER,
   spec_cosine REAL,
   spec_speech_seconds REAL,
   spec_error TEXT,
+  spec_cold INTEGER,
+  spec_embedding_space TEXT,
+  spec_embedding TEXT,
   speculative INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (call_sid, round)
