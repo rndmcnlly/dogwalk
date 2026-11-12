@@ -1260,6 +1260,9 @@ def practice_checks(base_url: str, token: str) -> None:
     status, body = post(base_url, "/voice/practice", call, token)
     require(status == 200 and "needs an enrolled voice" in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>')
             and "<Stream" not in body, f"practice without a Voice Reference: {body}")
+    returned = lambda sid: json.loads(d1_local(f"SELECT returned_from FROM voice_calls WHERE call_sid = '{sid}'")[0]["returned_from"] or "null")
+    require(returned("CA_PRACTICE") == {"flow": "practice", "outcome": "unavailable", "reason": "no_voice_reference"},
+            f"practice return note: {returned('CA_PRACTICE')}")
 
     subprocess.run([project_wrangler(), "d1", "execute", "dogwalk", "--local", "--command",
                     f"INSERT INTO voice_references (user_id, embedding_space, embedding, enrolled_at) "
@@ -1460,6 +1463,8 @@ def practice_checks(base_url: str, token: str) -> None:
     require(events.count("practice.started") == 4 and events.count("practice.ended") == 4 and "practice.unavailable" in events
             and events.count("practice.repeat") == 6,
             f"practice activity: {events}")
+    # The last practice's end is what the reconnected Voice Agent hears (call_started.returned_from).
+    require(returned("CA_PRACTICE") == {"flow": "practice", "outcome": ended[-1]["reason"]}, f"practice return note: {returned('CA_PRACTICE')}")
 
 
 ROAMING_HANDLE = "anchor antelope"
@@ -1878,6 +1883,17 @@ def reenrollment_checks(base_url: str, token: str) -> None:
     require(rows and all(row["source"] == "access" for row in rows), f"re-enrollment activity source: {rows[:2]}")
     results = [json.loads(row["detail"])["outcome"] for row in rows if row["event"] == "reenrollment.result"]
     require(results == ["reenrolled", "failed", "discontinuous", "stopped", "lost_reference"], f"re-enrollment results: {results}")
+    # Each call's end, as the reconnected Voice Agent's call_started reports it: outcome names only.
+    notes = {row["call_sid"]: json.loads(row["returned_from"]) for row in
+             d1_local("SELECT call_sid, returned_from FROM voice_calls WHERE call_sid LIKE 'CA_REENROLL%'")}
+    require(notes == {
+        "CA_REENROLL_NONE": {"flow": "reenrollment", "outcome": "unavailable", "reason": "no_voice_reference"},
+        "CA_REENROLL": {"flow": "reenrollment", "outcome": "reenrolled"},
+        "CA_REENROLL_MISS": {"flow": "reenrollment", "outcome": "failed"},
+        "CA_REENROLL_SWAP": {"flow": "reenrollment", "outcome": "discontinuous"},
+        "CA_REENROLL_STOP": {"flow": "reenrollment", "outcome": "stopped"},
+        "CA_REENROLL_RACE": {"flow": "reenrollment", "outcome": "lost_reference"},
+    }, f"re-enrollment return notes: {notes}")
     require(not any({"phrase", "transcript", "embedding"} & json.loads(row["detail"]).keys() for row in rows),
             "Call Activity kept re-enrollment speech")
     require({"reenrollment.unavailable", "reenrollment.started", "reenrollment.round", "reenrollment.checked"} <= {row["event"] for row in rows},

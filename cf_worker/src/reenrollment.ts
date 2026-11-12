@@ -20,7 +20,7 @@
 // Voice Reference the check began against; Twilio signs them.
 import { isAccountSid, Say } from "./caller_stream";
 import {
-  answerOf, awaitScore, CALL_SID, clearRounds, judge, markScoring, MATCH_COSINE, nextTake, openRound, readRound, receivedCuePlay,
+  answerOf, awaitScore, CALL_SID, clearRounds, judge, markScoring, MATCH_COSINE, nextTake, noteReturn, openRound, readRound, receivedCuePlay,
   type Ritual, scoreDetail, scoreTiming, skipRound, stopTake, takeTwiml,
 } from "./challenge_rounds";
 import { collectedAnswers, ENROLL_ANSWERS, meanEmbedding, MIN_ENROLL_ANSWERS, ROAMING_CHALLENGES } from "./identity_check";
@@ -77,6 +77,7 @@ async function end(env: Env, callSid: string, log: Log, detail: Record<string, u
   // sweep (or the call's end) removes what a failure leaves, and a lost event loses no state.
   await clearRounds(env, callSid).catch(() => {});
   await log("reenrollment.result", detail).catch(() => {});
+  await noteReturn(env, callSid, "reenrollment", String(detail.outcome));
   return Say(`${spoken} Back to Dogwalk.`) + RETURN;
 }
 
@@ -116,10 +117,12 @@ export async function startReenrollment(env: Env, ctx: ExecutionContext, url: UR
   if (!subject?.embedding) {
     // First-call enrollment, not Re-enrollment, makes a first Voice Reference, on a Home call.
     await log("reenrollment.unavailable", { reason: "no_voice_reference" });
+    if (CALL_SID.test(callSid)) await noteReturn(env, callSid, "reenrollment", "unavailable", "no_voice_reference");
     return Say("Your voice isn't enrolled yet, so there's nothing to replace. Your next call from your home phone will enroll it. Back to Dogwalk.") + RETURN;
   }
   if (!env.SPEAKER || !isAccountSid(account)) {
     await log("reenrollment.unavailable", { reason: env.SPEAKER ? "no_account" : "no_verifier" });
+    await noteReturn(env, callSid, "reenrollment", "unavailable", env.SPEAKER ? "no_account" : "no_verifier");
     return Say("Voice re-enrollment is not available right now. Back to Dogwalk.") + RETURN;
   }
   // Rows outlive a call that hung up mid-round; any start clears those too.

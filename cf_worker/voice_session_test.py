@@ -1709,11 +1709,41 @@ async def run_protocol(identity: str) -> None:
             "From": TEST_PHONE, "CallSid": "CA_VOICE_TEST2"}, LOCAL_TOKEN)
         assert status == 200 and '<Redirect method="POST">/voice/practice</Redirect>' in body, body
 
+        # Practice and Re-enrollment return the call to /voice, and the reconnected Voice Agent's
+        # call_started says how each ended: outcome names only, read once.
+        async def return_from(flow: str, live_id: str) -> dict:
+            status, body = await asyncio.to_thread(post, DEFAULT_LOCAL, f"/voice/{flow}", {
+                "From": TEST_PHONE, "CallSid": "CA_VOICE_TEST2", "AccountSid": "AC" + "0" * 32}, LOCAL_TOKEN)
+            assert status == 200 and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'), body
+            await mocks.live.close()
+            mocks.live_connected.clear()
+            body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST2", live_id)
+            assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
+            await asyncio.wait_for(mocks.live_connected.wait(), 8)
+            marker = f'"returned_from":{{"flow":"{flow}"'
+            await wait_for(lambda: any(marker in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
+            started = OrchestratorMock.user_message(marker)
+            returned = json.loads(started.split("call_started: ", 1)[1].split("\n", 1)[0])["returned_from"]
+            assert not {"score", "cosine", "level", "phrase", "transcript", "embedding"} & returned.keys(), returned
+            return returned
+        assert await return_from("practice", "live-test-4") == {"flow": "practice", "outcome": "unavailable", "reason": "no_voice_reference"}
+        assert await return_from("reenrollment", "live-test-5") == {"flow": "reenrollment", "outcome": "unavailable", "reason": "no_voice_reference"}
+        assert await asyncio.to_thread(d1, "SELECT returned_from FROM voice_calls WHERE call_sid = 'CA_VOICE_TEST2'") == [{"returned_from": None}]
+        # Seeded as Re-enrollment writes a replacement (smoke_test.py drives the real ritual): a
+        # third reconnect reports it, as the caller in CAa3722805 needed.
+        await asyncio.to_thread(d1, """UPDATE voice_calls SET returned_from = '{"flow":"reenrollment","outcome":"reenrolled"}' WHERE call_sid = 'CA_VOICE_TEST2'""")
+        await mocks.live.close()
+        mocks.live_connected.clear()
+        body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST2", "live-test-6")
+        assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
+        await asyncio.wait_for(mocks.live_connected.wait(), 8)
+        await wait_for(lambda: '"returned_from":{"flow":"reenrollment","outcome":"reenrolled"}' in json.dumps([p["input"] for _, p in OrchestratorMock.requests]).replace('\\"', '"'), 10)
+
         # Star then two hands the call to the recovery menu, which ends the GPT-Live leg.
         await mocks.send_live(dtmf("*"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
         await mocks.send_live(dtmf("2"))
-        await wait_for(lambda: hangups() == 3, 10)
+        await wait_for(lambda: any(path == "/live/sessions/live-test-6/hangup" for path, _ in DaytonaMock.openai_requests), 10)
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
         # Drain the operator API by insertion cursor, independently of event-time
         # sorting and without pairing to either caller's browser.

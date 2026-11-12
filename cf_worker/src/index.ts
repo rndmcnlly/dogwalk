@@ -29,6 +29,7 @@ import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
 import { handleVoiceVerify, warmSpeaker } from "./voice_verify";
 import { handlePracticeHeard, handlePracticeResult, handlePracticeStream, practiceReceived, practiceStreamStop, practiceTone, startPractice } from "./challenge_practice";
+import { noteReturn } from "./challenge_rounds";
 import { handleReenrollmentHeard, handleReenrollmentResult, reenrollmentStreamStop, startReenrollment } from "./reenrollment";
 import {
   type Exits, handleIdentityHeard, handleIdentityResult, handleIdentityStream, handleIdentityWho, identityStreamStop, roamingAdmits,
@@ -1728,6 +1729,7 @@ async function handlePractice(req: Request, env: Env, ctx: ExecutionContext, url
   } catch (error) {
     await log("practice.error", { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
     await env.DB.prepare("DELETE FROM challenge_rounds WHERE call_sid = ?").bind(callSid).run().catch(() => {});
+    await noteReturn(env, callSid, "practice", "error");
     // A failed round webhook still stops its stream, which would otherwise keep listening.
     const stop = url.pathname === "/voice/practice/heard" ? practiceStreamStop(url) : "";
     return twiml(stop + Say("Challenge practice stopped because of an error. Back to Dogwalk.") + Redirect("/voice"));
@@ -1755,6 +1757,7 @@ async function handleReenrollment(req: Request, env: Env, ctx: ExecutionContext,
     await log("reenrollment.error", { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
     // Collected embeddings go with the rounds. A failed round webhook still stops its stream.
     await env.DB.prepare("DELETE FROM challenge_rounds WHERE call_sid = ?").bind(callSid).run().catch(() => {});
+    await noteReturn(env, callSid, "reenrollment", "error");
     const stop = url.pathname === "/voice/reenrollment/heard" ? reenrollmentStreamStop(url) : "";
     return twiml(stop + Say("Re-enrollment stopped because of an error. Your voice profile is unchanged. Back to Dogwalk.") + Redirect("/voice"));
   }

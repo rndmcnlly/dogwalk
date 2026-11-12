@@ -324,6 +324,21 @@ speculative score was used, `head_start_ms`, from its start to `/heard`) plus
 `practice.started`, `practice.repeat`, `practice.ended`, and
 `practice.unavailable`.
 
+On every return to `/voice` (and on `practice.error`), practice writes
+`voice_calls.returned_from` as `{"flow": "practice", "outcome": <the
+practice.ended reason, "unavailable" with its reason, or "error">}`. The Voice
+Session reads and clears it when the Voice Agent reconnects, and `call_started`
+carries it as `returned_from`, so the Session Orchestrator knows how the flow it
+handed the call to ended. Outcome names only: never a level, score, or phrase.
+Re-enrollment does the same with `"flow": "reenrollment"` and its
+`reenrollment.result` outcome. Voice Donation ends the call, so it never
+returns. Apply `migrations/2026-11-15-returned-from.sql` remotely before
+deploying this:
+
+```bash
+npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-15-returned-from.sql
+```
+
 ## Identity Check (shadow mode)
 
 The Identity Check (DOMAIN.md) runs in `src/identity_check.ts` on the round engine
@@ -472,7 +487,9 @@ source `access`: `reenrollment.unavailable`, `reenrollment.started`,
 `enrollment_failed`, `stopped`, `silent`, `unscored`, `undecided`,
 `lost_round`, or `lost_reference`), and `reenrollment.error`. Never a
 transcript, phrase, embedding, or audio. `voice_calls.identity` is untouched:
-it records how the call was admitted.
+it records how the call was admitted. The outcome also goes to
+`voice_calls.returned_from` for the reconnected Voice Agent's `call_started`
+(see Challenge Practice).
 
 Apply `migrations/2026-11-14-reenrollment.sql` remotely before deploying this (it
 rebuilds `call_handoffs` to allow `reenrollment`, copying any pending handoff):

@@ -11,7 +11,7 @@
 // speaks a level, never the number. A short "say that again" replays the phrase as a fresh take.
 import { answerReceivedCue, isAccountSid, roundTone, Say } from "./caller_stream";
 import {
-  answerOf, awaitScore, CALL_SID, clearRounds, handleChallengeStream, judge, markScoring, nextTake, openRound,
+  answerOf, awaitScore, CALL_SID, clearRounds, handleChallengeStream, judge, markScoring, nextTake, noteReturn, openRound,
   readRound, receivedCuePlay, scoreDetail, scoreTiming, skipRound, stopTake, takeTwiml,
 } from "./challenge_rounds";
 import type { Env } from "./types";
@@ -46,6 +46,7 @@ async function practiceUser(env: Env, callSid: string): Promise<{ id: number; id
 async function endPractice(env: Env, callSid: string, log: Log, reason: string, progress: Progress, spoken: string): Promise<string> {
   await env.DB.prepare("DELETE FROM challenge_rounds WHERE call_sid = ?").bind(callSid).run();
   await log("practice.ended", { reason, attempts: progress.attempts, judged: progress.judged });
+  await noteReturn(env, callSid, "practice", reason);
   return Say(`${spoken} Back to Dogwalk.`) + RETURN;
 }
 
@@ -83,10 +84,12 @@ export async function startPractice(env: Env, ctx: ExecutionContext, url: URL, f
   const user = CALL_SID.test(callSid) ? await practiceUser(env, callSid) : null;
   if (!user?.enrolled) {
     await log("practice.unavailable", { reason: "no_voice_reference" });
+    if (CALL_SID.test(callSid)) await noteReturn(env, callSid, "practice", "unavailable", "no_voice_reference");
     return Say("Challenge practice needs an enrolled voice, and yours is not enrolled yet. Back to Dogwalk.") + RETURN;
   }
   if (!env.SPEAKER || !isAccountSid(account)) {
     await log("practice.unavailable", { reason: env.SPEAKER ? "no_account" : "no_verifier" });
+    await noteReturn(env, callSid, "practice", "unavailable", env.SPEAKER ? "no_account" : "no_verifier");
     return Say("Challenge practice is not available right now. Back to Dogwalk.") + RETURN;
   }
   // Rows outlive a call that hung up mid-round; any practice start clears those too.
