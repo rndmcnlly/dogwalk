@@ -707,6 +707,13 @@ but does not touch accepted browser credentials in Durable Object storage:
 npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-12-spoken-pairing.sql
 ```
 
+For an existing local D1 database, apply the same migration before running the
+test suites (`schema.sql` alone does not replace an existing table):
+
+```bash
+npx wrangler d1 execute dogwalk --local --file migrations/2026-11-12-spoken-pairing.sql
+```
+
 An optional, read-only second surface (`../DOMAIN.md`, Paired Browser). The
 caller asks to pair; the `pair-browser` Voice Agent Skill walks them through
 opening `https://dogwalk.tools/pair`, then the Orchestrator calls `pair_browser`

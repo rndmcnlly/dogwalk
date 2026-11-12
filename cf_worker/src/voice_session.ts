@@ -4456,11 +4456,18 @@ export class VoiceSession {
   private async cleanupVoice(reason: string): Promise<void> {
     if (this.cleaningUpVoice) return;
     this.cleaningUpVoice = true;
+    // Approval belongs to this call, never a later call's status-key press.
+    // Invalidate synchronously before cleanup's first await; keep the spent
+    // ticket long enough for its browser to learn that the request expired.
+    const pendingCodeHash = this.pairing?.codeHash;
+    this.endPairingTimers();
+    if (this.pairing) {
+      this.pairing.codeHash = "";
+      this.pairing.expiresAt = 0;
+      if (this.pairing.claim?.state === "waiting") this.pairing.claim.state = "expired";
+    }
     if (this.recording) await this.finishRecording(true, "call ended");
     this.endMenu();
-    // A claim already waiting keeps its own timer; nobody is left to hear pairing_unclaimed.
-    if (this.pairing?.unclaimedTimer) clearTimeout(this.pairing.unclaimedTimer);
-    if (this.pairing) this.pairing.unclaimedTimer = null;
     this.heldAppends = [];
     this.earconQueue = [];
     // Following is per call: there is nobody to narrate to between calls.
@@ -4473,6 +4480,7 @@ export class VoiceSession {
     this.live = null;
     this.liveAttached = false;
     this.liveSessionId = null;
+    if (pendingCodeHash) await this.env.DB.prepare("DELETE FROM pairing_codes WHERE code_hash = ?").bind(pendingCodeHash).run();
     if (live?.readyState === WebSocket.OPEN) live.close(1000, reason);
     if (this.transcriptSaveTimer) clearTimeout(this.transcriptSaveTimer);
     this.transcriptSaveTimer = null;

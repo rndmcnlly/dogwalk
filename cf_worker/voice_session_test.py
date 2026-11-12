@@ -436,11 +436,13 @@ ORCHESTRATOR_SCRIPT = [
     # Preferences and pairing are voice operations; keypad digits stand in for asking here.
     ('"key":"6"', lambda ctx: [call("k6-style", "set_earcon_style", style="tonal")]),
     ('"key":"8"', lambda ctx: [call("k8-pair", "pair_browser")]),
+    ('"key":"8"', lambda ctx: [call("k8-say", "say", text=f"Pairing code {tool_result(ctx, 'k8-pair')['code']}", delegation_id=None)]),
     # No browser claimed the first spoken code: offer a fresh one after expiry.
     ("[harness event] pairing_unclaimed", lambda ctx: [
         call("pu-say", "say", text=REPLAY_SAY, delegation_id=None),
         call("pu-pair", "pair_browser"),
     ]),
+    ("[harness event] pairing_unclaimed", lambda ctx: [call("pu-code-say", "say", text=f"Pairing code {tool_result(ctx, 'pu-pair')['code']}", delegation_id=None)]),
     ('"key":"9"', lambda ctx: [call("k9-show", "show_in_browser", uri="dogwalk:file/REPORT.md", note="the report")]),
     ('"key":"4"', lambda ctx: [call("k4-state", "inspect_call_state")]),
     ('"key":"5"', lambda ctx: [call("k5-board", "draw_on_whiteboard", program=BOARD_PROGRAM, note="pick one")]),
@@ -450,6 +452,7 @@ ORCHESTRATOR_SCRIPT = [
     # Five more boards push the first out of retention, and its captured image with it.
     ('"key":"A"', lambda ctx: [call(f"kA-evict-{n}", "draw_on_whiteboard", program=ICON_PROGRAM, note=f"icon {n}") for n in range(1, 6)]),
     ('"key":"B"', lambda ctx: [call("kB-html", "show_in_browser", uri="dogwalk:file/report.html", note="the chart report")]),
+    ('"key":"E"', lambda ctx: [call("kE-pair", "pair_browser")]),
     ('"key":"3"', lambda ctx: [
         call("k3-say", "say", text=SWITCH_SAY, delegation_id=None),
         call("k3-theme", "set_theme", theme="survey", register="high"),
@@ -493,7 +496,7 @@ STEP_IDS = [
     "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
     "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist",
     "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5", "kB-html", "k3-say", "k3-theme",
-    "k2-dramaturgy", "kC-donate", "kD-practice",
+    "k8-say", "pu-code-say", "kE-pair", "k2-dramaturgy", "kC-donate", "kD-practice",
 ]
 
 
@@ -1373,6 +1376,7 @@ async def run_protocol(identity: str) -> None:
         pairing_started = time.monotonic()
         await mocks.send_live(dtmf("8"))
         unclaimed_code = await next_pairing_code("k8-pair")
+        await next_matching(mocks.live_messages, appended("commentary", f"Pairing code {unclaimed_code}"))
         assert sum(m.get("type") == "session.output_audio.fixture.play" for m in mocks.seen) == fixture_count
         # Exercise the real expiry timer: changing D1 alone would not advance the object's
         # in-memory clock. This intentionally adds about 90 seconds to the suite.
@@ -1383,6 +1387,7 @@ async def run_protocol(identity: str) -> None:
         assert not any(key in unclaimed for key in ("baud", "decode_failures", "symbols_heard")), unclaimed
         await next_matching(mocks.live_messages, appended("commentary", REPLAY_SAY))
         code = await next_pairing_code("pu-pair")
+        await next_matching(mocks.live_messages, appended("commentary", f"Pairing code {code}"))
         assert sum(m.get("type") == "session.output_audio.fixture.play" for m in mocks.seen) == fixture_count
         assert code != unclaimed_code
         nameplate = code.split("-")[0]
@@ -1637,6 +1642,15 @@ async def run_protocol(identity: str) -> None:
 
         # A theme switch bounces the call: the new theme's greeting is written before the
         # GPT-Live leg hangs up, then the same CallSid returns with the new voice and conceit.
+        # A waiting pairing claim must expire at disconnect, not remain available
+        # for a later status-key press to approve without a fresh announcement.
+        await mocks.send_live(dtmf("E"))
+        disconnect_code = await next_pairing_code("kE-pair")
+        status, pending = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": disconnect_code})
+        assert status == 200, (status, pending)
+        pending_ticket = {"authorization": f"Bearer {pending['ticket']}"}
+        assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, pending_ticket))[1] == {"state": "waiting"}
+        await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "submitted the pairing code" in m.get("content", ""))
         greetings = len(OrchestratorMock.greeting_requests)
         await mocks.send_live(dtmf("3"))
         await next_matching(mocks.live_messages, appended("commentary", SWITCH_SAY))
@@ -1649,6 +1663,12 @@ async def run_protocol(identity: str) -> None:
         assert OrchestratorMock.tool_output("k3-theme")["bouncing"] is True
         await mocks.live.close()
         mocks.live_connected.clear()
+        for _ in range(100):
+            pending_state = (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, pending_ticket))[1]
+            if pending_state == {"state": "expired"}:
+                break
+            await asyncio.sleep(0.05)
+        assert pending_state == {"state": "expired"}, "disconnect expires approval before its 30-second timeout"
         body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST2", "live-test-3")
         assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
         await asyncio.wait_for(mocks.live_connected.wait(), 8)
@@ -1658,6 +1678,8 @@ async def run_protocol(identity: str) -> None:
         await next_matching(mocks.live_messages, appended("commentary", f"Dogwalk. {NEXT_GREETING}"))
         # The register carries across the bounce as unspoken context for the new voice.
         await next_matching(mocks.live_messages, appended("thinking", "The caller had the register at high; start there."))
+        await mocks.send_live(dtmf("1"))
+        assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, pending_ticket))[1] == {"state": "expired"}, "a rejoined call cannot approve the old claim"
         await mocks.send_live(dtmf("2"))
         await wait_for(lambda: '"call_id": "k2-dramaturgy"' in json.dumps([p["input"] for _, p in OrchestratorMock.requests]), 10)
         dramaturgy = OrchestratorMock.tool_output("k2-dramaturgy")["guidance"]
