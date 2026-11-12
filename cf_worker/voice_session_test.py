@@ -2156,6 +2156,9 @@ def start_wrangler(wrangler: str) -> subprocess.Popen:
             f"ORCHESTRATOR_API_BASE:http://127.0.0.1:{ORCHESTRATOR_MOCK_PORT}/v1",
             "--var",
             f"ADMIN_PASSWORD:{LOCAL_ADMIN_PASSWORD}",
+            # Registration and invitation rituals here assume shadow Roaming, whatever wrangler.toml deploys.
+            "--var",
+            "ROAMING_ADMISSION:off",
         ],
         cwd=WORKER_DIR,
         stdout=WRANGLER_LOG.open("a"),
