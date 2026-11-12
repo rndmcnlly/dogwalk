@@ -49,6 +49,10 @@ SANDBOX_REAP_MODE = "delete"
 # its three Identity Challenges. Anything else keeps Roaming in shadow mode, admitting nobody.
 ROAMING_ADMISSION = "on"
 
+# The Home check's name path (README: Identity Check): a Home call within this many hours of the
+# User's last Voice Call, from any phone, asks for their Handle instead of a sentence. "0" turns it off.
+HOME_NAME_WINDOW_HOURS = "24"
+
 # Worker Version ID, stamped on observations as OTel service.version.
 [version_metadata]
 binding = "CF_VERSION_METADATA"

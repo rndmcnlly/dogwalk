@@ -342,6 +342,21 @@ what enforcement would have done.
   `TERSE_AFTER` (3), then "Your sentence." The result speaks the level and
   redirects to `/voice`, which dials the Voice Agent. Stop, two silences, a
   verifier error, or four rounds without a judgment also connect.
+- **Name path** (`HOME_NAME_WINDOW_HOURS` in `wrangler.toml`, `"24"`; `"0"` or
+  unset turns it off). When another `voice_calls` row with this `user_id` (a Home
+  or Roaming-admitted call, from any phone) ended, or was last active, within the
+  window, `/voice` says "Dogwalk, for
+  <Handle>." and round 1 is a name round (`mode=name` in its webhook URLs): its
+  phrase is the Handle, hinted, and the Gather says "Say your name." A matched
+  name plays the received cue, scores like any challenge, and connects with no
+  level spoken and no second try, whatever the score or speech seconds;
+  `challenges_completed` does not move. A wrong name ("I didn't catch your
+  name."), silence, or a replay limit falls back to one sentence (round 2), led
+  by "Your sentence." or the full instructions per `TERSE_AFTER`. Escapes work
+  as from a sentence. The real verifier refuses under 3.5 s of audio or 1 s of
+  measured speech, so many name answers record `not_enough_speech` with
+  `insufficient-audio`; the refusal's measured `speech_seconds` is kept, and a
+  speculative refusal is never used over a score of the whole stream.
 - **Classification** (`/voice/identity/heard`, after the phrase check): two
   adjacent Handle words that are a User's Handle start that User's challenges; an
   Invite Code (three PGP words) goes straight to its readback, and a mention of an
@@ -393,6 +408,8 @@ them any enrollment embeddings, are deleted whenever a path ends, on an error,
 and when the call's terminal status arrives.
 
 Call Activity (source `access`): `identity.started` (`path`, `user_id`, `terse`),
+with `mode` (`name` or `sentence`) on every Home record and round below (except
+`unavailable`, recorded before a mode is chosen),
 `identity.round` (`path`, `round`, `outcome`, `cosine` or for enrollment none,
 `speech_seconds`, `cold`, `wait_ms`, `speculative`, `head_start_ms`),
 `identity.repeat`, `identity.escape` (`to`), `identity.who`, `identity.result`
@@ -400,7 +417,7 @@ Call Activity (source `access`): `identity.started` (`path`, `user_id`, `terse`)
 `admit`, `require_roaming`, `admit_roaming`, `deny`, or `undecided`, `shadow`),
 and `identity.error`. Never a transcript, phrase, embedding, or audio. The
 VoiceSession reads `voice_calls.identity` into `call_started` as `identity`
-(`via`, `outcome`, `level`, `would_have`, `shadow`, `enrolled_now`) for the
+(`via`, `mode`, `outcome`, `level`, `would_have`, `shadow`, `enrolled_now`) for the
 Session Orchestrator; the spoken Opening does not change.
 
 Apply `migrations/2026-11-13-identity-check.sql` remotely before deploying this

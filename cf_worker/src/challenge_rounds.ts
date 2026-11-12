@@ -102,9 +102,12 @@ export async function readRound(env: Env, callSid: string, round: number): Promi
   ).bind(callSid, round).first<RoundRow>();
 }
 
-/** Start a round with a fresh phrase, replacing any earlier row of that number. */
-export async function openRound(env: Env, callSid: string, round: number, ritual: Ritual, userId: number): Promise<string> {
-  const phrase = challengePhrase();
+/**
+ * Start a round with a fresh phrase (or a given one, such as the Home check's Handle), replacing
+ * any earlier row of that number.
+ */
+export async function openRound(env: Env, callSid: string, round: number, ritual: Ritual, userId: number, given?: string): Promise<string> {
+  const phrase = given ?? challengePhrase();
   await env.DB.prepare(
     `INSERT INTO challenge_rounds (call_sid, round, ritual, user_id, phrase, state, created_at)
        VALUES (?, ?, ?, ?, ?, 'listening', unixepoch())
@@ -138,14 +141,14 @@ export const receivedCuePlay = (env: Env, url: URL, ritual: Ritual) =>
   `<Play>https://${originHost(env, url)}/voice/${stageOf(ritual)}/received.wav</Play>`;
 
 /**
- * One take of a round: a stream, the tone, and the phrase inside a Gather hinted with its words.
- * It also warms the verifier where this User's challenges are scored, some seconds from now: in
+ * One take of a round: a stream, the tone, and the phrase (or a prompt that asks for it) inside a
+ * Gather hinted with its words. It also warms the verifier where this User's challenges are scored, some seconds from now: in
  * a playtest (2026-11-11) a level came about 5 s after the answer, where a warm verifier takes
  * under 1.
  */
 export async function takeTwiml(env: Env, ctx: ExecutionContext, url: URL, take: {
   callSid: string; round: number; take: number; phrase: string; account: string; ritual: Ritual; identityHash: string;
-  action: string;
+  action: string; prompt?: string;
 }): Promise<string> {
   warmSpeaker(env, ctx, take.identityHash);
   const stage = stageOf(take.ritual);
@@ -153,7 +156,7 @@ export async function takeTwiml(env: Env, ctx: ExecutionContext, url: URL, take:
   return StartStream(roundName(take.ritual, take.round, take.take), `wss://${originHost(env, url)}/voice/${stage}/stream/${capability}`,
     { round: String(take.round), take: String(take.take) }) +
     roundTonePlay(env, url, take.ritual) +
-    GatherSpeech(take.phrase, take.action, ROUND_GATHER_TIMING, contentWords(take.phrase));
+    GatherSpeech(take.prompt ?? take.phrase, take.action, ROUND_GATHER_TIMING, contentWords(take.phrase));
 }
 
 /** The Stop for a take's stream, so every response to its Gather (error paths too) ends it. */
@@ -312,6 +315,9 @@ export async function handleChallengeStream(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       result.error = /^([a-z-]+): /.exec(message)?.[1] ?? "unavailable";
+      // The verifier's refusal names the speech it measured, so a short answer still says how short.
+      const measured = result.error === "insufficient-audio" ? /([\d.]+) s of speech/.exec(message) : null;
+      if (measured) result.speech = Number(measured[1]);
     }
     return result;
   };
@@ -353,10 +359,13 @@ export async function handleChallengeStream(
       if (row?.state !== "scoring" || row.take !== take) return;
       if (latest && !talkedSince) {
         await latest.stored;
+        // A speculative refusal for too little audio is never used: the whole stream is longer,
+        // and a short answer (the Home check's Handle) may clear the verifier's floors only with it.
         const used = await env.DB.prepare(
           `UPDATE challenge_rounds SET state = 'scored', cosine = spec_cosine, speech_seconds = spec_speech_seconds, error = spec_error,
              cold = spec_cold, embedding_space = spec_embedding_space, embedding = spec_embedding, speculative = 1
-            WHERE call_sid = ? AND round = ? AND take = ? AND state = 'scoring' AND spec_seq = ?`,
+            WHERE call_sid = ? AND round = ? AND take = ? AND state = 'scoring' AND spec_seq = ?
+              AND (spec_error IS NULL OR spec_error != 'insufficient-audio')`,
         ).bind(callSid, round, take, latest.seq).run();
         if (used.meta.changes) return;
       }

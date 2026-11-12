@@ -299,7 +299,8 @@ switch; a Theme may say it warmly but never supplies its words.
 
 The one phone number Dogwalk associates with a User for convenience. A User has
 at most one Home and a number is Home to at most one User. A call from a Home
-starts the Identity Check with that User's Handle and one Identity Challenge.
+starts the Identity Check with that User's Handle and one Identity Challenge, or,
+soon after the User's last call, the name path (see Identity Check).
 A Home expires 90 days after its last successful call. Any User who passes the
 Identity Check may make the calling number their Home, displacing that number's
 previous User, who still gets in by naming their Handle. Re-homing is rare; the
@@ -406,6 +407,24 @@ call politely. A caller who names the Handle they are already being checked as
 hears the same sentence again. The check runs once per Voice Call: returning to
 the Voice Agent later in the call (after Challenge Practice, a Theme switch, or
 recovery) does not repeat it.
+
+The **name path** makes daily use smoother: a Home call within a configured
+window of the User's last Voice Call (as that User, from any phone: Home or an
+admitted Roaming call) hears its Handle and is asked to say their name instead
+of a sentence ("Dogwalk, for anchor antelope." then the tone and "Say your
+name."). The answer is classified like a phrase whose content words are the
+Handle; a matched one is scored against the Voice Reference like any challenge
+and recorded as the name path's, but the caller hears no level and is never
+asked again: a Handle is about a second of speech, under the floor a level
+needs, where genuine scores run low, so a spoken level would be wrong more often
+than informative. Thin speech, a verifier refusal, or no score at all connects
+as any result does. Anything but the Handle (nothing heard, other words, too
+many requests to repeat) falls back to one Identity Challenge, taught as on a
+call past the window; someone else, another Handle, an invite, or donating
+escape as from a sentence. Name answers are not completed challenges, so the
+sentence's teaching count does not move. The name path is weaker evidence than a
+sentence by design: it trades security for smoothness through the window, a
+tunable parameter (see Open Questions).
 
 **Shadow mode** is the current deployment state. The check runs, is scored, and
 is reported in Call Activity and to the Session Orchestrator, with what an
@@ -1169,6 +1188,7 @@ The following language appears in Git history and is not canonical for productio
 - User reaping is not implemented; only Sandbox reaping is. When it is: its age; that reaping a User moves their Handle into `retired_handles` for the same 90-day quarantine as renaming (the table's `user_id` then names a reaped User), clears the Home, deletes the Voice Reference, and sets `users.reaped_at`; whether it also reaps a Sandbox not yet reaped; and what becomes of the Voice Session Durable Object (its Memory, transcripts, and archives), which no reaping deletes today. Transcripts also live outside it: every Voice Call's caller and Voice Agent speech is kept as diagnostic text in `call_activity`, linked to the User through `voice_calls.user_id`, with no retention period; whether reaping a User strips that text, and whether call text should expire independently of reaping, is undecided. A proposal for these points is on issue #25.
 - Should the Identity Check ever collect more voice evidence during the conversation, or does whole-call collection need its own consent and retention decision?
 - Shadow Identity Check: what evidence (genuine and impostor levels across conditions, wrong-phrase and thin-speech rates, `wait_ms`) is enough to turn on enforcement, and does enforcement start with Home calls before Roaming exists? The registration prompt accepts a Handle only while Roaming admission is on; should it also do so in shadow mode, so a User calling from a phone that is not a Home can be challenged without being admitted? Should Roaming challenges against a User count toward that User's taught-once count, or Challenge Practice rounds toward it? Registration's enrollment does not yet create the new Sandbox while it runs, and does not use the spoken Invite Code as speech.
+- The name path trades security for smoothness by a tunable window. In shadow mode it opens nothing new: every Home call connects whatever its score, and spoofing caller ID already skips the voice evidence. Once enforcement exists, its weaker evidence matters: a Handle is short, public to anyone the User has told it, and often below the verifier's own speech floor (1 s measured), so many name answers yield no score at all. What should an enforcing name path do with an unscored or thin answer (admit, or fall back to a sentence)? Should the window count only calls whose check admitted, since today any call attributed to the User renews it, including one placed with a spoofed caller ID? Should a carrier phrase ("this is anchor antelope") lengthen the sample? Name-path records carry `mode: "name"` so playtests can compare their cosines and speech seconds with sentences before deciding.
 - Re-enrollment: a User whose voice no longer matches from any setting (illness, a changed voice, or a verifier whose new embedding space cannot compare with the old reference) cannot re-enroll by voice. What recovers them, and what proves it is them, is undecided; today it is the operator deleting the Voice Reference so first-call enrollment runs again on the next Home call. Should Re-enrollment also be reachable after Roaming admission, and should it require that this call's own Identity Check matched? Should failed Re-enrollment checks count toward a Handle's attempt limits, since, like Challenge Practice, each one tells the caller a level? Should the Session Orchestrator learn the outcome when the call returns to it?
 - Roaming admission: what evidence turns it on (it rests on the same small sample as the threshold: no human impostors or clone test yet)? Should several rounds combine into one decision (a mean or a majority over more, cheaper rounds) instead of every round passing on its own? Should Roaming speak a coarser level than Home, or none, since each level is feedback for tuning an impersonation? Are three failures per Handle and five per number per day right, given that pausing a Handle is also a way for anyone to keep its User from Roaming for a day, and that one attempt at a time lets a caller who holds a call open keep the User from Roaming for its length? A User who only roams never hears the Roaming notice, which waits for a call not admitted by Roaming; should it reach them some other way? Re-homing after a Roaming admission (explicit, spoken, confirmed) is not built.
 - Voice Donations: how long is donated audio kept? Today it stays until the operator deletes it on request or decides otherwise; a fixed retention period, and whether the consent script should state it, is undecided. Should a donor be able to delete their own session by voice without an identifier being spoken to them?

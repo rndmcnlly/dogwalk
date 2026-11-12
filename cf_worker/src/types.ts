@@ -16,6 +16,9 @@ export interface Env {
   // Roaming admission (identity_check.ts): "on" admits a caller who passes a named User's three
   // Identity Challenges; anything else keeps Roaming in shadow mode.
   ROAMING_ADMISSION?: string;
+  // The Home check's name path (identity_check.ts): hours since the User's last Voice Call within
+  // which a Home call asks for their Handle instead of a sentence; unset or not positive turns it off.
+  HOME_NAME_WINDOW_HOURS?: string;
   OPENAI_PROJECT_ID: string;
   OPENAI_WEBHOOK_SECRET: string;
   OPENAI_LIVE_MODEL?: string;
