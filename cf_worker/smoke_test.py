@@ -2147,8 +2147,9 @@ def main() -> int:
     # A private dev registry, shared by both Workers this run starts, so no other worktree's
     # wrangler dev binds to this speaker mock.
     registry = tempfile.mkdtemp(prefix="dogwalk-wrangler-registry-")
-    # Pinned to a dry run whatever wrangler.toml deploys, so the reaping checks start without deleting.
-    process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:dry-run")
+    # Pinned to a dry run and shadow Roaming whatever wrangler.toml deploys, so the reaping checks
+    # start without deleting and identity_checks see Roaming that admits nobody.
+    process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:dry-run", "ROAMING_ADMISSION:off")
     try:
         if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
             print("wrangler dev did not start", file=sys.stderr)
@@ -2161,13 +2162,13 @@ def main() -> int:
         # Sandbox reaping: the dry run first, then delete mode, which needs a restart.
         reap_users = reap_dry_run_checks(DEFAULT_LOCAL)
         stop_worker(process)
-        process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:delete")
+        process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:delete", "ROAMING_ADMISSION:off")
         if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
             print("wrangler dev did not restart", file=sys.stderr)
             return 1
         reap_delete_checks(DEFAULT_LOCAL, LOCAL_TOKEN, reap_users)
         print("Sandbox reaping checks passed (dry run, delete, 404, leftover deletion, recent, live, and unlinked callers, call while deletion pending, backoff and stuck, diagnostics race)")
-        # Roaming admission is configuration, off by default: it needs a restart too.
+        # Roaming admission is configuration: turning it on needs a restart too.
         stop_worker(process)
         process = start_worker(wrangler, registry, "ROAMING_ADMISSION:on")
         if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
