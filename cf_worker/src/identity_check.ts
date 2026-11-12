@@ -404,7 +404,7 @@ export async function handleIdentityHeard(
       return stop + Say("Your sentence.") + await identityTake(env, ctx, url, callSid, account, round, take + 1, row.phrase, progress, subject);
     }
     await skipRound(env, callSid, round);
-    await log("identity.round", { path: progress.path, round, outcome: "repeat_limit" });
+    await log("identity.round", { path: progress.path, ...modeOf(progress), round, outcome: "repeat_limit" });
     return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: 0 }, subject,
       "No more repeats of that one. Here's another.");
   }

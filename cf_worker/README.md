@@ -408,7 +408,8 @@ them any enrollment embeddings, are deleted whenever a path ends, on an error,
 and when the call's terminal status arrives.
 
 Call Activity (source `access`): `identity.started` (`path`, `user_id`, `terse`),
-with `mode` (`name` or `sentence`) on every Home record and round below,
+with `mode` (`name` or `sentence`) on every Home record and round below (except
+`unavailable`, recorded before a mode is chosen),
 `identity.round` (`path`, `round`, `outcome`, `cosine` or for enrollment none,
 `speech_seconds`, `cold`, `wait_ms`, `speculative`, `head_start_ms`),
 `identity.repeat`, `identity.escape` (`to`), `identity.who`, `identity.result`
