@@ -734,7 +734,8 @@ def run_tests(
         # Practice scores through the mock speaker Worker that runs beside local dev.
         practice_checks(base_url, token)
         identity_checks(base_url, token)
-    print("33 core checks plus operator/provider timing, Voice Donation, Challenge Practice, and Identity Check checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
+        reenrollment_checks(base_url, token)
+    print("33 core checks plus operator/provider timing, Voice Donation, Challenge Practice, Identity Check, and Re-enrollment checks passed" if mock_daytona else "21 core checks plus operator timing checks passed")
     return 0
 
 
@@ -1725,6 +1726,147 @@ def identity_checks(base_url: str, token: str) -> None:
             and [r["outcome"] for r in spec] == ["match", "collected"], f"speculative identity rounds: {spec}")
     require({"identity.started", "identity.escape", "identity.who", "identity.result", "identity.repeat"} <= {row["event"] for row in rows},
             f"identity events: {sorted({row['event'] for row in rows})}")
+
+
+def reenrollment_checks(base_url: str, token: str) -> None:
+    """Re-enrollment: from an admitted call, three matched challenges against the current Voice
+    Reference (enforced, though the Identity Check is in shadow mode), then five enrollment
+    answers whose mean replaces it outright, only if it still matches the old one."""
+    received_cue = re.escape("<Play>https://dogwalk.tools/voice/identity/received.wav</Play>")
+    connect = '<Redirect method="POST">/voice</Redirect></Response>'
+    user = d1_local(f"SELECT id, home_phone FROM users WHERE home_phone LIKE '{TEST_NUMBERS}' AND reaped_at IS NULL "
+                    f"AND home_phone NOT IN ('{ROAMING_PHONE}', '{ENROLL_PHONE}', '{REGISTER_PHONE}', '{REGISTER_FAIL_PHONE}') LIMIT 1")[0]
+    uid, phone = user["id"], user["home_phone"]
+    # The mock embeds every answer as the uniform unit vector: NEAR still matches it (cosine 0.95),
+    # FAR does not (cosine 0).
+    near = json.dumps([1.0] * 96 + [0.5] * 96)
+    far = json.dumps([1.0] * 96 + [-1.0] * 96)
+
+    def call(sid: str) -> dict:
+        d1_local(f"INSERT OR IGNORE INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at, user_id) "
+                 f"VALUES ('{sid}', '{phone}', 'in-progress', unixepoch(), unixepoch(), {uid})")
+        return {"From": phone, "CallSid": sid, "AccountSid": TEST_ACCOUNT}
+
+    def reference() -> str | None:
+        rows = d1_local(f"SELECT embedding FROM voice_references WHERE user_id = {uid}")
+        return rows[0]["embedding"] if rows else None
+
+    def set_reference(embedding: str) -> None:
+        d1_local(f"INSERT OR REPLACE INTO voice_references (user_id, embedding_space, embedding, enrolled_at) "
+                 f"VALUES ({uid}, 'mock-speaker-space', '{embedding}', unixepoch())")
+
+    def round_of(body: str, sid: str, number: int, phase: str, ritual: str = "identity") -> tuple[str, str, str]:
+        name = f"identity-round-{number:02d}"
+        stream = re.search(rf'<Start><Stream name="{name}" url="wss://dogwalk\.tools(/voice/identity/stream/[^"]+)" track="inbound_track">', body)
+        action = re.search(rf'action="(/voice/reenrollment/heard\?phase={phase}&amp;silent=\d&amp;judged=\d&amp;start=\d+&amp;round={number}&amp;take=0)"', body)
+        require(stream and action and "<Play>https://dogwalk.tools/voice/identity/tone.wav</Play>" in body, f"re-enrollment round {number}: {body}")
+        row = d1_local(f"SELECT phrase, ritual FROM challenge_rounds WHERE call_sid = '{sid}' AND round = {number}")[0]
+        require(row["ritual"] == ritual and f">{row['phrase']}</Say></Gather>" in body, f"re-enrollment round {number} ritual: {row}")
+        return stream[1], action[1].replace("&amp;", "&"), row["phrase"]
+
+    def answer(body: str, form: dict, number: int, phase: str, seconds: float, sample: int) -> str:
+        stream, action, phrase = round_of(body, form["CallSid"], number, phase, "identity" if phase == "check" else "enrollment")
+        redirect = []
+        def heard() -> None:
+            _, twiml = post(base_url, action, {**form, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)
+            match = re.fullmatch(rf'<Response><Stop><Stream name="identity-round-{number:02d}"/></Stop>{received_cue}'
+                                 rf'<Redirect method="POST">(/voice/reenrollment/result\?[^<]+)</Redirect></Response>', twiml)
+            require(match is not None, f"re-enrollment matched phrase: {twiml}")
+            redirect.append(match[1].replace("&amp;", "&"))
+        practice_stream(base_url, stream, token, number, steady_audio(seconds, sample), heard)
+        status, result = post(base_url, redirect[0], form, token)
+        require(status == 200, f"re-enrollment result {number}: {status} {result}")
+        return result
+
+    def say(body: str, form: dict, number: int, phase: str, words: str) -> str:
+        _, action, _ = round_of(body, form["CallSid"], number, phase, "identity" if phase == "check" else "enrollment")
+        return post(base_url, action, {**form, "SpeechResult": words, "Confidence": "0.9"}, token)[1]
+
+    # The Voice Agent's handoff, and a User with nothing to replace.
+    form = call("CA_REENROLL_NONE")
+    d1_local(f"DELETE FROM voice_references WHERE user_id = {uid}; INSERT INTO call_handoffs (call_sid, phone_number, action, created_at) "
+             f"VALUES ('CA_REENROLL_NONE', '{phone}', 'reenrollment', unixepoch())")
+    status, body = post(base_url, "/voice/after-live", form, token)
+    require(status == 200 and '<Redirect method="POST">/voice/reenrollment</Redirect>' in body, f"re-enrollment handoff: {body}")
+    status, body = post(base_url, "/voice/reenrollment", form, token)
+    require(status == 200 and "isn't enrolled yet" in body and body.endswith(connect) and "<Stream" not in body,
+            f"re-enrollment without a Voice Reference: {body}")
+    require(reference() is None, "re-enrollment created a first Voice Reference")
+
+    # The whole ritual: three matches (a wrong phrase between them does not count), then five
+    # answers, one too short; the mean replaces the old reference outright.
+    set_reference(near)
+    form = call("CA_REENROLL")
+    _, body = post(base_url, "/voice/reenrollment", form, token)
+    require("replaces your voice profile" in body and "3 sentences, and each must match" in body and "Say stop to cancel." in body,
+            f"re-enrollment intro: {body}")
+    body = answer(body, form, 1, "check", 3.0, 8000)
+    require(body.startswith('<Response><Say voice="Polly.Joanna">Strong voice match.</Say><Start><Stream'), f"check round 1: {body}")
+    body = say(body, form, 2, "check", "the purple cow jumped")
+    require(re.match(rf'<Response><Stop><Stream name="identity-round-02"/></Stop>{received_cue}<Say[^>]*>That wasn\'t the sentence\.', body),
+            f"check wrong phrase: {body}")
+    body = answer(body, form, 3, "check", 3.0, 6000)
+    require("Voice matched.</Say>" in body and "That's you." not in body, f"check round 3: {body}")
+    body = answer(body, form, 4, "check", 3.0, 6000)
+    require("Voice matched. That's you. Now the new profile: 5 sentences" in body and "&amp;start=4&amp;round=5&amp;" in body,
+            f"check passed: {body}")
+    for number in range(5, 11):
+        body = answer(body, form, number, "enroll", 0.4 if number == 6 else 3.0, 6000)
+        if number == 6:
+            require("I didn't get enough of that one. Here's another." in body, f"re-enrollment short answer: {body}")
+        elif number < 10:
+            require(body.startswith("<Response><Start><Stream") and "match" not in body, f"re-enrollment answer {number}: {body}")
+    require(body == f'<Response><Say voice="Polly.Joanna">Thanks. Your new voice profile replaces the old one. Back to Dogwalk.</Say>{connect}',
+            f"re-enrollment end: {body}")
+    vector = json.loads(reference() or "[]")
+    require(len(vector) == 192 and all(abs(v - 192 ** -0.5) < 1e-9 for v in vector), f"replaced reference: {vector[:3]}")
+    require(d1_local("SELECT COUNT(*) AS n FROM challenge_rounds WHERE call_sid = 'CA_REENROLL'")[0]["n"] == 0, "re-enrollment rows kept")
+
+    # One miss ends the check, whatever came before: the reference is unchanged.
+    set_reference(near)
+    form = call("CA_REENROLL_MISS")
+    _, body = post(base_url, "/voice/reenrollment", form, token)
+    body = answer(body, form, 1, "check", 3.0, 8000)
+    body = answer(body, form, 2, "check", 3.0, 3000)
+    require(body == f'<Response><Say voice="Polly.Joanna">Voice not matched. Your voice profile is unchanged. Back to Dogwalk.</Say>{connect}',
+            f"failed check: {body}")
+    require(reference() == near, "a failed check changed the reference")
+
+    # A different voice after a passed check: the new answers do not match the old reference.
+    set_reference(far)
+    form = call("CA_REENROLL_SWAP")
+    _, body = post(base_url, "/voice/reenrollment", form, token)
+    for number in range(1, 4):
+        body = answer(body, form, number, "check", 3.0, 8000)
+    for number in range(4, 9):
+        body = answer(body, form, number, "enroll", 3.0, 6000)
+    require("Those answers didn't sound like your current profile. Your voice profile is unchanged." in body and body.endswith(connect),
+            f"discontinuous re-enrollment: {body}")
+    require(reference() == far, "a discontinuous re-enrollment changed the reference")
+
+    # Stop during enrollment cancels it, keeping no collected embedding.
+    set_reference(near)
+    form = call("CA_REENROLL_STOP")
+    _, body = post(base_url, "/voice/reenrollment", form, token)
+    for number in range(1, 4):
+        body = answer(body, form, number, "check", 3.0, 8000)
+    body = answer(body, form, 4, "enroll", 3.0, 6000)
+    body = say(body, form, 5, "enroll", "stop")
+    require(body == f'<Response><Stop><Stream name="identity-round-05"/></Stop><Say voice="Polly.Joanna">Re-enrollment cancelled. '
+            f'Your voice profile is unchanged. Back to Dogwalk.</Say>{connect}', f"re-enrollment stop: {body}")
+    require(reference() == near and d1_local("SELECT COUNT(*) AS n FROM challenge_rounds WHERE call_sid = 'CA_REENROLL_STOP'")[0]["n"] == 0,
+            "stopped re-enrollment changed the reference or kept rows")
+
+    # Call Activity: under access, with every outcome and never speech or an embedding.
+    rows = d1_local("SELECT source, event, detail FROM call_activity WHERE call_sid LIKE 'CA_REENROLL%' AND event LIKE 'reenrollment.%' ORDER BY id")
+    require(rows and all(row["source"] == "access" for row in rows), f"re-enrollment activity source: {rows[:2]}")
+    results = [json.loads(row["detail"])["outcome"] for row in rows if row["event"] == "reenrollment.result"]
+    require(results == ["reenrolled", "failed", "discontinuous", "stopped"], f"re-enrollment results: {results}")
+    require(not any({"phrase", "transcript", "embedding"} & json.loads(row["detail"]).keys() for row in rows),
+            "Call Activity kept re-enrollment speech")
+    require({"reenrollment.unavailable", "reenrollment.started", "reenrollment.round", "reenrollment.checked"} <= {row["event"] for row in rows},
+            f"re-enrollment events: {sorted({row['event'] for row in rows})}")
+    set_reference("[0.5, 0.5]")
 
 
 def project_wrangler() -> str | None:

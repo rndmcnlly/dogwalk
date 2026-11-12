@@ -29,11 +29,11 @@ import type { Env } from "./types";
 // Configuration, not domain rules.
 /** Completed Home challenges after which the greeting stops teaching the ritual. */
 export const TERSE_AFTER = 3;
-/** Identity Challenges a caller who names a Handle takes. */
-const ROAMING_CHALLENGES = 3;
+/** Identity Challenges a caller who names a Handle takes, and Re-enrollment's check (reenrollment.ts) with them. */
+export const ROAMING_CHALLENGES = 3;
 /** Answers enrollment collects, and the fewest with enough speech that make a Voice Reference. */
-const ENROLL_ANSWERS = 5;
-const MIN_ENROLL_ANSWERS = 3;
+export const ENROLL_ANSWERS = 5;
+export const MIN_ENROLL_ANSWERS = 3;
 // Rounds, judged or not, before a path gives up: wrong phrases and thin speech never count as
 // failures, so these bound a line that never yields a judgment.
 const MAX_ROUNDS: Record<Path, number> = { home: 4, roaming: 8, enroll: 10, register: 10 };
@@ -441,15 +441,24 @@ export function meanEmbedding(embeddings: number[][]): number[] {
   return unit(sum);
 }
 
-async function finishEnrollment(env: Env, callSid: string, log: Log, progress: Progress, spoken: string, error?: string): Promise<string> {
+/**
+ * The enrollment answers a call collected for a User, with enough speech, in one embedding space:
+ * the one most answers share (a verifier deployed mid-call could split them). Re-enrollment
+ * (reenrollment.ts) computes its replacement from the same answers.
+ */
+export async function collectedAnswers(env: Env, callSid: string, userId: number): Promise<{ space: string; embeddings: number[][] }> {
   const { results } = await env.DB.prepare(
     `SELECT embedding_space, embedding FROM challenge_rounds
       WHERE call_sid = ? AND ritual = 'enrollment' AND user_id = ? AND state = 'scored' AND embedding IS NOT NULL AND speech_seconds >= ?`,
-  ).bind(callSid, progress.user, MIN_SPEECH_SECONDS).all<{ embedding_space: string; embedding: string }>();
-  // One embedding space: the one most answers share (a verifier deployed mid-call could split them).
+  ).bind(callSid, userId, MIN_SPEECH_SECONDS).all<{ embedding_space: string; embedding: string }>();
   const spaces = new Map<string, number[][]>();
   for (const row of results ?? []) spaces.set(row.embedding_space, [...spaces.get(row.embedding_space) ?? [], JSON.parse(row.embedding)]);
   const [space, embeddings] = [...spaces].sort((a, b) => b[1].length - a[1].length)[0] ?? ["", []];
+  return { space, embeddings };
+}
+
+async function finishEnrollment(env: Env, callSid: string, log: Log, progress: Progress, spoken: string, error?: string): Promise<string> {
+  const { space, embeddings } = await collectedAnswers(env, callSid, progress.user);
   const lead = spoken ? `${spoken} ` : "";
   if (embeddings.length < MIN_ENROLL_ANSWERS) {
     await conclude(env, callSid, log, { path: progress.path, user_id: progress.user, outcome: "enrollment_failed", answers: embeddings.length,
