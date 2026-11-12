@@ -47,7 +47,7 @@ SANDBOX_REAP_AGE_DAYS = "30"
 SANDBOX_REAP_MODE = "delete"
 # Roaming admission (README: Identity Check): "on" admits a caller who names a Handle and passes
 # its three Identity Challenges. Anything else keeps Roaming in shadow mode, admitting nobody.
-ROAMING_ADMISSION = "off"
+ROAMING_ADMISSION = "on"
 
 # Worker Version ID, stamped on observations as OTel service.version.
 [version_metadata]
