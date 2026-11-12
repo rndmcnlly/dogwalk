@@ -1473,6 +1473,8 @@ ROAMING_PHONE = "+15555550122"
 ENROLL_PHONE = "+15555550120"
 REGISTER_PHONE = "+15555550121"
 REGISTER_FAIL_PHONE = "+15555550123"
+INVITEE_PHONE = "+15555550127"
+INVITEE_WORDS = "aimless bodyguard banjo"
 
 
 def identity_checks(base_url: str, token: str) -> None:
@@ -1481,7 +1483,7 @@ def identity_checks(base_url: str, token: str) -> None:
     a User without a Voice Reference enrolls instead; Registration ends with enrollment."""
     received_cue = re.escape("<Play>https://dogwalk.tools/voice/identity/received.wav</Play>")
     home = d1_local(f"SELECT id, handle, home_phone FROM users WHERE home_phone LIKE '{TEST_NUMBERS}' AND reaped_at IS NULL "
-                    f"AND home_phone NOT IN ('{ROAMING_PHONE}', '{ENROLL_PHONE}', '{REGISTER_PHONE}', '{REGISTER_FAIL_PHONE}') LIMIT 1")[0]
+                    f"AND home_phone NOT IN ('{ROAMING_PHONE}', '{ENROLL_PHONE}', '{REGISTER_PHONE}', '{REGISTER_FAIL_PHONE}', '{INVITEE_PHONE}') LIMIT 1")[0]
     uid, handle, phone = home["id"], home["handle"], home["home_phone"]
     d1_local(f"INSERT OR REPLACE INTO voice_references (user_id, embedding_space, embedding, enrolled_at) "
              f"VALUES ({uid}, 'mock-speaker-space', '[0.5, 0.5]', unixepoch()); UPDATE users SET challenges_completed = 0 WHERE id = {uid}")
@@ -1660,7 +1662,7 @@ def identity_checks(base_url: str, token: str) -> None:
     body = say("CA_ID_SELF", 1, "enroll", eid, body, "I'm someone else", ENROLL_PHONE)
     require('action="/voice/identity/who?attempt=1"' in body, f"unenrolled someone else: {body}")
     _, body = post(base_url, "/voice/identity/who?attempt=1", {**call("CA_ID_SELF", ENROLL_PHONE), "SpeechResult": f"it's {ENROLL_HANDLE}"}, token)
-    require("I'll learn it now." in body and "<Hangup/>" not in body, f"unenrolled own Handle: {body}")
+    require("One step first, about a minute: 5 short sentences" in body and "<Hangup/>" not in body, f"unenrolled own Handle: {body}")
     body = say("CA_ID_SELF", 1, "enroll", eid, body, "stop", ENROLL_PHONE)
     require(body.endswith(f'Skipping enrollment. I\'ll ask again next call.</Say>{connect}'), f"unenrolled own Handle, stop: {body}")
 
@@ -1689,13 +1691,20 @@ def identity_checks(base_url: str, token: str) -> None:
     # and leaves with one computed from the answers' embeddings.
     form = call("CA_ID_ENROLL", ENROLL_PHONE)
     _, body = post(base_url, "/voice", form, token)
-    require("I'll learn it now." in body and "never a recording" in body and "5 sentences" in body, f"enrollment intro: {body}")
+    # The shape comes first: how many sentences, and how long.
+    require(f"Dogwalk, for {ENROLL_HANDLE}. One step first, about a minute: 5 short sentences so Dogwalk can recognize your voice "
+            "from any phone. I keep a voice profile, never a recording" in body, f"enrollment intro: {body}")
     for number in range(1, 7):
         # The first answer is embedded speculatively, from the end of the answer.
         body = answer(body, form, number, "enroll", eid, 0.4 if number == 2 else 3.0, 6000,
                       audio=answer_audio(6000, (2.0, True), (1.0, False)) if number == 1 else None, stored=3.7 if number == 1 else None)
+        # Progress marks count collected answers, so the short second answer moves nothing: the
+        # third collected answer leaves two, the fourth leaves the last one.
+        mark = {4: "Two more.", 5: "Last one."}.get(number)
         if number == 2:
             require("I didn't get enough of that one. Here's another." in body, f"enrollment short answer: {body}")
+        elif mark:
+            require(body.startswith(f'<Response><Say voice="Polly.Joanna">{mark}</Say><Start><Stream'), f"enrollment mark {number}: {body}")
         elif number < 6:
             require(body.startswith("<Response><Start><Stream") and "match" not in body, f"enrollment round {number}: {body}")
     require(body == f'<Response><Say voice="Polly.Joanna">Thanks. Your voice is enrolled.</Say>{connect}', f"enrollment end: {body}")
@@ -1713,9 +1722,47 @@ def identity_checks(base_url: str, token: str) -> None:
     post(base_url, "/voice/claim?attempts=1", {**form, "SpeechResult": LOCAL_INVITE, "Confidence": "0.9"}, token)
     _, body = post(base_url, "/voice/confirm?attempts=1", {**form, "SpeechResult": "yes", "Confidence": "0.9"}, token)
     rid = d1_local(f"SELECT id FROM users WHERE home_phone = '{REGISTER_PHONE}'")[0]["id"]
-    require("Registered. Your name on Dogwalk is" in body and "I'll learn it now." in body, f"registration enrollment: {body}")
+    # Before the work, the steps left and how long; then the Handle, twice.
+    require(re.search(r'<Say voice="Polly\.Joanna">Registered\. Two steps left, about two minutes: your Dogwalk name, then 5 short sentences '
+                      r'so Dogwalk can recognize your voice from any phone\. Your name on Dogwalk is ([a-z]+ [a-z]+)\. Again: \1\. '
+                      r'This phone is now your home\. Now your voice\. I keep a voice profile', body) is not None, f"registration enrollment: {body}")
     body = say("CA_ID_REGISTER", 1, "register", rid, body, "stop", REGISTER_PHONE)
     require(body.endswith("Skipping enrollment. I'll ask again next call. Goodbye.</Say><Hangup/></Response>"), f"registration skip: {body}")
+
+    # Registration by Invitation: how far the invitee gets is kept on the Invitation for the
+    # inviter's next call (invitations.ts, inviteeNews), counting collected answers, never rounds.
+    d1_local(f"DELETE FROM invitations WHERE code_words = '{INVITEE_WORDS}'; "
+             f"INSERT INTO invite_codes (code_words, minted_at, expires_at, max_uses) VALUES ('{INVITEE_WORDS}', unixepoch(), unixepoch() + 86400, 1) "
+             f"ON CONFLICT(code_words) DO UPDATE SET expires_at = excluded.expires_at, max_uses = 1; "
+             f"INSERT INTO invitations (code_words, inviter_user_id) VALUES ('{INVITEE_WORDS}', {uid})")
+    onboarding = lambda: d1_local("SELECT onboarding_call_sid, enrollment_answers, enrollment_outcome FROM invitations "
+                                  f"WHERE code_words = '{INVITEE_WORDS}'")[0]
+    hang_up = lambda sid: post(base_url, "/voice/status", {"From": INVITEE_PHONE, "CallSid": sid, "CallStatus": "completed", "CallDuration": "30"}, token)
+    # The words read back, then a hangup before confirming: the Invitation knows which call got that far.
+    form = call("CA_ID_INVITEE1", INVITEE_PHONE)
+    post(base_url, "/voice", form, token)
+    _, body = post(base_url, "/voice/claim?attempts=1", {**form, "SpeechResult": INVITEE_WORDS, "Confidence": "0.9"}, token)
+    require("I heard" in body and onboarding() == {"onboarding_call_sid": "CA_ID_INVITEE1", "enrollment_answers": 0, "enrollment_outcome": None},
+            f"invitee readback: {onboarding()}")
+    hang_up("CA_ID_INVITEE1")
+    # Called back and registered: two answers collected around a wrong phrase, then stop.
+    form = call("CA_ID_INVITEE2", INVITEE_PHONE)
+    post(base_url, "/voice", form, token)
+    post(base_url, "/voice/claim?attempts=1", {**form, "SpeechResult": INVITEE_WORDS, "Confidence": "0.9"}, token)
+    _, body = post(base_url, "/voice/confirm?attempts=1", {**form, "SpeechResult": "yes", "Confidence": "0.9"}, token)
+    nid = d1_local(f"SELECT id FROM users WHERE home_phone = '{INVITEE_PHONE}'")[0]["id"]
+    require("Registered. Two steps left" in body, f"invitee registration: {body}")
+    body = answer(body, form, 1, "register", nid, 3.0, 6000)
+    require(onboarding() == {"onboarding_call_sid": "CA_ID_INVITEE2", "enrollment_answers": 1, "enrollment_outcome": None},
+            f"invitee first answer: {onboarding()}")
+    body = say("CA_ID_INVITEE2", 2, "register", nid, body, "the purple cow jumped", INVITEE_PHONE)
+    require("That wasn't the sentence." in body and onboarding()["enrollment_answers"] == 1, f"invitee wrong phrase: {onboarding()}")
+    body = answer(body, form, 3, "register", nid, 3.0, 6000)
+    body = say("CA_ID_INVITEE2", 4, "register", nid, body, "stop", INVITEE_PHONE)
+    require(body.endswith("Skipping enrollment. I'll ask again next call. Goodbye.</Say><Hangup/></Response>")
+            and onboarding() == {"onboarding_call_sid": "CA_ID_INVITEE2", "enrollment_answers": 2, "enrollment_outcome": "stopped"},
+            f"invitee stop: {onboarding()} {body}")
+    hang_up("CA_ID_INVITEE2")
 
     # Call Activity: identity.* under access, every scored round with its score, wait, and cold flag,
     # and never a transcript or phrase.
@@ -1740,7 +1787,7 @@ def reenrollment_checks(base_url: str, token: str) -> None:
     received_cue = re.escape("<Play>https://dogwalk.tools/voice/identity/received.wav</Play>")
     connect = '<Redirect method="POST">/voice</Redirect></Response>'
     user = d1_local(f"SELECT id, home_phone FROM users WHERE home_phone LIKE '{TEST_NUMBERS}' AND reaped_at IS NULL "
-                    f"AND home_phone NOT IN ('{ROAMING_PHONE}', '{ENROLL_PHONE}', '{REGISTER_PHONE}', '{REGISTER_FAIL_PHONE}') LIMIT 1")[0]
+                    f"AND home_phone NOT IN ('{ROAMING_PHONE}', '{ENROLL_PHONE}', '{REGISTER_PHONE}', '{REGISTER_FAIL_PHONE}', '{INVITEE_PHONE}') LIMIT 1")[0]
     uid, phone = user["id"], user["home_phone"]
     # The mock embeds every answer as the uniform unit vector: NEAR still matches it (cosine 0.95),
     # FAR does not (cosine 0).
@@ -1823,6 +1870,10 @@ def reenrollment_checks(base_url: str, token: str) -> None:
         body = answer(body, form, number, "enroll", 0.4 if number == 6 else 3.0, 6000)
         if number == 6:
             require("I didn't get enough of that one. Here's another." in body, f"re-enrollment short answer: {body}")
+        elif number in (8, 9):
+            # The same progress marks as first-call enrollment, counting collected answers only.
+            mark = "Two more." if number == 8 else "Last one."
+            require(body.startswith(f'<Response><Say voice="Polly.Joanna">{mark}</Say><Start><Stream'), f"re-enrollment mark {number}: {body}")
         elif number < 10:
             require(body.startswith("<Response><Start><Stream") and "match" not in body, f"re-enrollment answer {number}: {body}")
     require(body == f'<Response><Say voice="Polly.Joanna">Thanks. Your new voice profile replaces the old one. Back to Dogwalk.</Say>{connect}',

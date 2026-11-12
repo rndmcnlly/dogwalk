@@ -23,7 +23,9 @@ import {
 import type { Env } from "./types";
 import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
 import { TerminalRelay } from "./terminal_relay";
-import { INVITATION_STATUS_SQL, redemptionStatements, USABLE_FOR_PHONE_SQL } from "./invitations";
+import {
+  INVITATION_STATUS_SQL, noteEnrollmentOutcome, noteInviteHeard, redemptionStatements, USABLE_FOR_PHONE_SQL,
+} from "./invitations";
 import { availableHandles } from "./handles";
 import { frontendInstructions, VoiceSession } from "./voice_session";
 import { DEFAULT_THEME, THEMES } from "./themes";
@@ -1882,6 +1884,8 @@ async function inviteReadback(env: Env, from: string, callSid: string, match: st
   )
     .bind(callSid, from, match, Math.floor(Date.now() / 1000))
     .run();
+  // An Invitation's words heard: how far its invitee gets is news for the inviter (invitations.ts).
+  await noteInviteHeard(env.DB, match, callSid).catch((error) => console.error("invitee onboarding note failed", error));
   const readback = `I heard: ${match.split(" ").join(", ")}. Say yes to confirm, or again to retry.`;
   return GatherSpeech(readback, "/voice/confirm", attempts, ["yes", "again"]);
 }
@@ -2076,19 +2080,23 @@ async function bindClaim(
   await audit(env, "registration.success", from, callSid, { invitation: redeemed.meta.changes > 0 });
 
   // The Handle is how the User will name themselves from any other phone: say it twice. Then
-  // Registration enrolls the new User's Voice Reference (identity_check.ts), when it can.
-  const registered = `Registered. Your name on Dogwalk is ${handle}. Again: ${handle}. This phone is now your home.`;
+  // Registration enrolls the new User's Voice Reference (identity_check.ts), when it can, after
+  // saying what is left and how long it takes.
+  const named = `Your name on Dogwalk is ${handle}. Again: ${handle}. This phone is now your home.`;
   const log = (event: string, detail: Record<string, unknown>) => audit(env, event, from, callSid, detail);
   // The Registration is committed: an enrollment that cannot start still ends with the Handle spoken.
   let enrollment: string | null = null;
+  let newUser: { id: number } | null = null;
   try {
-    const newUser = await env.DB.prepare("SELECT id FROM users WHERE handle = ? AND reaped_at IS NULL").bind(handle).first<{ id: number }>();
-    enrollment = newUser ? await startRegistrationEnrollment(env, ctx, new URL(req.url), form, newUser.id, log, registered) : null;
+    newUser = await env.DB.prepare("SELECT id FROM users WHERE handle = ? AND reaped_at IS NULL").bind(handle).first<{ id: number }>();
+    enrollment = newUser ? await startRegistrationEnrollment(env, ctx, new URL(req.url), form, newUser.id, log, named) : null;
   } catch (error) {
     await log("identity.error", { stage: "registration", message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
     await env.DB.prepare("DELETE FROM challenge_rounds WHERE call_sid = ?").bind(callSid).run().catch(() => {});
   }
-  return twiml(enrollment ?? Say(`${registered} Goodbye.`) + Hangup());
+  // The inviter hears that enrollment could not run, rather than that the invitee hung up.
+  if (!enrollment && newUser) await noteEnrollmentOutcome(env.DB, newUser.id, "unavailable").catch(() => {});
+  return twiml(enrollment ?? Say(`Registered. ${named} Goodbye.`) + Hangup());
 }
 
 // --- helpers ------------------------------------------------------------
