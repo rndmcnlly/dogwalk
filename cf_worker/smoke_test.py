@@ -1539,7 +1539,7 @@ def identity_checks(base_url: str, token: str) -> None:
             and "<Dial" not in body, f"Home greeting: {body}")
     body = answer(body, call("CA_ID_1"), 1, "home", uid, 3.0, 8000)
     require(body == f'<Response><Say voice="Polly.Joanna">Strong voice match.</Say>{connect}', f"strong Home level: {body}")
-    require(identity("CA_ID_1") == {"path": "home", "user_id": uid, "outcome": "strong_match", "level": "Strong voice match.",
+    require(identity("CA_ID_1") == {"path": "home", "mode": "sentence", "user_id": uid, "outcome": "strong_match", "level": "Strong voice match.",
                                     "enforcement": "admit", "shadow": True}, f"identity: {identity('CA_ID_1')}")
     status, body = post(base_url, "/voice", call("CA_ID_1"), token)
     # Re-entry goes straight to the connection step (this fixture's User shares the mock's one Sandbox, so it may not dial).
@@ -2061,6 +2061,129 @@ def roaming_admission_checks(base_url: str, token: str) -> None:
             "Goodbye.</Say><Hangup/></Response>", "paused number")
 
 
+def home_name_checks(base_url: str, token: str) -> None:
+    """The Home check's name path (wrangler.toml's HOME_NAME_WINDOW_HOURS; the earlier runs had it
+    off): within the window of the User's last Voice Call, from any phone, a Home call asks for
+    the Handle, scores the short answer without speaking a level, and connects; thin speech never
+    blocks; anything but the Handle falls back to one sentence; past the window, a sentence."""
+    received_cue = re.escape("<Play>https://dogwalk.tools/voice/identity/received.wav</Play>")
+    connect = '<Redirect method="POST">/voice</Redirect></Response>'
+    home = d1_local("SELECT u.id, u.handle, u.home_phone FROM voice_calls c JOIN users u ON u.id = c.user_id WHERE c.call_sid = 'CA_ID_1'")[0]
+    uid, handle, phone = home["id"], home["handle"], home["home_phone"]
+    vid = d1_local(f"SELECT id FROM users WHERE handle = '{ROAMING_HANDLE}'")[0]["id"]
+    completed = d1_local(f"SELECT challenges_completed AS n FROM users WHERE id = {uid}")[0]["n"]
+    require(completed >= 3, f"the name checks expect a taught User: {completed}")
+
+    def call(sid: str, caller: str = phone) -> dict:
+        return {"From": caller, "CallSid": sid, "AccountSid": TEST_ACCOUNT}
+
+    def identity(sid: str) -> dict | None:
+        row = d1_local(f"SELECT identity FROM voice_calls WHERE call_sid = '{sid}'")
+        return json.loads(row[0]["identity"]) if row and row[0]["identity"] else None
+
+    def round_of(body: str, number: int, user: int, name: bool) -> tuple[str, str]:
+        stream = re.search(rf'<Start><Stream name="identity-round-{number:02d}" url="wss://dogwalk\.tools(/voice/identity/stream/[^"]+)"', body)
+        action = re.search(rf'action="(/voice/identity/heard\?path=home&amp;user={user}&amp;[^"]*&amp;start=0{"&amp;mode=name" if name else ""}'
+                           rf'&amp;round={number}&amp;take=0)"', body)
+        require(stream and action, f"name check round {number} (name {name}): {body}")
+        return stream[1], action[1].replace("&amp;", "&")
+
+    def name_greeting(body: str, who: str) -> None:
+        words = ",".join(who.split())
+        require(f'<Say voice="Polly.Joanna">Dogwalk, for {who}.</Say><Start>' in body and f'hints="stop,{words}"' in body
+                and '<Say voice="Polly.Joanna">Say your name.</Say></Gather>' in body and "sentence" not in body, f"name greeting: {body}")
+
+    def answer(body: str, form: dict, number: int, user: int, name: bool, words: str, seconds: float, sample: int) -> str:
+        """A matched answer (the Handle or the round's phrase) of steady audio, scored at the stop."""
+        stream, action = round_of(body, number, user, name)
+        redirect = []
+        def heard() -> None:
+            _, twiml = post(base_url, action, {**form, "SpeechResult": words, "Confidence": "0.9"}, token)
+            match = re.fullmatch(rf'<Response><Stop><Stream name="identity-round-{number:02d}"/></Stop>{received_cue}'
+                                 rf'<Redirect method="POST">(/voice/identity/result\?[^<]+)</Redirect></Response>', twiml)
+            require(match is not None, f"name check matched answer: {twiml}")
+            redirect.append(match[1].replace("&amp;", "&"))
+        practice_stream(base_url, stream, token, number, steady_audio(seconds, sample), heard)
+        return post(base_url, redirect[0], form, token)[1]
+
+    def say(sid: str, body: str, number: int, user: int, name: bool, words: str, caller: str = phone) -> str:
+        _, action = round_of(body, number, user, name)
+        return post(base_url, action, {**call(sid, caller), "SpeechResult": words, "Confidence": "0.9"}, token)[1]
+
+    # Within the window: the Handle, a prompt for it, a received cue, and the connection, with no level.
+    _, body = post(base_url, "/voice", call("CA_HN_1"), token)
+    name_greeting(body, handle)
+    body = answer(body, call("CA_HN_1"), 1, uid, True, f"it's {handle}", 3.0, 8000)
+    require(body == f"<Response>{connect}", f"name path end: {body}")
+    require(identity("CA_HN_1") == {"path": "home", "mode": "name", "user_id": uid, "outcome": "strong_match", "enforcement": "admit",
+                                    "shadow": True}, f"name identity: {identity('CA_HN_1')}")
+    require(d1_local(f"SELECT challenges_completed AS n FROM users WHERE id = {uid}")[0]["n"] == completed, "the name path counted as a challenge")
+    # Thin speech never blocks: under the level's floor, or under the verifier's own, the call connects with the score recorded.
+    for sid, seconds in (("CA_HN_THIN", 1.0), ("CA_HN_TINY", 0.4)):
+        _, body = post(base_url, "/voice", call(sid), token)
+        body = answer(body, call(sid), 1, uid, True, handle, seconds, 6000)
+        require(body == f"<Response>{connect}", f"thin name {seconds}: {body}")
+        require(identity(sid) == {"path": "home", "mode": "name", "user_id": uid, "outcome": "not_enough_speech", "enforcement": "undecided",
+                                  "shadow": True}, f"thin name identity: {identity(sid)}")
+    rounds = {row["call_sid"]: json.loads(row["detail"]) for row in d1_local(
+        "SELECT call_sid, detail FROM call_activity WHERE call_sid IN ('CA_HN_1', 'CA_HN_THIN', 'CA_HN_TINY') AND event = 'identity.round'")}
+    # The mock's cosine is its first sample through mu-law, so only its level is exact.
+    require(rounds["CA_HN_1"]["mode"] == "name" and rounds["CA_HN_1"]["cosine"] >= 0.7 and rounds["CA_HN_1"]["speech_seconds"] == 3.0
+            and 0.5 <= rounds["CA_HN_THIN"]["cosine"] < 0.7 and rounds["CA_HN_THIN"]["speech_seconds"] == 1.0
+            and rounds["CA_HN_TINY"]["cosine"] is None and rounds["CA_HN_TINY"]["speech_seconds"] == 0.4
+            and rounds["CA_HN_TINY"]["error"] == "insufficient-audio", f"name rounds: {rounds}")
+
+    # A wrong name falls back to one sentence, whose level is spoken as past the window.
+    _, body = post(base_url, "/voice", call("CA_HN_WRONG"), token)
+    body = say("CA_HN_WRONG", body, 1, uid, True, "purple monkey")
+    require(re.match(rf'<Response><Stop><Stream name="identity-round-01"/></Stop>{received_cue}'
+                     r'<Say voice="Polly\.Joanna">I didn\'t catch your name\. Your sentence\.</Say><Start>', body), f"wrong name: {body}")
+    phrase = d1_local("SELECT phrase FROM challenge_rounds WHERE call_sid = 'CA_HN_WRONG' AND round = 2")[0]["phrase"]
+    require(f">{phrase}</Say></Gather>" in body and phrase != handle, f"fallback sentence: {body}")
+    body = answer(body, call("CA_HN_WRONG"), 2, uid, False, phrase.lower().rstrip("."), 3.0, 8000)
+    require(body == f'<Response><Say voice="Polly.Joanna">Strong voice match.</Say>{connect}', f"fallback level: {body}")
+    require(identity("CA_HN_WRONG")["mode"] == "sentence" and identity("CA_HN_WRONG")["outcome"] == "strong_match",
+            f"fallback identity: {identity('CA_HN_WRONG')}")
+    # Silence falls back too, and a second silence connects as before; a request to repeat asks again.
+    _, body = post(base_url, "/voice", call("CA_HN_SILENT"), token)
+    _, action = round_of(body, 1, uid, True)
+    body = post(base_url, action, {**call("CA_HN_SILENT"), "SpeechResult": "say that again"}, token)[1]
+    require('<Say voice="Polly.Joanna">Again.</Say>' in body and '<Say voice="Polly.Joanna">Say your name.</Say></Gather>' in body
+            and "&amp;mode=name&amp;round=1&amp;take=1" in body, f"name repeat: {body}")
+    action = re.search(r'action="(/voice/identity/heard\?[^"]+take=1)"', body)[1].replace("&amp;", "&")
+    body = post(base_url, action, {**call("CA_HN_SILENT"), "SpeechResult": ""}, token)[1]
+    require("I didn't hear your name. Your sentence.</Say>" in body, f"silent name: {body}")
+    body = say("CA_HN_SILENT", body, 2, uid, False, "")
+    require(body.endswith(f'<Say voice="Polly.Joanna">I didn\'t hear anything.</Say>{connect}') and identity("CA_HN_SILENT")["outcome"] == "silent",
+            f"silent twice: {body}")
+    # The escapes still apply to the name round: someone else, and another User's Handle.
+    _, body = post(base_url, "/voice", call("CA_HN_ELSE"), token)
+    body = say("CA_HN_ELSE", body, 1, uid, True, "I'm someone else")
+    require('action="/voice/identity/who?attempt=1"' in body, f"someone else at the name: {body}")
+    _, body = post(base_url, "/voice", call("CA_HN_OTHER"), token)
+    body = say("CA_HN_OTHER", body, 1, uid, True, f"this is {ROAMING_HANDLE}")
+    # Roaming as that Handle starts (or, after roaming_admission_checks' failures, says it is paused).
+    require(ROAMING_HANDLE in body and "sentence" not in body and "mode=name" not in body, f"another Handle at the name: {body}")
+
+    # Any phone counts: the Roaming-admitted call (roaming_admission_checks) is this User's only earlier one.
+    require(d1_local(f"SELECT call_sid FROM voice_calls WHERE user_id = {vid}") == [{"call_sid": "CA_RA_PASS"}],
+            "the Roaming User has other calls")
+    _, body = post(base_url, "/voice", call("CA_HN_ROAMED", ROAMING_PHONE), token)
+    name_greeting(body, ROAMING_HANDLE)
+    body = say("CA_HN_ROAMED", body, 1, vid, True, "stop", ROAMING_PHONE)
+    require(body.endswith(f"Skipping the voice check.</Say>{connect}") and identity("CA_HN_ROAMED")["mode"] == "name", f"name stop: {body}")
+
+    # Past the window: the sentence path, unchanged.
+    d1_local(f"UPDATE voice_calls SET started_at = started_at - 172800, last_activity_at = last_activity_at - 172800, "
+             f"ended_at = ended_at - 172800 WHERE user_id = {uid}")
+    _, body = post(base_url, "/voice", call("CA_HN_OLD"), token)
+    require(f'<Say voice="Polly.Joanna">Dogwalk, for {handle}. Your sentence.</Say>' in body and "mode=name" not in body, f"past the window: {body}")
+    round_of(body, 1, uid, False)
+    started = [json.loads(row["detail"]) for row in d1_local(
+        "SELECT detail FROM call_activity WHERE call_sid IN ('CA_HN_1', 'CA_HN_OLD') AND event = 'identity.started' ORDER BY id")]
+    require([row["mode"] for row in started] == ["name", "sentence"], f"identity.started modes: {started}")
+
+
 def project_wrangler() -> str | None:
     local = WORKER_DIR / "node_modules" / ".bin" / "wrangler"
     return str(local) if local.exists() else shutil.which("wrangler")
@@ -2148,8 +2271,9 @@ def main() -> int:
     # wrangler dev binds to this speaker mock.
     registry = tempfile.mkdtemp(prefix="dogwalk-wrangler-registry-")
     # Pinned to a dry run and shadow Roaming whatever wrangler.toml deploys, so the reaping checks
-    # start without deleting and identity_checks see Roaming that admits nobody.
-    process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:dry-run", "ROAMING_ADMISSION:off")
+    # start without deleting and identity_checks see Roaming that admits nobody. The name path
+    # stays off until its own checks, so earlier Home calls all hear a sentence.
+    process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:dry-run", "ROAMING_ADMISSION:off", "HOME_NAME_WINDOW_HOURS:0")
     try:
         if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
             print("wrangler dev did not start", file=sys.stderr)
@@ -2162,13 +2286,14 @@ def main() -> int:
         # Sandbox reaping: the dry run first, then delete mode, which needs a restart.
         reap_users = reap_dry_run_checks(DEFAULT_LOCAL)
         stop_worker(process)
-        process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:delete", "ROAMING_ADMISSION:off")
+        process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:delete", "ROAMING_ADMISSION:off", "HOME_NAME_WINDOW_HOURS:0")
         if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
             print("wrangler dev did not restart", file=sys.stderr)
             return 1
         reap_delete_checks(DEFAULT_LOCAL, LOCAL_TOKEN, reap_users)
         print("Sandbox reaping checks passed (dry run, delete, 404, leftover deletion, recent, live, and unlinked callers, call while deletion pending, backoff and stuck, diagnostics race)")
-        # Roaming admission is configuration: turning it on needs a restart too.
+        # Roaming admission is configuration: turning it on needs a restart too. This run keeps
+        # wrangler.toml's name window, which the Roaming checks never reach (no Home calls).
         stop_worker(process)
         process = start_worker(wrangler, registry, "ROAMING_ADMISSION:on")
         if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
@@ -2176,6 +2301,8 @@ def main() -> int:
             return 1
         roaming_admission_checks(DEFAULT_LOCAL, LOCAL_TOKEN)
         print("Roaming admission checks passed (greeting Handle, admission with the Home unchanged, failure, stop, Handle and number pauses)")
+        home_name_checks(DEFAULT_LOCAL, LOCAL_TOKEN)
+        print("Home name path checks passed (within the window, thin speech, wrong name, silence, escapes, a Roaming-admitted call, past the window)")
         return 0
     finally:
         stop_worker(process)

@@ -5,7 +5,11 @@
 // module holds the check's words, limits, and paths:
 //
 // - home: a call from a User's Home hears their Handle and one Identity Challenge, then
-//   connects. Full instructions until the User has completed TERSE_AFTER challenges.
+//   connects. Full instructions until the User has completed TERSE_AFTER challenges. Within
+//   HOME_NAME_WINDOW_HOURS of the User's last Voice Call, from any phone, the name path asks the
+//   caller to say their Handle instead: a short answer scored and recorded (mode "name") but never
+//   spoken as a level or asked again, then the call connects. Anything but the Handle (unheard,
+//   another word, a replay limit) falls back to one Identity Challenge; the escapes still apply.
 // - roaming: a caller who names another User's Handle takes three Identity Challenges against
 //   that User's Voice Reference. Unless Roaming admission is on (ROAMING_ADMISSION, off by
 //   default), they are never admitted: they hear it is coming soon, and the call ends. When it
@@ -48,6 +52,12 @@ const ROAMING_KEEP_SECONDS = 90 * 86400;
 
 /** Whether passing Roaming's challenges admits the caller (configuration; shadow when off). */
 export const roamingAdmits = (env: Env) => env.ROAMING_ADMISSION === "on";
+/** Seconds since the User's last Voice Call within which a Home call takes the name path; 0 when off (configuration). */
+const nameWindowSeconds = (env: Env) => {
+  const hours = Number(env.HOME_NAME_WINDOW_HOURS);
+  return Number.isFinite(hours) && hours > 0 ? Math.round(hours * 3600) : 0;
+};
+const NAME_PROMPT = "Say your name.";
 /** Answers enrollment collects, and the fewest with enough speech that make a Voice Reference. */
 export const ENROLL_ANSWERS = 5;
 export const MIN_ENROLL_ANSWERS = 3;
@@ -84,16 +94,21 @@ async function subjectOf(env: Env, userId: number): Promise<Subject | null> {
 // Carried in each round's webhook URLs. start is the round before the path began, so a path
 // entered mid-call (Roaming after a Handle is named) gets its own MAX_ROUNDS budget while round
 // numbers stay increasing, and a stopped stream's late score can never land on a new round.
-interface Progress { path: Path; user: number; silent: number; judged: number; passed: number; start: number }
+// name marks the Home check's name round, whose phrase is the User's Handle.
+interface Progress { path: Path; user: number; silent: number; judged: number; passed: number; start: number; name: boolean }
 function progressOf(url: URL): Progress | null {
   const path = url.searchParams.get("path") as Path;
   const user = Number(url.searchParams.get("user"));
   if (!PATHS.includes(path) || !Number.isSafeInteger(user) || user <= 0) return null;
   const count = (name: string) => Number(url.searchParams.get(name) ?? "0") || 0;
-  return { path, user, silent: count("silent"), judged: count("judged"), passed: count("passed"), start: count("start") };
+  return { path, user, silent: count("silent"), judged: count("judged"), passed: count("passed"), start: count("start"),
+    name: path === "home" && url.searchParams.get("mode") === "name" };
 }
-const query = (p: Progress) => `path=${p.path}&user=${p.user}&silent=${p.silent}&judged=${p.judged}&passed=${p.passed}&start=${p.start}`;
-const fresh = (path: Path, user: number, start = 0): Progress => ({ path, user, silent: 0, judged: 0, passed: 0, start });
+const query = (p: Progress) =>
+  `path=${p.path}&user=${p.user}&silent=${p.silent}&judged=${p.judged}&passed=${p.passed}&start=${p.start}${p.name ? "&mode=name" : ""}`;
+const fresh = (path: Path, user: number, start = 0): Progress => ({ path, user, silent: 0, judged: 0, passed: 0, start, name: false });
+/** Which Home check a record or round belongs to, so name answers can be compared with sentences. */
+const modeOf = (p: Progress) => (p.path === "home" ? { mode: p.name ? "name" : "sentence" } : {});
 const outOfRounds = (round: number, progress: Progress) => round - progress.start >= MAX_ROUNDS[progress.path];
 
 // --- outcomes -----------------------------------------------------------
@@ -158,30 +173,35 @@ async function escapeOf(env: Env, heard: string[]): Promise<Escape> {
 async function roundTwiml(
   env: Env, ctx: ExecutionContext, url: URL, callSid: string, account: string, round: number, progress: Progress, subject: Subject,
 ): Promise<string> {
-  const phrase = await openRound(env, callSid, round, ritualOf(progress.path), subject.id);
+  const phrase = await openRound(env, callSid, round, ritualOf(progress.path), subject.id, progress.name ? subject.handle : undefined);
   return identityTake(env, ctx, url, callSid, account, round, 0, phrase, progress, subject);
 }
 
+// The name round asks for the Handle rather than saying it: the greeting already did.
 const identityTake = (
   env: Env, ctx: ExecutionContext, url: URL, callSid: string, account: string, round: number, take: number, phrase: string,
   progress: Progress, subject: Subject,
 ) => takeTwiml(env, ctx, url, {
   callSid, round, take, phrase, account, ritual: ritualOf(progress.path), identityHash: subject.identity_hash,
-  action: `/voice/identity/heard?${query(progress)}&round=${round}&take=${take}`,
+  action: `/voice/identity/heard?${query(progress)}&round=${round}&take=${take}`, ...(progress.name ? { prompt: NAME_PROMPT } : {}),
 });
 
-/** Another phrase, or the path's end once it has run out of rounds. */
+/** What leads into a sentence: the full instructions until the User has completed TERSE_AFTER Home challenges. */
+const sentenceLead = (subject: Subject) => subject.challenges_completed >= TERSE_AFTER ? "Your sentence."
+  : "To check that it's you, repeat the sentence after the tone, once, in your normal voice. If you're someone else, say so.";
+
+/** Another phrase, or the path's end once it has run out of rounds. After the name round, always a sentence. */
 async function nextRound(
   env: Env, ctx: ExecutionContext, url: URL, callSid: string, account: string, log: Log, round: number, progress: Progress,
   subject: Subject, spoken: string,
 ): Promise<string> {
   if (outOfRounds(round, progress)) {
     if (progress.path === "enroll" || progress.path === "register") return finishEnrollment(env, callSid, log, progress, spoken);
-    await conclude(env, callSid, log, { path: progress.path, user_id: subject.id, outcome: "undecided",
+    await conclude(env, callSid, log, { path: progress.path, ...modeOf(progress), user_id: subject.id, outcome: "undecided",
       enforcement: progress.path === "home" ? "require_roaming" : "deny", judged: progress.judged, passed: progress.passed });
     return after(progress.path, `${spoken} ${progress.path === "home" ? "Skipping the voice check for now." : "That's all for now."}`);
   }
-  return (spoken ? Say(spoken) : "") + await roundTwiml(env, ctx, url, callSid, account, round + 1, progress, subject);
+  return (spoken ? Say(spoken) : "") + await roundTwiml(env, ctx, url, callSid, account, round + 1, { ...progress, name: false }, subject);
 }
 
 // --- starts -------------------------------------------------------------
@@ -207,12 +227,17 @@ export async function startHomeCheck(
   await clearRounds(env, callSid);
   if (!subject.enrolled) return startEnrollment(env, ctx, url, callSid, account, subject, "enroll", log, `Dogwalk, for ${subject.handle}.`);
   const terse = subject.challenges_completed >= TERSE_AFTER;
-  await log("identity.started", { path: "home", user_id: subject.id, terse });
-  const greeting = terse
-    ? `Dogwalk, for ${subject.handle}. Your sentence.`
-    : `Dogwalk, for ${subject.handle}. To check that it's you, repeat the sentence after the tone, once, in your normal voice. ` +
-      "If you're someone else, say so.";
-  return Say(greeting) + await roundTwiml(env, ctx, url, callSid, account, 1, fresh("home", subject.id), subject);
+  // The name path: an earlier Voice Call as this User (Home or Roaming-admitted, the only calls
+  // that carry a user_id) within the window. Ended calls count from their end.
+  const window = nameWindowSeconds(env);
+  const recent = window > 0 && (await env.DB.prepare(
+    `SELECT EXISTS (SELECT 1 FROM voice_calls WHERE user_id = ? AND call_sid != ?
+                     AND COALESCE(ended_at, last_activity_at, started_at) > unixepoch() - ?) AS recent`,
+  ).bind(subject.id, callSid, window).first<{ recent: number }>())?.recent === 1;
+  const progress = { ...fresh("home", subject.id), name: recent };
+  await log("identity.started", { path: "home", ...modeOf(progress), user_id: subject.id, terse });
+  return Say(`Dogwalk, for ${subject.handle}.${recent ? "" : ` ${sentenceLead(subject)}`}`) +
+    await roundTwiml(env, ctx, url, callSid, account, 1, progress, subject);
 }
 
 /** The end of Registration: the new User enrolls their Voice Reference, then the call ends. Null when it cannot run. */
@@ -336,29 +361,31 @@ export async function handleIdentityHeard(
   }
   const answer = answerOf(row.phrase, String(form.get("SpeechResult") ?? ""), take);
   const enrolling = ritual === "enrollment";
+  // Leaving the name round for anything but the Handle falls back to one sentence, taught as on a call past the window.
+  const instead = (lead: string, sentence: string) => (progress.name ? `${lead} ${sentenceLead(subject)}` : sentence);
   switch (answer.kind) {
     case "stop":
-      await conclude(env, callSid, log, { path: progress.path, user_id: subject.id, outcome: "stopped", enforcement: "undecided" });
+      await conclude(env, callSid, log, { path: progress.path, ...modeOf(progress), user_id: subject.id, outcome: "stopped", enforcement: "undecided" });
       return stop + after(progress.path, enrolling ? "Skipping enrollment. I'll ask again next call."
         : progress.path === "home" ? "Skipping the voice check." : "Goodbye.");
     case "silent":
-      await log("identity.round", { path: progress.path, round, outcome: "silent" });
+      await log("identity.round", { path: progress.path, ...modeOf(progress), round, outcome: "silent" });
       if (progress.silent + 1 >= MAX_SILENT_ROUNDS) {
-        await conclude(env, callSid, log, { path: progress.path, user_id: subject.id, outcome: "silent", enforcement: "undecided" });
+        await conclude(env, callSid, log, { path: progress.path, ...modeOf(progress), user_id: subject.id, outcome: "silent", enforcement: "undecided" });
         return stop + after(progress.path, "I didn't hear anything.");
       }
       await skipRound(env, callSid, round);
       return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: progress.silent + 1 }, subject,
-        "I didn't hear the sentence. Here's another.");
+        instead("I didn't hear your name.", "I didn't hear the sentence. Here's another."));
     case "repeat":
       await nextTake(env, callSid, round, take);
       await log("identity.repeat", { path: progress.path, round, take: take + 1 });
       return stop + Say("Again.") + await identityTake(env, ctx, url, callSid, account, round, take + 1, row.phrase, progress, subject);
     case "repeat_limit":
       await skipRound(env, callSid, round);
-      await log("identity.round", { path: progress.path, round, outcome: "repeat_limit" });
+      await log("identity.round", { path: progress.path, ...modeOf(progress), round, outcome: "repeat_limit" });
       return stop + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: 0 }, subject,
-        "No more repeats of that one. Here's another.");
+        instead("No more repeats.", "No more repeats of that one. Here's another."));
     case "matched":
       await markScoring(env, callSid, round);
       // The cue plays while the verifier scores, so it costs the caller no extra wait.
@@ -383,16 +410,16 @@ export async function handleIdentityHeard(
   }
   if (escape) {
     await skipRound(env, callSid, round);
-    await log("identity.escape", { path: progress.path, round, to: escape.to, ...(escape.to === "user" ? { user_id: escape.user.id } : {}) });
+    await log("identity.escape", { path: progress.path, ...modeOf(progress), round, to: escape.to, ...(escape.to === "user" ? { user_id: escape.user.id } : {}) });
     if (escape.to === "user") return stop + await startRoaming(env, ctx, url, form, log, round, escape.user, progress.path);
     if (escape.to === "who") return stop + whoPrompt(1);
-    await conclude(env, callSid, log, { path: progress.path, user_id: subject.id, outcome: escape.to, enforcement: "undecided" });
+    await conclude(env, callSid, log, { path: progress.path, ...modeOf(progress), user_id: subject.id, outcome: escape.to, enforcement: "undecided" });
     return stop + (escape.to === "registration" ? await exits.registration(answer.heard) : exits.donation());
   }
   await skipRound(env, callSid, round);
-  await log("identity.round", { path: progress.path, round, outcome: "wrong_phrase" });
+  await log("identity.round", { path: progress.path, ...modeOf(progress), round, outcome: "wrong_phrase" });
   return stop + receivedCuePlay(env, url, ritual) + await nextRound(env, ctx, url, callSid, account, log, round, { ...progress, silent: 0 }, subject,
-    "That wasn't the sentence. Here's another.");
+    instead("I didn't catch your name.", "That wasn't the sentence. Here's another."));
 }
 
 /** The Stop for the stream a /voice/identity/heard request's round and take started, so an error path can stop it. */
@@ -467,7 +494,8 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
     return after(progress.path, "");
   }
   const verdict = judge(row);
-  await log("identity.round", { path: progress.path, round, outcome: verdict.outcome, ...scoreDetail(row), ...scoreTiming(row, wait_ms) });
+  await log("identity.round", { path: progress.path, ...modeOf(progress), round, outcome: verdict.outcome, ...scoreDetail(row),
+    ...scoreTiming(row, wait_ms) });
   // Enrollment keeps a collected answer's embedding until the Voice Reference is computed.
   if (verdict.outcome !== "collected") {
     await env.DB.prepare("DELETE FROM challenge_rounds WHERE call_sid = ? AND round = ?").bind(callSid, round).run();
@@ -475,11 +503,23 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
   const next = (spoken: string, judged = progress.judged, passed = progress.passed) =>
     nextRound(env, ctx, url, callSid, account, log, round, { ...progress, judged, passed }, subject, spoken);
 
+  if (progress.name) {
+    // The Handle is about a second of speech, below the floor a level needs (MIN_SPEECH_SECONDS)
+    // and often below the verifier's own, where genuine scores run low. So the name path speaks
+    // no level and never asks again: every result is recorded with its speech seconds (the round
+    // above), and the call connects. Not a completed challenge, so the sentence's teaching stays.
+    const scored = verdict.outcome === "strong_match" || verdict.outcome === "match" || verdict.outcome === "no_match";
+    await conclude(env, callSid, log, { path: "home", mode: "name", user_id: subject.id, outcome: verdict.outcome,
+      ...(verdict.outcome === "unscored" && verdict.error ? { error: verdict.error } : {}),
+      enforcement: !scored ? "undecided" : verdict.outcome === "no_match" ? "require_roaming" : "admit" });
+    return after("home", "");
+  }
+
   if (verdict.outcome === "unscored") {
     // A verifier failure ends the check (shadow: the Home call connects); a slow score earns another phrase.
     if (verdict.error) {
       if (ritual === "enrollment") return finishEnrollment(env, callSid, log, progress, "", verdict.error);
-      await conclude(env, callSid, log, { path: progress.path, user_id: subject.id, outcome: "unscored", error: verdict.error,
+      await conclude(env, callSid, log, { path: progress.path, ...modeOf(progress), user_id: subject.id, outcome: "unscored", error: verdict.error,
         enforcement: "undecided", judged: progress.judged, passed: progress.passed });
       return after(progress.path, progress.path === "home" ? "I couldn't check your voice this time." : "Voice checks aren't working right now. Goodbye.");
     }
@@ -494,7 +534,7 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
   if (progress.path === "home") {
     // Teach once, then go terse: Access Control state in D1, never model Memory.
     await env.DB.prepare("UPDATE users SET challenges_completed = challenges_completed + 1 WHERE id = ?").bind(subject.id).run();
-    await conclude(env, callSid, log, { path: "home", user_id: subject.id, outcome: verdict.outcome, level: verdict.spoken,
+    await conclude(env, callSid, log, { path: "home", mode: "sentence", user_id: subject.id, outcome: verdict.outcome, level: verdict.spoken,
       enforcement: verdict.outcome === "no_match" ? "require_roaming" : "admit" });
     return after("home", verdict.spoken);
   }

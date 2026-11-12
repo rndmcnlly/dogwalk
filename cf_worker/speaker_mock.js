@@ -28,7 +28,8 @@ export class SpeakerVerifier extends WorkerEntrypoint {
     const samples = new Int16Array(input.audio);
     const seconds = samples.length / input.sampleRate;
     if (seconds > 30) throw new Error("invalid-input: audio exceeds 30 s");
-    if (seconds < 0.5) throw new Error("insufficient-audio: too little speech");
+    // Worded like the verifier's refusal, which names the speech it measured.
+    if (seconds < 0.5) throw new Error(`insufficient-audio: ${seconds.toFixed(2)} s of speech, need 0.5 s`);
     if (samples[0] < 0) throw new Error("inference-failed: mock failure");
     return { cosineSimilarity: samples[0] / 10000, embeddingSpace: input.reference.embeddingSpace, audioSeconds: seconds, speechSeconds: seconds };
   }
