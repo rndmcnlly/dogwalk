@@ -680,6 +680,24 @@ as `earcon_preference` and previewed with the opening earcon), `pair_browser`
 arrive mid-loop are injected before its next model call, so corrections steer
 work in flight. Its context persists in Durable Object storage across calls;
 between calls, events accumulate but the model does not run.
+`compact_context` (optional `focus`, at most 500 characters) returns at once: it
+appends a neutral commentary telling the caller the Voice Agent is tidying its
+notes, and once its step is answered it snapshots the context and starts the
+Memory writer, a separate Responses request (same instructions, tools with
+`tool_choice: "none"`, pinned Memory, and context, so the prompt cache serves
+it, ending in a `[write memory]` developer message; an over-long draft gets one
+`[condense memory]` request with only the draft). The writer runs off the
+Orchestrator's queue, so handoffs, harness events, and tools (`end_call` too)
+proceed meanwhile; call CAa3722805 waited 31.5 s to hang up behind a Memory
+written inline. When it finishes, the Memory version is stored and the cut
+removes context only before the user message chosen from the snapshot (found by
+identity, so items added meanwhile stay), recording `orchestrator.compaction`
+or `orchestrator.compaction.failed`; a call still attached gets
+`context_compacted` or `compaction_failed`. A compaction outlives its call
+(`waitUntil`, and the keepalive alarm re-arms while it runs), so the next call
+starts compacted. The context backstop stays a synchronous mechanical cut at
+150,000 input tokens: it writes no Memory and needs no model, and a cut past a
+running compaction's anchor leaves that compaction nothing to cut.
 `ORCHESTRATOR_API_BASE` and `ORCHESTRATOR_API_KEY` can point it at any compatible
 endpoint.
 

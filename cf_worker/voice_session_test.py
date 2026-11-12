@@ -385,7 +385,12 @@ ORCHESTRATOR_SCRIPT = [
         call("h3-ghost", "create_managed_session", alias="Ghost", directory="missing"),
         call("h3-escape", "create_managed_session", alias="Escape", directory="../etc"),
     ]),
-    ("[handoff del-3]", lambda ctx: [call("h3-say", "say", text=LEASH_SAY, delegation_id="del-3")]),
+    # A chapter closes as the first call winds down: the Orchestrator compacts, and the Memory
+    # writer is still running when the caller asks to hang up.
+    ("[handoff del-3]", lambda ctx: [
+        call("h3-say", "say", text=LEASH_SAY, delegation_id="del-3"),
+        call("h3-compact", "compact_context", focus=EARLY_FOCUS),
+    ]),
     ("[handoff del-4]", lambda ctx: [call("h4-end", "end_call")]),
     # Second call: a turn that fails mid-command: its running command ends with it.
     ("[handoff del-f]", lambda ctx: [call("f-begin", "begin_prompt_turn", alias="Juniper", prompt=FAIL_PROMPT)]),
@@ -446,9 +451,9 @@ ORCHESTRATOR_SCRIPT = [
     ('"key":"9"', lambda ctx: [call("k9-show", "show_in_browser", uri="dogwalk:file/REPORT.md", note="the report")]),
     ('"key":"4"', lambda ctx: [call("k4-state", "inspect_call_state")]),
     ('"key":"5"', lambda ctx: [call("k5-board", "draw_on_whiteboard", program=BOARD_PROGRAM, note="pick one")]),
-    # A chapter closes: the Orchestrator compacts. An over-long Memory is refused first.
-    ("[harness event] whiteboard_answer", lambda ctx: [call("cc-long", "compact_context", memory="x" * 12_001)]),
-    ("[harness event] whiteboard_answer", lambda ctx: [call("cc-memory", "compact_context", memory=MEMORY_TEXT)]),
+    # A chapter closes: the Orchestrator compacts. An over-long focus is refused first.
+    ("[harness event] whiteboard_answer", lambda ctx: [call("cc-long", "compact_context", focus="x" * 501)]),
+    ("[harness event] whiteboard_answer", lambda ctx: [call("cc-memory", "compact_context")]),
     # Five more boards push the first out of retention, and its captured image with it.
     ('"key":"A"', lambda ctx: [call(f"kA-evict-{n}", "draw_on_whiteboard", program=ICON_PROGRAM, note=f"icon {n}") for n in range(1, 6)]),
     ('"key":"B"', lambda ctx: [call("kB-html", "show_in_browser", uri="dogwalk:file/report.html", note="the chart report")]),
@@ -483,6 +488,9 @@ LATE_PHONE = "+15555550106"
 RIVAL_PHONE = "+15555550107"
 TEST_NUMBERS = [TEST_PHONE, SEED_INVITER, BOUND_PHONE, INVITEE_PHONE, REBOUND_PHONE, RACE_PHONE, LATE_PHONE, RIVAL_PHONE]
 MEMORY_TEXT = "Caller prefers terse updates. Juniper fixes the parser; Dozer works in honeydozer."
+EARLY_MEMORY = "Juniper fixes the parser."
+EARLY_FOCUS = "Juniper's parser work"
+COMPACTION_BRIEF = "Tell the caller briefly that you are tidying your notes, and that they can keep talking meanwhile."
 BOARD_PROGRAM = (
     'root = Stack([fig, big, pick])\nfig = Image("diagram.svg", "The parser\'s two stages", "Drawn by an agent", "small")\n'
     'big = Image(\'big.png\', "A generated chart")\n'
@@ -493,7 +501,7 @@ STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say", "f-begin", "f-inspect", "o-begin", "o-inspect",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
-    "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say",
+    "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say", "h3-compact",
     "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
     "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist",
     "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5", "kB-html", "k3-say", "k3-theme",
@@ -506,6 +514,11 @@ class OrchestratorMock(BaseHTTPRequestHandler):
 
     requests: list[tuple[dict[str, str], dict]] = []
     greeting_requests: list[dict] = []
+    # The Memory writer's requests, answered in order; clearing the gate holds them, as a slow
+    # model writing a long Memory would (CAa3722805: 51.7 s).
+    memory_requests: list[dict] = []
+    memory_replies = [EARLY_MEMORY, MEMORY_TEXT]
+    memory_gate = threading.Event()
     issued: list[tuple[str, int]] = []
     lock = threading.Lock()
 
@@ -518,6 +531,13 @@ class OrchestratorMock(BaseHTTPRequestHandler):
         headers = {key.lower(): value for key, value in self.headers.items()}
         if self.path != "/v1/responses":
             self.send_error(404)
+            return
+        if str(payload["input"][-1].get("content", "")).startswith("[write memory]"):
+            with OrchestratorMock.lock:
+                OrchestratorMock.memory_requests.append(payload)
+                reply = OrchestratorMock.memory_replies[len(OrchestratorMock.memory_requests) - 1]
+            OrchestratorMock.memory_gate.wait(60)
+            self.respond({"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": reply}]}]})
             return
         if payload.get("tool_choice") == "none":
             # The end-of-call request that writes the next call's welcome line.
@@ -1147,6 +1167,7 @@ async def run_protocol(identity: str) -> None:
         # Handoff 3: leash earlier work, retag it, let it go home, and list what remains.
         await mocks.send_live(transcript("input", "Pick up that parser work from yesterday ", 7000, 8000))
         await mocks.send_live(transcript("input", "as Birch, call it Rowan, then let it go.", 8000, 8800))
+        OrchestratorMock.memory_gate.clear()
         await mocks.send_live(delegation("del-3", 8850))
         # Discovery lists every directory (following nextCursor) and resumes from the
         # session's own directory.
@@ -1206,6 +1227,16 @@ async def run_protocol(identity: str) -> None:
         assert escape["ok"] is False and "inside the Workspace" in escape["error"], escape
         assert any("test -d" in command and "honeydozer" in command for command in DaytonaMock.executed)
 
+        # compact_context answered at once and briefed the Voice Frontend; its Memory writer is
+        # a separate request, still held when the caller asks to hang up.
+        await wait_for(outputs_back("h3-compact"))
+        assert OrchestratorMock.tool_output("h3-compact")["ok"] is True
+        await next_matching(mocks.live_messages, appended("commentary", COMPACTION_BRIEF))
+        await wait_for(lambda: OrchestratorMock.memory_requests, 10)
+        writer = OrchestratorMock.memory_requests[0]
+        assert writer["tool_choice"] == "none" and EARLY_FOCUS in writer["input"][-1]["content"], writer["input"][-1]
+        assert any(item.get("call_id") == "h3-compact" and item.get("type") == "function_call_output" for item in writer["input"])
+
         # Handoff 4: the Voice Frontend already said goodbye, so end_call hangs up at once,
         # with no farewell of the Orchestrator's own. The delegation arrives three times: a
         # replay after an attach keeps its event_id, and a repeat under a new one is still
@@ -1219,6 +1250,7 @@ async def run_protocol(identity: str) -> None:
         assert OrchestratorMock.tool_output("h4-end")["status"] == "ending call"
         assert not any(m.get("type") == "session.commentary.append" and m.get("delegation_id") == "del-4"
                        for m in mocks.seen), "end_call spoke a farewell of its own"
+        assert not OrchestratorMock.memory_gate.is_set(), "the hangup waited for the Memory writer"
 
         # Between calls: the provider closes the sideband, which ends the voice session and
         # writes the next welcome; the Agent asks for permission while nobody is on the line;
@@ -1231,6 +1263,9 @@ async def run_protocol(identity: str) -> None:
         handoffs = [item for item in greeting_request["input"]
                     if item.get("role") == "user" and "[handoff del-4]" in str(item.get("content"))]
         assert len(handoffs) == 1, handoffs
+        # The writer finishes after the call: the next call starts with its Memory.
+        OrchestratorMock.memory_gate.set()
+        await wait_for(lambda: any((item.get("memory") or {}).get("text") == EARLY_MEMORY for item in conversations()), 15)
         await mocks.acp.send(json.dumps({
             "jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission",
             "params": {
@@ -1314,6 +1349,10 @@ async def run_protocol(identity: str) -> None:
         await wait_for(lambda: "3 steps in a row failed for Juniper, the latest while looking something up on the web; its turn is still going." in beats(), 10)
         await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "f-inspect" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
         failed_at = len(beats())
+        # The compaction the first call's hangup did not wait for leads the second call's context.
+        second = next(payload["input"] for _, payload in OrchestratorMock.requests
+                      if any("[handoff del-f]" in str(item.get("content")) for item in payload["input"]))
+        assert second[0] == {"role": "developer", "content": f"[memory] {EARLY_MEMORY}"}, second[0]
         assert "git status" not in beats() and "--short" not in beats() and "(" not in beats(), beats()
         assert '"followed":true' in OrchestratorMock.user_message("turn_failed")
         failed = OrchestratorMock.tool_output("f-inspect")
@@ -1481,7 +1520,7 @@ async def run_protocol(identity: str) -> None:
             assert browser_state["showing_now"] == {"view": "files", "path": "/home/daytona/REPORT.md"}, browser_state
             assert browser_state["page_stale"] is True, browser_state
             assert state["earcon_style"] == "tonal", state
-            assert state["context_tokens"] == 1 and state["memory"] is None, state
+            assert state["context_tokens"] == 1 and state["memory"]["chars"] == len(EARLY_MEMORY) and "compacting" not in state["memory"], state
             # The Orchestrator draws a board; the caller answers it on the page; it hears the answer.
             await mocks.send_live(dtmf("5"))
             board = (await recv_type(browser, "board", 15))["board"]
@@ -1499,28 +1538,20 @@ async def run_protocol(identity: str) -> None:
             await stale.send(json.dumps({"type": "board_error", "id": board["id"], "error": "line 2: unknown component Image (left out)"}))
             await wait_for(lambda: any("whiteboard_error" in str(item.get("content")) and "out of date" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
             await stale.close()
+            OrchestratorMock.memory_gate.clear()
             await browser.send(json.dumps({"type": "board_answer", "id": board["id"], "answer": {"button": "Send", "values": {"approach": "Refactor"}, "note": ""}}))
             answered = (await recv_type(browser, "board"))["board"]
             assert answered["status"] == "answered" and answered["answer"]["values"] == {"approach": "Refactor"}, answered
             await wait_for(lambda: any("whiteboard_answer" in str(item.get("content")) and "Refactor" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-            # The Orchestrator compacts after the answer: an over-long Memory is refused, then the
-            # next request leads with the pinned Memory and has shed the first call, with every
-            # function call still paired with its output.
+            # The Orchestrator compacts after the answer: an over-long focus is refused, then the
+            # compaction starts and the Voice Frontend is briefed; its Memory writer is held while
+            # the call goes on.
             await wait_for(lambda: any(item.get("call_id") == "cc-memory" and item.get("type") == "function_call_output" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-            refused_memory = OrchestratorMock.tool_output("cc-long")
-            assert refused_memory["ok"] is False and "condense" in refused_memory["error"], refused_memory
-            compacted = next(payload["input"] for _, payload in OrchestratorMock.requests if any(item.get("call_id") == "cc-memory" and item.get("type") == "function_call_output" for item in payload["input"]))
-            assert compacted[0] == {"role": "developer", "content": f"[memory] {MEMORY_TEXT}"}, compacted[0]
-            assert not any(item.get("call_id") == "h1-create" for item in compacted), "the first call survived compaction"
-            assert compacted[1].get("role") == "user", compacted[1]
-            calls_in = {item["call_id"] for item in compacted if item.get("type") == "function_call"}
-            outputs_in = {item["call_id"] for item in compacted if item.get("type") == "function_call_output"}
-            assert calls_in == outputs_in and "cc-memory" in calls_in, (calls_in ^ outputs_in)
-            assert (await recv_type(browser, "memory"))["memory"]["text"] == MEMORY_TEXT
-            diagnostics = next(item for item in await asyncio.to_thread(conversations) if item.get("memory"))
-            assert diagnostics["memory"]["text"] == MEMORY_TEXT and diagnostics["memory_versions"][-1]["chars"] == len(MEMORY_TEXT), diagnostics["memory_versions"]
-            assert diagnostics["context_archives"][-1]["reason"] == "compaction", diagnostics["context_archives"]
-            assert not any(item.get("call_id") == "h1-create" for item in diagnostics["orchestrator_context"])
+            refused_focus = OrchestratorMock.tool_output("cc-long")
+            assert refused_focus["ok"] is False and "at most 500" in refused_focus["error"], refused_focus
+            await next_matching(mocks.live_messages, appended("commentary", COMPACTION_BRIEF))
+            await wait_for(lambda: len(OrchestratorMock.memory_requests) == 2, 10)
+            assert OrchestratorMock.memory_requests[1]["input"][0] == {"role": "developer", "content": f"[memory] {EARLY_MEMORY}"}
             # A second answer to the same board is ignored.
             await browser.send(json.dumps({"type": "board_answer", "id": board["id"], "answer": {"values": {"approach": "Quick fix"}}}))
             # Media viewers fetch raw bytes with the credential in a header, never the URL.
@@ -1583,6 +1614,23 @@ async def run_protocol(identity: str) -> None:
             await wait_for(lambda: any(item.get("call_id") == "kA-evict-5" and item.get("type") == "function_call_output" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
             icon = OrchestratorMock.tool_output("kA-evict-5")
             assert icon["ok"] and "images_not_captured" not in icon, icon
+            # Five boards drawn while the writer was held: the cut, once it lands, keeps them and
+            # sheds only what the writer read before the current call.
+            assert not OrchestratorMock.memory_gate.is_set()
+            OrchestratorMock.memory_gate.set()
+            assert (await recv_type(browser, "memory", 15))["memory"]["text"] == MEMORY_TEXT
+            await wait_for(lambda: any("context_compacted" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
+            compacted = next(payload["input"] for _, payload in OrchestratorMock.requests if any("context_compacted" in str(item.get("content")) for item in payload["input"]))
+            assert compacted[0] == {"role": "developer", "content": f"[memory] {MEMORY_TEXT}"}, compacted[0]
+            assert not any(item.get("call_id") == "h1-create" for item in compacted), "the first call survived compaction"
+            assert compacted[1].get("role") == "user", compacted[1]
+            calls_in = {item["call_id"] for item in compacted if item.get("type") == "function_call"}
+            outputs_in = {item["call_id"] for item in compacted if item.get("type") == "function_call_output"}
+            assert calls_in == outputs_in and {"cc-memory", "kA-evict-1", "kA-evict-5"} <= calls_in, (calls_in ^ outputs_in, calls_in)
+            diagnostics = next(item for item in await asyncio.to_thread(conversations) if item.get("memory"))
+            assert diagnostics["memory"]["text"] == MEMORY_TEXT and diagnostics["memory_versions"][-1]["chars"] == len(MEMORY_TEXT), diagnostics["memory_versions"]
+            assert diagnostics["context_archives"][-1]["reason"] == "compaction", diagnostics["context_archives"]
+            assert not any(item.get("call_id") == "h1-create" for item in diagnostics["orchestrator_context"])
             assert (await asyncio.to_thread(asset, svg_hash))[0] == 404, "an evicted board's asset is gone"
             status, headers, body = await asyncio.to_thread(asset, hashlib.sha256(PNG_BYTES).hexdigest())
             assert status == 200 and body == PNG_BYTES and headers.get("content-type") == "image/png", "one asset shared by five boards"
