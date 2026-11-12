@@ -2015,6 +2015,19 @@ def roaming_admission_checks(base_url: str, token: str) -> None:
     require(identity("CA_RA_SLOW")["outcome"] == "expired"
             and d1_local("SELECT failures FROM roaming_attempts WHERE call_sid = 'CA_RA_SLOW'")[0]["failures"] == 0, "expired attempt counted")
 
+    # Failures by other calls that land after an attempt began pause its admission (one statement decides).
+    form = call("CA_RA_LATE", STRANGER_PHONE)
+    body = claim(form, shadow_handle)
+    body = answer(body, form, 1, 8000, user=others[1])
+    body = answer(body, form, 2, 8000, user=others[1])
+    d1_local(f"INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at, failures) VALUES "
+             + ", ".join(f"('CA_RA_L{i}', {others[1]}, '{STRANGER_PHONE_2}', unixepoch() - 30, 1)" for i in range(3)))
+    body = answer(body, form, 3, 8000, user=others[1])
+    require(body == f'<Response><Say voice="Polly.Joanna">Strong voice match. Calls as {shadow_handle} from other phones are paused right now. '
+            "Goodbye.</Say><Hangup/></Response>", f"pause during an attempt: {body}")
+    require(identity("CA_RA_LATE")["outcome"] == "paused" and d1_local("SELECT user_id FROM voice_calls WHERE call_sid = 'CA_RA_LATE'")[0]["user_id"] is None
+            and d1_local("SELECT admitted_at FROM roaming_attempts WHERE call_sid = 'CA_RA_LATE'")[0]["admitted_at"] is None, "admitted while paused")
+
     # A name that is no Handle and no Invite Code: the retry still offers both.
     form = call("CA_RA_UNKNOWN", STRANGER_PHONE)
     body = claim(form, "purple monkey")

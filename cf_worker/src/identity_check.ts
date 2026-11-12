@@ -505,23 +505,36 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
   if (attempt) {
     // Past ROAMING_ACTIVE_SECONDS another call may hold the Handle, so this attempt ends
     // without a verdict: it can neither admit nor add a failure behind that call's pause check.
-    if (attempt.expired) {
+    // The writes below repeat the expiry condition, so the decision and the write are one statement.
+    const expired = async () => {
       await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "expired", enforcement: "deny", judged, passed }, false);
       return after("roaming", "That took too long. Call again to start over. Goodbye.");
-    }
+    };
+    if (attempt.expired) return expired();
     // The first unmatched voice fails the attempt, since no later round could change the
     // decision and each would be one more level to tune an impersonation against.
     // Every judged round must have passed; by construction it has, since a failure ends here.
     if (verdict.outcome === "no_match" || passed !== judged) {
-      await env.DB.prepare("UPDATE roaming_attempts SET failures = failures + 1 WHERE call_sid = ? AND user_id = ?")
-        .bind(callSid, subject.id).run();
+      const failed = await env.DB.prepare(
+        "UPDATE roaming_attempts SET failures = failures + 1 WHERE call_sid = ? AND user_id = ? AND started_at > unixepoch() - ?",
+      ).bind(callSid, subject.id, ROAMING_ACTIVE_SECONDS).run();
+      if (!failed.meta.changes) return expired();
       await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "failed", enforcement: "deny", judged, passed }, false);
       return after("roaming", `${verdict.spoken} I can't let you in as ${subject.handle} this time. Goodbye.`);
     }
     if (judged < ROAMING_CHALLENGES) return next(verdict.spoken, judged, passed);
-    // Failures by other calls since this attempt began still pause it.
-    const paused = await roamingPause(env, subject.id, String(form.get("From") ?? ""));
-    if (paused) {
+    // Failures by other calls since this attempt began still pause it: the pause, the expiry, and
+    // the admission are one statement, so no failure can land between the check and the write.
+    const phone = String(form.get("From") ?? "");
+    const admitted = await env.DB.prepare(
+      `UPDATE roaming_attempts SET admitted_at = unixepoch()
+        WHERE call_sid = ?1 AND user_id = ?2 AND started_at > unixepoch() - ?3
+          AND (SELECT COUNT(*) FROM roaming_attempts WHERE user_id = ?2 AND failures > 0 AND started_at > unixepoch() - ?4) < ?5
+          AND (SELECT COUNT(*) FROM roaming_attempts WHERE phone_number = ?6 AND failures > 0 AND started_at > unixepoch() - ?4) < ?7`,
+    ).bind(callSid, subject.id, ROAMING_ACTIVE_SECONDS, ROAMING_WINDOW_SECONDS, ROAMING_FAILURES_PER_HANDLE, phone, ROAMING_FAILURES_PER_NUMBER).run();
+    if (!admitted.meta.changes) {
+      const paused = await roamingPause(env, subject.id, phone);
+      if (!paused) return expired();
       await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "paused", paused, enforcement: "deny", judged, passed }, false);
       return after("roaming", `${verdict.spoken} Calls as ${subject.handle} from other phones are paused right now. Goodbye.`);
     }
@@ -534,15 +547,13 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
 }
 
 /**
- * Three passed challenges: the call becomes the named User's, with a Home call's access, and
- * the Home is unchanged. The User is written before the admission, so a failure between the two
- * leaves an unadmitted call, which /voice resolves by its number as before.
+ * Three passed challenges, once the attempt's admitted_at is written: the call becomes the named
+ * User's, with a Home call's access, and the Home is unchanged. The User is written before the
+ * admission, so a failure between the two leaves an unadmitted call, which /voice resolves by
+ * its number as before.
  */
 async function admitRoaming(env: Env, callSid: string, log: Log, subject: Subject, spoken: string, judged: number): Promise<string> {
-  await env.DB.batch([
-    env.DB.prepare("UPDATE voice_calls SET user_id = ? WHERE call_sid = ?").bind(subject.id, callSid),
-    env.DB.prepare("UPDATE roaming_attempts SET admitted_at = unixepoch() WHERE call_sid = ? AND user_id = ?").bind(callSid, subject.id),
-  ]);
+  await env.DB.prepare("UPDATE voice_calls SET user_id = ? WHERE call_sid = ?").bind(subject.id, callSid).run();
   await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "passed", enforcement: "admit_roaming", judged,
     passed: judged, admitted: true }, false);
   return Say(`${spoken} Welcome, ${subject.handle}.`) + CONNECT;
