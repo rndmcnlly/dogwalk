@@ -1200,16 +1200,33 @@ def ulaw_byte(target: int) -> int:
     return min(range(256), key=lambda encoded: abs(decode(encoded) - target))
 
 
-def practice_stream(base_url: str, path: str, token: str, round_number: int, seconds: float, first_sample: int, heard, take: int = 0) -> None:
-    """One round's caller-only stream: constant audio whose first sample tells speaker_mock.js
-    what to answer, then the Gather's action (heard), then the stop event its <Stop> produces."""
+def steady_audio(seconds: float, first_sample: int) -> bytes:
+    """Constant audio from the first frame: the endpointer never hears an answer end in it, so
+    the round is scored at the stream's stop. Its sample tells speaker_mock.js what to answer."""
+    return bytes([ulaw_byte(first_sample)]) * int(seconds * 8000)
+
+
+def answer_audio(first_sample: int, *parts: tuple[float, bool]) -> bytes:
+    """A quiet line whose first sample tells speaker_mock.js what to answer, then (seconds,
+    speech) parts: speech is a loud buzz, anything else silence. The endpointer hears an answer
+    end 0.7 s into a silence after at least a second of speech."""
+    loud, quiet = ulaw_byte(6000), ulaw_byte(0)
+    audio = bytearray([ulaw_byte(first_sample)]) + bytes([quiet]) * 7999
+    for seconds, speech in parts:
+        audio += bytes([loud if speech else quiet]) * int(seconds * 8000)
+    return bytes(audio)
+
+
+def practice_stream(base_url: str, path: str, token: str, round_number: int, audio: bytes, heard, take: int = 0) -> None:
+    """One round's caller-only stream, then the Gather's action (heard), then the stop event its
+    <Stop> produces."""
     start = {"event": "start", "start": {"accountSid": TEST_ACCOUNT, "callSid": "CA_PRACTICE",
              "mediaFormat": {"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1},
              "customParameters": {"round": str(round_number), "take": str(take)}}}
-    payload = base64.b64encode(bytes([ulaw_byte(first_sample)] * 160)).decode()
     with open_stream(base_url, path, token, scheme="wss") as ws:
         ws.send(json.dumps(start))
-        for frame in range(int(seconds * 50)):
+        for frame in range(len(audio) // 160):
+            payload = base64.b64encode(audio[frame * 160:(frame + 1) * 160]).decode()
             ws.send(json.dumps({"event": "media", "media": {"track": "inbound", "timestamp": str(frame * 20), "payload": payload}}))
         heard()
         ws.send(json.dumps({"event": "stop", "stop": {"accountSid": TEST_ACCOUNT, "callSid": "CA_PRACTICE"}}))
@@ -1264,18 +1281,29 @@ def practice_checks(base_url: str, token: str) -> None:
                 f"round {number} hints: {hints} for {phrase}")
         return stream[1], action[1].replace("&amp;", "&")
 
-    def scored(number: int, body: str, seconds: float, first_sample: int) -> str:
+    def speculative_stored(number: int, seconds: float) -> None:
+        """Wait until the stream has stored the speculative score of its first `seconds` of audio."""
+        for _ in range(40):
+            rows = d1_local(f"SELECT spec_speech_seconds FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")
+            if rows and rows[0]["spec_speech_seconds"] == seconds:
+                return
+            time.sleep(0.25)
+        raise AssertionError(f"round {number}: no speculative score of {seconds} s before /heard")
+
+    def scored(number: int, body: str, audio: bytes, stored: float | None = None) -> str:
         stream, action = round_of(body, number)
         phrase = d1_local(f"SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]["phrase"]
         redirect = []
         def heard() -> None:
+            if stored is not None:
+                speculative_stored(number, stored)
             _, twiml = post(base_url, action, {**call, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)
             # The received cue plays before the wait for the level.
             match = re.fullmatch(rf'<Response><Stop><Stream name="practice-round-{number:02d}"/></Stop>{received_cue}'
                                  rf'<Redirect method="POST">(/voice/practice/result\?round={number}&amp;judged=\d+)</Redirect></Response>', twiml)
             require(match is not None, f"matched phrase: {twiml}")
             redirect.append(match[1].replace("&amp;", "&"))
-        practice_stream(base_url, stream, token, number, seconds, first_sample, heard)
+        practice_stream(base_url, stream, token, number, audio, heard)
         status, result = post(base_url, redirect[0], call, token)
         require(status == 200, f"result {number}: {status} {result}")
         return result
@@ -1290,20 +1318,20 @@ def practice_checks(base_url: str, token: str) -> None:
             and "/voice/practice/result" not in body, f"wrong phrase: {body}")
     require(stream_rejection(base_url, stream, token) == 409, "a skipped round accepted a stream")
     # Each level, said as words and never as a number.
-    body = scored(2, body, 3.0, 8000)
+    body = scored(2, body, steady_audio(3.0, 8000))
     require("Strong voice match. Here's another." in body and not any(re.search(r"\d", said) for said in re.findall(r"<Say[^>]*>([^<]*)</Say>", body)), f"strong: {body}")
     # MIN_SPEECH_SECONDS itself is enough to judge.
-    body = scored(3, body, 1.5, 6000)
+    body = scored(3, body, steady_audio(1.5, 6000))
     require("Voice matched. Here's another." in body, f"match: {body}")
-    body = scored(4, body, 3.0, 3000)
+    body = scored(4, body, steady_audio(3.0, 3000))
     require("Voice not matched. Here's another." in body, f"no match: {body}")
     # Too little speech, by the verifier's measure and by its insufficient-audio error.
-    body = scored(5, body, 1.2, 8000)
+    body = scored(5, body, steady_audio(1.2, 8000))
     require("Not enough to judge. Here's another." in body, f"short speech: {body}")
-    body = scored(6, body, 0.3, 8000)
+    body = scored(6, body, steady_audio(0.3, 8000))
     require("Not enough to judge. Here's another." in body, f"insufficient audio: {body}")
     # A 35 s answer is judged on its last 30 s, the verifier's maximum (the mock refuses more).
-    body = scored(7, body, 35.0, 6000)
+    body = scored(7, body, steady_audio(35.0, 6000))
     require("Voice matched. Here's another." in body, f"long answer: {body}")
     # "Say that again" replays the same phrase as a new take with its own stream, counting nothing;
     # the stopped take refuses a late stream.
@@ -1340,9 +1368,60 @@ def practice_checks(base_url: str, token: str) -> None:
 
     # A verifier error ends practice as unavailable and returns.
     status, body = post(base_url, "/voice/practice", call, token)
-    body = scored(1, body, 3.0, -8000)
+    body = scored(1, body, steady_audio(3.0, -8000))
     require("not available right now. Back to Dogwalk." in body and body.endswith('<Redirect method="POST">/voice</Redirect></Response>'),
             f"verifier error: {body}")
+
+    # Speculative scoring: the stream starts the verifier when the answer ends (0.7 s of silence
+    # after a second of speech), before /heard. The mock's speech seconds are the audio length it
+    # was given, so they show which audio was scored.
+    status, body = post(base_url, "/voice/practice", call, token)
+    # The answer ends at 3.7 s; the stream runs to 4.0 s. The score stored at the end, before
+    # /heard, is used.
+    body = scored(1, body, answer_audio(8000, (2.0, True), (1.0, False)), stored=3.7)
+    require("Strong voice match. Here's another." in body, f"speculative score: {body}")
+    # The caller keeps talking after a pause long enough to end the answer: a fresh score starts
+    # at the second end (5.6 s) and only it is used.
+    body = scored(2, body, answer_audio(6000, (2.0, True), (0.9, False), (1.0, True), (1.0, False)), stored=5.6)
+    require("Voice matched. Here's another." in body, f"restarted speculative score: {body}")
+    # Talking again just before the stream stops leaves the first score stale and no second end:
+    # the whole stream (5.2 s) is scored at the stop.
+    body = scored(3, body, answer_audio(3000, (2.0, True), (0.9, False), (1.0, True), (0.3, False)))
+    require("Voice not matched. Here's another." in body, f"stale speculative score: {body}")
+    # A fifth end of the answer in one take starts no verifier call: the whole stream (13 s) is
+    # scored at the stop.
+    body = scored(4, body, answer_audio(8000, *[(1.2, True), (0.8, False)] * 6))
+    require("Strong voice match. Here's another." in body, f"speculative score limit: {body}")
+
+    def discarded(number: int, body: str, transcript: str, take: int = 0) -> str:
+        """Stream an answer, wait for its stored speculative score, then send a transcript that
+        is not a matched phrase: the score must be gone, never used or logged."""
+        stream, action = round_of(body, number, take=take)
+        answer = []
+        def heard() -> None:
+            speculative_stored(number, 3.7)
+            answer.append(post(base_url, action, {**call, "SpeechResult": transcript, "Confidence": "0.9"}, token)[1])
+        practice_stream(base_url, stream, token, number, answer_audio(8000, (2.0, True), (1.0, False)), heard, take=take)
+        time.sleep(1)
+        row = d1_local("SELECT state, spec_seq, spec_started_ms, spec_cosine, spec_speech_seconds, spec_error, cosine, speculative "
+                       f"FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = {number}")[0]
+        require(row == {"state": "skipped", "spec_seq": None, "spec_started_ms": None, "spec_cosine": None, "spec_speech_seconds": None,
+                        "spec_error": None, "cosine": None, "speculative": 0}, f"round {number} kept a speculative score: {row}")
+        return answer[0]
+
+    # A wrong phrase discards the score its answer started.
+    phrase = d1_local("SELECT phrase FROM practice_rounds WHERE call_sid = 'CA_PRACTICE' AND round = 5")[0]["phrase"]
+    body = discarded(5, body, phrase.rstrip(".").rsplit(" ", 1)[0] + " cow")
+    require("That wasn't the sentence." in body, f"wrong phrase after an answer end: {body}")
+    # So does a repeat request past the replay limit.
+    for take in (1, 2, 3):
+        _, action = round_of(body, 6, take=take - 1)
+        status, body = post(base_url, action, {**call, "SpeechResult": "Again.", "Confidence": "0.9"}, token)
+    body = discarded(6, body, "Pardon?", take=3)
+    require("No more repeats of that one." in body, f"repeat limit after an answer end: {body}")
+    _, action = round_of(body, 7)
+    status, body = post(base_url, action, {**call, "SpeechResult": "Stop.", "Confidence": "0.9"}, token)
+    require("Practice over." in body, f"stop after speculative rounds: {body}")
 
     # Both cues are public 8 kHz WAVs Twilio can cache; the received cue is 210 ms, unlike the 150 ms tone.
     for path, ms in (("/voice/practice/tone.wav", 150), ("/voice/practice/received.wav", 210)):
@@ -1355,9 +1434,18 @@ def practice_checks(base_url: str, token: str) -> None:
     rows = d1_local("SELECT event, detail FROM call_activity WHERE call_sid = 'CA_PRACTICE' AND event LIKE 'practice.%' ORDER BY id")
     rounds = [json.loads(row["detail"]) for row in rows if row["event"] == "practice.round"]
     require([r["outcome"] for r in rounds] == ["wrong_phrase", "strong_match", "match", "no_match", "not_enough_speech",
-                                               "not_enough_speech", "match", "repeat_limit", "silent", "silent", "unscored"], f"practice rounds: {rounds}")
-    require(rounds[1]["speech_seconds"] == 3.0 and 0.79 < rounds[1]["cosine"] < 0.82 and isinstance(rounds[1].get("wait_ms"), int),
-            f"scored round detail: {rounds[1]}")
+                                               "not_enough_speech", "match", "repeat_limit", "silent", "silent", "unscored",
+                                               "strong_match", "match", "no_match", "strong_match", "wrong_phrase", "repeat_limit"],
+            f"practice rounds: {rounds}")
+    # Steady audio never ends an answer, so it is scored at the stop, without a head start.
+    require(rounds[1]["speech_seconds"] == 3.0 and 0.79 < rounds[1]["cosine"] < 0.82 and isinstance(rounds[1].get("wait_ms"), int)
+            and rounds[1]["speculative"] is False and "head_start_ms" not in rounds[1], f"scored round detail: {rounds[1]}")
+    speculative = rounds[11:17]
+    require([(r.get("speculative"), r.get("speech_seconds")) for r in speculative[:4]] == [(True, 3.7), (True, 5.6), (False, 5.2), (False, 13.0)]
+            and all(r.get("head_start_ms", 0) > 0 for r in speculative[:2]) and not any("head_start_ms" in r for r in speculative[2:4]),
+            f"speculative rounds: {speculative}")
+    require(not any({"cosine", "speech_seconds", "error", "speculative", "head_start_ms"} & set(r) for r in speculative[4:]),
+            f"a discarded round logged a score: {speculative[4:]}")
     # Too little speech keeps the verifier's score for calibration; insufficient audio has none.
     require(rounds[4]["speech_seconds"] == 1.2 and 0.79 < rounds[4]["cosine"] < 0.82, f"short speech detail: {rounds[4]}")
     require(rounds[5]["cosine"] is None and rounds[5]["error"] == "insufficient-audio", f"insufficient audio detail: {rounds[5]}")
@@ -1367,8 +1455,8 @@ def practice_checks(base_url: str, token: str) -> None:
     ended = [json.loads(row["detail"]) for row in rows if row["event"] == "practice.ended"]
     require(ended[0]["reason"] == "stop" and ended[0]["judged"] == 4 and ended[0]["attempts"] == 9, f"practice.ended: {ended[0]}")
     events = [row["event"] for row in rows]
-    require(events.count("practice.started") == 3 and events.count("practice.ended") == 3 and "practice.unavailable" in events
-            and events.count("practice.repeat") == 3,
+    require(events.count("practice.started") == 4 and events.count("practice.ended") == 4 and "practice.unavailable" in events
+            and events.count("practice.repeat") == 6,
             f"practice activity: {events}")
 
 

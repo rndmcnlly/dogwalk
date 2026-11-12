@@ -376,8 +376,11 @@ pass. Correctness is deterministic and strict: every content word of the phrase
 (all but articles, possessives, and auxiliaries; prepositions count) must appear
 in the transcript, in order, with only plural inflection forgiven and extra
 words allowed between them. A mismatch, whether the caller misheard the prompt
-or the recognizer misheard the caller, is a wrong phrase: it is not scored and
-is never a voice failure. The recognizer is hinted with the phrase's words, so a
+or the recognizer misheard the caller, is a wrong phrase: any score of its audio
+is discarded, never used, spoken, or logged, and it is never a voice failure.
+Scoring may begin as soon as the answer ends, before the transcript arrives,
+because a score decides nothing until the phrase matches; if the caller keeps
+talking, only a score of the whole answer counts. The recognizer is hinted with the phrase's words, so a
 correct repetition comes back as them while a different word still comes
 through. A caller who asks to hear the sentence again ("repeat", "say that
 again", "pardon") in a short utterance hears the same phrase again, counted as
@@ -405,8 +408,8 @@ me", "test my voice"): the Voice Agent hands the call to a deterministic,
 speech-only loop that offers fresh phrases until the caller says stop or a round
 limit is reached, then returns the call to the Voice Agent. Each round follows
 the Identity Challenge's shape (tone, sentence, answer, received cue, level) and
-the Identity Check's rules: a transcript that does not match the phrase is not
-scored, too little speech to judge earns another phrase without counting, a
+the Identity Check's rules: a transcript that does not match the phrase has its
+score discarded, too little speech to judge earns another phrase without counting, a
 request to hear the sentence again replays it, and a
 scored round is spoken only as a level of voice match (strong, matched, or not
 matched), never as the raw score. The levels come from configured thresholds, the

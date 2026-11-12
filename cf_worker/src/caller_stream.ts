@@ -2,7 +2,8 @@
 // Donation (voice_donation.ts) keeps what arrives; Challenge Practice (challenge_practice.ts)
 // scores it and keeps nothing. Each round's TwiML starts a stream to a signed wss URL, so the
 // WebSocket lives only as long as one round: it buffers the mu-law frames in memory and hands
-// the decoded samples to its caller when the stream stops or closes.
+// the decoded samples to its caller when the stream stops or closes. It can also report each
+// end of the caller's answer as it happens (AnswerEndpointer), so work can start before the stop.
 import type { Env } from "./types";
 
 export const SAMPLE_RATE = 8000;
@@ -146,6 +147,82 @@ export function answerReceivedCue(): Response {
   return cue(receivedWav);
 }
 
+// --- end of answer ------------------------------------------------------
+
+// Tuned (2026-11-11) on the car donation's eight phrase rounds and the 18-clip phone corpus:
+// every phrase answer gave exactly one end, at most 0.78 s of pause sat inside one answer
+// (one corpus clip, whose first part held under a second of speech), and the car line's floor
+// sat near 27 dB with speech frames at 45 to 65.
+const FRAME_SAMPLES = SAMPLE_RATE / 50; // 20 ms, one Twilio media frame
+/** A frame is speech when its energy (dB of mean square, 16-bit scale) clears both the noise floor plus this margin... */
+export const SPEECH_MARGIN_DB = 15;
+/** ...and this absolute level (about -50 dBFS), so a digitally silent line has a meaningful threshold. */
+export const SPEECH_MIN_DB = 40;
+/** Consecutive speech frames that start (or resume) talking, so a click or the tone's echo is not speech. */
+export const ONSET_FRAMES = 3;
+/** Trailing silence that ends an answer: 700 ms, under Gather's 1 s pause and over every pause inside a car phrase. */
+export const END_GAP_FRAMES = 35;
+/** Speech frames, over the whole stream, before any silence can end an answer: 1 s. */
+export const MIN_ANSWER_FRAMES = 50;
+// The floor tracks the minimum of the smoothed energy while the caller is not talking, rising
+// at most 3 dB a second, so it learns the line from the audio before the answer.
+const FLOOR_RISE_DB = 3 / 50;
+const SMOOTHING = 0.2;
+
+export interface AnswerEvent { kind: "end" | "resume"; at: number } // at: samples since the stream began
+
+/**
+ * A deterministic endpointer over a caller-only mu-law stream: "end" when an answer of at least
+ * a second of speech is followed by 700 ms of silence, and "resume" when talking starts again
+ * after an end. It is a hint for starting work early, never a judgment: the Gather's transcript
+ * still decides what the answer was.
+ */
+export class AnswerEndpointer {
+  private energy = 0;
+  private filled = 0;
+  private samples = 0;
+  private smoothed: number | null = null;
+  private floor = Infinity;
+  private talking = false;
+  private answered = false;
+  private run = 0;
+  private silence = 0;
+  private voiced = 0;
+
+  push(chunk: Uint8Array): AnswerEvent[] {
+    const events: AnswerEvent[] = [];
+    for (const byte of chunk) {
+      const sample = ULAW[byte];
+      this.energy += sample * sample;
+      this.samples++;
+      if (++this.filled < FRAME_SAMPLES) continue;
+      const kind = this.frame(10 * Math.log10(this.energy / FRAME_SAMPLES + 1));
+      this.energy = 0;
+      this.filled = 0;
+      if (kind) events.push({ kind, at: this.samples });
+    }
+    return events;
+  }
+
+  private frame(db: number): AnswerEvent["kind"] | null {
+    this.smoothed = this.smoothed === null ? db : this.smoothed + (db - this.smoothed) * SMOOTHING;
+    if (!this.talking) this.floor = Math.min(this.smoothed, this.floor + FLOOR_RISE_DB);
+    if (db > Math.max(this.floor + SPEECH_MARGIN_DB, SPEECH_MIN_DB)) {
+      this.voiced++;
+      this.silence = 0;
+      if (++this.run < ONSET_FRAMES || this.talking) return null;
+      this.talking = true;
+      return this.answered ? "resume" : null;
+    }
+    this.run = 0;
+    if (!this.talking || ++this.silence < END_GAP_FRAMES) return null;
+    this.talking = false;
+    if (this.voiced < MIN_ANSWER_FRAMES) return null;
+    this.answered = true;
+    return "end";
+  }
+}
+
 // --- Media Stream -------------------------------------------------------
 
 export interface StreamedAudio {
@@ -164,23 +241,36 @@ export interface StreamedAudio {
  * Twilio signature and the capability; this checks the start event (account, custom
  * parameters, format) and the frames. Anything malformed closes the socket and hands over
  * nothing. A stream that carried audio is decoded and passed to `ended` inside waitUntil,
- * with `complete` false when the socket closed without a stop event.
+ * with `complete` false when the socket closed without a stop event. With `answer`, an
+ * AnswerEndpointer watches the audio as it arrives: each end of an answer hands over the
+ * samples so far, and talking again after one is reported as a resume.
  */
 export function acceptCallerStream(
   ctx: ExecutionContext,
   expect: { account: string; parameters: Record<string, string>; maxSeconds: number },
   ended: (audio: StreamedAudio) => Promise<void>,
+  answer?: { end: (samples: Int16Array) => void; resume: () => void },
 ): Response {
   const [client, server] = Object.values(new WebSocketPair());
   server.accept();
   const frames: Uint8Array[] = [];
   const limit = expect.maxSeconds * SAMPLE_RATE;
+  const endpointer = answer ? new AnswerEndpointer() : null;
   let bytes = 0, count = 0, gapMs = 0, truncated = false;
   let startedAt: string | null = null;
   let settled = false;
   let resolveDone = () => {};
   ctx.waitUntil(new Promise<void>((resolve) => { resolveDone = resolve; }));
 
+  const decoded = () => {
+    const samples = new Int16Array(bytes);
+    let offset = 0;
+    for (const frame of frames) {
+      for (let i = 0; i < frame.length; i++) samples[offset + i] = ULAW[frame[i]];
+      offset += frame.length;
+    }
+    return samples;
+  };
   const append = (chunk: Uint8Array) => {
     const room = limit - bytes;
     if (chunk.length > room) truncated = true;
@@ -188,6 +278,10 @@ export function acceptCallerStream(
     const kept = chunk.length > room ? chunk.subarray(0, room) : chunk;
     frames.push(kept);
     bytes += kept.length;
+    for (const event of endpointer?.push(kept) ?? []) {
+      if (event.kind === "end") answer?.end(decoded());
+      else answer?.resume();
+    }
   };
   const discard = (code: number, reason: string) => {
     if (settled) return;
@@ -201,12 +295,7 @@ export function acceptCallerStream(
     settled = true;
     try {
       if (startedAt && bytes > 0) {
-        const samples = new Int16Array(bytes);
-        let offset = 0;
-        for (const frame of frames) {
-          for (let i = 0; i < frame.length; i++) samples[offset + i] = ULAW[frame[i]];
-          offset += frame.length;
-        }
+        const samples = decoded();
         frames.length = 0;
         await ended({
           samples, complete, frames: count, seconds: bytes / SAMPLE_RATE, inserted_gap_ms: gapMs, truncated,
