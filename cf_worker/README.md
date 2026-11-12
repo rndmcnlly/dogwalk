@@ -85,8 +85,10 @@ A daily cron pass (`17 10 * * *`, `SANDBOX_REAP_CRON` in `src/index.ts`) looks
 for Sandbox Assignments whose User has made no Voice Call for
 `SANDBOX_REAP_AGE_DAYS` (default 30, minimum 1; the assignment's creation counts
 when there are no calls) and none in progress. It handles at most ten per pass,
-oldest first. `SANDBOX_REAP_MODE` ships as `dry-run`: the pass only audits
-`sandbox.reap.candidate`. Any value other than `delete` is a dry run.
+oldest first. `SANDBOX_REAP_MODE` is `delete`. Any other value (such as
+`dry-run`, the mode reaping first shipped in) makes the pass only audit
+`sandbox.reap.candidate`. The pass audits nothing when it finds nothing; to see
+that it ran, look for the `17 10 * * *` trigger in Workers Logs.
 
 In `delete` mode, reaping is one D1 batch that rechecks idleness (counting an
 in-progress call from the User's Home that `/voice` has not yet linked): it
@@ -128,7 +130,7 @@ npx wrangler d1 execute dogwalk --remote --command \
      FROM sandbox_deletions WHERE deleted_at IS NULL"
 ```
 
-See the candidates before turning deletion on:
+Recent reaping, candidates included when in a dry run:
 
 ```sh
 npx wrangler d1 execute dogwalk --remote --command \
@@ -138,9 +140,13 @@ npx wrangler d1 execute dogwalk --remote --command \
 
 Each row's `detail` names `user_id`, `provider_id`, `last_call_at`, and
 `idle_days`. Join `user_id` to `users.handle` to recognize whose Sandbox it is.
-To turn deletion on, set `SANDBOX_REAP_MODE = "delete"` under `[vars]` in
+To pause deletion, set `SANDBOX_REAP_MODE = "dry-run"` under `[vars]` in
 `wrangler.toml` and deploy (or change the variable in the Cloudflare dashboard,
-which the next `wrangler deploy` overwrites with the file's value). In production a pass
+which the next `wrangler deploy` overwrites with the file's value). A reap
+already started stays started. A pause applies to passes that start after the
+deploy: one already running keeps its `delete` mode until it finishes, and
+Daytona completes deletions it has accepted. Later passes start no reaps and
+send no deletions, and resume pending deletions once `delete` is back. In production a pass
 runs only on that schedule, so the first candidates appear after the next 10:17
 UTC following a deploy. Locally, `wrangler dev --test-scheduled` exposes
 `/__scheduled?cron=17+10+*+*+*`, which the smoke test uses.

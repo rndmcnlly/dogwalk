@@ -904,7 +904,7 @@ def by_event(events: list[tuple[str, dict]], name: str) -> dict[int, dict]:
 
 
 def reap_dry_run_checks(base_url: str) -> dict[str, int]:
-    """The default mode only audits candidates: no provider call, no assignment or deletion change."""
+    """A dry run only audits candidates: no provider call, no assignment or deletion change."""
     users = seed_reap_fixture()
     before, deletions = reap_assignments(), reap_deletions()
     DaytonaMock.deleted.clear()
@@ -1812,7 +1812,8 @@ def main() -> int:
     # A private dev registry, shared by both Workers this run starts, so no other worktree's
     # wrangler dev binds to this speaker mock.
     registry = tempfile.mkdtemp(prefix="dogwalk-wrangler-registry-")
-    process = start_worker(wrangler, registry)
+    # Pinned to a dry run whatever wrangler.toml deploys, so the reaping checks start without deleting.
+    process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:dry-run")
     try:
         if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
             print("wrangler dev did not start", file=sys.stderr)
@@ -1822,7 +1823,7 @@ def main() -> int:
         )
         if result:
             return result
-        # Sandbox reaping: the configured default is a dry run; delete mode needs a restart.
+        # Sandbox reaping: the dry run first, then delete mode, which needs a restart.
         reap_users = reap_dry_run_checks(DEFAULT_LOCAL)
         stop_worker(process)
         process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:delete")
