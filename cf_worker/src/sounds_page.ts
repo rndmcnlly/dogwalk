@@ -230,7 +230,6 @@ const PROMPTS: Record<PromptName, { title: string; text: string }> = {
   menu_restart_confirm: { title: "Confirm restart", text: "Restarting stops running work. Press one again to confirm." },
   menu_restarting: { title: "Restarting", text: "Restarting the sandbox." },
   menu_back: { title: "Back to the conversation", text: "Back." },
-  pairing_cue: { title: "Pairing tones next", text: "Pairing tones." },
 };
 
 const HTML_CACHE = "public, max-age=300";

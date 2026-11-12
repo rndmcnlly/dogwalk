@@ -524,7 +524,7 @@ Managed Session creation, asynchronous Prompt Turns, session inspection, the
 end-of-call welcome, a returning caller's composed Opening with caller-ID and
 since-last-call clauses, `session/resume` on reconnect with a cached preview
 URL, the keypad conventions and System Menu, voice-set Earcon Style, browser
-pairing end to end (Pairing Tones decoded from the played fixture, claim, single
+pairing end to end (spoken code allocation, typed claim, single
 use, keypad acceptance, status and file reads over the browser socket, path
 confinement, refusal, and unpairing), and call termination without
 consuming provider traffic.
@@ -595,7 +595,6 @@ takes a minute or two." and the Orchestrator loads the `first-call-tour` skill.
 | Conversation | other | `keypad` harness event to the Orchestrator with the conversation since the last handoff |
 | Recording | `#` / `*` | Save / discard |
 | Pairing confirmation | `1` / `*` | Accept / refuse the browser that claimed the Pairing Code |
-| Pairing Tones playing | any | Ignored (until 0.5 s after), so echoes read back as presses cannot act |
 
 The System Menu is a deterministic state machine in the Durable Object, kept for
 what must work when the Voice Agent cannot hear or think straight: it mutes the
@@ -700,28 +699,60 @@ strictly durable unattended turns.
 
 ## Paired Browser
 
+Before deploying spoken pairing, apply `migrations/2026-11-12-spoken-pairing.sql`
+to D1. It discards pending acoustic codes and removes decode-failure telemetry,
+but does not touch accepted browser credentials in Durable Object storage:
+
+```bash
+npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-12-spoken-pairing.sql
+```
+
+For an existing local D1 database, apply the same migration before running the
+test suites (`schema.sql` alone does not replace an existing table):
+
+```bash
+npx wrangler d1 execute dogwalk --local --file migrations/2026-11-12-spoken-pairing.sql
+```
+
 An optional, read-only second surface (`../DOMAIN.md`, Paired Browser). The
 caller asks to pair; the `pair-browser` Voice Agent Skill walks them through
-opening `https://dogwalk.tools/pair` on another device and pressing Listen, then
-the Orchestrator calls `pair_browser`. The Durable Object stores a fresh Pairing
-Code's hash in D1 `pairing_codes` (90 s, single use), waits for a lull, and
-plays a spoken "Pairing tones." cue (after the Voice Frontend has finished
-speaking) and then the Pairing Tones (`src/pairing.ts`: 10 random bytes plus 6
-Reed-Solomon parity bytes over GF(256), 32 DTMF symbols at a `baud` the
-Orchestrator picks from 4, 6, 8, 12, 16, default 8, so four seconds; each tone
-fills 60% of its slot, at most 70 ms, and the rest is silence so room echoes
-decay). The page (`src/pair_page.ts`) decodes with a Goertzel AudioWorklet,
-tries each allowed rate against the frame's length, runs a symbol clock that
-marks unclear slots as erasures, and claims only Reed-Solomon decodes with
-parity to spare. `POST /pair/claim` consumes the code row and
+opening `https://dogwalk.tools/pair`, then the Orchestrator calls `pair_browser`
+with no arguments. The Durable Object allocates a fresh Wormhole-style
+`number-word-word` Pairing Code (`src/pairing.ts`), retrying collisions on its
+1–999 Nameplate prefix. D1 `pairing_codes` stores the unique `nameplate`,
+`code_hash` (SHA-256 of the full code), `identity_hash`, `expires_at`, and
+`attempts` (initially zero), never the code text. It replaces the User's previous
+outstanding code and expires after 90 s. The tool returns the code to the
+Orchestrator, which has the Voice Frontend say it clearly, including the hyphens;
+the caller types it into the page (`src/pair_page.ts`). No browser microphone,
+speakerphone, second device, or generated keypad tones are involved. This is
+spoken-code rendezvous, not the Magic Wormhole protocol. If the code expires
+without a claim, an expiry timer emits `pairing_unclaimed` and the Orchestrator
+offers a fresh code. Code text is excluded from diagnostic events, Memory, and
+Workspace files, apart from unavoidable spoken/model conversation content.
+`POST /pair/claim` consumes the code row and
 forwards the browser's description (user agent) and place (Cloudflare `cf`
 city and region) to the Durable Object, which has the Voice Frontend name them;
 `1` accepts, `*` refuses, 30 s lapses. The page polls
 `GET /pair/claim/status` with its ticket and receives its credential once.
 
+Two complete PGP wordlists give 16 secret bits (odd list first, matching
+Wormhole); the numeric Nameplate is public routing, not entropy. Entry accepts
+spaces or hyphens and ignores case. A transactional D1 batch counts at most five
+guesses per code across all source addresses, spends a successful code, and
+retires an exhausted code. `pairing_claim_budget` enforces 120 requests per
+fixed minute service-wide, including malformed requests. HTTPS and independent
+caller approval are required; the budgets do not prevent denial of service or
+overhearing. Run `node --experimental-strip-types pairing_test.ts` for code
+generation, normalization, and vocabulary checks; `voice_session_test.py`
+exercises claim and approval behavior through the Worker.
+
+`node --test pairing_lifecycle_test.mjs` exercises disconnect/claim interleaving
+and a D1 cleanup failure against the actual Voice Session methods.
+
 Credentials are `<identity>.<secret>`: the identity half routes to the
 sandbox-keyed Durable Object (and must have a Sandbox Assignment), and only the
-secret's hash is stored there, in `paired_browsers` (at most three; an hour idle,
+secret's hash is stored there, in `paired_browsers` (at most one; an hour idle,
 twelve hours in all; cleared on Sandbox replacement). The browser keeps it in
 `sessionStorage` and opens `wss://dogwalk.tools/pair/ws?for=<identity>`,
 authenticating in its first message. The socket uses the Hibernation API, so a
@@ -854,10 +885,6 @@ Chromium with `--no-sandbox`); a Sandbox from an older snapshot answers
 "the desktop is not installed on this sandbox yet" until it is back-patched.
 At 1 GiB the desktop with Chromium leaves little room for an Agent; snapshots from
 `dogwalk-acp-20261108-v2` on default to 4 GiB.
-
-The prototype that settled the signal design is
-`../prototypes/acoustic_pairing.html`: a transmitter, a live raw versus ECC
-decoder view, and a simulated phone line (mu-law, noise, burst loss).
 
 ## Diagnostics
 

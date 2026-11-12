@@ -6,9 +6,8 @@ import {
   type Clip, type EarconName, type EarconStyle, type PromptName,
 } from "./audio";
 import {
-  newBrowserSecret, newPairingCode, PAIRED_IDLE_MS, PAIRED_MAX_MS, PAIRING_BAUDS,
-  PAIRING_CODE_TTL_MS, PAIRING_CONFIRM_MS, PAIRING_DEFAULT_BAUD, PAIRING_UNCLAIMED_MS, pairingTones, sha256Hex, toHex,
-  type PairingBaud,
+  newBrowserSecret, newPairingCode, PAIRED_IDLE_MS, PAIRED_MAX_MS,
+  PAIRING_CODE_TTL_MS, PAIRING_CONFIRM_MS, sha256Hex, toHex,
 } from "./pairing";
 import {
   createInvitation, inspectRegistration, listInvitations, MAX_ACTIVE_INVITATIONS, normalizeRecipient,
@@ -239,14 +238,12 @@ interface SystemMenu {
   timer: ReturnType<typeof setTimeout>;
 }
 
-// Paired Browser (DOMAIN.md). A Pairing Code lives in memory for one call; a claim waits for
+// Paired Browser (DOMAIN.md). Only a Pairing Code's hash lives here; a claim waits for
 // the caller's key press; accepted browsers persist (by secret hash) until they expire.
 interface PairingAttempt {
   codeHash: string;
   expiresAt: number;
-  baud: PairingBaud;
-  startedAt: number;
-  // Armed once the tones have played; fires pairing_unclaimed if no claim follows.
+  // Fires pairing_unclaimed when the code expires without a claim.
   unclaimedTimer: ReturnType<typeof setTimeout> | null;
   claim: {
     secretHash: string;
@@ -592,16 +589,10 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "pair_browser",
-    description: "Play a fresh Pairing Code into the call as keypad tones, so a browser listening at dogwalk.tools/pair can pair as a read-only companion (session status and Workspace files). Call it as soon as the caller says the page is open and listening: a practiced caller often has it listening before they call, so then call it at once, with a say of at most a few words in the same response. A newcomer needs the pair-browser skill's walkthrough. The system waits for you to finish speaking, plays a spoken cue (\"Pairing tones.\"), then the tones; do not count down or announce them yourself. It returns after the tones have played, and a browser_pairing or pairing_unclaimed event follows. Pairing completes only if the caller then presses one.",
+    description: "Create a fresh, single-use Pairing Code for a read-only companion browser at dogwalk.tools/pair (session status and Workspace files). Returns a number-word-word code: say the returned code clearly for the caller to type into the page, including the hyphens, without inventing or changing it. The code expires after 90 seconds; another invocation replaces the old code. A newcomer needs the pair-browser skill's walkthrough. No microphone or second device is required. Pairing completes only if the caller then presses one after the system names the claiming browser; star refuses it.",
     parameters: {
       type: "object",
-      properties: {
-        baud: {
-          type: "integer",
-          enum: [...PAIRING_BAUDS],
-          description: "Symbols per second; 32 symbols are sent. 8 is the recommended default (4 seconds). If a page heard tones but failed to decode them (pairing_unclaimed reports decode_failures, or the page may say ECC failed), retry slower: 6, then 4 (8 seconds). 12 or 16 suit only clean lines.",
-        },
-      },
+      properties: {},
       additionalProperties: false,
     },
   },
@@ -783,11 +774,11 @@ How you are built: you are the Voice Frontend, quick and conversational. The Ses
 
 Match the caller's sophistication, especially on technical topics. With a newcomer, be plain and a little modest. With someone who talks fluently about agents, sessions, context, or delegation, answer in those terms; their literacy should make you more useful, not less.
 
-Speech: short natural phone speech, usually one sentence, at most two, except when reading permission choices. After answering, stop and listen. Never speak identifiers, URLs, file paths, or provider details; invite words and phone numbers the Session Orchestrator gives you for an invitation, and the caller's Handle (their two-word name on Dogwalk) and Handle options, are the exception: say them slowly and clearly, and repeat them on request. Refer to sessions by their aliases, and name only aliases the Session Orchestrator, a Following thought, or a status readout gave you in this call; never invent or guess one, and if you are unsure which sessions exist, think it over.
+Speech: short natural phone speech, usually one sentence, at most two, except when reading permission choices. After answering, stop and listen. Never speak identifiers, URLs, file paths, or provider details; invite words and phone numbers the Session Orchestrator gives you for an invitation, the caller's Handle (their two-word name on Dogwalk) and Handle options, and the Pairing Code and pairing address ("dogwalk dot tools slash pair"), are the exception: say them slowly and clearly, and repeat them on request. Speak a Pairing Code exactly as given, saying the hyphens between the number and words. Refer to sessions by their aliases, and name only aliases the Session Orchestrator, a Following thought, or a status readout gave you in this call; never invent or guess one, and if you are unsure which sessions exist, think it over.
 
 Delegation policy:
-Backend tools: starting work in sessions, checking on sessions and what they reported, finding earlier sessions that are not attached, attaching, renaming, or closing sessions, cancelling a session's current work, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its theme, leaning into the theme or interpreting it for something it does not cover (runtime dramaturgy), changing the theme or the sounds, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, pairing a browser and playing the pairing tones (again, or slower), showing things on the caller's paired screen, drawing on the whiteboard, inviting someone to Dogwalk, invitations and their status, who invited the caller, the caller's name on Dogwalk (their Handle) and choosing a new one, recovery controls, donating voice samples for research, practicing voice challenges (testing how well their voice matches), and ending the call.
-Generate <|SpawnThinking|> when: the caller asks for or about any of those, including questions about the setup or environment, or says a pairing page is open, listening, or ready, or asks you to lean into the theme, deepen the metaphor, or do runtime dramaturgy (climb the register at once, and think it over for the theme's sources), or corrects or cancels something they asked earlier, or wants to hang up.
+Backend tools: starting work in sessions, checking on sessions and what they reported, finding earlier sessions that are not attached, attaching, renaming, or closing sessions, cancelling a session's current work, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its theme, leaning into the theme or interpreting it for something it does not cover (runtime dramaturgy), changing the theme or the sounds, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, pairing a browser and creating a fresh spoken pairing code, showing things on the caller's paired screen, drawing on the whiteboard, inviting someone to Dogwalk, invitations and their status, who invited the caller, the caller's name on Dogwalk (their Handle) and choosing a new one, recovery controls, donating voice samples for research, practicing voice challenges (testing how well their voice matches), and ending the call.
+Generate <|SpawnThinking|> when: the caller asks for or about any of those, including questions about the setup or environment, or says a pairing page is open or ready, or asks you to lean into the theme, deepen the metaphor, or do runtime dramaturgy (climb the register at once, and think it over for the theme's sources), or corrects or cancels something they asked earlier, or wants to hang up.
 Do not generate <|SpawnThinking|> when: greeting, small talk, conversational repair, or repeating what you were already told.
 Generate <|SpawnThinking|> before giving an answer that depends on that work. Do not guess the result while waiting, and never answer "I don't have that detail" when a session could find out.
 
@@ -842,7 +833,7 @@ Rules:
 - Following: beginning a Prompt Turn follows that session, replacing any other. The Voice Frontend then hears its progress directly and narrates it in quiet moments without you. Use follow_managed_session when the caller wants to keep up with a session, and stop_following when they want to let it work unobserved; both are cheap. Following observes; it never directs the Agent. A bid event, or a turn or permission event with followed false, is a session you are not following asking for attention: mention it and offer to follow it, and do not call follow_managed_session unless the caller agrees.
 - call_started includes opening: the exact words already spoken to the caller at connection (a caller-ID verification clause, any Roaming as the caller from other phones since their last call from home, then a reorienting welcome written from your context at the end of the last call, plus anything that happened since). Do not repeat or paraphrase it. caller_id (the STIR/SHAKEN result), identity, and since_last_call are context; identity is how the caller got in through the voice check before you answered: via home or roaming, outcome and the level they already heard (or enrolled_now when they just enrolled their voice), and would_have, what an enforcing check would have done. shadow true means the check only reports and never kept anyone out. admitted true means the caller named their Handle from a phone that is not their home and passed three voice checks: they have their full access, and their home number is unchanged. Never recite it, a score, or a level; mention it only if the caller asks how the voice check went, and say plainly what it reported; brief the Voice Frontend with what it needs from them and wait for the caller. Say something unprompted only when the opening missed something the caller needs now. since_last_call.sandbox_reaped true means the sandbox was cleared after a long stretch without calls and this call has a fresh one: the old files, clones, and sessions are no longer reachable even where your Memory mentions them, while what your Memory knows about the caller still holds; when the caller asks for earlier work, say it was cleared and offer to set it up again. Use inspect_call_activity when the caller asks what happened to a call or connection; explain plainly what is known and what is not.
 - call_started with first_call true is the caller's first call after registering, and their sandbox is still being set up: load the first-call-tour skill and follow it.
-- agent_connecting means the sandbox is still starting, so session tools fail fast until agent_connected arrives (with the session count). Keep conversing meanwhile. If the caller asks for work, tell them briefly that the sandbox is still starting and that you will start as soon as it is ready, then do it when agent_connected arrives without asking again. Inspection and listing answer from the last known state throughout. agent_unavailable means the sandbox could not be reached; say so plainly and offer open_recovery_menu. sandbox_restart_requested means the caller restarted the sandbox from the keypad menu: running work stopped, and agent_connected follows when it is back. When you call pair_browser, call say with a few words in the same response, so the caller's request never goes unanswered. browser_pairing reports a Paired Browser outcome (see the pair-browser skill); the system already spoke it, so mention it again only if asked. pairing_unclaimed means no browser claimed the code within seconds of the tones, and the caller is waiting on you: say so at once. With decode_failures above zero, a page heard tones but could not decode them, so offer to play them again at a slower baud; with none, suggest speakerphone, more volume, holding the phone closer, and checking that the page says it is listening, then offer to play them again. browser_connected and browser_disconnected say whether the caller's paired page is open; call_started's paired_browser (and inspect_call_state at any time) says what it shows and recently showed, so a caller who was just reading something there and calls back for help can be met with it. browser_page_stale means the open page was loaded before an update and lacks newer features: with reloads_itself true it reloads on its own once idle; otherwise, or while paired_browser.page_stale stays true, ask the caller to reload the page before drawing on it. While the page is open, offer to put things on their screen with show_in_browser when reading them aloud would be clumsy (a report, a diff, an image, a table); otherwise, if the caller wants to see something, offer to pair a browser.
+- agent_connecting means the sandbox is still starting, so session tools fail fast until agent_connected arrives (with the session count). Keep conversing meanwhile. If the caller asks for work, tell them briefly that the sandbox is still starting and that you will start as soon as it is ready, then do it when agent_connected arrives without asking again. Inspection and listing answer from the last known state throughout. agent_unavailable means the sandbox could not be reached; say so plainly and offer open_recovery_menu. sandbox_restart_requested means the caller restarted the sandbox from the keypad menu: running work stopped, and agent_connected follows when it is back. pair_browser returns a fresh number-word-word code: call say after receiving the result and speak that exact code clearly, including the hyphens, for the caller to type into dogwalk.tools/pair. Never invent a code or put one in Memory. browser_pairing reports a Paired Browser outcome (see the pair-browser skill); the system already spoke it, so mention it again only if asked. pairing_unclaimed means the code expired after ninety seconds without a claim: say so promptly and offer a fresh code, not the expired one. browser_connected and browser_disconnected say whether the caller's paired page is open; call_started's paired_browser (and inspect_call_state at any time) says what it shows and recently showed, so a caller who was just reading something there and calls back for help can be met with it. browser_page_stale means the open page was loaded before an update and lacks newer features: with reloads_itself true it reloads on its own once idle; otherwise, or while paired_browser.page_stale stays true, ask the caller to reload the page before drawing on it. While the page is open, offer to put things on their screen with show_in_browser when reading them aloud would be clumsy (a report, a diff, an image, a table); otherwise, if the caller wants to see something, offer to pair a browser.
 - agent_termination on turn_failed or agent_unavailable says why the Agent process ended (failed_turns names turns it cut short). For out_of_memory, tell the caller plainly that the Agent was killed because the sandbox ran out of memory (give the limit), that a large install or build was likely running, and that work since its last report may be incomplete; offer to retry in smaller steps (fewer packages at once, less build parallelism) or note that a bigger sandbox is an operator change.
 - When the caller wants to hang up, call end_call alone: the Voice Frontend says its own goodbye before handing off, and the call ends at once. Before open_recovery_menu, call say with an explanation of what comes next in the same response.
 - Voice Donation: when the caller asks to donate voice samples for research, call say with a few words and start_voice_donation together in the same response. The donation flow explains what it records, asks for consent itself, and ends the call when it finishes, so do not describe or promise its terms. It records nothing for the caller's sessions and is not part of their account.
@@ -892,7 +883,6 @@ export class VoiceSession {
   private identityHash: string | null = null;
   private pairing: PairingAttempt | null = null;
   private pairedStatusTimer: ReturnType<typeof setTimeout> | null = null;
-  private pairingTonesPlaying = false;
   private feed: FeedEntry[] = [];
   private feedSeq = 0;
   private feedDirty = new Set<number>();
@@ -1557,8 +1547,6 @@ export class VoiceSession {
   private async receiveKeypad(key: string): Promise<void> {
     await this.record("voice.keypad", { key });
     this.feedPush("system", `keypad ${key}`, { lane: "keypad" });
-    // An echo of the pairing tones that the carrier reads back as presses must not act.
-    if (this.pairingTonesPlaying) return;
     if (this.recording) {
       if (key === "#") return this.finishRecording(true, "pound key");
       if (key === "*") return this.finishRecording(false, "star key");
@@ -1729,80 +1717,67 @@ export class VoiceSession {
 
   // --- Paired Browser ----------------------------------------------------------------
   //
-  // Menu five plays a fresh Pairing Code as keypad tones; a browser in earshot claims it at
-  // /pair/claim; the Voice Frontend names the browser and where it is; the caller presses one
+  // The Orchestrator speaks a fresh Pairing Code; the caller types it into /pair, which claims
+  // it at /pair/claim; the Voice Frontend names the browser and where it is; the caller presses one
   // (or star). An accepted browser gets a credential once and then reads this object's
   // projection and the Workspace through a hibernatable WebSocket. Read-only by design.
 
-  // The pair_browser tool: a fresh Pairing Code as keypad tones, once the Voice Agent has stopped
-  // speaking. Playing tones authorizes nothing; only the caller's press of one does.
-  private async playPairingCode(baudInput: number): Promise<Record<string, unknown>> {
-    const baud = PAIRING_BAUDS.find((item) => item === baudInput) as PairingBaud | undefined;
-    if (!baud) throw new Error(`baud must be one of ${PAIRING_BAUDS.join(", ")}`);
+  // Knowing the spoken code authorizes nothing; only the caller's press of one does.
+  private async createPairingCode(): Promise<Record<string, unknown>> {
     if (!this.identityHash) throw new Error("pairing is not available on this call");
     if (this.recording) throw new Error("a recording is in progress; finish it first");
-    const code = newPairingCode();
-    const codeHash = await sha256Hex(code.hex);
-    const expiresAt = Date.now() + PAIRING_CODE_TTL_MS;
     this.endPairingTimers();
-    const attempt: PairingAttempt = { codeHash, expiresAt, baud, startedAt: Date.now(), unclaimedTimer: null, claim: null };
-    this.pairing = attempt;
-    await this.env.DB.batch([
-      this.env.DB.prepare("DELETE FROM pairing_codes WHERE identity_hash = ? OR expires_at <= unixepoch()").bind(this.identityHash),
-      this.env.DB.prepare("INSERT INTO pairing_codes (code_hash, identity_hash, expires_at) VALUES (?, ?, ?)")
-        .bind(codeHash, this.identityHash, Math.ceil(expiresAt / 1000)),
-    ]);
-    await this.record("pairing.started", { baud });
-    const tones = pairingTones(code.bytes, baud);
-    this.clipPending = true;
-    let played = false;
-    try {
-      // A fixture cuts the Voice Frontend off, so let it finish whatever it was asked to say
-      // first; then a fixed cue, so the caller knows the tones come next.
-      await this.awaitSpeechFinished();
-      await this.playFixture(prompt("pairing_cue"), "pairing_cue");
-      this.pairingTonesPlaying = true;
-      played = await this.playFixture(tones, "pairing_tones");
-    } finally {
-      this.clipPending = false;
-      // Echoes of the last tones clear before keys count again.
-      setTimeout(() => { this.pairingTonesPlaying = false; }, 500);
+    this.pairing = null;
+    await this.env.DB.prepare("DELETE FROM pairing_codes WHERE identity_hash = ? OR expires_at <= unixepoch()")
+      .bind(this.identityHash).run();
+    // The short prefix is a unique nameplate, not an authorization credential. Retry collisions
+    // without replacing another caller's outstanding code, and keep code text out of diagnostics.
+    for (let tries = 0; tries < 100; tries++) {
+      const code = newPairingCode();
+      const codeHash = await sha256Hex(code.code);
+      const expiresAt = Date.now() + PAIRING_CODE_TTL_MS;
+      const inserted = await this.env.DB.prepare("INSERT OR IGNORE INTO pairing_codes (code_hash, nameplate, identity_hash, expires_at, attempts) VALUES (?, ?, ?, ?, 0)")
+        .bind(codeHash, code.nameplate, this.identityHash, Math.ceil(expiresAt / 1000)).run();
+      if (!inserted.meta.changes) continue;
+      const attempt: PairingAttempt = { codeHash, expiresAt, unclaimedTimer: null, claim: null };
+      this.pairing = attempt;
+      if (this.liveAttached) {
+        attempt.unclaimedTimer = setTimeout(() => void this.pairingUnclaimed(attempt), Math.max(0, expiresAt - Date.now()));
+      }
+      await this.record("pairing.started", {});
+      return {
+        ok: true,
+        code: code.code,
+        expires_in_seconds: PAIRING_CODE_TTL_MS / 1000,
+        next: "Say this exact code clearly, including the hyphens, for the caller to type into dogwalk.tools/pair. The system names the claiming browser and asks the caller to press one to accept or star to refuse. If the code expires unclaimed, pairing_unclaimed follows: offer a fresh code.",
+      };
     }
-    if (this.pairing === attempt && !attempt.claim && this.liveAttached) {
-      attempt.unclaimedTimer = setTimeout(() => void this.pairingUnclaimed(attempt), PAIRING_UNCLAIMED_MS);
-    }
-    return {
-      ok: played,
-      baud,
-      seconds: Math.round(tones.seconds * 10) / 10,
-      next: `If a browser decoded the tones, the system names it to the caller within a few seconds and asks them to press one, and a browser_pairing event follows. If no browser claims the code within ${PAIRING_UNCLAIMED_MS / 1000} seconds, a pairing_unclaimed event follows; answer it as the pair-browser skill says.`,
-    };
+    throw new Error("pairing codes are busy; try again shortly");
   }
 
-  // No browser claimed this attempt's code after its tones. decode_failures counts every
-  // anonymous decode-failure report since the attempt started, from any browser: advisory,
-  // and fine for one operator, since reports cannot be tied to a call before a claim.
+  // Expiry feedback is independent of the model remembering to check the code.
   private async pairingUnclaimed(attempt: PairingAttempt): Promise<void> {
     attempt.unclaimedTimer = null;
     if (this.pairing !== attempt || attempt.claim || !this.liveAttached) return;
-    const row = await this.env.DB.prepare("SELECT COUNT(*) AS failures FROM pairing_decode_failures WHERE ts >= ?")
-      .bind(attempt.startedAt).first<{ failures: number }>().catch(() => null);
-    const decodeFailures = row?.failures ?? 0;
-    if (this.pairing !== attempt || attempt.claim || !this.liveAttached) return;
-    await this.record("pairing.unclaimed", { baud: attempt.baud, decode_failures: decodeFailures });
+    await this.record("pairing.unclaimed", { expired: true });
     await this.orchestratorEvent(`[harness event] pairing_unclaimed: ${JSON.stringify({
-      baud: attempt.baud, seconds_since_tones: PAIRING_UNCLAIMED_MS / 1000, decode_failures: decodeFailures,
+      expired: true, lifetime_seconds: PAIRING_CODE_TTL_MS / 1000,
     })}`);
   }
 
   private endPairingTimers(): void {
     if (this.pairing?.claim?.timer) clearTimeout(this.pairing.claim.timer);
+    if (this.pairing?.claim) this.pairing.claim.timer = null;
     if (this.pairing?.unclaimedTimer) clearTimeout(this.pairing.unclaimedTimer);
     if (this.pairing) this.pairing.unclaimedTimer = null;
   }
 
   private async pairRequest(request: Request, path: string): Promise<Response> {
     if (path === "/pair/claim" && request.method === "POST") {
+      // Hash first, then validate and install without yielding: call cleanup
+      // must not slip between validating the attempt and creating its claim.
+      const secret = newBrowserSecret();
+      const secretHash = await sha256Hex(secret);
       const attempt = this.pairing;
       if (!attempt || attempt.codeHash !== request.headers.get("x-dogwalk-code-hash") || Date.now() > attempt.expiresAt) {
         return Response.json({ error: "unknown or expired pairing code" }, { status: 404 });
@@ -1811,18 +1786,17 @@ export class VoiceSession {
       if (!this.liveAttached) return Response.json({ error: "the call has ended; pair again from a call" }, { status: 409 });
       if (attempt.unclaimedTimer) clearTimeout(attempt.unclaimedTimer);
       attempt.unclaimedTimer = null;
-      const secret = newBrowserSecret();
       const device = (request.headers.get("x-dogwalk-browser") ?? "a browser").slice(0, 80);
       const place = (request.headers.get("x-dogwalk-place") ?? "").slice(0, 120);
       attempt.claim = {
-        secretHash: await sha256Hex(secret), device, place, state: "waiting", token: null,
+        secretHash, device, place, state: "waiting", token: null,
         timer: setTimeout(() => void this.resolvePairingClaim("expired"), PAIRING_CONFIRM_MS),
       };
       await this.record("pairing.claimed", { device, place });
       this.sendLive({
         type: "session.commentary.append",
         delegation_id: null,
-        content: `A browser just heard the pairing tones: ${device}, ${place}. Tell the caller exactly that, then ask them to press one to pair it, or star to refuse.`,
+        content: `A browser just submitted the pairing code: ${device}, ${place}. Tell the caller exactly that, then ask them to press one to pair it, or star to refuse.`,
       });
       return Response.json({ ticket: `${this.identityHash}.${secret}` });
     }
@@ -3116,7 +3090,7 @@ export class VoiceSession {
           result = await this.showInBrowser(requiredString(args, "uri"), args.note);
           break;
         case "pair_browser":
-          result = await this.playPairingCode(args.baud === undefined ? PAIRING_DEFAULT_BAUD : Number(args.baud));
+          result = await this.createPairingCode();
           break;
         case "restart_sandbox":
           if (!this.sandboxId) throw new Error("no sandbox is assigned to this call");
@@ -4486,11 +4460,18 @@ export class VoiceSession {
   private async cleanupVoice(reason: string): Promise<void> {
     if (this.cleaningUpVoice) return;
     this.cleaningUpVoice = true;
+    // Approval belongs to this call, never a later call's status-key press.
+    // Invalidate synchronously before cleanup's first await; keep the spent
+    // ticket long enough for its browser to learn that the request expired.
+    const pendingCodeHash = this.pairing?.codeHash;
+    this.endPairingTimers();
+    if (this.pairing) {
+      this.pairing.codeHash = "";
+      this.pairing.expiresAt = 0;
+      if (this.pairing.claim?.state === "waiting") this.pairing.claim.state = "expired";
+    }
     if (this.recording) await this.finishRecording(true, "call ended");
     this.endMenu();
-    // A claim already waiting keeps its own timer; nobody is left to hear pairing_unclaimed.
-    if (this.pairing?.unclaimedTimer) clearTimeout(this.pairing.unclaimedTimer);
-    if (this.pairing) this.pairing.unclaimedTimer = null;
     this.heldAppends = [];
     this.earconQueue = [];
     // Following is per call: there is nobody to narrate to between calls.
@@ -4503,6 +4484,10 @@ export class VoiceSession {
     this.live = null;
     this.liveAttached = false;
     this.liveSessionId = null;
+    if (pendingCodeHash) this.state.waitUntil(
+      this.env.DB.prepare("DELETE FROM pairing_codes WHERE code_hash = ?").bind(pendingCodeHash).run()
+        .catch(() => { console.warn("pairing code cleanup failed; in-memory attempt is already invalid"); }),
+    );
     if (live?.readyState === WebSocket.OPEN) live.close(1000, reason);
     if (this.transcriptSaveTimer) clearTimeout(this.transcriptSaveTimer);
     this.transcriptSaveTimer = null;

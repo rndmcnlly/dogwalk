@@ -62,7 +62,7 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
   while it is pending and survives losing it.
 - Speaks a deterministic Opening and runs the keypad conventions and the in-call
   System Menu (restart and recovery only) without a model.
-- Plays Pairing Tones on request, takes the caller's keypad acceptance, and
+- Allocates a fresh spoken number-word-word Pairing Code on request, takes the caller's independent keypad acceptance, and
   serves Paired Browsers read-only over hibernatable WebSockets.
 - Runs the Session Orchestrator: answers each GPT-Live client delegation from
   the call transcript, with neutral Managed Session and Prompt Turn tools, and
@@ -126,9 +126,10 @@ exists but is disabled until a path-scoped Access application is configured.
   cuts off speech, need a real call.
 - A completely silent Prompt Turn can outlive Cloudflare's outbound WebSocket
   retention guarantee. A sandbox-initiated connection is the hardening path.
-- Pairing Tones are verified only against local mocks and a simulated phone
-  line; real carriers (AMR or EVS speech codecs), room acoustics, and a phone's
-  own echo of the tones are untested.
+- Browser pairing uses a spoken code typed into `/pair`, with ninety-second
+  expiry feedback and independent keypad confirmation (one accepts, star
+  refuses). It needs no acoustic decoder or browser microphone. End-to-end
+  spoken-code usability over a real call still needs verification.
 - Session deletion, Session Config Options, and ACP Elicitation are not yet exposed
   through the Voice Agent; discovery, load, and close are.
 - The Diagnostics surface is read-only infrastructure, not a required user interface.

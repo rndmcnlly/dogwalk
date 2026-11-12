@@ -1,5 +1,5 @@
-// Paired Browser page (DOMAIN.md), served at GET /pair: listens for the Pairing Code the call
-// plays as keypad tones, claims it, waits for the caller to accept, then shows live Managed
+// Paired Browser page (DOMAIN.md), served at GET /pair: accepts the spoken Pairing Code as
+// typed text, claims it, waits for the caller to accept, then shows live Managed
 // Session status, a timeline of the call, a read-only Workspace file viewer, Human Takeover
 // launchers, and the Whiteboard (boards the walker draws for the caller to read or answer) over /pair/ws.
 // Media files (images, PDF, audio, video, downloads) come from GET /pair/file as blob URLs, and
@@ -7,11 +7,7 @@
 //
 // String.raw keeps every backslash in the page script literal, so regexes and "\n" escapes
 // reach the browser as written. The page must therefore contain no backtick and no dollar-brace
-// sequence anywhere (a backtick is written "\x60" in the script). The decoder core between the
-// CORE markers is ported from prototypes/acoustic_pairing.html and must match src/pairing.ts:
-// 10 data bytes, 6 parity bytes, 32 symbols back to back with no gap, one copy, at a symbol rate
-// the Voice Agent picks from BAUD_RATES. The page is not told the rate: it tries each one whose
-// frame length fits the heard frame and keeps the one that Reed-Solomon confirms.
+// sequence anywhere (a backtick is written "\x60" in the script).
 //
 // The page's build identity is a hash of this source, stamped into the page where it says
 // __PAIR_BUILD__. The page sends it when it connects; a tab loaded before a deploy learns it is
@@ -31,7 +27,7 @@ const PAIR_TEMPLATE = String.raw`<!doctype html>
   --paper:#f4efe3;--card:#fbf8f1;--ink:#1b2a24;--body:#33413a;--muted:#56625a;--faint:#8a9188;
   --line:#ddd4c3;--rule:#c6bca7;--leash:#b2441f;--leash-soft:#f1dccf;--grass:#2f5d4a;
   --accent:var(--leash);--accent-ink:#fff;
-  --ok:#2e7d4f;--bad:#b3261e;--warn:#a86a00;--fix:#d68910;--info:#2f6690;
+  --ok:#2e7d4f;--bad:#b3261e;--warn:#a86a00;--info:#2f6690;
   --highlight:var(--leash-soft);--code-bg:#ece5d5;
   --role-caller:var(--leash);--role-voice:var(--grass);--role-orchestrator:#6a4c93;--role-system:var(--muted);
   --agent-s:55%;--agent-l:33%;
@@ -45,7 +41,7 @@ const PAIR_TEMPLATE = String.raw`<!doctype html>
     --paper:#111815;--card:#18211d;--ink:#ece6d7;--body:#cfd3c8;--muted:#a3ada3;--faint:#6f7a72;
     --line:#26322d;--rule:#34423b;--leash:#ec8a62;--leash-soft:#3a2219;--grass:#8cc2a6;
     --accent-ink:#1b120d;
-    --ok:#74c69d;--bad:#ff8f85;--warn:#e3b45a;--fix:#e0a040;--info:#8cb9e6;
+    --ok:#74c69d;--bad:#ff8f85;--warn:#e3b45a;--info:#8cb9e6;
     --code-bg:#202b26;--role-orchestrator:#bba6e8;
     --agent-s:60%;--agent-l:72%;
   }
@@ -83,20 +79,8 @@ button.mini{padding:1px 8px;font-size:12px;line-height:1.5;flex:none}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0}
 .steps{margin:6px 0 14px;padding-left:1.4em;max-width:62ch}
 .steps li{margin:3px 0}
-.meter{height:8px;background:var(--line);border-radius:4px;overflow:hidden;max-width:520px}
-.meter>div{height:100%;width:0;background:var(--accent);transition:width 60ms linear}
-.stream{font-family:var(--mono);font-size:15px;letter-spacing:.1em;word-break:break-all;min-height:1.5em}
-.frame{border-top:1px solid var(--line);padding:6px 0;font-family:var(--mono);font-size:13px}
-.symrow{white-space:nowrap;overflow-x:auto}
-.symrow .lbl{display:inline-block;width:3.2em;color:var(--muted)}
-.sym{display:inline-block;width:1.1ch;text-align:center}
-.sym.erased{color:var(--bad)}
-.sym.wrong{background:color-mix(in srgb,var(--bad) 28%,transparent)}
-.sym.fixed{background:color-mix(in srgb,var(--fix) 35%,transparent)}
-.sep{display:inline-block;width:1.4ch;text-align:center;color:var(--faint)}
-.verdict{font-family:var(--sans);font-size:13px}
-.verdict.ok{color:var(--ok)}
-.verdict.bad{color:var(--bad)}
+#pairForm{max-width:32em}
+#pairCode{font-family:var(--mono);font-size:1.1em}
 details summary{cursor:pointer}
 #log{max-height:180px;overflow:auto;white-space:pre-wrap;margin-top:6px}
 .diag{margin-top:28px}
@@ -432,22 +416,17 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
 
 <section id="pairScreen" hidden>
   <ol class="steps">
-    <li>Use a different device from the phone in the call (a laptop or tablet). Phones give the browser silence while a call holds the microphone.</li>
-    <li>Put the phone on speaker, near this device.</li>
-    <li>Press Listen and allow the microphone.</li>
-    <li>In the call, ask the walker to pair a browser, and say when this page is listening. After the walker says "Pairing tones", the call plays a few seconds of keypad tones.</li>
-    <li>The call describes this browser: press one to accept it (star refuses).</li>
+    <li>In the call, ask the walker to pair a browser.</li>
+    <li>Type the spoken code below: a number from 1 to 999, then two words.</li>
+    <li>Select Pair browser. The call describes this browser: press 1 in the call to accept it, or star to refuse.</li>
   </ol>
-  <p class="small muted">If the page hears the tones but cannot decode them, ask the walker to send the tones slower.</p>
-  <div class="row">
-    <button id="listen" class="primary">Listen</button>
-    <button id="stop" disabled>Stop</button>
-  </div>
-  <div class="meter"><div id="level"></div></div>
-  <div id="levelText" class="mono small muted">&nbsp;</div>
-  <p class="small muted">Tones as heard while a frame arrives, one mark per tone (&middot; is an unusually long silence); the rate is worked out when the frame ends:</p>
-  <div id="live" class="stream"></div>
-  <div id="frames"></div>
+  <form id="pairForm">
+    <label class="wb-field" for="pairCode"><span>Pairing code</span>
+      <input id="pairCode" name="code" class="wb-input" type="text" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="pairHelp status" placeholder="123-adroitness-aardvark">
+    </label>
+    <p id="pairHelp" class="small muted">Use spaces or hyphens between the number and words. The code expires after 90 seconds. Ask the walker to repeat it or give you a new code if needed.</p>
+    <div class="row"><button id="claimCode" type="submit" class="primary">Pair browser</button></div>
+  </form>
 </section>
 
 <section id="pairedScreen" hidden>
@@ -576,362 +555,6 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
 
 <script>
 "use strict";
-// ==== CORE START: the decoder, shared by the page, the AudioWorklet (via toString), and offline tests ====
-const ROWS = [697, 770, 852, 941];
-const COLS = [1209, 1336, 1477, 1633];
-const KEYPAD = ["123A", "456B", "789C", "*0#D"];
-const ALPHABET = "0123456789ABCD*#"; // nibble value -> keypad symbol
-const CODE_BYTES = 10;   // 80 random bits
-const PARITY_BYTES = 6;  // Reed-Solomon parity
-const BAUD_RATES = [4, 6, 8, 12, 16]; // symbols per second the call may use; tones touch, no gap
-const N_SLOTS = (CODE_BYTES + PARITY_BYTES) * 2;
-const DOT = "·";        // an unclear slot or stretch
-
-// Goertzel classifier: each hop labels the latest 25.6 ms window with a keypad symbol or null.
-// Rectangular window, as in classic DTMF receivers: its 39 Hz resolution keeps the nearest
-// neighbors (73 Hz apart) out of the main lobe. Hops are a quarter window, so even a 62.5 ms
-// slot (16 baud) holds about six windows that lie entirely inside it; slower rates get more.
-class Classifier {
-  constructor(sampleRate, opts) {
-    opts = opts || {};
-    this.win = Math.round(0.0256 * sampleRate);
-    this.hop = Math.round(this.win / 4);
-    this.buf = new Float32Array(this.win);
-    this.pos = 0;
-    this.count = 0;
-    this.coef = ROWS.concat(COLS).map((f) => 2 * Math.cos(2 * Math.PI * f / sampleRate));
-    this.minRms = opts.minRms ?? 0.003;
-    this.purity = opts.purity ?? 0.5;
-    this.dominance = opts.dominance ?? 4;
-    this.twist = opts.twist ?? 10;
-  }
-  push(samples, onResult) {
-    for (let i = 0; i < samples.length; i++) {
-      this.buf[this.pos] = samples[i];
-      this.pos = (this.pos + 1) % this.win;
-      this.count++;
-      if (this.count >= this.win && (this.count - this.win) % this.hop === 0) onResult(this.classify());
-    }
-  }
-  classify() {
-    const N = this.win;
-    const s1 = new Float64Array(8), s2 = new Float64Array(8);
-    let energy = 0;
-    for (let j = 0; j < N; j++) {
-      const x = this.buf[(this.pos + j) % N];
-      energy += x * x;
-      for (let k = 0; k < 8; k++) {
-        const s0 = x + this.coef[k] * s1[k] - s2[k];
-        s2[k] = s1[k];
-        s1[k] = s0;
-      }
-    }
-    // Normalized so a sinusoid of amplitude A reports A^2/2, its mean power.
-    const P = new Array(8);
-    for (let k = 0; k < 8; k++) P[k] = 2 * (s1[k] * s1[k] + s2[k] * s2[k] - this.coef[k] * s1[k] * s2[k]) / (N * N);
-    const mean = energy / N;
-    const rms = Math.sqrt(mean);
-    const best = (from) => {
-      const group = P.slice(from, from + 4);
-      const order = group.map((p, i) => [p, i]).sort((a, b) => b[0] - a[0]);
-      return { index: order[0][1], power: order[0][0], runnerUp: order[1][0] };
-    };
-    const r = best(0), c = best(4);
-    const twistDb = Math.abs(10 * Math.log10((r.power + 1e-12) / (c.power + 1e-12)));
-    const ok = rms >= this.minRms
-      && r.power + c.power >= this.purity * mean
-      && r.power >= this.dominance * r.runnerUp
-      && c.power >= this.dominance * c.runnerUp
-      && twistDb <= this.twist;
-    return { sym: ok ? KEYPAD[r.index][c.index] : null, rms };
-  }
-}
-
-// ---- Reed-Solomon over GF(256), errors and erasures (after Wikiversity's "Reed-Solomon codes for coders").
-// Primitive polynomial 0x11d, generator roots 2^0..2^(n-1), as in src/pairing.ts.
-// Polynomials are arrays, highest degree first.
-const GF_EXP = new Uint8Array(512), GF_LOG = new Uint8Array(256);
-(() => {
-  let x = 1;
-  for (let i = 0; i < 255; i++) {
-    GF_EXP[i] = x; GF_LOG[x] = i;
-    x <<= 1; if (x & 0x100) x ^= 0x11d;
-  }
-  for (let i = 255; i < 512; i++) GF_EXP[i] = GF_EXP[i - 255];
-})();
-const gfMul = (a, b) => (a && b ? GF_EXP[GF_LOG[a] + GF_LOG[b]] : 0);
-const gfDiv = (a, b) => (a ? GF_EXP[(GF_LOG[a] + 255 - GF_LOG[b]) % 255] : 0);
-const gfPow = (x, p) => GF_EXP[(((GF_LOG[x] * p) % 255) + 255) % 255];
-const gfInv = (x) => GF_EXP[255 - GF_LOG[x]];
-const polyScale = (p, x) => p.map((c) => gfMul(c, x));
-function polyAdd(p, q) {
-  const r = new Array(Math.max(p.length, q.length)).fill(0);
-  p.forEach((c, i) => { r[i + r.length - p.length] = c; });
-  q.forEach((c, i) => { r[i + r.length - q.length] ^= c; });
-  return r;
-}
-function polyMul(p, q) {
-  const r = new Array(p.length + q.length - 1).fill(0);
-  for (let j = 0; j < q.length; j++) for (let i = 0; i < p.length; i++) r[i + j] ^= gfMul(p[i], q[j]);
-  return r;
-}
-function polyEval(p, x) {
-  let y = p[0];
-  for (let i = 1; i < p.length; i++) y = gfMul(y, x) ^ p[i];
-  return y;
-}
-// Only used to show the corrected parity symbols next to the raw ones.
-function rsEncode(msg, nsym) {
-  let gen = [1];
-  for (let i = 0; i < nsym; i++) gen = polyMul(gen, [1, gfPow(2, i)]);
-  const out = [...msg, ...new Array(nsym).fill(0)];
-  for (let i = 0; i < msg.length; i++) {
-    const coef = out[i];
-    if (coef) for (let j = 1; j < gen.length; j++) out[i + j] ^= gfMul(gen[j], coef);
-  }
-  return [...msg, ...out.slice(msg.length)];
-}
-const rsSyndromes = (msg, nsym) => [0, ...Array.from({ length: nsym }, (_, i) => polyEval(msg, gfPow(2, i)))];
-
-function rsCorrectErrata(msg, synd, errPos) {
-  const coefPos = errPos.map((p) => msg.length - 1 - p);
-  let errLoc = [1];
-  for (const i of coefPos) errLoc = polyMul(errLoc, polyAdd([1], [gfPow(2, i), 0]));
-  const product = polyMul([...synd].reverse(), errLoc);
-  const errEval = product.slice(product.length - errLoc.length).reverse();
-  const X = coefPos.map((p) => gfPow(2, -(255 - p)));
-  const E = new Array(msg.length).fill(0);
-  X.forEach((Xi, i) => {
-    const XiInv = gfInv(Xi);
-    let locPrime = 1;
-    X.forEach((Xj, j) => { if (j !== i) locPrime = gfMul(locPrime, 1 ^ gfMul(XiInv, Xj)); });
-    if (locPrime === 0) throw new Error("could not find error magnitude");
-    const y = gfMul(Xi, polyEval([...errEval].reverse(), XiInv));
-    E[errPos[i]] = gfDiv(y, locPrime);
-  });
-  return polyAdd(msg, E);
-}
-
-function rsErrorLocator(synd, nsym, eraseCount) {
-  let errLoc = [1], oldLoc = [1];
-  const shift = synd.length > nsym ? synd.length - nsym : 0;
-  for (let i = 0; i < nsym - eraseCount; i++) {
-    const K = i + shift;
-    let delta = synd[K];
-    for (let j = 1; j < errLoc.length; j++) delta ^= gfMul(errLoc[errLoc.length - 1 - j], synd[K - j]);
-    oldLoc = [...oldLoc, 0];
-    if (delta) {
-      if (oldLoc.length > errLoc.length) {
-        const newLoc = polyScale(oldLoc, delta);
-        oldLoc = polyScale(errLoc, gfInv(delta));
-        errLoc = newLoc;
-      }
-      errLoc = polyAdd(errLoc, polyScale(oldLoc, delta));
-    }
-  }
-  while (errLoc.length && errLoc[0] === 0) errLoc.shift();
-  const errs = errLoc.length - 1;
-  if ((errs - eraseCount) * 2 + eraseCount > nsym) throw new Error("too many errors");
-  return errLoc;
-}
-
-function rsForneySyndromes(synd, pos, n) {
-  const fsynd = synd.slice(1);
-  for (const p of pos) {
-    const x = gfPow(2, n - 1 - p);
-    for (let j = 0; j < fsynd.length - 1; j++) fsynd[j] = gfMul(fsynd[j], x) ^ fsynd[j + 1];
-  }
-  return fsynd;
-}
-
-// Returns { data, errata: corrected byte positions } or throws when the frame is beyond repair.
-function rsDecode(received, nsym, erasePos) {
-  const msg = [...received];
-  for (const p of erasePos) msg[p] = 0;
-  if (erasePos.length > nsym) throw new Error("too many erasures");
-  const synd = rsSyndromes(msg, nsym);
-  if (Math.max(...synd) === 0) return { data: msg.slice(0, msg.length - nsym), errata: [...erasePos] };
-  const fsynd = rsForneySyndromes(synd, erasePos, msg.length);
-  const errLoc = rsErrorLocator(fsynd, nsym, erasePos.length);
-  const reversed = [...errLoc].reverse();
-  const errPos = [];
-  for (let i = 0; i < msg.length; i++) if (polyEval(reversed, gfPow(2, i)) === 0) errPos.push(msg.length - 1 - i);
-  if (errPos.length !== errLoc.length - 1) throw new Error("Chien search found the wrong number of errors");
-  const fixed = rsCorrectErrata(msg, synd, [...erasePos, ...errPos]);
-  if (Math.max(...rsSyndromes(fixed, nsym)) > 0) throw new Error("could not correct");
-  return { data: fixed.slice(0, fixed.length - nsym), errata: [...erasePos, ...errPos] };
-}
-
-// ---- Framing
-const bytesToSymbols = (bytes) => bytes.map((b) => ALPHABET[b >> 4] + ALPHABET[b & 15]).join("");
-const toHex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-const hexToBytes = (hex) => hex.match(/../g).map((h) => parseInt(h, 16));
-
-// Symbol clock: votes of the windows lying entirely inside each slot. start and slot are in
-// samples; labels[i] is the label of the window starting at (firstHop + i) * hop.
-function slotVotes(labels, firstHop, hop, win, start, slot, nSlots) {
-  const votes = Array.from({ length: nSlots }, () => ({}));
-  labels.forEach((sym, i) => {
-    if (!sym) return;
-    const a = (firstHop + i) * hop;
-    const k = Math.floor((a - start) / slot);
-    if (k < 0 || k >= nSlots || a + win > start + (k + 1) * slot) return;
-    votes[k][sym] = (votes[k][sym] || 0) + 1;
-  });
-  return votes;
-}
-// A slot with no votes, or no clear majority, is an erasure.
-function slotSymbols(votes) {
-  return votes.map((v) => {
-    const order = Object.entries(v).sort((a, b) => b[1] - a[1]);
-    if (!order.length || (order[1] && order[0][1] < 2 * order[1][1])) return null;
-    return order[0][0];
-  });
-}
-// Fit the clock: search the frame's start offset and a small rate error, maximizing agreement.
-function alignSlots(labels, firstHop, hop, win, slot, nSlots) {
-  const guess = firstHop * hop + 0.4 * win;
-  let best = null;
-  for (let scale = 0.99; scale <= 1.0101; scale += 0.005) {
-    for (let d = -slot / 2; d <= slot / 2; d += hop / 2) {
-      const votes = slotVotes(labels, firstHop, hop, win, guess + d, slot * scale, nSlots);
-      let score = 0;
-      for (const v of votes) {
-        const counts = Object.values(v).sort((a, b) => b - a);
-        if (counts.length) score += counts[0] - counts.slice(1).reduce((s, c) => s + c, 0);
-      }
-      if (!best || score > best.score) best = { score, votes };
-    }
-  }
-  return { symbols: slotSymbols(best.votes), score: best.score };
-}
-
-// Streaming frame assembler: hop labels in, a live change stream and finished frames out.
-// A frame opens at the first tone after silence and closes after 0.25 s of silence, or once it
-// outlasts the slowest frame. Its rate is found at the end: see decodeFrame.
-const STEADY_HOPS = 3;  // a tone held this many hops (about 19 ms) is real, not a blip
-const GAP_HOPS = 6;      // a toneless stretch this long (about 38 ms) separates tones, so a repeat shows again
-const UNCLEAR_HOPS = 32; // longer than any designed gap (about 0.2 s): shows as a dot
-class FrameReceiver {
-  constructor(sampleRate, hop, win, onLive, onFrame) {
-    Object.assign(this, { sampleRate, hop, win, onLive, onFrame });
-    this.maxHops = (N_SLOTS / Math.min(...BAUD_RATES) + 0.5) * sampleRate / hop;
-    this.hopIndex = 0;
-    this.frame = null;
-    this.silent = 0;
-  }
-  feed(sym) {
-    const i = this.hopIndex++;
-    if (!this.frame) {
-      if (!sym) return;
-      this.frame = { firstHop: i, labels: [], run: { sym: null, len: 0 }, live: "", heard: null, unclear: false };
-      this.silent = 0;
-      this.onLive("");
-    }
-    const f = this.frame;
-    f.labels.push(sym);
-    this.silent = sym ? 0 : this.silent + 1;
-    // Live view: the rate is unknown until the frame ends, so show debounced changes of tone.
-    if (sym === f.run.sym) f.run.len++;
-    else f.run = { sym, len: 1 };
-    if (!sym && f.run.len === GAP_HOPS) f.heard = null;
-    if (!sym && f.run.len === UNCLEAR_HOPS) f.unclear = true;
-    if (sym && f.run.len === STEADY_HOPS && sym !== f.heard) {
-      f.live += (f.unclear && f.live ? DOT : "") + sym;
-      f.heard = sym;
-      f.unclear = false;
-      this.onLive(f.live);
-    }
-    const silenceOver = this.silent * this.hop > 0.25 * this.sampleRate;
-    if (silenceOver || i - f.firstHop > this.maxHops) this.finish();
-  }
-  finish() {
-    const f = this.frame;
-    this.frame = null;
-    if (f) {
-      const frame = decodeFrame(f.labels, f.firstHop, this.hop, this.win, this.sampleRate);
-      if (frame) this.onFrame(frame);
-    }
-  }
-}
-
-// The frame's span runs from the first to the last steady tone, so stray blips at either end
-// (speech before the tones, a click after) neither open nor stretch it.
-function steadySpan(labels) {
-  let first = -1, last = -1, runStart = 0;
-  for (let i = 1; i <= labels.length; i++) {
-    if (i < labels.length && labels[i] && labels[i] === labels[runStart]) continue;
-    if (labels[runStart] && i - runStart >= STEADY_HOPS) {
-      if (first < 0) first = runStart;
-      last = i - 1;
-    }
-    runStart = i;
-  }
-  return first < 0 ? null : { first, last };
-}
-
-// Tries each allowed rate whose frame length is within 25% of the heard span; keeps the claimable
-// decode with the fewest repaired bytes, or else the best-fitting clock as a failure to display.
-// Returns null for a blip that no rate could explain.
-function decodeFrame(labels, firstHop, hop, win, sampleRate) {
-  const span = steadySpan(labels);
-  if (!span || labels.slice(span.first, span.last + 1).filter(Boolean).length < N_SLOTS) return null;
-  const seconds = ((span.last - span.first) * hop + win) / sampleRate;
-  const trimmed = labels.slice(span.first, span.last + 1);
-  let decoded = null, closest = null;
-  for (const baud of BAUD_RATES) {
-    if (Math.abs(seconds - N_SLOTS / baud) > 0.25 * N_SLOTS / baud) continue;
-    const fit = alignSlots(trimmed, firstHop + span.first, hop, win, sampleRate / baud, N_SLOTS);
-    const frame = Object.assign(decodeSlots(fit.symbols), { baud, seconds, score: fit.score });
-    if (claimable(frame) && (!decoded || frame.errata.length < decoded.errata.length
-      || (frame.errata.length === decoded.errata.length && frame.score > decoded.score))) decoded = frame;
-    if (!closest || frame.score > closest.score) closest = frame;
-  }
-  if (!closest) return null;
-  return decoded ? Object.assign(decoded, { rateFound: true }) : Object.assign(closest, { rateFound: false });
-}
-
-// Raw: the data slots as heard. ECC: Reed-Solomon with unclear slots as erasures. Only ecc is claimed.
-function decodeSlots(symbols) {
-  const bytes = [], erased = [];
-  for (let b = 0; b < symbols.length / 2; b++) {
-    const hi = symbols[2 * b], lo = symbols[2 * b + 1];
-    if (hi === null || lo === null) { erased.push(b); bytes.push(0); }
-    else bytes.push((ALPHABET.indexOf(hi) << 4) | ALPHABET.indexOf(lo));
-  }
-  const raw = erased.some((b) => b < CODE_BYTES) ? null : toHex(bytes.slice(0, CODE_BYTES));
-  let ecc = null, errata = [], error = null;
-  try {
-    const result = rsDecode(bytes, PARITY_BYTES, erased);
-    ecc = toHex(result.data);
-    errata = result.errata;
-  } catch (e) { error = e.message; }
-  return { symbols, erased, raw, ecc, errata, error };
-}
-// A frame repaired with all its redundancy spent (say, six erasures) is unchecked: any data
-// would fit. Claim only frames with parity left over to confirm the repair.
-function claimable(frame) {
-  const wrong = Math.max(0, frame.errata.length - frame.erased.length);
-  return frame.ecc !== null && frame.erased.length + 2 * wrong < PARITY_BYTES;
-}
-// ==== CORE END ====
-
-// ==== WORKLET START ====
-// The AudioWorklet runs the same Classifier, serialized with toString and loaded from a Blob URL.
-const WORKLET_SRC = "const ROWS = " + JSON.stringify(ROWS) + ", COLS = " + JSON.stringify(COLS)
-  + ", KEYPAD = " + JSON.stringify(KEYPAD) + ";\n"
-  + Classifier.toString() + "\n"
-  + "class PairingProcessor extends AudioWorkletProcessor {\n"
-  + "  constructor() { super(); this.c = new Classifier(sampleRate); }\n"
-  + "  process(inputs) {\n"
-  + "    const ch = inputs[0] && inputs[0][0];\n"
-  + "    if (ch) this.c.push(ch, (r) => this.port.postMessage(r));\n"
-  + "    return true;\n"
-  + "  }\n"
-  + "}\n"
-  + "registerProcessor(\"pairing-dtmf\", PairingProcessor);\n";
-// ==== WORKLET END ====
-
 const $ = (id) => document.getElementById(id);
 const HOME = "/home/daytona";
 const TOKEN_KEY = "dogwalk.pair.token";
@@ -968,154 +591,26 @@ function showScreen(name) {
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// ---- Listening and claiming
-let listener = null;     // { stop } while the microphone is open
-let latestHop = null;    // newest classifier result, for the meter
-let claimState = "idle"; // idle | listening | claiming | waiting
-const rejectedCodes = new Set();
+// ---- Typed Pairing Code claim. Normalization and PGP word validation belong to the server.
+let claimState = "idle"; // idle | claiming | waiting
 
-async function startListening() {
-  if (listener) return;
-  $("listen").disabled = true;
-  $("live").textContent = "";
-  $("frames").replaceChildren();
-  let ctx = null, stream = null;
-  try {
-    if (!navigator.mediaDevices) throw new Error("this page needs HTTPS for microphone access");
-    ctx = new AudioContext();
-    await ctx.resume();
-    // Speech processing would treat steady tones as noise and remove them.
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
-    });
-    const granted = stream.getAudioTracks()[0].getSettings();
-    log("mic " + (granted.sampleRate || ctx.sampleRate) + " Hz, context " + ctx.sampleRate + " Hz, echoCancellation="
-      + granted.echoCancellation + ", noiseSuppression=" + granted.noiseSuppression + ", autoGainControl=" + granted.autoGainControl);
-    const source = ctx.createMediaStreamSource(stream);
-    const sink = ctx.createGain();
-    sink.gain.value = 0;
-    sink.connect(ctx.destination);
-    const probe = new Classifier(ctx.sampleRate); // same window and hop as the worklet's
-    const rx = new FrameReceiver(ctx.sampleRate, probe.hop, probe.win, showLiveText, onFrame);
-    const onHop = (r) => { latestHop = r; rx.feed(r.sym); };
-    let node;
-    try {
-      await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" })));
-      node = new AudioWorkletNode(ctx, "pairing-dtmf");
-      node.port.onmessage = (e) => onHop(e.data);
-      log("decoding in an AudioWorklet");
-    } catch (error) {
-      // Fallback for browsers without blob-module worklets.
-      node = ctx.createScriptProcessor(2048, 1, 1);
-      node.onaudioprocess = (e) => probe.push(e.inputBuffer.getChannelData(0), onHop);
-      log("AudioWorklet unavailable (" + error.message + "), using ScriptProcessor");
-    }
-    source.connect(node);
-    node.connect(sink);
-    const opened = { stream, ctx };
-    listener = { stop: () => { opened.stream.getTracks().forEach((t) => t.stop()); opened.ctx.close(); } };
-    claimState = "listening";
-    $("stop").disabled = false;
-    setStatus("Listening for pairing tones");
-    requestAnimationFrame(drawMeter);
-  } catch (error) {
-    if (stream) stream.getTracks().forEach((t) => t.stop());
-    if (ctx) ctx.close();
-    setStatus("Could not use the microphone: " + error.message, "bad");
-    $("listen").disabled = false;
-  }
-}
-
-function stopListening() {
-  if (listener) listener.stop();
-  listener = null;
-  latestHop = null;
-  $("listen").disabled = false;
-  $("stop").disabled = true;
-  $("level").style.width = "0";
-  $("levelText").innerHTML = "&nbsp;";
-}
-
-function drawMeter() {
-  if (!listener) return;
-  if (latestHop) {
-    const dbfs = 20 * Math.log10(latestHop.rms + 1e-9);
-    $("level").style.width = Math.max(0, Math.min(100, (dbfs + 70) / 70 * 100)) + "%";
-    $("levelText").textContent = dbfs.toFixed(0) + " dBFS" + (latestHop.sym ? ", tone " + latestHop.sym : "");
-  }
-  requestAnimationFrame(drawMeter);
-}
-
-function showLiveText(text) {
-  $("live").textContent = text;
-}
-
-function symbolRow(label, symbols, classFor) {
-  const row = el("div", { class: "symrow" }, el("span", { class: "lbl" }, label));
-  symbols.forEach((s, k) => {
-    if (k === CODE_BYTES * 2) row.append(el("span", { class: "sep" }, "|"));
-    row.append(el("span", { class: "sym " + (classFor(k) || "") }, s == null ? DOT : s));
-  });
-  return row;
-}
-
-// Diagnostics per frame: the raw slots against the ECC-corrected frame.
-function showFrame(frame) {
-  const corrected = frame.ecc ? bytesToSymbols(rsEncode(hexToBytes(frame.ecc), PARITY_BYTES)).split("") : null;
-  const fixed = new Set(frame.errata);
-  const wrong = frame.errata.length - frame.erased.length;
-  const verdict = frame.ecc
-    ? (claimable(frame) ? "ECC ok: " : "ECC unverified: ") + frame.ecc.match(/.{1,4}/g).join(" ") + " (repaired " + frame.erased.length + " unclear and "
-      + Math.max(0, wrong) + " wrong of " + PARITY_BYTES + " parity bytes)"
-    : "ECC failed: " + frame.error;
-  const rate = (frame.rateFound ? "decoded at " : "no rate decoded; closest ") + frame.baud + " baud ("
-    + frame.seconds.toFixed(1) + " s of tones)";
-  const box = el("div", { class: "frame" }, [
-    el("div", { class: "small muted" }, rate),
-    symbolRow("raw", frame.symbols, (k) => {
-      if (frame.symbols[k] === null) return "erased";
-      if (corrected && corrected[k] !== frame.symbols[k]) return "wrong";
-    }),
-    corrected ? symbolRow("ecc", corrected, (k) => (fixed.has(k >> 1) ? "fixed" : "")) : null,
-    el("div", { class: "verdict " + (claimable(frame) ? "ok" : "bad") }, verdict),
-  ]);
-  const frames = $("frames");
-  frames.prepend(box);
-  while (frames.children.length > 4) frames.lastChild.remove();
-}
-
-function onFrame(frame) {
-  showFrame(frame);
-  log("frame: " + frame.seconds.toFixed(2) + " s, " + (frame.rateFound ? "decoded at " : "closest ") + frame.baud
-    + " baud, " + frame.erased.length + " unclear bytes, raw " + (frame.raw || "-") + ", ecc " + (frame.ecc || frame.error));
-  if (frame.ecc && !claimable(frame)) log("not claimed: the repair used all the parity, so it is unverified");
-  if (claimable(frame) && claimState === "listening" && !rejectedCodes.has(frame.ecc)) claim(frame.ecc);
-  else if (!claimable(frame) && claimState === "listening") {
-    setStatus("Heard tones but could not decode them. Still listening: ask the walker to send the tones slower.", "bad");
-    reportDecodeFailure(frame);
-  }
-}
-
-// Anonymous telemetry, so the call can tell "heard nothing" from "heard tones, could not
-// decode": coarse counts only, never symbols or code bits. Best effort.
-function reportDecodeFailure(frame) {
-  const report = {
-    stage: frame.ecc ? "ecc_unverified" : "ecc_failed",
-    baud: frame.baud,
-    seconds: Math.round(frame.seconds * 10) / 10,
-    symbols_heard: frame.symbols.filter((s) => s !== null).length,
-    erasures: frame.erased.length,
-  };
-  fetch("/pair/decode-failed", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(report),
-  }).catch(() => {});
+function setClaimState(state) {
+  claimState = state;
+  const busy = state !== "idle";
+  $("pairCode").disabled = busy;
+  $("claimCode").disabled = busy;
+  $("pairForm").setAttribute("aria-busy", String(busy));
 }
 
 async function claim(code) {
-  claimState = "claiming";
-  setStatus("Heard a code, claiming");
+  if (claimState !== "idle") return;
+  if (!code.trim()) {
+    setStatus("Enter the pairing code spoken in the call.", "bad");
+    $("pairCode").focus();
+    return;
+  }
+  setClaimState("claiming");
+  setStatus("Claiming the pairing code");
   let response, body;
   try {
     response = await fetch("/pair/claim", {
@@ -1125,23 +620,23 @@ async function claim(code) {
     });
     body = await response.json().catch(() => ({}));
   } catch (error) {
-    return claimFailed("Could not reach dogwalk.tools (" + error.message + "). Still listening.");
+    return claimFailed("Could not reach dogwalk.tools (" + error.message + "). Try again.");
   }
   if (response.ok && typeof body.ticket === "string") {
-    stopListening();
-    claimState = "waiting";
+    $("pairCode").value = "";
+    setClaimState("waiting");
     return waitForAnswer(body.ticket);
   }
   if (response.status === 404) {
-    rejectedCodes.add(code);
-    return claimFailed("That code is unknown or expired. Still listening: ask the walker in the call for new tones.");
+    return claimFailed("That code is unknown or expired. Ask the walker in the call for a new code.");
   }
-  claimFailed("Claim failed (" + response.status + "): " + (body.error || response.statusText) + ". Still listening.");
+  claimFailed("Claim failed (" + response.status + "): " + (body.error || response.statusText) + ". Check the code and try again.");
 }
 
 function claimFailed(message) {
-  claimState = listener ? "listening" : "idle";
+  setClaimState("idle");
   setStatus(message, "bad");
+  $("pairCode").focus();
 }
 
 async function waitForAnswer(ticket) {
@@ -1161,7 +656,7 @@ async function waitForAnswer(ticket) {
     if (body.state === "waiting") continue;
     if (body.state === "accepted" && typeof body.token === "string") {
       sessionStorage.setItem(TOKEN_KEY, body.token);
-      claimState = "idle";
+      setClaimState("idle");
       return connect();
     }
     if (body.state === "refused") return pairingFailed("The pairing was refused in the call.");
@@ -1171,9 +666,10 @@ async function waitForAnswer(ticket) {
 }
 
 function pairingFailed(message) {
-  claimState = "idle";
+  setClaimState("idle");
   showScreen("pair");
-  setStatus(message + " Press Listen to try again.", "bad");
+  setStatus(message + " Enter a new pairing code to try again.", "bad");
+  $("pairCode").focus();
 }
 
 // ---- Small helpers shared by the paired screen
@@ -1265,9 +761,9 @@ function onClose(ws, event) {
   if (event.code === 4001 || event.code === 4003) {
     forgetPairing();
     // 4003 without our own request: the server allows one Paired Browser, so another one replaced this one.
-    if (event.code === 4003 && unpairRequested) setStatus("Unpaired. Press Listen to pair again.");
-    else if (event.code === 4003) setStatus("This browser was unpaired (another browser may have paired in its place). Press Listen to pair again.", "bad");
-    else setStatus("This pairing is no longer valid" + (serverError ? " (" + serverError + ")" : "") + ". Press Listen to pair again.", "bad");
+    if (event.code === 4003 && unpairRequested) setStatus("Unpaired. Enter a pairing code to pair again.");
+    else if (event.code === 4003) setStatus("This browser was unpaired (another browser may have paired in its place). Enter a pairing code to pair again.", "bad");
+    else setStatus("This pairing is no longer valid" + (serverError ? " (" + serverError + ")" : "") + ". Enter a pairing code to pair again.", "bad");
     serverError = "";
     unpairRequested = false;
     return;
@@ -1402,7 +898,7 @@ function unpair() {
   clearTimeout(reconnectTimer);
   socket = null;
   forgetPairing();
-  setStatus("Unpaired. Press Listen to pair again.");
+  setStatus("Unpaired. Enter a pairing code to pair again.");
 }
 
 // ---- Tabs: Live (sessions and the call timeline), Files, Hands.
@@ -3548,11 +3044,9 @@ function openBanner() {
 }
 
 // ---- Start
-$("listen").addEventListener("click", startListening);
-$("stop").addEventListener("click", () => {
-  stopListening();
-  claimState = "idle";
-  setStatus("Stopped. Press Listen to start again.");
+$("pairForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  claim($("pairCode").value);
 });
 $("unpair").addEventListener("click", unpair);
 $("closeViewer").addEventListener("click", closeViewer);
@@ -3614,7 +3108,7 @@ showLiveView(liveView);
 showTab(currentTab);
 acquireWake();
 if (sessionStorage.getItem(TOKEN_KEY)) connect();
-else { showScreen("pair"); setStatus("Press Listen to start"); }
+else { showScreen("pair"); setStatus("Enter the pairing code spoken in the call"); }
 </script>
 </body>
 </html>

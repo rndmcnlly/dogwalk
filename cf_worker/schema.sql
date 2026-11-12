@@ -241,25 +241,17 @@ CREATE TABLE IF NOT EXISTS roaming_attempts (
 CREATE INDEX IF NOT EXISTS idx_roaming_attempts_user ON roaming_attempts(user_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_roaming_attempts_phone ON roaming_attempts(phone_number, started_at);
 
--- Paired Browser: a Pairing Code played into a call, awaiting a browser's claim.
--- Only the code's hash is stored; a claim deletes its row, so each code works once.
+-- Spoken Pairing Code: public rendezvous, hashed secret, bounded online guesses.
 CREATE TABLE IF NOT EXISTS pairing_codes (
   code_hash TEXT PRIMARY KEY,
+  nameplate TEXT NOT NULL UNIQUE,
   identity_hash TEXT NOT NULL,
-  expires_at INTEGER NOT NULL
+  expires_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0
 );
 
--- Paired Browser: anonymous reports from pairing pages that heard Pairing Tones but could
--- not decode them. Nothing ties a report to a call; ts is epoch milliseconds. The Worker
--- keeps only the newest rows (DECODE_FAILURE_KEEP_ROWS).
-CREATE TABLE IF NOT EXISTS pairing_decode_failures (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts INTEGER NOT NULL,
-  stage TEXT NOT NULL CHECK (stage IN ('ecc_failed', 'ecc_unverified')),
-  baud INTEGER,
-  seconds REAL,
-  symbols_heard INTEGER,
-  erasures INTEGER
+-- Global fixed-minute budget, shared across Worker isolates and source addresses.
+CREATE TABLE IF NOT EXISTS pairing_claim_budget (
+  minute INTEGER PRIMARY KEY,
+  attempts INTEGER NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_pairing_decode_failures_ts ON pairing_decode_failures(ts);
