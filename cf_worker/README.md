@@ -347,15 +347,17 @@ what enforcement would have done.
   or Roaming-admitted call, from any phone) ended, or was last active, within the
   window, `/voice` says "Dogwalk, for
   <Handle>." and round 1 is a name round (`mode=name` in its webhook URLs): its
-  phrase is the Handle, hinted, and the Gather says "Say your name." A matched
+  phrase is the Handle, hinted, and the Gather says "Say: this is <Handle>."
+  (a carrier phrase that lengthens the speech). The match needs only the Handle's
+  words in order, so "this is", "it's", or the bare Handle all match. A matched
   name plays the received cue, scores like any challenge, and connects with no
   level spoken and no second try, whatever the score or speech seconds;
   `challenges_completed` does not move. A wrong name ("I didn't catch your
   name."), silence, or a replay limit falls back to one sentence (round 2), led
   by "Your sentence." or the full instructions per `TERSE_AFTER`. Escapes work
   as from a sentence. The real verifier refuses under 3.5 s of audio or 1 s of
-  measured speech, so many name answers record `not_enough_speech` with
-  `insufficient-audio`; the refusal's measured `speech_seconds` is kept, and a
+  measured speech, so a bare Handle (production's first was 0.88 s) records
+  `not_enough_speech` with `insufficient-audio`; the refusal's measured `speech_seconds` is kept, and a
   speculative refusal is never used over a score of the whole stream.
 - **Classification** (`/voice/identity/heard`, after the phrase check): two
   adjacent Handle words that are a User's Handle start that User's challenges; an

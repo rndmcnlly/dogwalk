@@ -2064,7 +2064,7 @@ def roaming_admission_checks(base_url: str, token: str) -> None:
 def home_name_checks(base_url: str, token: str) -> None:
     """The Home check's name path (wrangler.toml's HOME_NAME_WINDOW_HOURS; the earlier runs had it
     off): within the window of the User's last Voice Call, from any phone, a Home call asks for
-    the Handle, scores the short answer without speaking a level, and connects; thin speech never
+    "this is <Handle>", scores the short answer without speaking a level, and connects; thin speech never
     blocks; anything but the Handle falls back to one sentence; past the window, a sentence."""
     received_cue = re.escape("<Play>https://dogwalk.tools/voice/identity/received.wav</Play>")
     connect = '<Redirect method="POST">/voice</Redirect></Response>'
@@ -2091,7 +2091,7 @@ def home_name_checks(base_url: str, token: str) -> None:
     def name_greeting(body: str, who: str) -> None:
         words = ",".join(who.split())
         require(f'<Say voice="Polly.Joanna">Dogwalk, for {who}.</Say><Start>' in body and f'hints="stop,{words}"' in body
-                and '<Say voice="Polly.Joanna">Say your name.</Say></Gather>' in body and "sentence" not in body, f"name greeting: {body}")
+                and f'<Say voice="Polly.Joanna">Say: this is {who}.</Say></Gather>' in body and "sentence" not in body, f"name greeting: {body}")
 
     def answer(body: str, form: dict, number: int, user: int, name: bool, words: str, seconds: float, sample: int,
                audio: bytes | None = None, spec_error: str | None = None) -> str:
@@ -2119,18 +2119,19 @@ def home_name_checks(base_url: str, token: str) -> None:
         _, action = round_of(body, number, user, name)
         return post(base_url, action, {**call(sid, caller), "SpeechResult": words, "Confidence": "0.9"}, token)[1]
 
-    # Within the window: the Handle, a prompt for it, a received cue, and the connection, with no level.
+    # Within the window: the Handle, a prompt to say "this is" it, a received cue, and the connection, with no level.
     _, body = post(base_url, "/voice", call("CA_HN_1"), token)
     name_greeting(body, handle)
-    body = answer(body, call("CA_HN_1"), 1, uid, True, f"it's {handle}", 3.0, 8000)
+    body = answer(body, call("CA_HN_1"), 1, uid, True, f"this is {handle}", 3.0, 8000)
     require(body == f"<Response>{connect}", f"name path end: {body}")
     require(identity("CA_HN_1") == {"path": "home", "mode": "name", "user_id": uid, "outcome": "strong_match", "enforcement": "admit",
                                     "shadow": True}, f"name identity: {identity('CA_HN_1')}")
     require(d1_local(f"SELECT challenges_completed AS n FROM users WHERE id = {uid}")[0]["n"] == completed, "the name path counted as a challenge")
     # Thin speech never blocks: under the level's floor, or under the verifier's own, the call connects with the score recorded.
-    for sid, seconds in (("CA_HN_THIN", 1.0), ("CA_HN_TINY", 0.4)):
+    # Variants match too ("it's", the bare Handle a caller will sometimes give).
+    for sid, words, seconds in (("CA_HN_THIN", f"it's {handle}", 1.0), ("CA_HN_TINY", handle, 0.4)):
         _, body = post(base_url, "/voice", call(sid), token)
-        body = answer(body, call(sid), 1, uid, True, handle, seconds, 6000)
+        body = answer(body, call(sid), 1, uid, True, words, seconds, 6000)
         require(body == f"<Response>{connect}", f"thin name {seconds}: {body}")
         require(identity(sid) == {"path": "home", "mode": "name", "user_id": uid, "outcome": "not_enough_speech", "enforcement": "undecided",
                                   "shadow": True}, f"thin name identity: {identity(sid)}")
@@ -2144,7 +2145,7 @@ def home_name_checks(base_url: str, token: str) -> None:
     # A speculative refusal for too little audio (the mock's 3.5 s floor, at the answer's end) is
     # never used: the whole stream, which is longer, is scored instead.
     _, body = post(base_url, "/voice", call("CA_HN_SPEC"), token)
-    body = answer(body, call("CA_HN_SPEC"), 1, uid, True, handle, 0, 0, audio=answer_audio(7200, (1.2, True), (2.0, False)),
+    body = answer(body, call("CA_HN_SPEC"), 1, uid, True, f"this's {handle}", 0, 0, audio=answer_audio(7200, (1.2, True), (2.0, False)),
                   spec_error="insufficient-audio")
     require(body == f"<Response>{connect}" and identity("CA_HN_SPEC")["outcome"] == "strong_match", f"speculative refusal: {identity('CA_HN_SPEC')}")
     spec = json.loads(d1_local("SELECT detail FROM call_activity WHERE call_sid = 'CA_HN_SPEC' AND event = 'identity.round'")[0]["detail"])
@@ -2165,7 +2166,7 @@ def home_name_checks(base_url: str, token: str) -> None:
     _, body = post(base_url, "/voice", call("CA_HN_SILENT"), token)
     _, action = round_of(body, 1, uid, True)
     body = post(base_url, action, {**call("CA_HN_SILENT"), "SpeechResult": "say that again"}, token)[1]
-    require('<Say voice="Polly.Joanna">Again.</Say>' in body and '<Say voice="Polly.Joanna">Say your name.</Say></Gather>' in body
+    require('<Say voice="Polly.Joanna">Again.</Say>' in body and f'<Say voice="Polly.Joanna">Say: this is {handle}.</Say></Gather>' in body
             and "&amp;mode=name&amp;round=1&amp;take=1" in body, f"name repeat: {body}")
     action = re.search(r'action="(/voice/identity/heard\?[^"]+take=1)"', body)[1].replace("&amp;", "&")
     body = post(base_url, action, {**call("CA_HN_SILENT"), "SpeechResult": ""}, token)[1]
@@ -2175,7 +2176,7 @@ def home_name_checks(base_url: str, token: str) -> None:
             f"silent twice: {body}")
     # The escapes still apply to the name round: someone else, and another User's Handle.
     _, body = post(base_url, "/voice", call("CA_HN_ELSE"), token)
-    body = say("CA_HN_ELSE", body, 1, uid, True, "I'm someone else")
+    body = say("CA_HN_ELSE", body, 1, uid, True, "no, this is someone else")
     require('action="/voice/identity/who?attempt=1"' in body, f"someone else at the name: {body}")
     _, body = post(base_url, "/voice", call("CA_HN_OTHER"), token)
     body = say("CA_HN_OTHER", body, 1, uid, True, f"this is {ROAMING_HANDLE}")
