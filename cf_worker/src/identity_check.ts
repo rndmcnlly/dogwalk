@@ -7,8 +7,8 @@
 // - home: a call from a User's Home hears their Handle and one Identity Challenge, then
 //   connects. Full instructions until the User has completed TERSE_AFTER challenges. Within
 //   HOME_NAME_WINDOW_HOURS of the User's last Voice Call, from any phone, the name path asks the
-//   caller to say their Handle instead: a short answer scored and recorded (mode "name") but never
-//   spoken as a level or asked again, then the call connects. Anything but the Handle (unheard,
+//   caller to say "this is <Handle>" instead: a short answer scored and recorded (mode "name")
+//   but never spoken as a level or asked again, then the call connects. Anything but the Handle (unheard,
 //   another word, a replay limit) falls back to one Identity Challenge; the escapes still apply.
 // - roaming: a caller who names another User's Handle takes three Identity Challenges against
 //   that User's Voice Reference. Unless Roaming admission is on (ROAMING_ADMISSION, off by
@@ -57,7 +57,10 @@ const nameWindowSeconds = (env: Env) => {
   const hours = Number(env.HOME_NAME_WINDOW_HOURS);
   return Number.isFinite(hours) && hours > 0 ? Math.round(hours * 3600) : 0;
 };
-const NAME_PROMPT = "Say your name.";
+// A carrier phrase lengthens the answer past the verifier's speech floor, which a bare Handle
+// (about a second) often misses. The round's phrase stays the Handle, so "it's <Handle>" or
+// the bare Handle still match.
+const namePrompt = (handle: string) => `Say: this is ${handle}.`;
 /** Answers enrollment collects, and the fewest with enough speech that make a Voice Reference. */
 export const ENROLL_ANSWERS = 5;
 export const MIN_ENROLL_ANSWERS = 3;
@@ -177,13 +180,13 @@ async function roundTwiml(
   return identityTake(env, ctx, url, callSid, account, round, 0, phrase, progress, subject);
 }
 
-// The name round asks for the Handle rather than saying it: the greeting already did.
+// The name round asks for "this is <Handle>" rather than saying the Handle as a sentence.
 const identityTake = (
   env: Env, ctx: ExecutionContext, url: URL, callSid: string, account: string, round: number, take: number, phrase: string,
   progress: Progress, subject: Subject,
 ) => takeTwiml(env, ctx, url, {
   callSid, round, take, phrase, account, ritual: ritualOf(progress.path), identityHash: subject.identity_hash,
-  action: `/voice/identity/heard?${query(progress)}&round=${round}&take=${take}`, ...(progress.name ? { prompt: NAME_PROMPT } : {}),
+  action: `/voice/identity/heard?${query(progress)}&round=${round}&take=${take}`, ...(progress.name ? { prompt: namePrompt(subject.handle) } : {}),
 });
 
 /** What leads into a sentence: the full instructions until the User has completed TERSE_AFTER Home challenges. */
@@ -504,8 +507,8 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
     nextRound(env, ctx, url, callSid, account, log, round, { ...progress, judged, passed }, subject, spoken);
 
   if (progress.name) {
-    // The Handle is about a second of speech, below the floor a level needs (MIN_SPEECH_SECONDS)
-    // and often below the verifier's own, where genuine scores run low. So the name path speaks
+    // "This is <Handle>" is under two seconds of speech, below the floor a level needs
+    // (MIN_SPEECH_SECONDS) and near the verifier's own, where genuine scores run low. So the name path speaks
     // no level and never asks again: every result is recorded with its speech seconds (the round
     // above), and the call connects. Not a completed challenge, so the sentence's teaching stays.
     const scored = verdict.outcome === "strong_match" || verdict.outcome === "match" || verdict.outcome === "no_match";
