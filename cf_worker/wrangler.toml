@@ -44,7 +44,7 @@ DEPLOYMENT_ENVIRONMENT = "production"
 # Sandbox reaping (README: Sandbox Reaping): a daily pass over Sandboxes whose User has made no
 # Voice Call for this many days. Anything but "delete" is a dry run that audits candidates only.
 SANDBOX_REAP_AGE_DAYS = "30"
-SANDBOX_REAP_MODE = "dry-run"
+SANDBOX_REAP_MODE = "delete"
 
 # Worker Version ID, stamped on observations as OTel service.version.
 [version_metadata]
