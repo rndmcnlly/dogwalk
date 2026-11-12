@@ -764,6 +764,8 @@ The following language appears in Git history and is not canonical for productio
 
 ## Open Questions
 
+- The disabled-by-default development text Voice Frontend adapter exercises Handoffs against the same Session Orchestrator and Session Management, without a PSTN Voice Call or provider media session. Its operator-authorized attachment selects an existing Registration and Sandbox Assignment, uses visibly synthetic `DEV_TEXT_` diagnostic call IDs, and makes no caller-ID verification claim. Audio playback, recordings, acoustic browser pairing, telephone recovery, and Theme bouncing are unsupported. What identity and transport capabilities should a future non-PSTN production frontend negotiate? This spike does not change the normative Voice Call or Diagnostics Surface boundaries.
+
 - Should queued follow-up prompts be first-class Prompt Turns immediately, or become Prompt Turns only when sent to the Agent?
 - Proactive speech about Activity is now limited to the Followed Session's Progress Beats, and attention from other sessions arrives as Bids. Still open: which beats deserve an earcon or a per-session sound instead of speech, whether a failure streak is a good enough sign that a session is stuck, and whether the beat thresholds (4 s of quiet, 20 s between narrations) hold up in playtests. Also open: whether the production model's reasoning text (ACP `agent_thought_chunk`, now counted per turn in `acp.turn.stopped` and `acp.turn.failed` as `thoughts`) is worth narrating.
 - How should the Voice Agent resolve ambiguous spoken "stop" among stopping speech, cancelling one Prompt Turn, closing one Managed Session, stopping all Agent work, and ending the voice call?

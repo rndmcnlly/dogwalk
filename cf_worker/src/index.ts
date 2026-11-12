@@ -479,6 +479,28 @@ async function resolveSandbox(
 
 const accessKeySets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
+async function handleDevVoiceFrontend(req: Request, env: Env, url: URL): Promise<Response> {
+  if (env.ENABLE_TEXT_FRONTEND_SPIKE !== "true") return new Response("not found", { status: 404 });
+  if (!(await adminAuthorized(req, env))) return new Response("unauthorized", { status: 401 });
+  if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
+  if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("websocket required", { status: 426 });
+  const phone = normalizePhone(url.searchParams.get("phone"));
+  if (!phone) return new Response("normalized phone required", { status: 400 });
+  // No provisioning, caller-supplied sandbox/identity IDs, or telephony impersonation.
+  const assignment = await env.DB.prepare(
+    `SELECT s.provider_id, s.identity_hash FROM sandbox_assignments s
+       JOIN registrations r ON r.phone_number = s.phone_number WHERE s.phone_number = ?`,
+  ).bind(phone).first<{ provider_id: string | null; identity_hash: string }>();
+  if (!assignment?.provider_id) return new Response("existing registration and sandbox assignment required", { status: 404 });
+  const headers = new Headers({
+    Upgrade: "websocket",
+    "x-dogwalk-phone": phone,
+    "x-dogwalk-sandbox-id": assignment.provider_id,
+    "x-dogwalk-identity": assignment.identity_hash,
+  });
+  return voiceSessionFor(env, assignment.identity_hash).fetch("https://voice-session/dev/voice-frontend", { headers });
+}
+
 async function adminAuthorized(req: Request, env: Env): Promise<boolean> {
   const authorization = req.headers.get("authorization");
   if (env.ADMIN_PASSWORD && authorization?.startsWith("Basic ")) {
@@ -827,6 +849,9 @@ function voiceSessionFor(env: Env, identity: string): DurableObjectStub {
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
+
+    // An active development transport, deliberately outside passive /admin diagnostics.
+    if (url.pathname === "/dev/voice-frontend") return handleDevVoiceFrontend(req, env, url);
 
     if (url.pathname === "/" && req.method === "GET") {
       return new Response(LANDING_HTML, {

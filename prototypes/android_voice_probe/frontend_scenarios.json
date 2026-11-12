@@ -1,0 +1,29 @@
+[
+  {
+    "name": "work_question_handoff",
+    "recent_transcript": [{"role": "user", "text": "What is Juniper working on?"}],
+    "latest_unspoken_context": "No session status has been provided. Do not infer it.",
+    "speech_requests": [],
+    "new_user_utterance": true,
+    "trigger": "user_utterance",
+    "expected_action": "handoff"
+  },
+  {
+    "name": "phrase_authoritative_failure",
+    "recent_transcript": [],
+    "latest_unspoken_context": "Following Juniper: the current test failed. No fix has been attempted.",
+    "speech_requests": [{"id": "fixture-failure", "text": "Tell the user the test failed and ask whether to investigate. Do not claim a fix."}],
+    "new_user_utterance": false,
+    "trigger": "speech_request",
+    "expected_action": "reply"
+  },
+  {
+    "name": "new_correction_over_pending_progress",
+    "recent_transcript": [{"role": "user", "text": "Actually stop working on that and inspect the error first."}],
+    "latest_unspoken_context": "Following Juniper: a build is running. It has not been cancelled.",
+    "speech_requests": [{"id": "fixture-progress", "text": "Tell the user the build is still running."}],
+    "new_user_utterance": true,
+    "trigger": "user_utterance",
+    "expected_action": "handoff"
+  }
+]

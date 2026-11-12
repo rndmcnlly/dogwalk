@@ -23,4 +23,6 @@ export interface Env {
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
   ADMIN_PASSWORD?: string;
+  // Development-only alternate Voice Frontend, disabled unless exactly "true".
+  ENABLE_TEXT_FRONTEND_SPIKE?: string;
 }

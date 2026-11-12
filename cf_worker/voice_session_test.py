@@ -1743,7 +1743,7 @@ def stop_wrangler(process: subprocess.Popen) -> None:
         time.sleep(0.2)
 
 
-def start_wrangler(wrangler: str) -> subprocess.Popen:
+def start_wrangler(wrangler: str, text_frontend: bool | None = None) -> subprocess.Popen:
     process = subprocess.Popen(
         [
             wrangler,
@@ -1774,6 +1774,7 @@ def start_wrangler(wrangler: str) -> subprocess.Popen:
             f"ORCHESTRATOR_API_BASE:http://127.0.0.1:{ORCHESTRATOR_MOCK_PORT}/v1",
             "--var",
             f"ADMIN_PASSWORD:{LOCAL_ADMIN_PASSWORD}",
+            *(["--var", f"ENABLE_TEXT_FRONTEND_SPIKE:{str(text_frontend).lower()}"] if text_frontend is not None else []),
         ],
         cwd=WORKER_DIR,
         stdout=subprocess.DEVNULL,
