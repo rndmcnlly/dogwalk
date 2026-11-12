@@ -3672,9 +3672,11 @@ export class VoiceSession {
     const calls = this.roamingNoticed;
     this.roamingNoticed = [];
     if (!calls.length || !this.userId) return;
-    await this.env.DB.prepare(
-      `UPDATE roaming_attempts SET noticed_at = unixepoch() WHERE user_id = ? AND call_sid IN (${calls.map(() => "?").join(", ")})`,
-    ).bind(this.userId, ...calls).run();
+    // D1 binds at most 100 parameters per statement: the User and up to 90 calls each.
+    const chunks = Array.from({ length: Math.ceil(calls.length / 90) }, (_, i) => calls.slice(i * 90, i * 90 + 90));
+    await this.env.DB.batch(chunks.map((chunk) => this.env.DB.prepare(
+      `UPDATE roaming_attempts SET noticed_at = unixepoch() WHERE user_id = ? AND call_sid IN (${chunk.map(() => "?").join(", ")})`,
+    ).bind(this.userId, ...chunk)));
   }
 
   private async callerIdAttestation(): Promise<Record<string, unknown> | null> {
