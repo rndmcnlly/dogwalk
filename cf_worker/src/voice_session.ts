@@ -2923,17 +2923,23 @@ export class VoiceSession {
   private async compactInBackground(snapshot: unknown[], anchor: unknown, focus: string, callSid: string | null): Promise<void> {
     const started = Date.now();
     const sameCall = () => this.liveAttached && this.callSid === callSid;
+    // Diagnostics belong to the call that asked, even when a later call is attached by the end.
+    const scope = { callSid, liveSessionId: null };
+    let stored = false;
     try {
       const version = await this.storeMemory(await this.writeMemory(snapshot, focus), callSid);
+      stored = true;
       // Only what the writer read is cut: the anchor is a user message in the snapshot, and
       // everything added since lies after it. A backstop cut past it leaves nothing to do.
       const index = anchor ? this.orchestratorContext.indexOf(anchor) : -1;
-      if (index > 0) await this.cutContext(index, "compaction");
-      await this.record("orchestrator.compaction", { ms: Date.now() - started, memory_chars: version.chars, removed_items: Math.max(index, 0), call_ended: !sameCall() });
+      if (index > 0) await this.cutContext(index, "compaction", callSid);
+      await this.record("orchestrator.compaction", { ms: Date.now() - started, memory_chars: version.chars, removed_items: Math.max(index, 0), call_ended: !sameCall() }, scope);
       if (sameCall()) await this.orchestratorEvent(`[harness event] context_compacted: ${JSON.stringify({ memory_chars: version.chars, removed_items: Math.max(index, 0) })}`);
     } catch (error) {
-      await this.record("orchestrator.compaction.failed", { ms: Date.now() - started, message: errorMessage(error) });
-      if (sameCall()) await this.orchestratorEvent(`[harness event] compaction_failed: ${JSON.stringify({ error: errorMessage(error), note: "Your previous Memory stands; nothing was cut." })}`);
+      await this.record("orchestrator.compaction.failed", { ms: Date.now() - started, memory_stored: stored, message: errorMessage(error) }, scope);
+      const note = stored ? "Your new Memory is pinned, but cutting older conversation failed; your context may still hold it until the next compaction."
+        : "Your previous Memory stands; nothing was cut.";
+      if (sameCall()) await this.orchestratorEvent(`[harness event] compaction_failed: ${JSON.stringify({ error: errorMessage(error), note })}`);
     }
   }
 
@@ -3016,14 +3022,14 @@ export class VoiceSession {
 
   // Remove context before start, archive it (newest archives only, each under one storage
   // value), and shift the call marks that locate each call's slice.
-  private async cutContext(start: number, reason: string): Promise<void> {
+  private async cutContext(start: number, reason: string, callSid = this.callSid): Promise<void> {
     const removed = this.orchestratorContext.slice(0, start);
     this.orchestratorContext = this.orchestratorContext.slice(start);
     let archived = removed;
     while (archived.length && JSON.stringify(archived).length > MAX_ARCHIVE_JSON) archived = archived.slice(Math.ceil(archived.length / 10));
     const ts = Date.now();
     const entry: ContextArchive = {
-      key: `orchestrator_archive/${ts}`, ts, call_sid: this.callSid ?? "", reason,
+      key: `orchestrator_archive/${ts}`, ts, call_sid: callSid ?? "", reason,
       items: removed.length, kept_items: this.orchestratorContext.length,
     };
     const archives = await this.state.storage.get<ContextArchive[]>("orchestrator_archives") ?? [];
@@ -3037,7 +3043,8 @@ export class VoiceSession {
       call_marks: marks.map((mark) => ({ ...mark, context_index: Math.max(0, mark.context_index - start) })),
     });
     if (stale.length) await this.state.storage.delete(stale.map((item) => item.key));
-    await this.record("orchestrator.context.cut", { reason, removed_items: removed.length, kept_items: this.orchestratorContext.length });
+    await this.record("orchestrator.context.cut", { reason, removed_items: removed.length, kept_items: this.orchestratorContext.length },
+      { callSid, liveSessionId: callSid === this.callSid ? this.liveSessionId : null });
   }
 
   private frontendAppend(lane: "brief" | "say", args: Record<string, unknown>): Record<string, unknown> {

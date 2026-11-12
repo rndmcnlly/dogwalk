@@ -536,7 +536,10 @@ class OrchestratorMock(BaseHTTPRequestHandler):
             with OrchestratorMock.lock:
                 OrchestratorMock.memory_requests.append(payload)
                 reply = OrchestratorMock.memory_replies[len(OrchestratorMock.memory_requests) - 1]
-            OrchestratorMock.memory_gate.wait(60)
+            if not OrchestratorMock.memory_gate.wait(60):
+                # A gate never released would let compaction finish early and prove nothing.
+                self.send_error(504, "memory gate never released")
+                return
             self.respond({"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": reply}]}]})
             return
         if payload.get("tool_choice") == "none":
