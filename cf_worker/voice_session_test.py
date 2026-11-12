@@ -452,7 +452,8 @@ ORCHESTRATOR_SCRIPT = [
     # Five more boards push the first out of retention, and its captured image with it.
     ('"key":"A"', lambda ctx: [call(f"kA-evict-{n}", "draw_on_whiteboard", program=ICON_PROGRAM, note=f"icon {n}") for n in range(1, 6)]),
     ('"key":"B"', lambda ctx: [call("kB-html", "show_in_browser", uri="dogwalk:file/report.html", note="the chart report")]),
-    ('"key":"E"', lambda ctx: [call("kE-pair", "pair_browser")]),
+    ("[handoff del-pair-disconnect]", lambda ctx: [call("dc-pair", "pair_browser")]),
+    ("[handoff del-pair-disconnect]", lambda ctx: [call("dc-say", "say", text=f"Pairing code {tool_result(ctx, 'dc-pair')['code']}", delegation_id="del-pair-disconnect")]),
     ('"key":"3"', lambda ctx: [
         call("k3-say", "say", text=SWITCH_SAY, delegation_id=None),
         call("k3-theme", "set_theme", theme="survey", register="high"),
@@ -496,7 +497,7 @@ STEP_IDS = [
     "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
     "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist",
     "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5", "kB-html", "k3-say", "k3-theme",
-    "k8-say", "pu-code-say", "kE-pair", "k2-dramaturgy", "kC-donate", "kD-practice",
+    "k8-say", "pu-code-say", "dc-pair", "dc-say", "k2-dramaturgy", "kC-donate", "kD-practice",
 ]
 
 
@@ -1644,8 +1645,10 @@ async def run_protocol(identity: str) -> None:
         # GPT-Live leg hangs up, then the same CallSid returns with the new voice and conceit.
         # A waiting pairing claim must expire at disconnect, not remain available
         # for a later status-key press to approve without a fresh announcement.
-        await mocks.send_live(dtmf("E"))
-        disconnect_code = await next_pairing_code("kE-pair")
+        await mocks.send_live(transcript("input", "Pair a browser before switching themes.", 130000, 131000))
+        await mocks.send_live(delegation("del-pair-disconnect", 131050))
+        disconnect_code = await next_pairing_code("dc-pair")
+        await next_matching(mocks.live_messages, appended("commentary", f"Pairing code {disconnect_code}"))
         status, pending = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": disconnect_code})
         assert status == 200, (status, pending)
         pending_ticket = {"authorization": f"Bearer {pending['ticket']}"}

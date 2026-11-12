@@ -747,6 +747,9 @@ overhearing. Run `node --experimental-strip-types pairing_test.ts` for code
 generation, normalization, and vocabulary checks; `voice_session_test.py`
 exercises claim and approval behavior through the Worker.
 
+`node --test pairing_lifecycle_test.mjs` exercises disconnect/claim interleaving
+and a D1 cleanup failure against the actual Voice Session methods.
+
 Credentials are `<identity>.<secret>`: the identity half routes to the
 sandbox-keyed Durable Object (and must have a Sandbox Assignment), and only the
 secret's hash is stored there, in `paired_browsers` (at most one; an hour idle,

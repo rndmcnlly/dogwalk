@@ -1767,12 +1767,17 @@ export class VoiceSession {
 
   private endPairingTimers(): void {
     if (this.pairing?.claim?.timer) clearTimeout(this.pairing.claim.timer);
+    if (this.pairing?.claim) this.pairing.claim.timer = null;
     if (this.pairing?.unclaimedTimer) clearTimeout(this.pairing.unclaimedTimer);
     if (this.pairing) this.pairing.unclaimedTimer = null;
   }
 
   private async pairRequest(request: Request, path: string): Promise<Response> {
     if (path === "/pair/claim" && request.method === "POST") {
+      // Hash first, then validate and install without yielding: call cleanup
+      // must not slip between validating the attempt and creating its claim.
+      const secret = newBrowserSecret();
+      const secretHash = await sha256Hex(secret);
       const attempt = this.pairing;
       if (!attempt || attempt.codeHash !== request.headers.get("x-dogwalk-code-hash") || Date.now() > attempt.expiresAt) {
         return Response.json({ error: "unknown or expired pairing code" }, { status: 404 });
@@ -1781,11 +1786,10 @@ export class VoiceSession {
       if (!this.liveAttached) return Response.json({ error: "the call has ended; pair again from a call" }, { status: 409 });
       if (attempt.unclaimedTimer) clearTimeout(attempt.unclaimedTimer);
       attempt.unclaimedTimer = null;
-      const secret = newBrowserSecret();
       const device = (request.headers.get("x-dogwalk-browser") ?? "a browser").slice(0, 80);
       const place = (request.headers.get("x-dogwalk-place") ?? "").slice(0, 120);
       attempt.claim = {
-        secretHash: await sha256Hex(secret), device, place, state: "waiting", token: null,
+        secretHash, device, place, state: "waiting", token: null,
         timer: setTimeout(() => void this.resolvePairingClaim("expired"), PAIRING_CONFIRM_MS),
       };
       await this.record("pairing.claimed", { device, place });
@@ -4480,7 +4484,10 @@ export class VoiceSession {
     this.live = null;
     this.liveAttached = false;
     this.liveSessionId = null;
-    if (pendingCodeHash) await this.env.DB.prepare("DELETE FROM pairing_codes WHERE code_hash = ?").bind(pendingCodeHash).run();
+    if (pendingCodeHash) this.state.waitUntil(
+      this.env.DB.prepare("DELETE FROM pairing_codes WHERE code_hash = ?").bind(pendingCodeHash).run()
+        .catch(() => { console.warn("pairing code cleanup failed; in-memory attempt is already invalid"); }),
+    );
     if (live?.readyState === WebSocket.OPEN) live.close(1000, reason);
     if (this.transcriptSaveTimer) clearTimeout(this.transcriptSaveTimer);
     this.transcriptSaveTimer = null;
