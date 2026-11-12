@@ -11,7 +11,7 @@ const env: any = {
   DB: { prepare: (sql: string) => ({ bind: (sid: string) => {
     assert.equal(sid, callSid);
     return {
-      first: async () => { assert.match(sql, /LEFT JOIN sandbox_assignments/); return mapping; },
+      first: async () => { assert.match(sql, /LEFT JOIN users u ON u.id = c.user_id/); return mapping; },
       all: async () => ({ results: observations.map((detail, id) => ({ id, detail: JSON.stringify(detail) })) }),
     };
   } }) },
