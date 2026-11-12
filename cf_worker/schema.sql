@@ -129,7 +129,10 @@ CREATE TABLE IF NOT EXISTS voice_calls (
   user_id INTEGER REFERENCES users(id),
   -- How the caller got in (JSON), written once when the Identity Check concludes; the
   -- Opening tells the Session Orchestrator. See identity_check.ts.
-  identity TEXT
+  identity TEXT,
+  -- How a flow the call was handed to ended (JSON { flow, outcome }), until the Voice Agent
+  -- reconnects and call_started reports it. See migrations/2026-11-15-returned-from.sql.
+  returned_from TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_voice_calls_user ON voice_calls(user_id, started_at);

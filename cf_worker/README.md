@@ -324,6 +324,21 @@ speculative score was used, `head_start_ms`, from its start to `/heard`) plus
 `practice.started`, `practice.repeat`, `practice.ended`, and
 `practice.unavailable`.
 
+On every return to `/voice` (and on `practice.error`), practice writes
+`voice_calls.returned_from` as `{"flow": "practice", "outcome": <the
+practice.ended reason, "unavailable" with its reason, or "error">}`. The Voice
+Session reads and clears it when the Voice Agent reconnects, and `call_started`
+carries it as `returned_from`, so the Session Orchestrator knows how the flow it
+handed the call to ended. Outcome names only: never a level, score, or phrase.
+Re-enrollment does the same with `"flow": "reenrollment"` and its
+`reenrollment.result` outcome. Voice Donation ends the call, so it never
+returns. Apply `migrations/2026-11-15-returned-from.sql` remotely before
+deploying this:
+
+```bash
+npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-15-returned-from.sql
+```
+
 ## Identity Check (shadow mode)
 
 The Identity Check (DOMAIN.md) runs in `src/identity_check.ts` on the round engine
@@ -472,7 +487,9 @@ source `access`: `reenrollment.unavailable`, `reenrollment.started`,
 `enrollment_failed`, `stopped`, `silent`, `unscored`, `undecided`,
 `lost_round`, or `lost_reference`), and `reenrollment.error`. Never a
 transcript, phrase, embedding, or audio. `voice_calls.identity` is untouched:
-it records how the call was admitted.
+it records how the call was admitted. The outcome also goes to
+`voice_calls.returned_from` for the reconnected Voice Agent's `call_started`
+(see Challenge Practice).
 
 Apply `migrations/2026-11-14-reenrollment.sql` remotely before deploying this (it
 rebuilds `call_handoffs` to allow `reenrollment`, copying any pending handoff):
@@ -666,6 +683,24 @@ as `earcon_preference` and previewed with the opening earcon), `pair_browser`
 arrive mid-loop are injected before its next model call, so corrections steer
 work in flight. Its context persists in Durable Object storage across calls;
 between calls, events accumulate but the model does not run.
+`compact_context` (optional `focus`, at most 500 characters) returns at once: it
+appends a neutral commentary telling the caller the Voice Agent is tidying its
+notes, and once its step is answered it snapshots the context and starts the
+Memory writer, a separate Responses request (same instructions, tools with
+`tool_choice: "none"`, pinned Memory, and context, so the prompt cache serves
+it, ending in a `[write memory]` developer message; an over-long draft gets one
+`[condense memory]` request with only the draft). The writer runs off the
+Orchestrator's queue, so handoffs, harness events, and tools (`end_call` too)
+proceed meanwhile; call CAa3722805 waited 31.5 s to hang up behind a Memory
+written inline. When it finishes, the Memory version is stored and the cut
+removes context only before the user message chosen from the snapshot (found by
+identity, so items added meanwhile stay), recording `orchestrator.compaction`
+or `orchestrator.compaction.failed`; a call still attached gets
+`context_compacted` or `compaction_failed`. A compaction outlives its call
+(`waitUntil`, and the keepalive alarm re-arms while it runs), so the next call
+starts compacted. The context backstop stays a synchronous mechanical cut at
+150,000 input tokens: it writes no Memory and needs no model, and a cut past a
+running compaction's anchor leaves that compaction nothing to cut.
 `ORCHESTRATOR_API_BASE` and `ORCHESTRATOR_API_KEY` can point it at any compatible
 endpoint.
 

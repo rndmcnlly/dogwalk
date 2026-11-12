@@ -125,6 +125,16 @@ export async function clearRounds(env: Env, callSid: string): Promise<void> {
 }
 
 /**
+ * How a flow that returns the call to the Voice Agent ended, for the next call_started
+ * (voice_session.ts, returnedFrom). Outcome names only: never a score, level, or phrase.
+ * Best-effort: a lost note loses no state, only the Orchestrator's knowledge of the end.
+ */
+export async function noteReturn(env: Env, callSid: string, flow: "practice" | "reenrollment", outcome: string, reason?: string): Promise<void> {
+  await env.DB.prepare("UPDATE voice_calls SET returned_from = ? WHERE call_sid = ?")
+    .bind(JSON.stringify({ flow, outcome, ...(reason ? { reason } : {}) }), callSid).run().catch(() => {});
+}
+
+/**
  * A round that ends without a matched phrase. Its speculative score, if one started, is
  * discarded unread: once 'skipped', the stream can neither store nor use one.
  */
