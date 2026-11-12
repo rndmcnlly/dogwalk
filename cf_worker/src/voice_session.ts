@@ -880,8 +880,10 @@ export class VoiceSession {
   // the call to (whose invitations and history these are). Only the User is identity.
   private phone: string | null = null;
   private userId: number | null = null;
-  // Roaming attempts the Opening being composed tells, marked noticed once it is sent.
+  // Roaming attempts the Opening being composed tells, and that Opening's message: they are
+  // marked noticed when sendLive actually sends it.
   private roamingNoticed: string[] = [];
+  private roamingNoticeMessage: unknown = null;
   // The renaming ritual's offers in the current call: set_handle accepts only these.
   private handleOffers: { callSid: string | null; offered: string[]; spins: number } = { callSid: null, offered: [], spins: 0 };
   private sandboxId: string | null = null;
@@ -1101,9 +1103,11 @@ export class VoiceSession {
     const openedWaking = !this.acpReady;
     const opener: EarconName = openedWaking ? "call_started" : "call_started_ready";
     if (this.earconStyle) await this.playFixture(earcon(opener, this.earconStyle), opener);
-    this.sendLive({ type: "session.commentary.append", delegation_id: null, content: opening });
-    // A notice in an Opening that never reached the caller stays for the next call.
-    if (this.live?.readyState === WebSocket.OPEN) await this.markRoamingNoticed().catch(() => {});
+    // A notice in an Opening that never reached the caller (a hangup, or one held behind the
+    // keypad menu and discarded) stays for the next call: sendLive marks it once it is sent.
+    const openingMessage = { type: "session.commentary.append", delegation_id: null, content: opening };
+    this.roamingNoticeMessage = this.roamingNoticed.length ? openingMessage : null;
+    this.sendLive(openingMessage);
     if (openingContext) this.sendLive({ type: "session.thinking.append", delegation_id: null, content: openingContext });
     await this.record("voice.opening", { first_call: this.firstCall, words: opening.split(/\s+/).length });
     // Diagnostics: where this call's slice of the cross-call Orchestrator context begins.
@@ -4292,6 +4296,10 @@ export class VoiceSession {
       return;
     }
     this.live.send(JSON.stringify(message));
+    if (message === this.roamingNoticeMessage) {
+      this.roamingNoticeMessage = null;
+      void this.markRoamingNoticed().catch(() => {});
+    }
     this.timing("live.sent", {
       type: outgoing.type,
       event_id: eventId,
