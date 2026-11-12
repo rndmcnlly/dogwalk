@@ -501,7 +501,7 @@ and from that calling number across Handles (five); the Home call is never
 paused. A pause that begins during an attempt also stops its admission. An
 attempt is recorded before its first challenge, so hanging up after hearing a
 level cannot hide a failure, and a Handle takes one attempt at a time, so calls
-in parallel cannot all start before any has failed. Only an attempt recorded
+in parallel cannot all start before any has failed; an attempt that outlives its hold on the Handle (minutes) ends without a verdict. Only an attempt recorded
 under admission can admit. The User's next call that was not itself admitted by
 Roaming (their first call too) says, after the caller-ID clause, how many calls
 got in as them from other phones and how many voice checks as them failed, since

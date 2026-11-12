@@ -2005,6 +2005,16 @@ def roaming_admission_checks(base_url: str, token: str) -> None:
     require(identity("CA_RA_SHADOW")["shadow"] is True and "admitted" not in identity("CA_RA_SHADOW"), f"{identity('CA_RA_SHADOW')}")
     require(d1_local("SELECT user_id FROM voice_calls WHERE call_sid = 'CA_RA_SHADOW'")[0]["user_id"] is None, "an unrecorded attempt was admitted")
 
+    # An attempt that outlives its hold on the Handle ends without a verdict, adding no failure.
+    form = call("CA_RA_SLOW", STRANGER_PHONE)
+    body = claim(form, shadow_handle)
+    d1_local("UPDATE roaming_attempts SET started_at = unixepoch() - 700 WHERE call_sid = 'CA_RA_SLOW'")
+    body = answer(body, form, 1, 3000, user=others[1])
+    require(body == '<Response><Say voice="Polly.Joanna">That took too long. Call again to start over. Goodbye.</Say><Hangup/></Response>',
+            f"expired attempt: {body}")
+    require(identity("CA_RA_SLOW")["outcome"] == "expired"
+            and d1_local("SELECT failures FROM roaming_attempts WHERE call_sid = 'CA_RA_SLOW'")[0]["failures"] == 0, "expired attempt counted")
+
     # A name that is no Handle and no Invite Code: the retry still offers both.
     form = call("CA_RA_UNKNOWN", STRANGER_PHONE)
     body = claim(form, "purple monkey")

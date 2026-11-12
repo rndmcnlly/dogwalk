@@ -279,9 +279,11 @@ async function startRoaming(
     await roundTwiml(env, ctx, url, callSid, account, round + 1, fresh("roaming", subject.id, round), subject);
 }
 
-/** Whether this call started a Roaming attempt as this User while admission was on. */
-async function roamingAttempt(env: Env, callSid: string, userId: number): Promise<boolean> {
-  return Boolean(await env.DB.prepare("SELECT 1 FROM roaming_attempts WHERE call_sid = ? AND user_id = ?").bind(callSid, userId).first());
+/** This call's Roaming attempt as this User, if it started one while admission was on, and whether it outlived its hold on the Handle. */
+async function roamingAttempt(env: Env, callSid: string, userId: number): Promise<{ expired: boolean } | null> {
+  return env.DB.prepare(
+    "SELECT started_at <= unixepoch() - ? AS expired FROM roaming_attempts WHERE call_sid = ? AND user_id = ?",
+  ).bind(ROAMING_ACTIVE_SECONDS, callSid, userId).first<{ expired: number }>().then((row) => (row ? { expired: row.expired === 1 } : null));
 }
 
 /** Whether Roaming is paused for this Handle or from this number by recent failed attempts. */
@@ -499,7 +501,14 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
   const judged = progress.judged + 1;
   // Admission enforces only an attempt it recorded, so a call that began in shadow mode stays
   // shadow if the flag turns on mid-call.
-  if (roamingAdmits(env) && await roamingAttempt(env, callSid, subject.id)) {
+  const attempt = roamingAdmits(env) ? await roamingAttempt(env, callSid, subject.id) : null;
+  if (attempt) {
+    // Past ROAMING_ACTIVE_SECONDS another call may hold the Handle, so this attempt ends
+    // without a verdict: it can neither admit nor add a failure behind that call's pause check.
+    if (attempt.expired) {
+      await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "expired", enforcement: "deny", judged, passed }, false);
+      return after("roaming", "That took too long. Call again to start over. Goodbye.");
+    }
     // The first unmatched voice fails the attempt, since no later round could change the
     // decision and each would be one more level to tune an impersonation against.
     // Every judged round must have passed; by construction it has, since a failure ends here.

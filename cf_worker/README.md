@@ -362,7 +362,7 @@ what enforcement would have done.
   "paused"`), then claims the Handle in one statement: it records the attempt
   unless another call's attempt on that Handle is in progress (its `voice_calls`
   row has no `identity` and no `ended_at`, within 10 minutes), which ends the call
-  with `outcome: "busy"`. Only a call with a recorded attempt is enforced (a call
+  with `outcome: "busy"`; an attempt past those 10 minutes ends at its next result with `outcome: "expired"`, no failure and no admission. Only a call with a recorded attempt is enforced (a call
   begun before the flag turned on stays shadow). The first `no_match` increments
   `failures` and hangs up ("I can't let you in as <Handle> this time"); three
   matches recheck the pause, then set `voice_calls.user_id`, mark `admitted_at`,
