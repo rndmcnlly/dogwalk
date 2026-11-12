@@ -356,7 +356,7 @@ export async function handleIdentityHeard(
   const subject = await subjectOf(env, progress.user);
   if (!row || !subject || row.ritual !== ritual || row.user_id !== subject.id || row.state !== "listening" || row.take !== take
     || !isAccountSid(account)) {
-    await conclude(env, callSid, log, { path: progress.path, user_id: progress.user, outcome: "lost_round", enforcement: "undecided" });
+    await conclude(env, callSid, log, { path: progress.path, ...modeOf(progress), user_id: progress.user, outcome: "lost_round", enforcement: "undecided" });
     return stop + after(progress.path, "");
   }
   const answer = answerOf(row.phrase, String(form.get("SpeechResult") ?? ""), take);
@@ -379,7 +379,7 @@ export async function handleIdentityHeard(
         instead("I didn't hear your name.", "I didn't hear the sentence. Here's another."));
     case "repeat":
       await nextTake(env, callSid, round, take);
-      await log("identity.repeat", { path: progress.path, round, take: take + 1 });
+      await log("identity.repeat", { path: progress.path, ...modeOf(progress), round, take: take + 1 });
       return stop + Say("Again.") + await identityTake(env, ctx, url, callSid, account, round, take + 1, row.phrase, progress, subject);
     case "repeat_limit":
       await skipRound(env, callSid, round);
@@ -490,7 +490,7 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
   const subject = await subjectOf(env, progress.user);
   const { row, wait_ms } = await awaitScore(env, callSid, round);
   if (!subject || !row || row.ritual !== ritual || row.user_id !== subject.id || (row.state !== "scoring" && row.state !== "scored")) {
-    await conclude(env, callSid, log, { path: progress.path, user_id: progress.user, outcome: "lost_round", enforcement: "undecided" });
+    await conclude(env, callSid, log, { path: progress.path, ...modeOf(progress), user_id: progress.user, outcome: "lost_round", enforcement: "undecided" });
     return after(progress.path, "");
   }
   const verdict = judge(row);

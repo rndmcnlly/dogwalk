@@ -2093,17 +2093,26 @@ def home_name_checks(base_url: str, token: str) -> None:
         require(f'<Say voice="Polly.Joanna">Dogwalk, for {who}.</Say><Start>' in body and f'hints="stop,{words}"' in body
                 and '<Say voice="Polly.Joanna">Say your name.</Say></Gather>' in body and "sentence" not in body, f"name greeting: {body}")
 
-    def answer(body: str, form: dict, number: int, user: int, name: bool, words: str, seconds: float, sample: int) -> str:
-        """A matched answer (the Handle or the round's phrase) of steady audio, scored at the stop."""
+    def answer(body: str, form: dict, number: int, user: int, name: bool, words: str, seconds: float, sample: int,
+               audio: bytes | None = None, spec_error: str | None = None) -> str:
+        """A matched answer (the Handle or the round's phrase) of steady audio, scored at the stop, or
+        `audio` whose end first stores a speculative score with `spec_error`."""
         stream, action = round_of(body, number, user, name)
         redirect = []
         def heard() -> None:
+            for _ in range(40 if spec_error else 0):
+                rows = d1_local(f"SELECT spec_error FROM challenge_rounds WHERE call_sid = '{form['CallSid']}' AND round = {number}")
+                if rows and rows[0]["spec_error"] == spec_error:
+                    break
+                time.sleep(0.25)
+            else:
+                require(not spec_error, f"no speculative {spec_error}")
             _, twiml = post(base_url, action, {**form, "SpeechResult": words, "Confidence": "0.9"}, token)
             match = re.fullmatch(rf'<Response><Stop><Stream name="identity-round-{number:02d}"/></Stop>{received_cue}'
                                  rf'<Redirect method="POST">(/voice/identity/result\?[^<]+)</Redirect></Response>', twiml)
             require(match is not None, f"name check matched answer: {twiml}")
             redirect.append(match[1].replace("&amp;", "&"))
-        practice_stream(base_url, stream, token, number, steady_audio(seconds, sample), heard)
+        practice_stream(base_url, stream, token, number, audio or steady_audio(seconds, sample), heard)
         return post(base_url, redirect[0], form, token)[1]
 
     def say(sid: str, body: str, number: int, user: int, name: bool, words: str, caller: str = phone) -> str:
@@ -2132,6 +2141,14 @@ def home_name_checks(base_url: str, token: str) -> None:
             and 0.5 <= rounds["CA_HN_THIN"]["cosine"] < 0.7 and rounds["CA_HN_THIN"]["speech_seconds"] == 1.0
             and rounds["CA_HN_TINY"]["cosine"] is None and rounds["CA_HN_TINY"]["speech_seconds"] == 0.4
             and rounds["CA_HN_TINY"]["error"] == "insufficient-audio", f"name rounds: {rounds}")
+    # A speculative refusal for too little audio (the mock's 3.5 s floor, at the answer's end) is
+    # never used: the whole stream, which is longer, is scored instead.
+    _, body = post(base_url, "/voice", call("CA_HN_SPEC"), token)
+    body = answer(body, call("CA_HN_SPEC"), 1, uid, True, handle, 0, 0, audio=answer_audio(7200, (1.2, True), (2.0, False)),
+                  spec_error="insufficient-audio")
+    require(body == f"<Response>{connect}" and identity("CA_HN_SPEC")["outcome"] == "strong_match", f"speculative refusal: {identity('CA_HN_SPEC')}")
+    spec = json.loads(d1_local("SELECT detail FROM call_activity WHERE call_sid = 'CA_HN_SPEC' AND event = 'identity.round'")[0]["detail"])
+    require(spec["speculative"] is False and spec["speech_seconds"] == 4.2 and "error" not in spec, f"speculative refusal round: {spec}")
 
     # A wrong name falls back to one sentence, whose level is spoken as past the window.
     _, body = post(base_url, "/voice", call("CA_HN_WRONG"), token)
