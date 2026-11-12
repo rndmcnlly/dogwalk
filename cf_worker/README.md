@@ -352,6 +352,21 @@ what enforcement would have done.
   Reference, each level spoken, then "Calling as yourself from another phone is
   coming soon" and a hangup; the caller is never admitted as that User. A named
   User without a Voice Reference ends at once.
+- **Roaming admission** (`ROAMING_ADMISSION = "on"` in `wrangler.toml`; anything
+  else keeps the shadow behavior above, byte for byte). The unregistered greeting
+  asks for "your two-word Dogwalk name, or your three invite words", and
+  `/voice/claim` starts Roaming on a Handle (`startRoamingFromGreeting`) before
+  matching an Invite Code. `startRoaming` first checks `roaming_attempts` for a
+  pause (3 failed attempts as the Handle, or 5 from the number, in 24 hours; the
+  caller hears which and the call ends with `outcome: "paused"`), then records
+  the attempt. The first `no_match` increments `failures` and hangs up ("I can't
+  let you in as <Handle> this time"); three matches set `voice_calls.user_id`, mark
+  `admitted_at`, store `identity` with `admitted: true, shadow: false`, say
+  "Welcome, <Handle>.", and redirect to `/voice`, where `admittedRoamingUser`
+  wins over the number's Home (only `last_seen_at` is touched, never the Home).
+  The User's next call not admitted by Roaming speaks a counted notice after the
+  caller-ID clause and sets `noticed_at`. Rows older than 90 days are pruned when
+  an attempt starts.
 - **Enrollment** (`path=enroll` on a Home call from a User without a Voice
   Reference; `path=register` at the end of Registration, when the confirm webhook
   carries an `AccountSid` and `SPEAKER` is bound): an explanation, then five
@@ -441,6 +456,17 @@ rebuilds `call_handoffs` to allow `reenrollment`, copying any pending handoff):
 ```bash
 npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-14-reenrollment.sql
 ```
+
+Roaming admission needs `roaming_attempts`; the table is written only while the
+flag is on, so the migration is safe to apply ahead of turning it on:
+
+```bash
+npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-14-roaming-admission.sql
+```
+
+To turn admission on, set `ROAMING_ADMISSION = "on"` in `wrangler.toml` and
+deploy; set it back and deploy to return to shadow Roaming. Attempts already
+recorded keep pausing Handles and numbers only while the flag is on.
 
 ## Verification
 

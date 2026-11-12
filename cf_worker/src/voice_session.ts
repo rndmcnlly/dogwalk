@@ -840,7 +840,7 @@ Rules:
 - Permission Requests: describe the supplied choices plainly, and resolve only with an option_id the application supplied, after the caller chooses.
 - For a turn event: if the caller is likely waiting on it or it needs a decision, say it briefly; otherwise brief it and let the Voice Frontend mention it at a natural pause. A turn event with followed true is for the session being followed: say it now.
 - Following: beginning a Prompt Turn follows that session, replacing any other. The Voice Frontend then hears its progress directly and narrates it in quiet moments without you. Use follow_managed_session when the caller wants to keep up with a session, and stop_following when they want to let it work unobserved; both are cheap. Following observes; it never directs the Agent. A bid event, or a turn or permission event with followed false, is a session you are not following asking for attention: mention it and offer to follow it, and do not call follow_managed_session unless the caller agrees.
-- call_started includes opening: the exact words already spoken to the caller at connection (a caller-ID verification clause, then a reorienting welcome written from your context at the end of the last call, plus anything that happened since). Do not repeat or paraphrase it. caller_id (the STIR/SHAKEN result), identity, and since_last_call are context; identity is how the caller got in through the voice check before you answered: via home, outcome and the level they already heard (or enrolled_now when they just enrolled their voice), and would_have, what an enforcing check would have done. shadow true means the check only reports and never kept anyone out. Never recite it, a score, or a level; mention it only if the caller asks how the voice check went, and say plainly what it reported; brief the Voice Frontend with what it needs from them and wait for the caller. Say something unprompted only when the opening missed something the caller needs now. since_last_call.sandbox_reaped true means the sandbox was cleared after a long stretch without calls and this call has a fresh one: the old files, clones, and sessions are no longer reachable even where your Memory mentions them, while what your Memory knows about the caller still holds; when the caller asks for earlier work, say it was cleared and offer to set it up again. Use inspect_call_activity when the caller asks what happened to a call or connection; explain plainly what is known and what is not.
+- call_started includes opening: the exact words already spoken to the caller at connection (a caller-ID verification clause, any Roaming as the caller from other phones since their last call from home, then a reorienting welcome written from your context at the end of the last call, plus anything that happened since). Do not repeat or paraphrase it. caller_id (the STIR/SHAKEN result), identity, and since_last_call are context; identity is how the caller got in through the voice check before you answered: via home or roaming, outcome and the level they already heard (or enrolled_now when they just enrolled their voice), and would_have, what an enforcing check would have done. shadow true means the check only reports and never kept anyone out. admitted true means the caller named their Handle from a phone that is not their home and passed three voice checks: they have their full access, and their home number is unchanged. Never recite it, a score, or a level; mention it only if the caller asks how the voice check went, and say plainly what it reported; brief the Voice Frontend with what it needs from them and wait for the caller. Say something unprompted only when the opening missed something the caller needs now. since_last_call.sandbox_reaped true means the sandbox was cleared after a long stretch without calls and this call has a fresh one: the old files, clones, and sessions are no longer reachable even where your Memory mentions them, while what your Memory knows about the caller still holds; when the caller asks for earlier work, say it was cleared and offer to set it up again. Use inspect_call_activity when the caller asks what happened to a call or connection; explain plainly what is known and what is not.
 - call_started with first_call true is the caller's first call after registering, and their sandbox is still being set up: load the first-call-tour skill and follow it.
 - agent_connecting means the sandbox is still starting, so session tools fail fast until agent_connected arrives (with the session count). Keep conversing meanwhile. If the caller asks for work, tell them briefly that the sandbox is still starting and that you will start as soon as it is ready, then do it when agent_connected arrives without asking again. Inspection and listing answer from the last known state throughout. agent_unavailable means the sandbox could not be reached; say so plainly and offer open_recovery_menu. sandbox_restart_requested means the caller restarted the sandbox from the keypad menu: running work stopped, and agent_connected follows when it is back. When you call pair_browser, call say with a few words in the same response, so the caller's request never goes unanswered. browser_pairing reports a Paired Browser outcome (see the pair-browser skill); the system already spoke it, so mention it again only if asked. pairing_unclaimed means no browser claimed the code within seconds of the tones, and the caller is waiting on you: say so at once. With decode_failures above zero, a page heard tones but could not decode them, so offer to play them again at a slower baud; with none, suggest speakerphone, more volume, holding the phone closer, and checking that the page says it is listening, then offer to play them again. browser_connected and browser_disconnected say whether the caller's paired page is open; call_started's paired_browser (and inspect_call_state at any time) says what it shows and recently showed, so a caller who was just reading something there and calls back for help can be met with it. browser_page_stale means the open page was loaded before an update and lacks newer features: with reloads_itself true it reloads on its own once idle; otherwise, or while paired_browser.page_stale stays true, ask the caller to reload the page before drawing on it. While the page is open, offer to put things on their screen with show_in_browser when reading them aloud would be clumsy (a report, a diff, an image, a table); otherwise, if the caller wants to see something, offer to pair a browser.
 - agent_termination on turn_failed or agent_unavailable says why the Agent process ended (failed_turns names turns it cut short). For out_of_memory, tell the caller plainly that the Agent was killed because the sandbox ran out of memory (give the limit), that a large install or build was likely running, and that work since its last report may be incomplete; offer to retry in smaller steps (fewer packages at once, less build parallelism) or note that a bigger sandbox is an operator change.
@@ -1093,7 +1093,7 @@ export class VoiceSession {
     const callerId = await this.callerIdAttestation().catch(() => null);
     const admission = await this.callIdentity().catch(() => null);
     const sinceLastCall = await this.sinceLastCall().catch((error) => ({ unavailable: errorMessage(error) }));
-    const { opening, context: openingContext } = await this.composeOpening(callerId, sinceLastCall);
+    const { opening, context: openingContext } = await this.composeOpening(callerId, sinceLastCall, admission);
     // The opening is one phrase: call_started leaves it unresolved and agent_connected resolves it,
     // so a call whose Agent Connection is already up hears the whole phrase at once.
     const openedWaking = !this.acpReady;
@@ -1442,6 +1442,7 @@ export class VoiceSession {
   private async composeOpening(
     callerId: Record<string, unknown> | null,
     sinceLastCall: Record<string, unknown> | null,
+    admission: Record<string, unknown> | null = null,
   ): Promise<{ opening: string; context: string | null }> {
     const clause = callerIdClause(callerId);
     const [lastCall, onboarded, nextGreeting, since, rejoin, register] = await Promise.all([
@@ -1467,7 +1468,9 @@ export class VoiceSession {
     if (this.firstCall) return { opening: `${clause} Dogwalk. ${this.theme.firstCallWelcome}`, context: null };
     // Each is used once: a later call gets a freshly written welcome or the fallback.
     await this.state.storage.delete(["next_greeting", "since_greeting"]);
-    const parts = [clause, "Dogwalk."];
+    // Roaming as this User since their last Home call follows the caller-ID clause: both say who could be calling.
+    const roaming = await this.roamingNotice(admission).catch(() => null);
+    const parts = [clause, ...(roaming ? [roaming] : []), "Dogwalk."];
     const abnormal = abnormalEnding(lastCall ?? null, sinceLastCall);
     if (abnormal) parts.push(abnormal);
     // The welcome and since-clauses were written about the reaped Sandbox's sessions.
@@ -3640,9 +3643,22 @@ export class VoiceSession {
     const row = await this.env.DB.prepare("SELECT identity FROM voice_calls WHERE call_sid = ?")
       .bind(this.callSid).first<{ identity: string | null }>();
     if (!row?.identity) return null;
-    const { path, outcome, level, enforcement, shadow, enrolled_now } = JSON.parse(row.identity) as Record<string, unknown>;
+    const { path, outcome, level, enforcement, shadow, enrolled_now, admitted } = JSON.parse(row.identity) as Record<string, unknown>;
     return { via: path ?? null, outcome, ...(level ? { level } : {}), would_have: enforcement ?? null, shadow: shadow === true,
-      ...(enrolled_now ? { enrolled_now: true } : {}) };
+      ...(enrolled_now ? { enrolled_now: true } : {}), ...(admitted ? { admitted: true } : {}) };
+  }
+
+  // Roaming attempts as this User since their last Home call (identity_check.ts, roaming_attempts),
+  // as one clause of the Opening. Consumed only by a call that was not itself admitted by Roaming,
+  // so someone roaming as the User cannot clear the notice before the User hears it.
+  private async roamingNotice(admission: Record<string, unknown> | null): Promise<string | null> {
+    if (!this.userId || !this.callSid || admission?.via === "roaming") return null;
+    const { results } = await this.env.DB.prepare(
+      `UPDATE roaming_attempts SET noticed_at = unixepoch()
+        WHERE user_id = ? AND call_sid != ? AND noticed_at IS NULL AND (admitted_at IS NOT NULL OR failures > 0)
+        RETURNING admitted_at, failures`,
+    ).bind(this.userId, this.callSid).all<{ admitted_at: number | null; failures: number }>();
+    return roamingClause(results.filter((row) => row.admitted_at !== null).length, results.filter((row) => row.failures > 0).length);
   }
 
   private async callerIdAttestation(): Promise<Record<string, unknown> | null> {
@@ -4682,6 +4698,17 @@ function callerIdClause(callerId: Record<string, unknown> | null): string {
   if (/^TN-Validation-Passed-[BC]$/.test(verstat)) return "Partly verified.";
   if (verstat.startsWith("TN-Validation-Failed")) return "Caller ID failed verification.";
   return "Caller ID unverified.";
+}
+
+// Roaming since the User's last Home call: calls admitted as them, and failed attempts, never
+// which numbers or when (those stay in Access Control, readable by the operator).
+function roamingClause(admitted: number, failed: number): string | null {
+  const times = (n: number) => (n === 1 ? "once" : n === 2 ? "twice" : `${n} times`);
+  const parts = [
+    ...(admitted ? [`someone got in as you from another phone ${times(admitted)}`] : []),
+    ...(failed ? [`someone failed the voice check as you from another phone ${times(failed)}`] : []),
+  ];
+  return parts.length ? `Since your last call from home, ${parts.join(", and ")}.` : null;
 }
 
 const SANDBOX_REAPED_CLAUSE = "Your sandbox was cleared after a long time without calls, so this one starts fresh.";

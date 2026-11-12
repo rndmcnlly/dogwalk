@@ -30,8 +30,8 @@ import { handleVoiceVerify, warmSpeaker } from "./voice_verify";
 import { handlePracticeHeard, handlePracticeResult, handlePracticeStream, practiceReceived, practiceStreamStop, practiceTone, startPractice } from "./challenge_practice";
 import { handleReenrollmentHeard, handleReenrollmentResult, reenrollmentStreamStop, startReenrollment } from "./reenrollment";
 import {
-  type Exits, handleIdentityHeard, handleIdentityResult, handleIdentityStream, handleIdentityWho, identityStreamStop, startHomeCheck,
-  startRegistrationEnrollment,
+  type Exits, handleIdentityHeard, handleIdentityResult, handleIdentityStream, handleIdentityWho, identityStreamStop, roamingAdmits,
+  startHomeCheck, startRegistrationEnrollment, startRoamingFromGreeting,
 } from "./identity_check";
 import { asksToDonate, donationConsent, donationTone, handleDonationConsent, handleDonationRound, handleDonationStream } from "./voice_donation";
 export { TerminalRelay, VoiceSession };
@@ -354,6 +354,14 @@ async function homeUser(env: Env, phone: string): Promise<User | null> {
     `SELECT ${USER_COLUMNS} FROM users u
       WHERE u.home_phone = ? AND u.reaped_at IS NULL AND u.home_used_at > unixepoch() - ?`,
   ).bind(phone, HOME_TTL_SECONDS).first<User>();
+}
+
+/** The User a Roaming caller was admitted as earlier in this Voice Call (identity_check.ts), whatever the number's Home. */
+async function admittedRoamingUser(env: Env, callSid: string): Promise<User | null> {
+  return env.DB.prepare(
+    `SELECT ${USER_COLUMNS} FROM voice_calls c JOIN users u ON u.id = c.user_id
+      WHERE c.call_sid = ? AND json_extract(c.identity, '$.admitted') = 1 AND u.reaped_at IS NULL`,
+  ).bind(callSid).first<User>();
 }
 
 /** The User this Voice Call was resolved to when it entered. */
@@ -1203,7 +1211,7 @@ export default {
       return handleRecoveryConfirm(req, env);
     }
     if (url.pathname === "/voice/claim" && req.method === "POST") {
-      return handleClaim(req, env);
+      return handleClaim(req, env, ctx);
     }
     if (url.pathname === "/voice/confirm" && req.method === "POST") {
       return handleConfirm(req, env, ctx);
@@ -1272,18 +1280,22 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
 
   // Caller ID selects the User whose Home this is, and the Identity Check (shadow mode,
   // identity_check.ts) asks for evidence once per call: it is scored and reported but never
-  // withholds entry, so every Home caller still connects afterwards.
-  const user = await homeUser(env, from);
+  // withholds entry, so every Home caller still connects afterwards. A Roaming caller admitted
+  // earlier in the call returns here as the User they named; their Home is left alone.
+  const roaming = callSid ? await admittedRoamingUser(env, callSid) : null;
+  const user = roaming ?? await homeUser(env, from);
   if (user) {
     // The verifier's model load takes seconds; start it now, in the User's VoiceSession where
     // their challenges are scored, so the Identity Challenge does not wait for it. Background
     // only: TwiML never waits.
-    warmSpeaker(env, ctx, user.identity_hash);
+    if (!roaming) warmSpeaker(env, ctx, user.identity_hash);
     await env.DB.batch([
-      env.DB.prepare("UPDATE users SET last_seen_at = unixepoch(), home_used_at = unixepoch() WHERE id = ?").bind(user.id),
+      roaming
+        ? env.DB.prepare("UPDATE users SET last_seen_at = unixepoch() WHERE id = ?").bind(user.id)
+        : env.DB.prepare("UPDATE users SET last_seen_at = unixepoch(), home_used_at = unixepoch() WHERE id = ?").bind(user.id),
       env.DB.prepare("UPDATE voice_calls SET user_id = ? WHERE call_sid = ?").bind(user.id, callSid),
     ]);
-    await audit(env, "caller.registered", from, callSid, { user_id: user.id, via: "home" });
+    await audit(env, "caller.registered", from, callSid, { user_id: user.id, via: roaming ? "roaming" : "home" });
     const checked = await env.DB.prepare("SELECT identity IS NOT NULL AS done FROM voice_calls WHERE call_sid = ?")
       .bind(callSid).first<{ done: number }>();
     if (!checked?.done) {
@@ -1316,11 +1328,13 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
     }
   }
 
-  // Unregistered caller: begin the registration ritual.
+  // Unregistered caller: begin the registration ritual, or with Roaming admission on, a User
+  // calling from another phone names their Handle (/voice/claim).
   await audit(env, "claim.ritual.start", from, callSid, {});
   const invites = await usableInviteCodes(env, from);
   return twiml(GatherSpeech(
-    "This is Dogwalk, a voice line for supervising coding agents. If you have an invite, say your three invite words now. " +
+    "This is Dogwalk, a voice line for supervising coding agents. " +
+      (roamingAdmits(env) ? "Say your two-word Dogwalk name, or your three invite words. " : "If you have an invite, say your three invite words now. ") +
       "To donate voice samples for research, say donate.",
     "/voice/claim", 1, [...invites.map((i) => i.code_words), "donate"],
   ));
@@ -1820,7 +1834,7 @@ async function endIdentity(env: Env, callSid: string): Promise<void> {
 
 // --- /voice/claim: receive spoken words --------------------------------
 
-async function handleClaim(req: Request, env: Env): Promise<Response> {
+async function handleClaim(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const sig = await twilioSignatureValid(req, env);
   if (!sig.valid) return new Response("forbidden", { status: 403 });
   const form = await req.clone().formData();
@@ -1845,6 +1859,13 @@ async function handleClaim(req: Request, env: Env): Promise<Response> {
     await audit(env, "donation.requested", from, callSid, { via: "registration prompt" });
     return twiml(Redirect("/voice/donation"));
   }
+  // A Handle (two words, disjoint from the Invite Code vocabulary) starts Roaming when admission is on.
+  const log = (event: string, detail: Record<string, unknown>) => audit(env, event, from, callSid, detail);
+  const roaming = await startRoamingFromGreeting(env, ctx, new URL(req.url), form, spoken, log).catch(async (error) => {
+    await log("identity.error", { stage: "greeting", message: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+    return Say("The voice check stopped because of an error. Goodbye.") + Hangup();
+  });
+  if (roaming) return twiml(roaming);
 
   const candidates = await usableInviteCodes(env, from);
   const match = matchInviteCode(spoken, candidates);

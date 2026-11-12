@@ -284,8 +284,11 @@ FIRST_OPENING = (
     "Caller ID unverified. Dogwalk. Welcome! I'm your walker; your sandbox is "
     "being set up, which takes a minute or two."
 )
+# Roaming as the caller since their last call from home follows the caller-ID clause (configure_assignment seeds it).
+ROAMING_CLAUSE = ("Since your last call from home, someone got in as you from another phone once, "
+                  "and someone failed the voice check as you from another phone twice.")
 RETURN_OPENING = (
-    f"Verified. Dogwalk. {NEXT_GREETING} Since then, Juniper asked for permission. Where to?"
+    f"Verified. {ROAMING_CLAUSE} Dogwalk. {NEXT_GREETING} Since then, Juniper asked for permission. Where to?"
 )
 REAPED_CLAUSE = "Your sandbox was cleared after a long time without calls, so this one starts fresh."
 WORK_BRIEF = "Starting Juniper on a tiny verified artifact."
@@ -625,6 +628,14 @@ SELECT call_sid, '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch(), trace_
 -- How CA_VOICE_TEST's caller got in: the shadow Identity Check's record (identity_check.ts).
 UPDATE voice_calls SET identity = '{{"path":"home","user_id":2,"outcome":"match","level":"Voice matched.","enforcement":"admit","shadow":true}}'
  WHERE call_sid = 'CA_VOICE_TEST';
+-- Roaming as the caller from other phones (identity_check.ts): one admission and two failed
+-- attempts are news for the next Home Opening; one already told and one that neither got in
+-- nor failed are not.
+INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at, failures, admitted_at, noticed_at)
+SELECT call_sid, (SELECT id FROM users WHERE identity_hash = '{identity}'), '+15555550188', unixepoch() - 600, failures, admitted_at, noticed_at
+  FROM (SELECT 'CA_ROAM_IN' AS call_sid, 0 AS failures, unixepoch() - 600 AS admitted_at, NULL AS noticed_at
+        UNION ALL SELECT 'CA_ROAM_FAIL1', 1, NULL, NULL UNION ALL SELECT 'CA_ROAM_FAIL2', 1, NULL, NULL
+        UNION ALL SELECT 'CA_ROAM_TOLD', 1, NULL, unixepoch() - 900 UNION ALL SELECT 'CA_ROAM_QUIT', 0, NULL, NULL);
 INSERT INTO call_activity (call_sid, ts, source, direction, event, detail)
 VALUES ('CA_VOICE_TEST2', unixepoch(), 'voice', 'inbound', 'call.attestation',
         '{{"stir_verstat":"TN-Validation-Passed-A","caller_name_present":false,"from_country":"US","parameters":[]}}');
@@ -1299,6 +1310,9 @@ async def run_protocol(identity: str) -> None:
         )
         assert "first_call" not in second_start and "[harness event] agent_connecting" in second_start
         assert '"stir_verstat":"TN-Validation-Passed-A"' in second_start
+        # The Roaming notice is told once: every reported attempt is now noticed.
+        unnoticed = await asyncio.to_thread(d1, "SELECT call_sid FROM roaming_attempts WHERE noticed_at IS NULL ORDER BY call_sid")
+        assert [row["call_sid"] for row in unnoticed] == ["CA_ROAM_QUIT"], unnoticed
 
         # Keypad conventions, all handled without the Orchestrator.
         await mocks.send_live(dtmf("1"))

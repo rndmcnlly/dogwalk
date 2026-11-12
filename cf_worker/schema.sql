@@ -222,6 +222,25 @@ CREATE TABLE IF NOT EXISTS challenge_rounds (
   PRIMARY KEY (call_sid, round)
 );
 
+-- Roaming attempts while Roaming admission is on (identity_check.ts): one per Voice Call and
+-- named User, written before the first challenge. failures counts unmatched voices on matched
+-- phrases (never wrong phrases or thin speech); recent failures pause Roaming for the Handle
+-- and from the number. The User's next Home Opening reports them (noticed_at). Rows older than
+-- 90 days are pruned.
+CREATE TABLE IF NOT EXISTS roaming_attempts (
+  call_sid TEXT NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  phone_number TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  failures INTEGER NOT NULL DEFAULT 0,
+  admitted_at INTEGER,
+  noticed_at INTEGER,
+  PRIMARY KEY (call_sid, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_roaming_attempts_user ON roaming_attempts(user_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_roaming_attempts_phone ON roaming_attempts(phone_number, started_at);
+
 -- Paired Browser: a Pairing Code played into a call, awaiting a browser's claim.
 -- Only the code's hash is stored; a claim deletes its row, so each code works once.
 CREATE TABLE IF NOT EXISTS pairing_codes (
