@@ -606,6 +606,9 @@ SELECT call_sid, '{TEST_PHONE}', 'in-progress', unixepoch(), unixepoch(), trace_
        (SELECT id FROM users WHERE identity_hash = '{identity}')
   FROM (SELECT 'CA_VOICE_TEST' AS call_sid, '{CALL_TRACE_ID}' AS trace_id, '{CALL_SPAN_ID}' AS span_id
         UNION ALL SELECT 'CA_VOICE_TEST2', NULL, NULL UNION ALL SELECT 'CA_VOICE_TEST3', NULL, NULL);
+-- How CA_VOICE_TEST's caller got in: the shadow Identity Check's record (identity_check.ts).
+UPDATE voice_calls SET identity = '{{"path":"home","user_id":2,"outcome":"match","level":"Voice matched.","enforcement":"admit","shadow":true}}'
+ WHERE call_sid = 'CA_VOICE_TEST';
 INSERT INTO call_activity (call_sid, ts, source, direction, event, detail)
 VALUES ('CA_VOICE_TEST2', unixepoch(), 'voice', 'inbound', 'call.attestation',
         '{{"stir_verstat":"TN-Validation-Passed-A","caller_name_present":false,"from_country":"US","parameters":[]}}');
@@ -939,6 +942,9 @@ async def run_protocol(identity: str) -> None:
         started_event = OrchestratorMock.user_message("call_started")
         assert '"first_call":true' in started_event and FIRST_OPENING in started_event
         assert '"caller_id":null' in started_event
+        # The Session Orchestrator learns how the caller got in; the spoken opening never recites it.
+        assert '"identity":{"via":"home","outcome":"match","level":"Voice matched.","would_have":"admit","shadow":true}' in started_event, started_event
+        assert "matched" not in greeting["content"].lower() and "user_id" not in started_event
         assert "agent_connecting" in started_event
         await next_matching(mocks.live_messages, appended("thinking", READY_BRIEF))
         early = OrchestratorMock.tool_output("cs-create")

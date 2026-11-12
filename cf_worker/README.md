@@ -192,17 +192,23 @@ A User (`users`) is a two-word Handle (`src/handles.ts`), an opaque
 `identity_hash` that keys their VoiceSession and TerminalRelay Durable Objects
 and their Daytona label `identity-v1:<hash>`, Registration provenance, and at
 most one Home number. Registration assigns a random Handle and speaks it twice.
-Until the Identity Check exists, an unexpired Home (used within 90 days) admits
-its caller as the phone number alone did before; `voice_calls.user_id` records
-which User a call reached. `voice_references` holds enrolled speaker embeddings
-(never audio) for the coming Identity Check. The `SPEAKER` Service Binding reaches
+An unexpired Home (used within 90 days) selects the User, and the shadow Identity
+Check (below) runs before the Voice Agent but never withholds entry;
+`voice_calls.user_id` records which User a call reached. `voice_references` holds
+enrolled speaker embeddings (never audio). The `SPEAKER` Service Binding reaches
 the separately deployed `dogwalk-speaker` Worker (`../speaker_worker/`), which
 scores audio against them; operator-only `/admin/api/voice-verify` routes expose
 it for calibration and answer 503 when it is unbound or unreachable. Local tests
-bind `speaker_mock.js` in its place (see Verification). A Home call from a User
-with a Voice Reference, and each Challenge Practice take, warm the verifier in
-the background (`warmSpeaker`, a `waitUntil` that never delays TwiML and drops
-every failure), so a later challenge on the same machine skips the 3–5 s model load.
+bind `speaker_mock.js` in its place (see Verification). A Home call, and each
+challenge take, warm the verifier in the background (`warmSpeaker`, a `waitUntil`
+that never delays TwiML and drops every failure), so a later challenge skips the
+3–5 s model load. Warmth belongs to one machine, so a User's warms and scores all
+go through their VoiceSession Durable Object (`userSpeaker` and `hostSpeaker` in
+`src/voice_verify.ts`, routes `/speaker/warm|embed|verify`): a Durable Object
+stays where it was created, and a Service Binding call runs on its caller's
+server, so the instance warmed at call arrival is the one that scores. Each
+hosted score calls `warm()` first and reports `cold`, which `identity.round` and
+`practice.round` log.
 
 `migrations/2026-11-11-users.sql` converted the phone-keyed `registrations`
 table, keeping each existing `identity_hash` so Durable Objects, Sandboxes, and
@@ -225,7 +231,7 @@ Each round then starts a caller-only `<Start><Stream>` to
 `/voice/donation/tone.wav`, and says the prompt inside a speech `<Gather>` whose
 action (`/voice/donation/round`) keeps the transcript, stops that stream, and
 starts the next round. Eight challenge phrases (`src/challenge_phrases.ts`, the
-generator the Identity Check will reuse) and two free-speech prompts make about
+generator the Identity Check uses) and two free-speech prompts make about
 three minutes. A short "stop" ends it, keeping what was recorded. Never `<Record>`.
 
 The stream upgrade must carry a valid Twilio signature (over its wss URL) and an
@@ -261,19 +267,20 @@ Challenge Practice); its `start_challenge_practice` tool leaves a `practice`
 handoff, so `/voice/after-live` redirects to `/voice/practice`
 (`src/challenge_practice.ts`). That route checks for the call's User's Voice
 Reference (`voice_calls.user_id`) and the `SPEAKER` binding, returning to `/voice`
-with a spoken reason when either is missing, warms the verifier with a synthetic
-`embed` in `waitUntil`, and starts round one. Each round inserts a transient
-`practice_rounds` row with a fresh phrase, starts a caller-only
+with a spoken reason when either is missing, and starts round one. Rounds come
+from the engine Challenge Practice shares with the Identity Check
+(`src/challenge_rounds.ts`; practice keeps only its words and limits). Each round
+inserts a transient `challenge_rounds` row with a fresh phrase, starts a caller-only
 `<Start><Stream>` to `/voice/practice/stream/<capability>` (the same signed,
 per-round machinery as Voice Donations, in `src/caller_stream.ts`), plays the
 tone, and says the phrase inside a speech `<Gather>`. Its action,
 `/voice/practice/heard`, checks the transcript first (`phraseMatches` in
-`src/challenge_phrases.ts`, shared with the coming Identity Check): every
+`src/challenge_phrases.ts`, shared with the Identity Check): every
 content word in order, plurals forgiven, insertions allowed, or the round is a
 wrong phrase and is not scored. Every phrase Gather (donation rounds too) passes
 the phrase's content words as speech `hints`. A short "repeat", "say that
 again", "again", "what", or "pardon" replays the phrase as a new take (its own
-stream and capability, `practice_rounds.take`), up to three times per round,
+stream and capability, `challenge_rounds.take`), up to three times per round,
 without counting it; a fourth request moves to a fresh phrase (`repeat_limit`). A captured answer, matched or a wrong phrase (never
 silence, "stop", or a repeat request), first plays the received cue,
 `/voice/practice/received.wav` (`answerReceivedCue` in `src/caller_stream.ts`:
@@ -311,6 +318,74 @@ speculative score was used, `head_start_ms`, from its start to `/heard`) plus
 `practice.started`, `practice.repeat`, `practice.ended`, and
 `practice.unavailable`.
 
+## Identity Check (shadow mode)
+
+The Identity Check (DOMAIN.md) runs in `src/identity_check.ts` on the round engine
+of `src/challenge_rounds.ts`, so it has Challenge Practice's shape and rules:
+tone, phrase, answer, received cue, level; strict `phraseMatches` with hints;
+replays on request; speculative scoring from the endpointer; a wrong phrase is
+never voice evidence; too little speech earns another phrase without counting.
+Shadow mode means every outcome connects a Home caller as before; the record says
+what enforcement would have done.
+
+- **Home** (`/voice`, a caller whose number is an unexpired Home): once per Voice
+  Call (`voice_calls.identity` set means done; returning to `/voice` after
+  practice, a Theme switch, or recovery skips it), `/voice` speaks "Dogwalk, for
+  <Handle>." and one challenge, while the Sandbox wakes in `waitUntil`
+  (`wakeSandbox`). Full instructions until `users.challenges_completed` reaches
+  `TERSE_AFTER` (3), then "Your sentence." The result speaks the level and
+  redirects to `/voice`, which dials the Voice Agent. Stop, two silences, a
+  verifier error, or four rounds without a judgment also connect.
+- **Classification** (`/voice/identity/heard`, after the phrase check): two
+  adjacent Handle words that are a User's Handle start that User's challenges; an
+  Invite Code (three PGP words) goes straight to its readback, and a mention of an
+  invite to "Say your three invite words" (`/voice/claim`); "donate" redirects to
+  `/voice/donation`; "someone else" asks who (`/voice/identity/who`, one retry,
+  then a polite end). Naming the Handle being checked replays the sentence.
+- **Roaming** (`path=roaming`): three challenges against the named User's Voice
+  Reference, each level spoken, then "Calling as yourself from another phone is
+  coming soon" and a hangup; the caller is never admitted as that User. A named
+  User without a Voice Reference ends at once.
+- **Enrollment** (`path=enroll` on a Home call from a User without a Voice
+  Reference; `path=register` at the end of Registration, when the confirm webhook
+  carries an `AccountSid` and `SPEAKER` is bound): an explanation, then five
+  matched answers embedded with `SPEAKER.embed` (no level spoken; under 1.5 s of
+  speech earns another phrase), kept as transient `challenge_rounds.embedding`
+  until the end. The Voice Reference is the mean of the L2-normalized embeddings,
+  re-normalized, in the embedding space most answers share; fewer than three
+  stores nothing, and `ON CONFLICT DO NOTHING` never replaces an existing one.
+  Stop skips it until the next call.
+
+Without `SPEAKER` or an `AccountSid` (local dev, most tests), `/voice` records
+`identity` as `unavailable` and connects at once. An exception in an identity
+webhook, or in starting the check from `/voice`, records `error` and connects a
+Home path (Roaming and Registration paths hang up; a Registration whose
+enrollment cannot start still speaks the Handle). Webhook URLs carry `path`,
+`user`, progress, and `start` (the round before the path began, so a path entered
+mid-call gets its own round budget); Twilio signs them. A call's rounds, and with
+them any enrollment embeddings, are deleted whenever a path ends, on an error,
+and when the call's terminal status arrives.
+
+Call Activity (source `access`): `identity.started` (`path`, `user_id`, `terse`),
+`identity.round` (`path`, `round`, `outcome`, `cosine` or for enrollment none,
+`speech_seconds`, `cold`, `wait_ms`, `speculative`, `head_start_ms`),
+`identity.repeat`, `identity.escape` (`to`), `identity.who`, `identity.result`
+(the stored record: `path`, `user_id`, `outcome`, `level`, `enforcement` of
+`admit`, `require_roaming`, `admit_roaming`, `deny`, or `undecided`, `shadow`),
+and `identity.error`. Never a transcript, phrase, embedding, or audio. The
+VoiceSession reads `voice_calls.identity` into `call_started` as `identity`
+(`via`, `outcome`, `level`, `would_have`, `shadow`, `enrolled_now`) for the
+Session Orchestrator; the spoken Opening does not change.
+
+Apply `migrations/2026-11-13-identity-check.sql` remotely before deploying this
+(it recreates the transient `challenge_rounds` from `practice_rounds`, and adds
+`users.challenges_completed` and `voice_calls.identity`); run it while no practice
+or check is in progress:
+
+```bash
+npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-13-identity-check.sql
+```
+
 ## Verification
 
 The local smoke test runs a fake Daytona lifecycle and toolbox server:
@@ -333,13 +408,16 @@ the base, base+3 to base+5, and base+1442. Each worktree keeps its own local D1.
 
 The smoke test's Voice Donation checks use wrangler dev's local R2. A local D1
 created before `migrations/2026-11-11-call-handoff-donation.sql`,
-`migrations/2026-11-12-challenge-practice.sql`, or
-`migrations/2026-11-12-speculative-scoring.sql` needs those files applied with
+`migrations/2026-11-12-challenge-practice.sql`,
+`migrations/2026-11-12-speculative-scoring.sql`, or
+`migrations/2026-11-13-identity-check.sql` needs those files applied with
 `--local` once, since `schema.sql` only creates missing tables.
 
 The smoke test runs `wrangler dev -c wrangler.toml -c speaker_mock.toml`, so the
 `SPEAKER` binding reaches `speaker_mock.js`, whose answers follow from the audio
-streamed to it (Challenge Practice levels, short speech, verifier errors). It
+streamed to it (Challenge Practice and Identity Check levels, short speech,
+verifier errors; its `embed` returns one fixed unit vector, so enrollment's
+reference is checkable). It
 gives wrangler a private dev registry (`WRANGLER_REGISTRY_PATH`), so another
 worktree's `wrangler dev` never binds to the mock.
 

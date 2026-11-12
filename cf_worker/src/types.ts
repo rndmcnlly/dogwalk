@@ -41,11 +41,13 @@ export interface Env {
 // insufficient-audio, incompatible-reference, busy, or inference-failed.
 export type SpeakerAudio = { audio: ArrayBuffer; format: "pcm_s16le"; sampleRate: number };
 export type SpeakerReference = { embedding: number[]; embeddingSpace: string };
+// Through a User's VoiceSession (voice_verify.ts, userSpeaker), embed and verify also report
+// cold: whether that request loaded the model.
 export interface SpeakerVerifier {
-  embed(input: SpeakerAudio): Promise<SpeakerReference & { audioSeconds: number; speechSeconds: number }>;
+  embed(input: SpeakerAudio): Promise<SpeakerReference & { audioSeconds: number; speechSeconds: number; cold?: boolean }>;
   // Loads the model in the instance on this machine; cold is true when this call did the work.
   warm(): Promise<{ cold: boolean }>;
   verify(input: SpeakerAudio & { reference: SpeakerReference }): Promise<{
-    cosineSimilarity: number; embeddingSpace: string; audioSeconds: number; speechSeconds: number;
+    cosineSimilarity: number; embeddingSpace: string; audioSeconds: number; speechSeconds: number; cold?: boolean;
   }>;
 }

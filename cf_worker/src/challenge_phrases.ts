@@ -3,7 +3,7 @@
 // concrete words keep them easy to repeat over a narrowband line; there are no digit strings,
 // tongue twisters, or disturbing content. No word is a Handle word, an Invite Code word, or an
 // escape word, so a transcript of a phrase is never mistaken for a Handle, an Invite Code, or a
-// request to leave. Voice Donations and Challenge Practice use them now; the Identity Check will.
+// request to leave. Voice Donations, Challenge Practice, and the Identity Check use them.
 import { HANDLE_WORDS } from "./handles.ts";
 import { EVEN_WORDS, ODD_WORDS } from "./invitations.ts";
 
@@ -36,7 +36,7 @@ const SLOTS = {
 type Slot = keyof typeof SLOTS;
 
 // Eight to eleven words: a brisk repetition then lasts about 2.5 s or more, enough for the
-// verifier to measure (MIN_SPEECH_SECONDS in challenge_practice.ts) even where a noisy line
+// verifier to measure (MIN_SPEECH_SECONDS in challenge_rounds.ts) even where a noisy line
 // hides the quieter syllables, while each phrase stays one easy breath.
 const TEMPLATES = [
   "The old {color} {thing} belongs {place}.",
