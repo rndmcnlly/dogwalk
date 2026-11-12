@@ -40,6 +40,9 @@ export const ROAMING_CHALLENGES = 3;
 const ROAMING_FAILURES_PER_HANDLE = 3;
 const ROAMING_FAILURES_PER_NUMBER = 5;
 const ROAMING_WINDOW_SECONDS = 86400;
+// A Handle takes one Roaming attempt at a time; an attempt whose call never reported its end
+// stops holding the Handle after this long (eight rounds take a few minutes).
+const ROAMING_ACTIVE_SECONDS = 600;
 // Attempts are kept for the User's next Home Opening, then pruned past this age, read or not.
 const ROAMING_KEEP_SECONDS = 90 * 86400;
 
@@ -255,15 +258,30 @@ async function startRoaming(
         ? `Too many failed tries as ${subject.handle} from other phones today. Call from its home phone, or try again tomorrow. Goodbye.`
         : "Too many failed voice checks from this phone today. Try again tomorrow. Goodbye.");
     }
-    // Recorded before the first challenge, so hanging up after hearing a level cannot hide a failure.
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM roaming_attempts WHERE started_at < unixepoch() - ?").bind(ROAMING_KEEP_SECONDS),
-      env.DB.prepare(`INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at) VALUES (?, ?, ?, unixepoch())
-                      ON CONFLICT(call_sid, user_id) DO NOTHING`).bind(callSid, subject.id, phone),
-    ]);
+    // Recorded before the first challenge, so hanging up after hearing a level cannot hide a
+    // failure. One statement claims the Handle, so calls in parallel cannot all start before any
+    // has failed: another call's attempt is in progress until its check concludes or it ends.
+    await env.DB.prepare("DELETE FROM roaming_attempts WHERE started_at < unixepoch() - ?").bind(ROAMING_KEEP_SECONDS).run();
+    const claimed = await env.DB.prepare(
+      `INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at)
+       SELECT ?1, ?2, ?3, unixepoch() WHERE NOT EXISTS (
+         SELECT 1 FROM roaming_attempts a JOIN voice_calls c ON c.call_sid = a.call_sid
+          WHERE a.user_id = ?2 AND a.call_sid != ?1 AND a.started_at > unixepoch() - ?4 AND a.admitted_at IS NULL
+            AND a.failures = 0 AND c.identity IS NULL AND c.ended_at IS NULL)
+       ON CONFLICT(call_sid, user_id) DO NOTHING`,
+    ).bind(callSid, subject.id, phone, ROAMING_ACTIVE_SECONDS).run();
+    if (!claimed.meta.changes && !await roamingAttempt(env, callSid, subject.id)) {
+      await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "busy", enforcement: "deny" }, false);
+      return after("roaming", `Someone is already checking as ${subject.handle}. Try again in a few minutes. Goodbye.`);
+    }
   }
   return Say(`Checking ${subject.handle}. ${ROAMING_CHALLENGES} sentences. After each tone, repeat the sentence once in your normal voice.`) +
     await roundTwiml(env, ctx, url, callSid, account, round + 1, fresh("roaming", subject.id, round), subject);
+}
+
+/** Whether this call started a Roaming attempt as this User while admission was on. */
+async function roamingAttempt(env: Env, callSid: string, userId: number): Promise<boolean> {
+  return Boolean(await env.DB.prepare("SELECT 1 FROM roaming_attempts WHERE call_sid = ? AND user_id = ?").bind(callSid, userId).first());
 }
 
 /** Whether Roaming is paused for this Handle or from this number by recent failed attempts. */
@@ -479,16 +497,25 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
     return after("home", verdict.spoken);
   }
   const judged = progress.judged + 1;
-  if (roamingAdmits(env)) {
-    // Admission enforces: the first unmatched voice fails the attempt, since no later round could
-    // change the decision and each would be one more level to tune an impersonation against.
-    if (verdict.outcome === "no_match") {
+  // Admission enforces only an attempt it recorded, so a call that began in shadow mode stays
+  // shadow if the flag turns on mid-call.
+  if (roamingAdmits(env) && await roamingAttempt(env, callSid, subject.id)) {
+    // The first unmatched voice fails the attempt, since no later round could change the
+    // decision and each would be one more level to tune an impersonation against.
+    // Every judged round must have passed; by construction it has, since a failure ends here.
+    if (verdict.outcome === "no_match" || passed !== judged) {
       await env.DB.prepare("UPDATE roaming_attempts SET failures = failures + 1 WHERE call_sid = ? AND user_id = ?")
         .bind(callSid, subject.id).run();
       await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "failed", enforcement: "deny", judged, passed }, false);
       return after("roaming", `${verdict.spoken} I can't let you in as ${subject.handle} this time. Goodbye.`);
     }
     if (judged < ROAMING_CHALLENGES) return next(verdict.spoken, judged, passed);
+    // Failures by other calls since this attempt began still pause it.
+    const paused = await roamingPause(env, subject.id, String(form.get("From") ?? ""));
+    if (paused) {
+      await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "paused", paused, enforcement: "deny", judged, passed }, false);
+      return after("roaming", `${verdict.spoken} Calls as ${subject.handle} from other phones are paused right now. Goodbye.`);
+    }
     return admitRoaming(env, callSid, log, subject, verdict.spoken, judged);
   }
   if (judged < ROAMING_CHALLENGES) return next(verdict.spoken, judged, passed);

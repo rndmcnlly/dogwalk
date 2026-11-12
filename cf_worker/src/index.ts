@@ -1876,7 +1876,7 @@ async function handleClaim(req: Request, env: Env, ctx: ExecutionContext): Promi
       from,
       callSid,
       attempts,
-      "Those words don't match an invite. ",
+      roamingAdmits(env) ? "I didn't recognize a Dogwalk name or invite words. " : "Those words don't match an invite. ",
     );
   }
 
@@ -2119,7 +2119,8 @@ async function retryOrHangup(
   const invites = await usableInviteCodes(env, from);
   return twiml(
     GatherSpeech(
-      `${prefix}Say your invite words.`,
+      // The greeting offered a Handle while Roaming admission is on, so a retry offers it too.
+      `${prefix}${roamingAdmits(env) ? "Say your two-word Dogwalk name, or your invite words." : "Say your invite words."}`,
       "/voice/claim",
       attempts + 1,
       invites.map((i) => i.code_words),

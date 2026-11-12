@@ -498,11 +498,15 @@ and returning to the Voice Agent later in the call does not check again. Wrong
 phrases, thin speech, silence, and stop end or prolong an attempt but are never
 failures. Failed attempts in the last day pause Roaming for that Handle (three)
 and from that calling number across Handles (five); the Home call is never
-paused. An attempt is recorded before its first challenge, so hanging up after
-hearing a level cannot hide a failure. The User's next call that was not itself
-admitted by Roaming says, after the caller-ID clause, how many calls got in as
-them from other phones and how many voice checks as them failed, since their
-last call from home; never which numbers or when.
+paused. A pause that begins during an attempt also stops its admission. An
+attempt is recorded before its first challenge, so hanging up after hearing a
+level cannot hide a failure, and a Handle takes one attempt at a time, so calls
+in parallel cannot all start before any has failed. Only an attempt recorded
+under admission can admit. The User's next call that was not itself admitted by
+Roaming (their first call too) says, after the caller-ID clause, how many calls
+got in as them from other phones and how many voice checks as them failed, since
+their last call from home; never which numbers or when. An Opening that never
+reached the caller leaves the notice for the next call.
 
 **Not:** A reduced access tier, or re-homing.
 
@@ -1163,7 +1167,7 @@ The following language appears in Git history and is not canonical for productio
 - Should the Identity Check ever collect more voice evidence during the conversation, or does whole-call collection need its own consent and retention decision?
 - Shadow Identity Check: what evidence (genuine and impostor levels across conditions, wrong-phrase and thin-speech rates, `wait_ms`) is enough to turn on enforcement, and does enforcement start with Home calls before Roaming exists? The registration prompt accepts a Handle only while Roaming admission is on; should it also do so in shadow mode, so a User calling from a phone that is not a Home can be challenged without being admitted? Should Roaming challenges against a User count toward that User's taught-once count, or Challenge Practice rounds toward it? Registration's enrollment does not yet create the new Sandbox while it runs, and does not use the spoken Invite Code as speech.
 - Re-enrollment: a User whose voice no longer matches from any setting (illness, a changed voice, or a verifier whose new embedding space cannot compare with the old reference) cannot re-enroll by voice. What recovers them, and what proves it is them, is undecided; today it is the operator deleting the Voice Reference so first-call enrollment runs again on the next Home call. Should Re-enrollment also be reachable after Roaming admission, and should it require that this call's own Identity Check matched? Should failed Re-enrollment checks count toward a Handle's attempt limits, since, like Challenge Practice, each one tells the caller a level? Should the Session Orchestrator learn the outcome when the call returns to it?
-- Roaming admission: what evidence turns it on (it rests on the same small sample as the threshold: no human impostors or clone test yet)? Should several rounds combine into one decision (a mean or a majority over more, cheaper rounds) instead of every round passing on its own? Should Roaming speak a coarser level than Home, or none, since each level is feedback for tuning an impersonation? Are three failures per Handle and five per number per day right, given that pausing a Handle is also a way for anyone to keep its User from Roaming for a day? A User who only roams never hears the Roaming notice, which waits for a call not admitted by Roaming; should it reach them some other way? Re-homing after a Roaming admission (explicit, spoken, confirmed) is not built.
+- Roaming admission: what evidence turns it on (it rests on the same small sample as the threshold: no human impostors or clone test yet)? Should several rounds combine into one decision (a mean or a majority over more, cheaper rounds) instead of every round passing on its own? Should Roaming speak a coarser level than Home, or none, since each level is feedback for tuning an impersonation? Are three failures per Handle and five per number per day right, given that pausing a Handle is also a way for anyone to keep its User from Roaming for a day, and that one attempt at a time lets a caller who holds a call open keep the User from Roaming for its length? A User who only roams never hears the Roaming notice, which waits for a call not admitted by Roaming; should it reach them some other way? Re-homing after a Roaming admission (explicit, spoken, confirmed) is not built.
 - Voice Donations: how long is donated audio kept? Today it stays until the operator deletes it on request or decides otherwise; a fixed retention period, and whether the consent script should state it, is undecided. Should a donor be able to delete their own session by voice without an identifier being spoken to them?
 - Is there a limit on how many Managed Sessions the Voice Agent attends at once, and who decides when to let one go?
 

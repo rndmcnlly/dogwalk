@@ -356,17 +356,22 @@ what enforcement would have done.
   else keeps the shadow behavior above, byte for byte). The unregistered greeting
   asks for "your two-word Dogwalk name, or your three invite words", and
   `/voice/claim` starts Roaming on a Handle (`startRoamingFromGreeting`) before
-  matching an Invite Code. `startRoaming` first checks `roaming_attempts` for a
-  pause (3 failed attempts as the Handle, or 5 from the number, in 24 hours; the
-  caller hears which and the call ends with `outcome: "paused"`), then records
-  the attempt. The first `no_match` increments `failures` and hangs up ("I can't
-  let you in as <Handle> this time"); three matches set `voice_calls.user_id`, mark
-  `admitted_at`, store `identity` with `admitted: true, shadow: false`, say
-  "Welcome, <Handle>.", and redirect to `/voice`, where `admittedRoamingUser`
-  wins over the number's Home (only `last_seen_at` is touched, never the Home).
-  The User's next call not admitted by Roaming speaks a counted notice after the
-  caller-ID clause and sets `noticed_at`. Rows older than 90 days are pruned when
-  an attempt starts.
+  matching an Invite Code; a retry offers both. `startRoaming` first checks
+  `roaming_attempts` for a pause (3 failed attempts as the Handle, or 5 from the
+  number, in 24 hours; the caller hears which and the call ends with `outcome:
+  "paused"`), then claims the Handle in one statement: it records the attempt
+  unless another call's attempt on that Handle is in progress (its `voice_calls`
+  row has no `identity` and no `ended_at`, within 10 minutes), which ends the call
+  with `outcome: "busy"`. Only a call with a recorded attempt is enforced (a call
+  begun before the flag turned on stays shadow). The first `no_match` increments
+  `failures` and hangs up ("I can't let you in as <Handle> this time"); three
+  matches recheck the pause, then set `voice_calls.user_id`, mark `admitted_at`,
+  store `identity` with `admitted: true, shadow: false`, say "Welcome, <Handle>.",
+  and redirect to `/voice`, where `admittedRoamingUser` wins over the number's Home
+  (only `last_seen_at` is touched, never the Home). The User's next call not
+  admitted by Roaming, first calls included, speaks a counted notice after the
+  caller-ID clause and sets `noticed_at` once that Opening is sent. Rows older than
+  90 days are pruned when an attempt starts.
 - **Enrollment** (`path=enroll` on a Home call from a User without a Voice
   Reference; `path=register` at the end of Registration, when the confirm webhook
   carries an `AccountSid` and `SPEAKER` is bound): an explanation, then five

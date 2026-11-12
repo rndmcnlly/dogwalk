@@ -280,15 +280,16 @@ THEME_LEXICON = [
 assert "dog" in THEME_LEXICON and "callsign" in THEME_LEXICON
 KEYPAD_SAY = "Seven noted."
 NEXT_GREETING = "Last time Juniper built a tiny verified artifact."
-FIRST_OPENING = (
-    "Caller ID unverified. Dogwalk. Welcome! I'm your walker; your sandbox is "
-    "being set up, which takes a minute or two."
-)
-# Roaming as the caller since their last call from home follows the caller-ID clause (configure_assignment seeds it).
+# Roaming as the caller since their last call from home follows the caller-ID clause, even on a
+# first call (configure_assignment seeds it), and is told once.
 ROAMING_CLAUSE = ("Since your last call from home, someone got in as you from another phone once, "
                   "and someone failed the voice check as you from another phone twice.")
+FIRST_OPENING = (
+    f"Caller ID unverified. {ROAMING_CLAUSE} Dogwalk. Welcome! I'm your walker; your sandbox is "
+    "being set up, which takes a minute or two."
+)
 RETURN_OPENING = (
-    f"Verified. {ROAMING_CLAUSE} Dogwalk. {NEXT_GREETING} Since then, Juniper asked for permission. Where to?"
+    f"Verified. Dogwalk. {NEXT_GREETING} Since then, Juniper asked for permission. Where to?"
 )
 REAPED_CLAUSE = "Your sandbox was cleared after a long time without calls, so this one starts fresh."
 WORK_BRIEF = "Starting Juniper on a tiny verified artifact."
@@ -1310,7 +1311,7 @@ async def run_protocol(identity: str) -> None:
         )
         assert "first_call" not in second_start and "[harness event] agent_connecting" in second_start
         assert '"stir_verstat":"TN-Validation-Passed-A"' in second_start
-        # The Roaming notice is told once: every reported attempt is now noticed.
+        # The Roaming notice was told once, in the first Opening: every reported attempt is now noticed.
         unnoticed = await asyncio.to_thread(d1, "SELECT call_sid FROM roaming_attempts WHERE noticed_at IS NULL ORDER BY call_sid")
         assert [row["call_sid"] for row in unnoticed] == ["CA_ROAM_QUIT"], unnoticed
 

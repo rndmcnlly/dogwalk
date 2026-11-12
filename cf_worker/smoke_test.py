@@ -1912,11 +1912,11 @@ def roaming_admission_checks(base_url: str, token: str) -> None:
         row = d1_local(f"SELECT identity FROM voice_calls WHERE call_sid = '{sid}'")
         return json.loads(row[0]["identity"]) if row and row[0]["identity"] else None
 
-    def answer(body: str, form: dict, number: int, first_sample: int) -> str:
+    def answer(body: str, form: dict, number: int, first_sample: int, user: int = vid) -> str:
         """A matched Roaming answer of steady audio, scored at the stream's stop."""
         name = f"identity-round-{number:02d}"
         stream = re.search(rf'<Start><Stream name="{name}" url="wss://dogwalk\.tools(/voice/identity/stream/[^"]+)"', body)
-        action = re.search(rf'action="(/voice/identity/heard\?path=roaming&amp;user={vid}&amp;[^"]*&amp;round={number}&amp;take=0)"', body)
+        action = re.search(rf'action="(/voice/identity/heard\?path=roaming&amp;user={user}&amp;[^"]*&amp;round={number}&amp;take=0)"', body)
         require(stream and action, f"Roaming round {number}: {body}")
         phrase = d1_local(f"SELECT phrase FROM challenge_rounds WHERE call_sid = '{form['CallSid']}' AND round = {number}")[0]["phrase"]
         redirect = []
@@ -1981,6 +1981,35 @@ def roaming_admission_checks(base_url: str, token: str) -> None:
     _, body = post(base_url, action.replace("&amp;", "&"), {**form, "SpeechResult": "stop", "Confidence": "0.9"}, token)
     require(body.endswith("Goodbye.</Say><Hangup/></Response>"), f"Roaming stop: {body}")
     require(d1_local("SELECT failures FROM roaming_attempts WHERE call_sid = 'CA_RA_STOP'")[0]["failures"] == 0, "stop counted as a failure")
+
+    # One attempt per Handle at a time: a second call waits until the first concludes or ends.
+    hold = call("CA_RA_HOLD", STRANGER_PHONE)
+    require(f"Checking {ROAMING_HANDLE}." in claim(hold, ROAMING_HANDLE), "first concurrent attempt")
+    form = call("CA_RA_BUSY", STRANGER_PHONE_2)
+    require(claim(form, ROAMING_HANDLE) == f'<Response><Say voice="Polly.Joanna">Someone is already checking as {ROAMING_HANDLE}. '
+            "Try again in a few minutes. Goodbye.</Say><Hangup/></Response>", "concurrent attempt")
+    require(identity("CA_RA_BUSY")["outcome"] == "busy", f"busy identity: {identity('CA_RA_BUSY')}")
+    post(base_url, "/voice/status", {"From": STRANGER_PHONE, "CallSid": "CA_RA_HOLD", "CallStatus": "completed", "CallDuration": "20"}, token)
+    form = call("CA_RA_AFTER", STRANGER_PHONE_2)
+    require(f"Checking {ROAMING_HANDLE}." in claim(form, ROAMING_HANDLE), "Handle held after the first call ended")
+    post(base_url, "/voice/status", {"From": STRANGER_PHONE_2, "CallSid": "CA_RA_AFTER", "CallStatus": "completed", "CallDuration": "20"}, token)
+
+    # An attempt admission did not record (the flag turned on mid-call) stays shadow, whatever its levels.
+    shadow_handle = d1_local(f"SELECT handle FROM users WHERE id = {others[1]}")[0]["handle"]
+    form = call("CA_RA_SHADOW", STRANGER_PHONE)
+    body = claim(form, shadow_handle)
+    d1_local("DELETE FROM roaming_attempts WHERE call_sid = 'CA_RA_SHADOW'")
+    for number in (1, 2, 3):
+        body = answer(body, form, number, 8000, user=others[1])
+    require("Calling as yourself from another phone is coming soon." in body and body.endswith("<Hangup/></Response>"), f"unrecorded attempt: {body}")
+    require(identity("CA_RA_SHADOW")["shadow"] is True and "admitted" not in identity("CA_RA_SHADOW"), f"{identity('CA_RA_SHADOW')}")
+    require(d1_local("SELECT user_id FROM voice_calls WHERE call_sid = 'CA_RA_SHADOW'")[0]["user_id"] is None, "an unrecorded attempt was admitted")
+
+    # A name that is no Handle and no Invite Code: the retry still offers both.
+    form = call("CA_RA_UNKNOWN", STRANGER_PHONE)
+    body = claim(form, "purple monkey")
+    require("I didn't recognize a Dogwalk name or invite words. Say your two-word Dogwalk name, or your invite words." in body,
+            f"retry with Roaming admission: {body}")
 
     # Three recent failed attempts as a Handle pause it from every number; older ones have aged out.
     d1_local(f"INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at, failures) VALUES "

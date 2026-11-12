@@ -880,6 +880,8 @@ export class VoiceSession {
   // the call to (whose invitations and history these are). Only the User is identity.
   private phone: string | null = null;
   private userId: number | null = null;
+  // Roaming attempts the Opening being composed tells, marked noticed once it is sent.
+  private roamingNoticed: string[] = [];
   // The renaming ritual's offers in the current call: set_handle accepts only these.
   private handleOffers: { callSid: string | null; offered: string[]; spins: number } = { callSid: null, offered: [], spins: 0 };
   private sandboxId: string | null = null;
@@ -1100,6 +1102,8 @@ export class VoiceSession {
     const opener: EarconName = openedWaking ? "call_started" : "call_started_ready";
     if (this.earconStyle) await this.playFixture(earcon(opener, this.earconStyle), opener);
     this.sendLive({ type: "session.commentary.append", delegation_id: null, content: opening });
+    // A notice in an Opening that never reached the caller stays for the next call.
+    if (this.live?.readyState === WebSocket.OPEN) await this.markRoamingNoticed().catch(() => {});
     if (openingContext) this.sendLive({ type: "session.thinking.append", delegation_id: null, content: openingContext });
     await this.record("voice.opening", { first_call: this.firstCall, words: opening.split(/\s+/).length });
     // Diagnostics: where this call's slice of the cross-call Orchestrator context begins.
@@ -1445,6 +1449,7 @@ export class VoiceSession {
     admission: Record<string, unknown> | null = null,
   ): Promise<{ opening: string; context: string | null }> {
     const clause = callerIdClause(callerId);
+    this.roamingNoticed = [];
     const [lastCall, onboarded, nextGreeting, since, rejoin, register] = await Promise.all([
       this.state.storage.get<LastCall>("last_call"),
       this.state.storage.get<boolean>("onboarded"),
@@ -1465,12 +1470,13 @@ export class VoiceSession {
       };
     }
     this.firstCall = !lastCall && !onboarded;
-    if (this.firstCall) return { opening: `${clause} Dogwalk. ${this.theme.firstCallWelcome}`, context: null };
-    // Each is used once: a later call gets a freshly written welcome or the fallback.
-    await this.state.storage.delete(["next_greeting", "since_greeting"]);
     // Roaming as this User since their last Home call follows the caller-ID clause: both say who could be calling.
     const roaming = await this.roamingNotice(admission).catch(() => null);
-    const parts = [clause, ...(roaming ? [roaming] : []), "Dogwalk."];
+    const heard = roaming ? `${clause} ${roaming}` : clause;
+    if (this.firstCall) return { opening: `${heard} Dogwalk. ${this.theme.firstCallWelcome}`, context: null };
+    // Each is used once: a later call gets a freshly written welcome or the fallback.
+    await this.state.storage.delete(["next_greeting", "since_greeting"]);
+    const parts = [heard, "Dogwalk."];
     const abnormal = abnormalEnding(lastCall ?? null, sinceLastCall);
     if (abnormal) parts.push(abnormal);
     // The welcome and since-clauses were written about the reaped Sandbox's sessions.
@@ -3649,16 +3655,26 @@ export class VoiceSession {
   }
 
   // Roaming attempts as this User since their last Home call (identity_check.ts, roaming_attempts),
-  // as one clause of the Opening. Consumed only by a call that was not itself admitted by Roaming,
-  // so someone roaming as the User cannot clear the notice before the User hears it.
+  // as one clause of the Opening. Told only on a call that was not itself admitted by Roaming, so
+  // someone roaming as the User cannot clear the notice before the User hears it, and marked
+  // noticed only once the Opening is sent (markRoamingNoticed).
   private async roamingNotice(admission: Record<string, unknown> | null): Promise<string | null> {
     if (!this.userId || !this.callSid || admission?.via === "roaming") return null;
     const { results } = await this.env.DB.prepare(
-      `UPDATE roaming_attempts SET noticed_at = unixepoch()
-        WHERE user_id = ? AND call_sid != ? AND noticed_at IS NULL AND (admitted_at IS NOT NULL OR failures > 0)
-        RETURNING admitted_at, failures`,
-    ).bind(this.userId, this.callSid).all<{ admitted_at: number | null; failures: number }>();
+      `SELECT call_sid, admitted_at, failures FROM roaming_attempts
+        WHERE user_id = ? AND call_sid != ? AND noticed_at IS NULL AND (admitted_at IS NOT NULL OR failures > 0)`,
+    ).bind(this.userId, this.callSid).all<{ call_sid: string; admitted_at: number | null; failures: number }>();
+    this.roamingNoticed = results.map((row) => row.call_sid);
     return roamingClause(results.filter((row) => row.admitted_at !== null).length, results.filter((row) => row.failures > 0).length);
+  }
+
+  private async markRoamingNoticed(): Promise<void> {
+    const calls = this.roamingNoticed;
+    this.roamingNoticed = [];
+    if (!calls.length || !this.userId) return;
+    await this.env.DB.prepare(
+      `UPDATE roaming_attempts SET noticed_at = unixepoch() WHERE user_id = ? AND call_sid IN (${calls.map(() => "?").join(", ")})`,
+    ).bind(this.userId, ...calls).run();
   }
 
   private async callerIdAttestation(): Promise<Record<string, unknown> | null> {
