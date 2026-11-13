@@ -2113,6 +2113,15 @@ async def run_protocol(identity: str) -> None:
             "From": TEST_PHONE, "CallSid": "CA_VOICE_TEST2"}, LOCAL_TOKEN)
         assert status == 200 and '<Redirect method="POST">/voice/practice</Redirect>' in body, body
 
+        # GPT-Live refusing the accept (an account out of credit) is recorded on the call as
+        # voice.live.accept.failed, and the fallback menu says why instead of "Voice dropped".
+        await asyncio.to_thread(d1, "INSERT INTO audit_log (ts, event, phone_number, call_sid, detail) VALUES "
+                                f"(unixepoch(), 'voice.live.accept.failed', '{TEST_PHONE}', 'CA_REFUSED', "
+                                "'{\"status\":429,\"code\":\"insufficient_quota\"}')")
+        status, body = await asyncio.to_thread(post, DEFAULT_LOCAL, "/voice/after-live", {
+            "From": TEST_PHONE, "CallSid": "CA_REFUSED"}, LOCAL_TOKEN)
+        assert status == 200 and "out of credit" in body and "Voice dropped" not in body and "Press 1 to reconnect" in body, body
+
         # Practice and Re-enrollment return the call to /voice, and the reconnected Voice Agent's
         # call_started says how each ended: outcome names only, read once.
         async def return_from(flow: str, live_id: str) -> dict:

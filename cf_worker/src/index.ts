@@ -1379,7 +1379,22 @@ async function handleAfterLive(req: Request, env: Env, ctx: ExecutionContext): P
   if (handoff?.action === "donation") return twiml(Redirect("/voice/donation"));
   if (handoff?.action === "practice") return twiml(Redirect("/voice/practice"));
   if (handoff?.action === "reenrollment") return twiml(Redirect("/voice/reenrollment"));
-  return recoveryMenu(handoff?.action === "recovery" ? "Recovery options. " : "Voice dropped. ");
+  if (handoff?.action === "recovery") return recoveryMenu("Recovery options. ");
+  return recoveryMenu(await voiceRefusal(env, callSid) ?? "Voice dropped. ");
+}
+
+// Why GPT-Live refused this call in the last few minutes, said plainly, or null when it did not
+// (a drop after voice connected). Restarting the sandbox will not help a refusal; the menu says so.
+async function voiceRefusal(env: Env, callSid: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    "SELECT detail FROM audit_log WHERE call_sid = ? AND event = 'voice.live.accept.failed' AND ts >= ? ORDER BY id DESC LIMIT 1",
+  ).bind(callSid, Math.floor(Date.now() / 1000) - 300).first<{ detail: string }>().catch(() => null);
+  if (!row) return null;
+  const detail = JSON.parse(row.detail) as { status?: number; code?: string | null };
+  if (detail.code === "insufficient_quota" || detail.code === "credit_balance_exhausted") {
+    return "The voice service is out of credit, so it refused the call. Restarting the sandbox will not fix that. ";
+  }
+  return `The voice service refused the call${detail.status ? `, error ${detail.status}` : ""}. `;
 }
 
 function recoveryMenu(prefix = ""): Response {
@@ -1528,7 +1543,14 @@ async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response
       delegation: { type: "client", acknowledgement_delay_ms: 400 },
     },
   });
-  if (!accepted) return new Response(null, { status: 204 });
+  if (!accepted.ok) {
+    // Recorded so the call's own activity says why voice never arrived (playtest.py shows it),
+    // and so the fallback menu can tell the caller (handleAfterLive).
+    await audit(env, "voice.live.accept.failed", caller.phone_number, context.callSid, {
+      live_session_id: liveSessionId, status: accepted.status, code: accepted.code,
+    });
+    return new Response(null, { status: 204 });
+  }
 
   const attached = await object.fetch("https://voice-session/attach", { method: "POST", headers });
   if (!attached.ok) {
@@ -1543,12 +1565,16 @@ async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response
   return new Response(null, { status: 204 });
 }
 
+// ok, or the provider's refusal: its HTTP status and error code (insufficient_quota when the
+// account is out of credit).
+interface LiveDecision { ok: boolean; status: number; code: string | null }
+
 async function decideLiveCall(
   env: Env,
   sessionId: string,
   action: "accept" | "reject" | "hangup",
   payload?: unknown,
-): Promise<boolean> {
+): Promise<LiveDecision> {
   const base = (env.OPENAI_LIVE_API_BASE ?? "https://api.openai.com/v1/live").replace(/\/$/, "");
   const response = await fetch(`${base}/sessions/${encodeURIComponent(sessionId)}/${action}`, {
     method: "POST",
@@ -1558,11 +1584,18 @@ async function decideLiveCall(
     },
     body: payload ? JSON.stringify(payload) : undefined,
   });
-  if (response.ok) return true;
+  if (response.ok) return { ok: true, status: response.status, code: null };
   const detail = await response.text();
-  if (response.status === 409 && detail.includes("decision_already_made")) return action === "accept";
+  if (response.status === 409 && detail.includes("decision_already_made")) return { ok: action === "accept", status: 409, code: "decision_already_made" };
   console.error(`GPT-Live ${action} failed`, response.status, detail.slice(0, 300));
-  return false;
+  let code: string | null = null;
+  try {
+    const error = (JSON.parse(detail) as { error?: { type?: string; code?: string } }).error;
+    code = error?.type === "insufficient_quota" ? "insufficient_quota" : error?.code ?? error?.type ?? null;
+  } catch {
+    // not JSON
+  }
+  return { ok: false, status: response.status, code };
 }
 
 async function recordCallStarted(env: Env, phone: string, callSid: string): Promise<void> {
