@@ -545,6 +545,7 @@ node --experimental-strip-types challenge_phrases_test.ts
 node --experimental-strip-types voice_verify_test.ts
 node --experimental-strip-types endpointer_test.ts
 node --experimental-strip-types operator_content_test.ts
+node --experimental-strip-types invitations_match_test.ts
 ```
 
 The local suites listen on 8787 (Worker), 8790-8792 (mocks), and 10229 (inspector).

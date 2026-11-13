@@ -357,13 +357,16 @@ def run_tests(
         {
             "From": TEST_PHONE,
             "CallSid": "CA_TEST1",
-            "SpeechResult": invite,
+            # Speech recognition splits compounds ("bread line" for breadline) and callers add
+            # words around the code: a first word split in two, inside filler, still matches.
+            "SpeechResult": f"Um, my words are {invite[:2]} {invite[2:]}, thanks.",
             "Confidence": "0.92",
         },
         token,
     )
     require(
-        status == 200 and 'action="/voice/confirm?attempts=1"' in body,
+        status == 200 and 'action="/voice/confirm?attempts=1"' in body
+        and f"I heard: {invite.replace(' ', ', ')}." in body,
         f"invite match: {status} {body}",
     )
     require('hints="yes,again"' in body, "confirmation gather has incorrect hints")

@@ -8,7 +8,8 @@ export const INVITATION_TTL_SECONDS = 24 * 60 * 60;
 export const MAX_ACTIVE_INVITATIONS = 3;
 
 // Words from the PGP word list (two syllables, three, then two, as PGPfone reads bytes),
-// lowercased, without proper nouns or grim words. The registration ritual matches them exactly.
+// lowercased, without proper nouns or grim words. The registration ritual finds them in
+// speech with findInviteCode.
 export const EVEN_WORDS = (
   "aardvark absurd accrue acme adrift adult ahead aimless allow alone ancient apple artist assume atlas " +
   "baboon backfield backward banjo beaming bedlamp beehive beeswax befriend billiard bison blockade blowtorch " +
@@ -256,6 +257,50 @@ export async function inspectRegistration(db: D1Database, user: number): Promise
 }
 
 // --- Redemption, for the registration ritual ------------------------------
+
+/** How a transcript named an Invite Code; `nearest` (letters off from the closest code) when it did not. */
+export type InviteMatch = { code: string; how: "exact" | "joined" | "near" } | { code: null; nearest: number | null };
+
+/** The largest letter difference a near match tolerates; the readback and "yes" still confirm it. */
+export const INVITE_NEAR_LETTERS = 2;
+const INVITE_WINDOW_WORDS = 8;
+
+// Speech recognition splits many of these words ("bread line" for breadline, "blow torch") and
+// callers add words around the code ("um", "my words are"), so a code may be any run of heard
+// words, spaces ignored. A near miss (a misheard letter or two, "stallion" for scallion) counts
+// only when exactly one usable code is that close.
+export function findInviteCode(heard: string[], candidates: string[]): InviteMatch {
+  const squash = (text: string) => text.replace(/[^a-z]/g, "");
+  const codes = candidates.map((code) => ({ code, letters: squash(code) }));
+  const best = new Map<string, number>();
+  for (let start = 0; start < heard.length; start++) {
+    for (let end = start + 1; end <= Math.min(heard.length, start + INVITE_WINDOW_WORDS); end++) {
+      const words = heard.slice(start, end), letters = words.join("");
+      for (const { code, letters: target } of codes) {
+        if (words.join(" ") === code) return { code, how: "exact" };
+        if (letters === target) return { code, how: "joined" };
+        if (Math.abs(letters.length - target.length) > INVITE_NEAR_LETTERS) continue;
+        best.set(code, Math.min(best.get(code) ?? Infinity, editDistance(letters, target)));
+      }
+    }
+  }
+  const nearest = Math.min(...best.values());
+  const close = [...best].filter(([, distance]) => distance <= INVITE_NEAR_LETTERS);
+  if (close.length === 1) return { code: close[0][0], how: "near" };
+  return { code: null, nearest: Number.isFinite(nearest) ? nearest : null };
+}
+
+function editDistance(a: string, b: string): number {
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    previous = current;
+  }
+  return previous[b.length];
+}
 
 // The clauses that make an Invite Code usable by this phone right now: unexpired, below its
 // uses, and, for an Invitation, unrevoked and either unbound or bound to this phone.
