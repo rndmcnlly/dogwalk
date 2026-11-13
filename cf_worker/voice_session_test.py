@@ -661,6 +661,13 @@ def created_alias(context: list[dict]) -> str:
 
 # Each step fires once its trigger appears in a user message, in order, after the
 # previous step's outputs are back. Steps that answer a handoff use its delegation id.
+# The provider's usage, and the counts Dogwalk records from it: cached and reasoning tokens
+# survive (#54), anything else is dropped.
+MOCK_USAGE = {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5,
+              "input_tokens_details": {"cached_tokens": 1, "unlisted": 9}, "output_tokens_details": {"reasoning_tokens": 1}}
+RECORDED_USAGE = {"input_tokens": 3, "output_tokens": 2,
+                  "input_tokens_details": {"cached_tokens": 1}, "output_tokens_details": {"reasoning_tokens": 1}}
+
 ORCHESTRATOR_SCRIPT = [
     # Session tools fail fast while the Sandbox is still starting.
     ("call_started", lambda ctx: [
@@ -957,7 +964,7 @@ class OrchestratorMock(BaseHTTPRequestHandler):
         # Provider correlation metadata, derived from the client's ID so the test can match rows.
         client = headers.get("x-client-request-id", "").replace("-", "")
         self.respond({"id": f"resp_{client}", "model": "mock-model-2026-11-10", "output": output,
-                      "usage": {"input_tokens": 1, "output_tokens": 1}}, {"x-request-id": f"req_{client}"})
+                      "usage": MOCK_USAGE}, {"x-request-id": f"req_{client}"})
 
     def respond(self, value: dict, extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(value).encode()
@@ -1568,7 +1575,7 @@ async def run_protocol(identity: str) -> None:
             heard = next(row for row in timed if row["event"] == "model.headers" and row["request_id"] == start["request_id"])
             assert heard["provider_request_id"] == f"req_{client}", heard
             assert (done["response_id"], done["response_model"], done["usage"]) == (
-                f"resp_{client}", "mock-model-2026-11-10", {"input_tokens": 1, "output_tokens": 1}), done
+                f"resp_{client}", "mock-model-2026-11-10", RECORDED_USAGE), done
         assert not any({"input", "output", "instructions"} & row.keys() for row in timed if row["event"].startswith("model."))
         received = next(row for row in timed if row["event"] == "live.received" and row.get("type") == "session.input_transcript.delta")
         assert received["end_ms"] >= received["start_ms"] and received["queue_ms"] >= 0

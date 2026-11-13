@@ -3105,8 +3105,7 @@ export class VoiceSession {
     const body = await response.json<{ id?: unknown; model?: unknown; output?: unknown[]; usage?: Record<string, unknown> }>();
     // Response metadata only: identifiers, the served model, and token counts, never content.
     const responseId = correlationId(body.id), responseModel = modelName(body.model);
-    const usage = Object.fromEntries((["input_tokens", "output_tokens"] as const)
-      .map((key) => [key, body.usage?.[key]]).filter(([, value]) => Number.isSafeInteger(value) && (value as number) >= 0));
+    const usage = tokenUsage(body.usage);
     this.timing("model.completed", { request_id: requestId, ms: Date.now() - started, ...span,
       ...(responseId ? { response_id: responseId } : {}), ...(responseModel ? { response_model: responseModel } : {}),
       ...(Object.keys(usage).length ? { usage } : {}),
@@ -5451,6 +5450,22 @@ function modelErrorType(error: unknown): string {
   if (typeof status === "number") return String(status);
   const name = (error as { name?: unknown } | null)?.name;
   return typeof name === "string" && name !== "Error" && /^[A-Za-z]\w{0,63}$/.test(name) ? name : "_OTHER";
+}
+
+// Token counts from a Responses `usage`, in the provider's nested shape, and nothing else:
+// cached input tokens tell a prompt-cache hit from a miss (#54), reasoning tokens what the
+// output cost was spent on.
+function tokenUsage(usage: Record<string, unknown> | undefined): Record<string, unknown> {
+  const count = (value: unknown) => (Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined);
+  const details = (key: string, field: string) => {
+    const value = count((usage?.[key] as Record<string, unknown> | undefined)?.[field]);
+    return value === undefined ? [] : [[key, { [field]: value }]];
+  };
+  return Object.fromEntries([
+    ...(["input_tokens", "output_tokens"] as const).flatMap((key) => (count(usage?.[key]) === undefined ? [] : [[key, usage?.[key]]])),
+    ...details("input_tokens_details", "cached_tokens"),
+    ...details("output_tokens_details", "reasoning_tokens"),
+  ]);
 }
 
 // A tool-free Responses reply's text, joined.
