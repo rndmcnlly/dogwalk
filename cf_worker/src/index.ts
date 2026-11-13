@@ -1098,8 +1098,8 @@ async function handlePair(req: Request, env: Env, url: URL): Promise<Response> {
     headers.set("x-dogwalk-identity", identity);
     return relay.fetch("https://terminal-relay/ws", { headers });
   }
-  // Workspace files (read from the Sandbox) and Board Assets (captured at draw time, never the Sandbox).
-  if ((url.pathname === "/pair/file" || /^\/pair\/asset\/[0-9a-f]{64}$/.test(url.pathname)) && req.method === "GET") {
+  // Files a board on the browser's Display names, read from the Sandbox only while it runs.
+  if (url.pathname === "/pair/file" && req.method === "GET") {
     const credential = splitCredential(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null);
     if (!credential || !(await knownIdentity(env, credential.identity))) return jsonResponse({ error: "this pairing has expired" }, 401);
     return voiceSessionFor(env, credential.identity).fetch(`https://voice-session${url.pathname}${url.search}`, {

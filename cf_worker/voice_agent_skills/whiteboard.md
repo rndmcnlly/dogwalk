@@ -1,15 +1,15 @@
 ---
 name: whiteboard
-description: a paired browser is connected (browser_connected holds) and something would be clearer drawn or decided on a screen than spoken, such as a flow, a comparison, numbers or a trend, a choice among several options, many small decisions such as proposed edits to accept or reject, or a form to fill in; or the caller asks for a diagram, a chart, or to see options side by side.
+description: a browser is paired and something would be clearer drawn or decided on a screen than spoken, such as a flow, a comparison, numbers or a trend, a choice among several options, many small decisions such as proposed edits to accept or reject, a form to fill in, a report or file to read, or hands-on access (a terminal, the desktop, a site an Agent serves, SSH, a download); or the caller asks for a diagram, a chart, or to see options side by side.
 ---
 
-The Whiteboard lives on the Paired Browser's Hands tab, and the caller can open it in a tab of its own. You draw on it with draw_on_whiteboard(program, note): program is openui-lang (below), note is a short title the caller sees ("Edits to README.md"). Each call draws a new board on top; older boards stay folded beneath it. show_in_browser with dogwalk:whiteboard brings it to the front. It is an escape hatch for what voice handles badly, not a replacement for talking.
+A Whiteboard is all a paired page shows. You draw on a Display with draw_on_whiteboard(program, display, note): program is openui-lang (below), display names the screen when there are several ("slides", "notes"), note is a short title the caller sees ("Edits to README.md"). Each call draws a new board on top; older boards stay folded beneath it, five per Display. It is an escape hatch for what voice handles badly, not a replacement for talking.
 
 ## When to draw, when to speak
 
 - Draw: more than three options, anything with numbers to compare, a sequence of steps, before/after text, five or more yes/no items, or a form with several fields.
 - Speak: one question, one number, one yes/no. Do not draw what one sentence says.
-- Draw only while browser_connected holds. With no browser, offer to pair one (pair-browser skill) or talk it through.
+- Draw on a Display whose page is open (displays[].page_open). A board drawn on a closed one waits there; the result says so, and so should you. With no browser, offer to pair one (pair-browser skill) or talk it through.
 - After drawing, say in one sentence what is on the board and what you need ("I put the three edits on the whiteboard; accept or reject each, or just tell me").
 
 ## Grammar
@@ -41,7 +41,15 @@ Content (markdown strings support **bold**, *italic*, code spans, links, lists, 
 - BarChart(labels, series, unit?, whole?): categories, not time. whole true: one series of parts of a whole, drawn with shares and a total.
 - LineChart(labels, series, unit?): values over time.
 - Series(name, values): only inside a chart; one number per label, null for no data.
-- Image(path, alt, caption?, size?): a PNG, JPEG, GIF, WebP, or SVG file in the Workspace, by its path (relative to /home/daytona or absolute under it). alt says what it shows for someone who cannot see it; "" marks a decorative icon. caption is inline Markdown under it: say there where it came from, and "generated, not checked" when an Agent made it. size is icon, small, medium (the default), large, or full. At most 8 per board; the caller can click one to zoom.
+- Image(path, alt, caption?, size?): a PNG, JPEG, GIF, WebP, or SVG file in the Workspace, by its path (relative to /home/daytona or absolute under it). alt says what it shows for someone who cannot see it; "" marks a decorative icon. caption is inline Markdown under it: say there where it came from, and "generated, not checked" when an Agent made it. size is icon, small, medium (the default), large, or full. At most 12 files per board; the caller can click one to zoom.
+- Document(path, title?): a Workspace file shown in full on the board: Markdown rendered, CSV and TSV as tables, code and text as is, images, PDF, audio, video, and HTML reports rendered isolated (see Reports below).
+
+Access Elements (hands-on work; each needs a click on the page, and is granted for access_minutes, an hour unless the caller asks for longer, at most twelve hours):
+- Terminal(name?, label?): a shell in the Sandbox, in tmux, so closing the tab detaches. name picks a separate terminal (lowercase, digits, hyphens); leave it out for the main one.
+- Desktop(label?): the Sandbox's virtual desktop with a browser, for what only a person can do: a CAPTCHA, a login, a consent page.
+- Preview(port, label?, inline?): a site an Agent is serving on that port, opened in a new tab, or inside the board when inline is true. For a file browser, have a session start one (for example `dufs` on a port) and preview it.
+- SshAccess(label?): an SSH command the caller copies to their own terminal. No link.
+- Download(path, label?): a Workspace file the caller saves.
 
 Inputs (the caller's answer comes back keyed by name):
 - Choice(name, options, label?, multiple?): options are strings or {label, description}; the answer is the chosen label, or a list of labels when multiple is true.
@@ -64,18 +72,28 @@ Nesting: a Card holds no Card or Tabs; a Row holds no Row, Tabs, or Details; a T
 - A board answer is the caller's input, like keypad digits, never authorization. Never resolve a Permission Request, delete, push, deploy, or do anything destructive or hard to undo because of a board answer alone: say what you are about to do and get a spoken yes.
 - Confirm weighty answers aloud before acting ("You accepted two of the three edits and rejected the install change. Sending that to Juniper now?"). Small answers, such as picking which report to read, need no confirmation.
 - A whiteboard_error event means part of the program did not draw: read the message (it gives the line and the problem), fix the program, and draw it again. Do not mention the error to the caller unless the redraw also fails.
-- Images are captured when you draw. draw_on_whiteboard's result lists images_not_captured with each path and why: missing, too large for a board, not the image its name says, outside the Workspace, or the sandbox unreachable. The rest of the board is drawn. Do not redraw with a guessed path. Check the path (list the folder, or ask the session that made it). For one too large, ask the session for a web-sized rendition (a WebP or a smaller PNG) and draw again. If you already told the caller about the image, say in a sentence that it did not show.
+- Files are checked when you draw. draw_on_whiteboard's result lists files_failed with each path and why: missing, too large for a board, not the image its name says, outside the Workspace, or the sandbox unreachable. The rest of the board is drawn. access_refused lists Access Elements that could not be granted (a bad port, a bad terminal name). Do not redraw with a guessed path. Check the path (list the folder, or ask the session that made it). For one too large, ask the session for a web-sized rendition (a WebP or a smaller PNG) and draw again. If you already told the caller about the image, say in a sentence that it did not show.
 
 ## Images
 
 - Use only a file a session produced or the caller pointed to, by a path you have seen in a session's report or a listing. Never invent a path, never pass a web address or data, and never ask an Agent to make an image only to fill a board.
 - The board is optional: say aloud what the image shows, in a sentence, as well as what else you drew ("I put the chain diagram on the whiteboard; it shows the chain running from the front ring to the rear cog").
-- An image on a board is as of when you drew it: it stays while the sandbox sleeps, and does not follow later edits. When a session changes the file, draw the board again to show the new version, and say so ("that's the updated diagram").
+- Dogwalk keeps no copy of an image or Document: the page reads the file when it shows the board, only while the sandbox runs. A page left open keeps what it loaded; a page opened or reloaded while the sandbox sleeps shows each file's description and that a call wakes it. Nothing on a board wakes the sandbox.
 - A complex diagram gets its explanation as Text or Steps next to it, not only in alt.
 - An image an Agent generated may be wrong. Caption it as generated, and do not present it as checked instruction.
 - For a rendition, give the producing session concrete limits: a still WebP under 1,500,000 bytes, at most 2048 pixels on the long side, preserving aspect ratio and transparency. Keep the original; use a new filename, inspect diagram labels, and report the new path. This is a file-preparation task, not a request to regenerate the illustration. Dogwalk's repository includes `board_rendition.py` as a tested example, but do not assume that script is installed in a session's Workspace.
 - Boards have no export, arbitrary canvas, or connector editor. Use Steps for a simple flow, or ask a session for a self-contained SVG diagram with connectors and show it as an Image. Do not promise editable geometry or a downloadable board.
-- HTML reports are live Workspace files, unlike captured boards: opening or reopening one needs the Sandbox. An already displayed report stays visible while it sleeps. Do not promise offline report reopening.
+
+## Reports
+
+For a rich report, ask a session for one self-contained HTML file: styles and scripts inline, no external links to fonts, scripts, or images, because the page shows HTML isolated from the network. Its images may simply be Workspace files: an <img> whose src is an absolute path under /home/daytona or a path relative to the report is read and embedded when the page shows it (each at most 1.5 MB, 6 MB in all). Web images do not load. Then draw it as a Document. Markdown is fine for plain reports.
+
+## Access
+
+- Draw an Access Element when the caller wants their hands on the Sandbox. Drawing it is the authorization; the caller opens it with a click on that Display, and you never see or speak a link, token, or password.
+- Opening one while the sandbox sleeps shows that it is asleep; the grant still holds, and the next call wakes the sandbox.
+- revoke_access ends every grant on a Display at once. A board pushed off the stack (five per Display) takes its grants with it, so redraw access you still need on a fresh board.
+- inspect_call_state lists each Display's live grants and how long they have left.
 
 ## Examples
 
@@ -113,6 +131,15 @@ root = Stack([fig, how, ok])
 fig = Image("bike/drivetrain.svg", "The chain looping from the front ring over the rear cog and through the derailleur", "Drawn by <alias>; generated, not checked", "large")
 how = Steps([{title: "Shift to the smallest cog"}, {title: "Open the quick link"}, {title: "Thread the new chain"}])
 ok = Button("Looks right", "primary")
+```
+
+A report and hands-on access for a talk's speaker notes, kept open for the talk:
+
+```
+root = Stack([notes, demo, term])
+notes = Document("talk/notes.md", "Speaker notes")
+demo = Preview(5173, "The demo site", true)
+term = Terminal("demo", "Demo shell")
 ```
 
 A chart:

@@ -795,15 +795,40 @@ ORCHESTRATOR_SCRIPT = [
         call("pu-pair", "pair_browser"),
     ]),
     ("[harness event] pairing_unclaimed", lambda ctx: [call("pu-code-say", "say", text=f"Pairing code {tool_result(ctx, 'pu-pair')['code']}", delegation_id=None)]),
-    ('"key":"9"', lambda ctx: [call("k9-show", "show_in_browser", uri="dogwalk:file/REPORT.md", note="the report")]),
     ('"key":"4"', lambda ctx: [call("k4-state", "inspect_call_state")]),
     ('"key":"5"', lambda ctx: [call("k5-board", "draw_on_whiteboard", program=BOARD_PROGRAM, note="pick one")]),
+    ('"key":"5"', lambda ctx: [call("k5-checks", "draw_on_whiteboard", program=CHECKS_PROGRAM, note="file checks")]),
     # A chapter closes: the Orchestrator compacts. An over-long focus is refused first.
     ("[harness event] whiteboard_answer", lambda ctx: [call("cc-long", "compact_context", focus="x" * 501)]),
     ("[harness event] whiteboard_answer", lambda ctx: [call("cc-memory", "compact_context")]),
-    # Five more boards push the first out of retention, and its captured image with it.
+    # Five more boards push the first two out of the Display's retention, with their grants.
     ('"key":"A"', lambda ctx: [call(f"kA-evict-{n}", "draw_on_whiteboard", program=ICON_PROGRAM, note=f"icon {n}") for n in range(1, 6)]),
-    ('"key":"B"', lambda ctx: [call("kB-html", "show_in_browser", uri="dogwalk:file/report.html", note="the chart report")]),
+    # A second Display: pairing it leaves the first paired; drawing must then name one.
+    ("[handoff del-wb-slides]", lambda ctx: [call("wb-pair", "pair_browser", display="Slides!")]),
+    ("[handoff del-wb-slides]", lambda ctx: [call("wb-say", "say", text=f"Pairing code {tool_result(ctx, 'wb-pair')['code']}", delegation_id="del-wb-slides")]),
+    ('browser_pairing: {"outcome":"accepted","display":"slides"', lambda ctx: [
+        call("wb-unnamed", "draw_on_whiteboard", program=SLIDES_PROGRAM),
+        call("wb-ghost", "draw_on_whiteboard", program=SLIDES_PROGRAM, display="kitchen"),
+    ]),
+    ('browser_pairing: {"outcome":"accepted","display":"slides"', lambda ctx: [call("wb-slides", "draw_on_whiteboard", program=SLIDES_PROGRAM, display="Slides", note="first slide")]),
+    # A browser paired to a Display that has one mirrors it.
+    ("[handoff del-wb-mirror]", lambda ctx: [call("wm-pair", "pair_browser", display="main")]),
+    ("[handoff del-wb-mirror]", lambda ctx: [call("wm-say", "say", text=f"Pairing code {tool_result(ctx, 'wm-pair')['code']}", delegation_id="del-wb-mirror")]),
+    ("[handoff del-wb-end]", lambda ctx: [call("we-rename", "rename_display", display="slides", new_name="Projector")]),
+    ("[handoff del-wb-end]", lambda ctx: [
+        call("we-preview", "draw_on_whiteboard", program=PROJECTOR_PROGRAM, display="projector"),
+        call("we-say", "say", text="The dev server is on the projector.", delegation_id="del-wb-end"),
+    ]),
+    # Access Elements: drawn in the call, granted for 90 minutes, on main only.
+    ('"key":"9"', lambda ctx: [call("k9-access", "draw_on_whiteboard", program=ACCESS_PROGRAM, display="main", access_minutes=90, note="hands on")]),
+    ('"key":"9"', lambda ctx: [call("k9-state", "inspect_call_state")]),
+    ('"key":"B"', lambda ctx: [call("kB-revoke", "revoke_access", display="main")]),
+    ('"key":"B"', lambda ctx: [call("kB-state", "inspect_call_state")]),
+    ("[handoff del-wb-end2]", lambda ctx: [call("we-unpair", "unpair_display", display="projector")]),
+    ("[handoff del-wb-end2]", lambda ctx: [
+        call("we-state", "inspect_call_state"),
+        call("we-say2", "say", text="The projector is unpaired.", delegation_id="del-wb-end2"),
+    ]),
     ("[handoff del-pair-disconnect]", lambda ctx: [call("dc-pair", "pair_browser")]),
     ("[handoff del-pair-disconnect]", lambda ctx: [call("dc-say", "say", text=f"Pairing code {tool_result(ctx, 'dc-pair')['code']}", delegation_id="del-pair-disconnect")]),
     ('"key":"3"', lambda ctx: [
@@ -839,11 +864,28 @@ EARLY_MEMORY = "Juniper fixes the parser."
 EARLY_FOCUS = "Juniper's parser work"
 COMPACTION_BRIEF = "Tell the caller briefly that you are tidying your notes, and that they can keep talking meanwhile."
 BOARD_PROGRAM = (
-    'root = Stack([fig, big, pick])\nfig = Image("diagram.svg", "The parser\'s two stages", "Drawn by an agent", "small")\n'
+    'root = Stack([fig, big, report, chart, pick, shell, docs])\nfig = Image("diagram.svg", "The parser\'s two stages", "Drawn by an agent", "small")\n'
     'big = Image(\'big.png\', "A generated chart")\n'
-    'pick = Choice("approach", ["Quick fix", "Refactor"], "Which approach?")'
+    'report = Document("REPORT.md", "The report")\nchart = Document("report.html", "The chart report")\n'
+    'pick = Choice("approach", ["Quick fix", "Refactor"], "Which approach?")\n'
+    'shell = Terminal()\ndocs = Preview(3000, "The docs")'
+)
+# Every file here fails its draw-time check, each for its own reason. huge.png comes last: the
+# Worker cancels its capped download, and against this HTTP/1.0 mock the next toolbox fetch in
+# the same draw has failed with "Network connection lost." (reported, not yet explained).
+CHECKS_PROGRAM = (
+    'root = Stack([Image("notes.png", "a"), Image("wide.png", "c"), Image("pixels.png", "d"), '
+    'Image("escape.png", "e"), Image("missing.png", "f"), Image("https://example.com/a.png", "g"), '
+    'Image("//example.com/a.png", "h"), Document("missing.md", "i"), Image("huge.png", "b")])'
 )
 ICON_PROGRAM = 'root = Stack([Image (asset, "", null, "icon"), Text("Example: Image(\'missing.png\', \'x\')")])\nasset = "/home/daytona/chart.png"'
+SLIDES_PROGRAM = 'root = Stack([Image("chart.png", "Slide one")])'
+PROJECTOR_PROGRAM = 'root = Stack([Preview(5173, "The dev server")])'
+ACCESS_PROGRAM = (
+    'root = Stack([gw, app, ssh, dl, desk, term, notes])\ngw = Preview(8765, "The gateway")\napp = Preview(5173, "The dev server")\n'
+    'ssh = SshAccess("Copy this")\ndl = Download("REPORT.md", "The report")\ndesk = Desktop()\nterm = Terminal("build")\n'
+    'notes = Document("REPORT.md", "Read it here")'
+)
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say", "f-begin", "f-inspect", "o-begin", "o-inspect",
@@ -853,7 +895,9 @@ STEP_IDS = [
     "s3-begin", "s3-steer", "s4-begin", "s4-steer", "d-begin", "g-begin", "g2-begin", "g3-begin",
     "x-cancel", "x-close", "x-inspect", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
     "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist",
-    "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5", "kB-html", "k3-say", "k3-theme",
+    "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-pair", "k4-state", "k5-board", "k5-checks", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5",
+    "wb-pair", "wb-say", "wb-unnamed", "wb-ghost", "wb-slides", "wm-pair", "wm-say", "we-rename", "we-preview", "we-say",
+    "k9-access", "k9-state", "kB-revoke", "kB-state", "we-unpair", "we-state", "we-say2", "k3-say", "k3-theme",
     "k8-say", "pu-code-say", "dc-pair", "dc-say", "k2-dramaturgy", "kC-donate", "kD-practice",
 ]
 
@@ -1236,6 +1280,37 @@ def sandbox_files(path: str):
     if path == f"{prefix}/download?path=%2Fhome%2Fdaytona%2FREPORT.md":
         return 200, REPORT_TEXT.encode(), "application/octet-stream"
     return None
+
+
+# What Access Grants minted and revoked at Daytona: signed preview links, their expiries, SSH
+# tokens and their deletions, and the terminal PTYs the relay asked for.
+PROVIDER: dict[str, list] = {"signed": [], "expired": [], "ssh": [], "pty": []}
+
+
+def provider_gets(path: str):
+    match = re.fullmatch(r"/api/sandbox/mock-sandbox-1/ports/(\d+)/signed-preview-url\?expiresInSeconds=(\d+)", path)
+    if not match:
+        return None
+    token = f"signed-token-{len(PROVIDER['signed']) + 1}"
+    PROVIDER["signed"].append({"port": int(match[1]), "seconds": int(match[2]), "token": token})
+    return 200, json.dumps({"url": f"https://{match[1]}-{token}.preview.test/", "token": token}).encode(), "application/json"
+
+
+def provider_posts(path: str, payload: dict):
+    if match := re.fullmatch(r"/api/sandbox/mock-sandbox-1/ports/(\d+)/signed-preview-url/([^/]+)/expire", path):
+        PROVIDER["expired"].append((int(match[1]), match[2]))
+        return {}
+    if match := re.fullmatch(r"/api/sandbox/mock-sandbox-1/ssh-access\?expiresInMinutes=(\d+)", path):
+        token = f"ssh-token-{len(PROVIDER['ssh']) + 1}"
+        PROVIDER["ssh"].append({"minutes": int(match[1]), "token": token})
+        return {"token": token, "sshCommand": f"ssh {token}@ssh.preview.test", "expiresAt": "2026-11-12T12:00:00Z"}
+    if path == "/toolbox/mock-sandbox-1/process/pty":
+        PROVIDER["pty"].append(payload.get("id"))  # still refused: the mock toolbox has no PTY
+    return None
+
+
+def provider_deletes(path: str):
+    return 200 if path.startswith("/api/sandbox/mock-sandbox-1/ssh-access?token=") else None
 
 
 def dtmf(key: str) -> dict:
@@ -1797,212 +1872,383 @@ async def run_protocol(identity: str) -> None:
         ticket = {"authorization": f"Bearer {claim['ticket']}"}
         assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1] == {"state": "waiting"}
         await mocks.send_live(dtmf("1"))
-        await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "browser is paired" in m.get("content", ""))
+        def heard(fragment: str) -> bool:
+            return any(fragment in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"])
+
+        paired_note = (await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "browser is paired" in m.get("content", "")))["content"]
+        assert 'as the display "main"' in paired_note and "mirroring" not in paired_note, paired_note
+        first_pairing = OrchestratorMock.tool_output("pu-pair")
+        assert first_pairing["display"] == "main" and first_pairing["joins_existing_display"] is False, first_pairing
         accepted = (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1]
         assert accepted["state"] == "accepted" and accepted["token"].startswith(identity + ".")
         assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1] == {"state": "accepted"}, "the token is handed out once"
         token = accepted["token"]
+        await wait_for(lambda: heard('browser_pairing: {"outcome":"accepted","display":"main"'), 10)
         # The page carries its build identity and sends it when it connects.
         page = await asyncio.to_thread(lambda: urllib.request.urlopen(f"http://127.0.0.1:{WORKER_PORT}/pair", timeout=10).read().decode())
         build = re.search(r'const PAIR_BUILD = "([0-9a-f]{8})";', page).group(1)
         assert "__PAIR_BUILD__" not in page
-        async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}") as browser:
-            await browser.send(json.dumps({"type": "auth", "token": token, "build": build}))
-            hello = await recv_type(browser, "hello")
-            assert hello["device"] == "Chrome on a Mac" and hello["idle_expires_at"] > time.time() * 1000
-            assert hello["build"] == build and hello["stale"] is False, hello
-            snapshot = await recv_type(browser, "status")
-            assert any(item["alias"] == "Juniper" for item in snapshot["sessions"]) and snapshot["sandbox"]["call_attached"]
-            # The live feed starts with a snapshot of what the call has said and done so far.
-            feed = await recv_type(browser, "feed")
-            assert feed.get("snapshot") and any(e["role"] == "system" and e.get("lane") == "keypad" and e["text"] == "keypad 8" for e in feed["entries"]), feed["entries"][-5:]
-            assert any(e["role"] == "orchestrator" and e.get("lane") == "say" and "pairing code" in e["text"].lower() for e in feed["entries"])
-            await browser.send(json.dumps({"type": "list", "id": 1, "path": ""}))
-            listing = await recv_type(browser, "list")
-            assert listing["id"] == 1 and listing["path"] == "/home/daytona"
-            assert [entry["name"] for entry in listing["entries"]] == ["parser", "REPORT.md"], "directories first"
-            await browser.send(json.dumps({"type": "read", "id": 2, "path": "REPORT.md"}))
-            report = await recv_type(browser, "file")
-            assert report["text"] == REPORT_TEXT and not report["truncated"]
-            await browser.send(json.dumps({"type": "read", "id": 3, "path": "../../etc/passwd"}))
-            escaped = await recv_type(browser, "error")
-            assert escaped["id"] == 3 and "/home/daytona" in escaped["error"]
-            await browser.send(json.dumps({"type": "ping"}))
-            await recv_type(browser, "pong")
-            # The Orchestrator learns the page is open, and can put a file on it.
-            await wait_for(lambda: any("browser_connected" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
-            await mocks.send_live(dtmf("9"))
-            shown = await recv_type(browser, "show", 15)
-            assert shown["uri"] == "dogwalk:file//home/daytona/REPORT.md" and shown["note"] == "the report", shown
-            # What the page shows is sensed without changing anything.
-            await browser.send(json.dumps({"type": "viewing", "view": "files", "path": "/home/daytona/REPORT.md", "kind": "file"}))
-            await asyncio.sleep(0.3)
-            # A tab loaded before a deploy: one with another build is told to reload itself; one
-            # from before builds existed cannot, so the Orchestrator hears it must ask the caller.
-            async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}") as newer:
-                await newer.send(json.dumps({"type": "auth", "token": token, "build": "00000000"}))
-                told = await recv_type(newer, "hello")
-                assert told["stale"] is True and told["build"] == build, told
-            await wait_for(lambda: any('browser_page_stale: {"reloads_itself":true}' in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
-            stale = await connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}")
-            await stale.send(json.dumps({"type": "auth", "token": token}))
-            assert (await recv_type(stale, "hello"))["stale"] is True
-            await wait_for(lambda: any('browser_page_stale: {"reloads_itself":false}' in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
-            await mocks.send_live(dtmf("4"))
-            await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "k4-state" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-            state = OrchestratorMock.tool_output("k4-state")
-            browser_state = state["paired_browser"]
-            assert browser_state["paired"] and browser_state["page_open"] and browser_state["device"] == "Chrome on a Mac", browser_state
-            assert browser_state["showing_now"] == {"view": "files", "path": "/home/daytona/REPORT.md"}, browser_state
-            assert browser_state["page_stale"] is True, browser_state
-            assert state["earcon_style"] == "tonal", state
-            assert state["context_tokens"] == 1 and state["memory"]["chars"] == len(EARLY_MEMORY) and "compacting" not in state["memory"], state
-            # The Orchestrator draws a board; the caller answers it on the page; it hears the answer.
-            await mocks.send_live(dtmf("5"))
-            board = (await recv_type(browser, "board", 15))["board"]
-            assert board["program"] == BOARD_PROGRAM and board["status"] == "open" and board["note"] == "pick one", board
-            # Images are captured when drawn: a manifest of content hashes, never bytes in the program.
-            svg_hash = hashlib.sha256(SVG_BYTES).hexdigest()
-            assert board["images"]["/home/daytona/diagram.svg"] == {"hash": svg_hash, "type": "image/svg+xml", "bytes": len(SVG_BYTES)}, board["images"]
-            assert "too large" in board["images"]["/home/daytona/big.png"]["error"], board["images"]
-            await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "k5-board" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-            drawn = OrchestratorMock.tool_output("k5-board")
-            assert "page_stale" in drawn, "draw_on_whiteboard warns of the stale page"
-            assert [item["path"] for item in drawn["images_not_captured"]] == ["/home/daytona/big.png"] and "WebP" in drawn["images_not_captured"][0]["error"], drawn
-            assert svg_hash not in json.dumps(drawn), "no hash reaches the Orchestrator"
-            # The stale page cannot render Image; its error says the page is out of date.
-            await stale.send(json.dumps({"type": "board_error", "id": board["id"], "error": "line 2: unknown component Image (left out)"}))
-            await wait_for(lambda: any("whiteboard_error" in str(item.get("content")) and "out of date" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
-            await stale.close()
-            OrchestratorMock.memory_gate.clear()
-            await browser.send(json.dumps({"type": "board_answer", "id": board["id"], "answer": {"button": "Send", "values": {"approach": "Refactor"}, "note": ""}}))
-            answered = (await recv_type(browser, "board"))["board"]
-            assert answered["status"] == "answered" and answered["answer"]["values"] == {"approach": "Refactor"}, answered
-            await wait_for(lambda: any("whiteboard_answer" in str(item.get("content")) and "Refactor" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-            # The Orchestrator compacts after the answer: an over-long focus is refused, then the
-            # compaction starts and the Voice Frontend is briefed; its Memory writer is held while
-            # the call goes on.
-            await wait_for(lambda: any(item.get("call_id") == "cc-memory" and item.get("type") == "function_call_output" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-            refused_focus = OrchestratorMock.tool_output("cc-long")
-            assert refused_focus["ok"] is False and "at most 500" in refused_focus["error"], refused_focus
-            await next_matching(mocks.live_messages, appended("commentary", COMPACTION_BRIEF))
-            await wait_for(lambda: len(OrchestratorMock.memory_requests) == 2, 10)
-            assert OrchestratorMock.memory_requests[1]["input"][0] == {"role": "developer", "content": f"[memory] {EARLY_MEMORY}"}
-            # A second answer to the same board is ignored.
-            await browser.send(json.dumps({"type": "board_answer", "id": board["id"], "answer": {"values": {"approach": "Quick fix"}}}))
-            # Media viewers fetch raw bytes with the credential in a header, never the URL.
-            bearer = {"authorization": f"Bearer {token}"}
-            status, headers, body = await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fhome%2Fdaytona%2FREPORT.md", bearer)
-            assert status == 200 and body == REPORT_TEXT.encode(), (status, body[:80])
-            assert headers.get("Content-Type", headers.get("content-type")) == "application/octet-stream"
-            assert "sandbox" in headers.get("Content-Security-Policy", headers.get("content-security-policy", ""))
-            assert (await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fetc%2Fpasswd", bearer))[0] == 400
-            assert (await asyncio.to_thread(pair_raw, "/pair/file?path=%2Fhome%2Fdaytona%2FREPORT.md", {"authorization": f"Bearer {identity}.{'0' * 48}"}))[0] == 401
-            # Whiteboard images: the type comes from the bytes, an SVG opened alone runs and loads
-            # nothing, and mismatches, oversized downloads, links out of the Workspace, and URLs are refused.
-            def image(path: str, headers: dict = bearer) -> tuple[int, dict, bytes]:
-                status, raw, body = pair_raw(f"/pair/file?as=image&path={urllib.parse.quote(path, safe='')}", headers)
-                return status, {key.lower(): value for key, value in raw.items()}, body
-            status, headers, body = await asyncio.to_thread(image, "chart.png")
-            assert status == 200 and body == PNG_BYTES and headers.get("content-type") == "image/png", (status, headers)
-            assert headers.get("x-content-type-options") == "nosniff" and "no-store" in headers.get("cache-control", "")
-            status, headers, body = await asyncio.to_thread(image, "/home/daytona/diagram.svg")
-            assert status == 200 and body == SVG_BYTES and headers.get("content-type") == "image/svg+xml", (status, headers)
-            csp = headers.get("content-security-policy", "")
-            assert "default-src 'none'" in csp and "style-src 'unsafe-inline'" in csp and "img-src data:" in csp, csp
-            status, _, body = await asyncio.to_thread(image, "notes.png")
-            assert status == 415 and b"not a PNG" in body, (status, body)
-            assert (await asyncio.to_thread(image, "huge.png"))[0] == 413, "the cap counts downloaded bytes"
-            for oversized in ["wide.png", "pixels.png"]:
-                status, _, body = await asyncio.to_thread(image, oversized)
-                assert status == 415 and b"megapixels" in body, (oversized, status, body)
-            status, _, body = await asyncio.to_thread(image, "escape.png")
-            assert status == 403 and b"outside" in body, (status, body)
-            assert (await asyncio.to_thread(image, "missing.png"))[0] == 404
-            for url in ["https://example.com/a.png", "data:image/png;base64,AAAA", "//example.com/a.png"]:
-                status, _, body = await asyncio.to_thread(image, url)
-                assert status == 400 and b"never a URL" in body, (url, status, body)
-            # A file named as an image is sniffed in the file viewer too; images still need a pairing.
-            assert (await asyncio.to_thread(pair_raw, "/pair/file?path=notes.png", bearer))[0] == 415
-            assert (await asyncio.to_thread(image, "chart.png", {"authorization": f"Bearer {identity}.{'0' * 48}"}))[0] == 401
-            assert not any("example.com" in command for command in DaytonaMock.executed)
-            # A board's images come from its captured assets, never the Sandbox: with the file
-            # gone, the asset still serves, typed and confined like an image read.
-            def asset(digest: str, headers: dict = bearer) -> tuple[int, dict, bytes]:
-                status, raw, body = pair_raw(f"/pair/asset/{digest}", headers)
-                return status, {key.lower(): value for key, value in raw.items()}, body
-            removed = IMAGE_FILES.pop("diagram.svg")
-            try:
-                assert (await asyncio.to_thread(image, "diagram.svg"))[0] == 404
-                status, headers, body = await asyncio.to_thread(asset, svg_hash)
-                assert status == 200 and body == SVG_BYTES and headers.get("content-type") == "image/svg+xml", (status, headers)
-                assert headers.get("x-content-type-options") == "nosniff" and "no-store" in headers.get("cache-control", "")
-                assert "default-src 'none'" in headers.get("content-security-policy", "") and "sandbox" in headers.get("content-security-policy", "")
-            finally:
-                IMAGE_FILES["diagram.svg"] = removed
-            assert (await asyncio.to_thread(asset, hashlib.sha256(PNG_BYTES).hexdigest()))[0] == 404, "only hashes a board refers to"
-            assert (await asyncio.to_thread(asset, svg_hash, {"authorization": f"Bearer {identity}.{'0' * 48}"}))[0] == 401
-            assert (await asyncio.to_thread(asset, "../file"))[0] == 404
-            # Five newer boards retire the first: its asset is collected and no longer served.
-            await mocks.send_live(dtmf("A"))
-            for _ in range(5):
-                await recv_type(browser, "board", 15)
-            await wait_for(lambda: any(item.get("call_id") == "kA-evict-5" and item.get("type") == "function_call_output" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-            icon = OrchestratorMock.tool_output("kA-evict-5")
-            assert icon["ok"] and "images_not_captured" not in icon, icon
-            # Five boards drawn while the writer was held: the cut, once it lands, keeps them and
-            # sheds only what the writer read before the current call.
-            assert not OrchestratorMock.memory_gate.is_set()
-            OrchestratorMock.memory_gate.set()
-            assert (await recv_type(browser, "memory", 15))["memory"]["text"] == MEMORY_TEXT
-            await wait_for(lambda: any("context_compacted" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-            compacted = next(payload["input"] for _, payload in OrchestratorMock.requests if any("context_compacted" in str(item.get("content")) for item in payload["input"]))
-            assert compacted[0] == {"role": "developer", "content": f"[memory] {MEMORY_TEXT}"}, compacted[0]
-            assert not any(item.get("call_id") == "h1-create" for item in compacted), "the first call survived compaction"
-            assert compacted[1].get("role") == "user", compacted[1]
-            calls_in = {item["call_id"] for item in compacted if item.get("type") == "function_call"}
-            outputs_in = {item["call_id"] for item in compacted if item.get("type") == "function_call_output"}
-            assert calls_in == outputs_in and {"cc-memory", "kA-evict-1", "kA-evict-5"} <= calls_in, (calls_in ^ outputs_in, calls_in)
-            diagnostics = next(item for item in await asyncio.to_thread(conversations) if item.get("memory"))
-            assert diagnostics["memory"]["text"] == MEMORY_TEXT and diagnostics["memory_versions"][-1]["chars"] == len(MEMORY_TEXT), diagnostics["memory_versions"]
-            assert diagnostics["context_archives"][-1]["reason"] == "compaction", diagnostics["context_archives"]
-            assert not any(item.get("call_id") == "h1-create" for item in diagnostics["orchestrator_context"])
-            assert (await asyncio.to_thread(asset, svg_hash))[0] == 404, "an evicted board's asset is gone"
-            status, headers, body = await asyncio.to_thread(asset, hashlib.sha256(PNG_BYTES).hexdigest())
-            assert status == 200 and body == PNG_BYTES and headers.get("content-type") == "image/png", "one asset shared by five boards"
-            assert "whiteboard.assets_collected" in await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
-            # An HTML report's Workspace images are inlined when it is read for the page.
-            await mocks.send_live(dtmf("B"))
-            assert (await recv_type(browser, "show", 15))["uri"] == "dogwalk:file//home/daytona/report.html"
-            await browser.send(json.dumps({"type": "read", "id": 9, "path": "/home/daytona/report.html"}))
-            html = (await recv_type(browser, "file"))["text"]
-            assert f'src="data:image/png;base64,{base64.b64encode(PNG_BYTES).decode()}"' in html and "srcset" not in html, html[:400]
-            assert 'src="https://example.com/a.png"' in html and 'src="data:image/gif;base64,R0lG"' in html, html
-            assert 'src="/etc/x.png" alt="Outside (image not shown: only files under /home/daytona can be read)"' in html, html
-            # Human Takeover: a terminal launch yields a one-time ticket in a URL fragment.
-            await browser.send(json.dumps({"type": "launch", "kind": "terminal", "id": 7}))
-            launch = await recv_type(browser, "launch")
-            assert launch["id"] == 7 and f"/pair/terminal#t={identity}." in launch["url"], launch
-            ticket_credential = launch["url"].split("#t=", 1)[1]
-            terminal_url = f"ws://127.0.0.1:{WORKER_PORT}/pair/terminal/ws?for={identity}"
+
+        async def open_page(credential: str, display: str):
+            """A paired page joins its Display: hello, then that Display's boards, and nothing else."""
+            page = await connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}")
+            await page.send(json.dumps({"type": "auth", "token": credential, "build": build}))
+            hello = json.loads(await page.recv())
+            assert hello["type"] == "hello" and hello["display"] == display, hello
+            boards = json.loads(await page.recv())
+            assert boards["type"] == "boards", boards
+            return page, hello, boards["boards"]
+
+        async def pong_after(page) -> list[dict]:
+            """What a page received before the answer to a ping sent now."""
+            await page.send(json.dumps({"type": "ping"}))
+            before = []
+            async with asyncio.timeout(8):
+                while (message := json.loads(await page.recv()))["type"] != "pong":
+                    before.append(message)
+            return before
+
+        async def ask(page, message: dict) -> dict:
+            """A page request and its answer (opened, file, or error), by id."""
+            await page.send(json.dumps(message))
+            async with asyncio.timeout(15):
+                while True:
+                    reply = json.loads(await page.recv())
+                    if reply.get("id") == message["id"] and reply.get("type") in ("opened", "file", "error"):
+                        return reply
+
+        def file(path: str, board: str, credential: str | None = None, **params) -> tuple[int, dict, bytes]:
+            """A board's file, with the credential in a header (never the URL)."""
+            query = urllib.parse.urlencode({"path": path, "board": board, **params})
+            status, raw, body = pair_raw(f"/pair/file?{query}", {"authorization": f"Bearer {credential or token}"})
+            return status, {key.lower(): value for key, value in raw.items()}, body
+
+        terminal_url = f"ws://127.0.0.1:{WORKER_PORT}/pair/terminal/ws?for={identity}"
+
+        async def terminal_ready(credential: dict) -> dict:
             async with connect(terminal_url) as terminal:
-                await terminal.send(json.dumps({"type": "auth", "ticket": ticket_credential, "cols": 100, "rows": 30}))
-                ready = await recv_type(terminal, "ready")
-                terminal_token = ready["token"]
-                assert terminal_token.startswith(identity + ".") and terminal_token != ticket_credential
+                await terminal.send(json.dumps({**credential, "type": "auth", "cols": 100, "rows": 30}))
+                reply = await recv_type(terminal, "ready")
                 # The mock toolbox has no PTY, so the relay reports why and closes.
-                notice = await recv_type(terminal, "notice")
-                assert "terminal" in notice["text"], notice
-            async with connect(terminal_url) as again:
-                await again.send(json.dumps({"type": "auth", "ticket": ticket_credential}))
-                assert "expired" in (await recv_type(again, "error"))["error"], "a launch ticket works once"
-            async with connect(terminal_url) as reload:
-                await reload.send(json.dumps({"type": "auth", "token": terminal_token}))
-                assert (await recv_type(reload, "ready"))["token"] == terminal_token, "a reload reconnects with its token"
-            # A desktop launch reports why it could not start (the mock has no computer use).
-            await browser.send(json.dumps({"type": "launch", "kind": "desktop", "id": 8}))
-            refused = await recv_type(browser, "error")
-            assert refused["id"] == 8 and "desktop" in refused["error"], refused
+                assert "terminal" in (await recv_type(terminal, "notice"))["text"]
+                return reply
+
+        async def terminal_refused(credential: dict) -> None:
+            async with connect(terminal_url) as terminal:
+                await terminal.send(json.dumps({**credential, "type": "auth"}))
+                assert "expired" in (await recv_type(terminal, "error"))["error"]
+
+        browser, hello, boards = await open_page(token, "main")
+        assert hello["device"] == "Chrome on a Mac" and hello["idle_expires_at"] > time.time() * 1000
+        assert hello["build"] == build and hello["stale"] is False, hello
+        assert boards == [], boards
+        # The page has no views of its own: no listing, no reading what no board names, no launching.
+        await browser.send(json.dumps({"type": "list", "id": 1, "path": ""}))
+        await browser.send(json.dumps({"type": "launch", "id": 2, "kind": "terminal"}))
+        assert await pong_after(browser) == [], "removed requests answer nothing"
+        unnamed = await ask(browser, {"type": "read", "id": 3, "path": "REPORT.md"})
+        assert unnamed["type"] == "error" and "no board on this display" in unnamed["error"], unnamed
+        # The Orchestrator learns the Display's page is open.
+        await wait_for(lambda: heard('browser_connected: {"display":"main"}'), 10)
+        # A tab loaded before a deploy: one with another build is told to reload itself; one
+        # from before builds existed cannot, so the Orchestrator hears it must ask the caller.
+        async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}") as newer:
+            await newer.send(json.dumps({"type": "auth", "token": token, "build": "00000000"}))
+            told = await recv_type(newer, "hello")
+            assert told["stale"] is True and told["build"] == build and told["display"] == "main", told
+        await wait_for(lambda: heard('browser_page_stale: {"display":"main","reloads_itself":true}'), 10)
+        stale = await connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}")
+        await stale.send(json.dumps({"type": "auth", "token": token}))
+        assert (await recv_type(stale, "hello"))["stale"] is True
+        await wait_for(lambda: heard('browser_page_stale: {"display":"main","reloads_itself":false}'), 10)
+        await mocks.send_live(dtmf("4"))
+        await wait_for(outputs_back("k4-state"), 15)
+        state = OrchestratorMock.tool_output("k4-state")
+        assert "paired_browser" not in state and "whiteboard" not in state, state
+        [main_display] = state["displays"]
+        assert main_display["name"] == "main" and main_display["page_open"] and main_display["page_stale"] is True, main_display
+        assert [item["device"] for item in main_display["browsers"]] == ["Chrome on a Mac"], main_display
+        assert main_display["boards"] == 0 and main_display["latest"] is None and main_display["access"] == [], main_display
+        assert 55 <= main_display["expires_in_minutes"] <= 60, main_display
+        assert state["earcon_style"] == "tonal", state
+        assert state["context_tokens"] == 1 and state["memory"]["chars"] == len(EARLY_MEMORY) and "compacting" not in state["memory"], state
+        # The Orchestrator draws a board; the caller answers it on the page; it hears the answer.
+        await mocks.send_live(dtmf("5"))
+        board = (await recv_type(browser, "board", 15))["board"]
+        assert board["program"] == BOARD_PROGRAM and board["status"] == "open" and board["note"] == "pick one" and board["display"] == "main", board
+        # Dogwalk keeps the program, never copies of the files it shows: only which failed, and why.
+        assert "images" not in board and list(board["failed"]) == ["big.png"] and "WebP" in board["failed"]["big.png"], board
+        assert set(board["access"]) == {"terminal:", "preview:3000"}, board["access"]
+        assert all(59.9 < (grant["expires_at"] - board["at"]) / 60_000 <= 60.1 for grant in board["access"].values()), board["access"]
+        checks = (await recv_type(browser, "board", 15))["board"]
+        await wait_for(outputs_back("k5-board", "k5-checks"), 15)
+        drawn = OrchestratorMock.tool_output("k5-board")
+        assert drawn["display"] == "main" and drawn["page_open"] is True and "not_seen" not in drawn, drawn
+        assert "page_stale" in drawn, "draw_on_whiteboard warns of the stale page"
+        assert list(drawn["files_failed"]) == ["big.png"] and "WebP" in drawn["files_failed"]["big.png"], drawn
+        assert sorted((item["kind"], item["target"], item["minutes"]) for item in drawn["access"]) == [("preview", "3000", 60), ("terminal", "", 60)], drawn
+        assert "access_refused" not in drawn, drawn
+        # Each file is checked when drawn: present, in the Workspace, the image its name says, not too large.
+        failed = OrchestratorMock.tool_output("k5-checks")["files_failed"]
+        reasons = {
+            "notes.png": "not a PNG", "huge.png": "WebP", "wide.png": "megapixels", "pixels.png": "megapixels",
+            "escape.png": "outside", "missing.png": "does not exist", "https://example.com/a.png": "never a URL",
+            "//example.com/a.png": "never a URL", "missing.md": "does not exist",
+        }
+        assert set(failed) == set(reasons) and checks["failed"] == failed, failed
+        for path, why in reasons.items():
+            assert why in failed[path], (path, failed[path])
+        assert not any("example.com" in command for command in DaytonaMock.executed)
+        # The stale page cannot render Image; its error says the page is out of date.
+        await stale.send(json.dumps({"type": "board_error", "id": board["id"], "error": "line 2: unknown component Image (left out)"}))
+        await wait_for(lambda: any("whiteboard_error" in str(item.get("content")) and "out of date" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
+        await stale.close()
+        OrchestratorMock.memory_gate.clear()
+        await browser.send(json.dumps({"type": "board_answer", "id": board["id"], "answer": {"button": "Send", "values": {"approach": "Refactor"}, "note": ""}}))
+        answered = (await recv_type(browser, "board"))["board"]
+        assert answered["status"] == "answered" and answered["answer"]["values"] == {"approach": "Refactor"}, answered
+        await wait_for(lambda: heard("whiteboard_answer") and heard("Refactor"), 15)
+        assert '"display":"main"' in OrchestratorMock.user_message("[harness event] whiteboard_answer")
+        # The Orchestrator compacts after the answer: an over-long focus is refused, then the
+        # compaction starts and the Voice Frontend is briefed; its Memory writer is held while
+        # the call goes on.
+        await wait_for(lambda: any(item.get("call_id") == "cc-memory" and item.get("type") == "function_call_output" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
+        refused_focus = OrchestratorMock.tool_output("cc-long")
+        assert refused_focus["ok"] is False and "at most 500" in refused_focus["error"], refused_focus
+        await next_matching(mocks.live_messages, appended("commentary", COMPACTION_BRIEF))
+        await wait_for(lambda: len(OrchestratorMock.memory_requests) == 2, 10)
+        assert OrchestratorMock.memory_requests[1]["input"][0] == {"role": "developer", "content": f"[memory] {EARLY_MEMORY}"}
+        # A second answer to the same board is ignored.
+        await browser.send(json.dumps({"type": "board_answer", "id": board["id"], "answer": {"values": {"approach": "Quick fix"}}}))
+        # A board's files are read from the Sandbox when shown, with the credential in a header,
+        # and only as the board names them: a Document as written, an Image as an image.
+        status, headers, body = await asyncio.to_thread(file, "REPORT.md", board["id"])
+        assert status == 200 and body == REPORT_TEXT.encode(), (status, body[:80])
+        assert headers.get("content-type") == "application/octet-stream" and headers.get("content-disposition", "").startswith("inline")
+        assert "sandbox" in headers.get("content-security-policy", "")
+        for path, board_id, params in [
+            ("REPORT.md", "", {}), ("/etc/passwd", board["id"], {}), ("/home/daytona/REPORT.md", board["id"], {}),
+            ("diagram.svg", board["id"], {}), ("REPORT.md", board["id"], {"as": "image"}), ("REPORT.md", board["id"], {"download": "1"}),
+            ("REPORT.md", checks["id"], {}),
+        ]:
+            status, _, body = await asyncio.to_thread(file, path, board_id, **params)
+            assert status == 404 and b"no board on this display" in body, (path, board_id, params, status, body)
+        assert (await asyncio.to_thread(file, "REPORT.md", board["id"], f"{identity}.{'0' * 48}"))[0] == 401
+        # Images: the type comes from the bytes, and an SVG opened alone runs and loads nothing.
+        status, headers, body = await asyncio.to_thread(file, "diagram.svg", board["id"], **{"as": "image"})
+        assert status == 200 and body == SVG_BYTES and headers.get("content-type") == "image/svg+xml", (status, headers)
+        assert headers.get("x-content-type-options") == "nosniff" and "no-store" in headers.get("cache-control", "")
+        csp = headers.get("content-security-policy", "")
+        assert "default-src 'none'" in csp and "style-src 'unsafe-inline'" in csp and "img-src data:" in csp, csp
+        # A file that failed when drawn says why.
+        for path, board_id, why in [("big.png", board["id"], b"WebP"), ("notes.png", checks["id"], b"not a PNG")]:
+            status, _, body = await asyncio.to_thread(file, path, board_id, **{"as": "image"})
+            assert status == 404 and why in body, (path, status, body)
+        # Never copied: a file gone since the draw is gone from the board too.
+        removed = IMAGE_FILES.pop("diagram.svg")
+        try:
+            assert (await asyncio.to_thread(file, "diagram.svg", board["id"], **{"as": "image"}))[0] == 404
+        finally:
+            IMAGE_FILES["diagram.svg"] = removed
+        # Documents are read over the page's socket, likewise only as a board names them.
+        report = await ask(browser, {"type": "read", "id": 4, "path": "REPORT.md", "board_id": board["id"]})
+        assert report["type"] == "file" and report["text"] == REPORT_TEXT and not report["truncated"], report
+        for path, board_id in [("../../etc/passwd", board["id"]), ("diagram.svg", board["id"]), ("REPORT.md", checks["id"]), ("REPORT.md", "bnope")]:
+            refused = await ask(browser, {"type": "read", "id": 5, "path": path, "board_id": board_id})
+            assert refused["type"] == "error" and "no board on this display" in refused["error"], (path, refused)
+        # An HTML report's Workspace images are inlined when it is read for the page.
+        html = (await ask(browser, {"type": "read", "id": 9, "path": "report.html", "board_id": board["id"]}))["text"]
+        assert f'src="data:image/png;base64,{base64.b64encode(PNG_BYTES).decode()}"' in html and "srcset" not in html, html[:400]
+        assert 'src="https://example.com/a.png"' in html and 'src="data:image/gif;base64,R0lG"' in html, html
+        assert 'src="/etc/x.png" alt="Outside (image not shown: only files under /home/daytona can be read)"' in html, html
+        # Human Takeover: the board's Terminal opens with a one-time ticket in a URL fragment.
+        opened = await ask(browser, {"type": "open", "id": 7, "board_id": board["id"], "key": "terminal:"})
+        assert opened["type"] == "opened" and f"/pair/terminal#t={identity}." in opened["url"], opened
+        ticket_credential = opened["url"].split("#t=", 1)[1]
+        ready = await terminal_ready({"ticket": ticket_credential})
+        terminal_token = ready["token"]
+        assert terminal_token.startswith(identity + ".") and terminal_token != ticket_credential
+        assert ready["expires_at"] == board["access"]["terminal:"]["expires_at"], "the terminal lasts as long as its grant"
+        assert PROVIDER["pty"][-1] == "human", PROVIDER["pty"]
+        await terminal_refused({"ticket": ticket_credential})  # a launch ticket works once
+        assert (await terminal_ready({"token": terminal_token}))["token"] == terminal_token, "a reload reconnects with its token"
+        # A Preview opens as a provider-signed link, bounded by its grant.
+        opened = await ask(browser, {"type": "open", "id": 8, "board_id": board["id"], "key": "preview:3000"})
+        docs_link = PROVIDER["signed"][-1]
+        assert docs_link["port"] == 3000 and 3500 <= docs_link["seconds"] <= 3600, docs_link
+        assert opened == {"type": "opened", "id": 8, "url": f"https://3000-{docs_link['token']}.preview.test"}, opened
+        # What was never granted, or granted on another board, opens nothing.
+        for key, board_id, why in [("preview:8080", board["id"], "not granted"), ("desktop:", board["id"], "not granted"),
+                                   ("terminal:", checks["id"], "not granted"), ("terminal:", "bnope", "no longer on this display")]:
+            refused = await ask(browser, {"type": "open", "id": 6, "board_id": board_id, "key": key})
+            assert refused["type"] == "error" and why in refused["error"], (key, refused)
+        # Five newer boards retire the first two from the Display, with the grants they carried.
+        await mocks.send_live(dtmf("A"))
+        icons = [(await recv_type(browser, "board", 15))["board"] for _ in range(5)]
+        await wait_for(outputs_back("kA-evict-5"), 15)
+        icon = OrchestratorMock.tool_output("kA-evict-5")
+        assert icon["ok"] and "files_failed" not in icon and "access" not in icon, icon
+        # Five boards drawn while the writer was held: the cut, once it lands, keeps them and
+        # sheds only what the writer read before the current call.
+        assert not OrchestratorMock.memory_gate.is_set()
+        OrchestratorMock.memory_gate.set()
+        await wait_for(lambda: any("context_compacted" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
+        compacted = next(payload["input"] for _, payload in OrchestratorMock.requests if any("context_compacted" in str(item.get("content")) for item in payload["input"]))
+        assert compacted[0] == {"role": "developer", "content": f"[memory] {MEMORY_TEXT}"}, compacted[0]
+        assert not any(item.get("call_id") == "h1-create" for item in compacted), "the first call survived compaction"
+        assert compacted[1].get("role") == "user", compacted[1]
+        calls_in = {item["call_id"] for item in compacted if item.get("type") == "function_call"}
+        outputs_in = {item["call_id"] for item in compacted if item.get("type") == "function_call_output"}
+        assert calls_in == outputs_in and {"cc-memory", "kA-evict-1", "kA-evict-5"} <= calls_in, (calls_in ^ outputs_in, calls_in)
+        diagnostics = next(item for item in await asyncio.to_thread(conversations) if item.get("memory"))
+        assert diagnostics["memory"]["text"] == MEMORY_TEXT and diagnostics["memory_versions"][-1]["chars"] == len(MEMORY_TEXT), diagnostics["memory_versions"]
+        assert diagnostics["context_archives"][-1]["reason"] == "compaction", diagnostics["context_archives"]
+        assert not any(item.get("call_id") == "h1-create" for item in diagnostics["orchestrator_context"])
+        assert (3000, docs_link["token"]) in PROVIDER["expired"], "a dropped board's signed link is expired"
+        await terminal_refused({"token": terminal_token})
+        assert (await asyncio.to_thread(file, "REPORT.md", board["id"]))[0] == 404, "a dropped board's files are no longer read"
+
+        # A second Display: pairing it leaves the first paired and its page open.
+        async def pair_another(call_id: str) -> tuple[str, str]:
+            code = await next_pairing_code(call_id)
+            await next_matching(mocks.live_messages, appended("commentary", f"Pairing code {code}"))
+            status, claim = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": code}, {"user-agent": CHROME_MAC})
+            assert status == 200, (status, claim)
+            await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "submitted the pairing code" in m.get("content", ""))
+            await mocks.send_live(dtmf("1"))
+            said = await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "browser is paired" in m.get("content", ""))
+            accepted = (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, {"authorization": f"Bearer {claim['ticket']}"}))[1]
+            assert accepted["state"] == "accepted", accepted
+            return accepted["token"], said["content"]
+
+        await mocks.send_live(transcript("input", "Pair my laptop as the slides display.", 100000, 101000))
+        await mocks.send_live(delegation("del-wb-slides", 101050))
+        slides_token, said = await pair_another("wb-pair")
+        assert OrchestratorMock.tool_output("wb-pair")["display"] == "slides" and not OrchestratorMock.tool_output("wb-pair")["joins_existing_display"]
+        assert 'as the display "slides"' in said and "mirroring" not in said, said
+        assert await pong_after(browser) == [], "the first browser stays paired, its page open"
+        await wait_for(outputs_back("wb-unnamed", "wb-ghost", "wb-slides"), 15)
+        unnamed = OrchestratorMock.tool_output("wb-unnamed")
+        assert unnamed["ok"] is False and "name the display" in unnamed["error"] and "main, slides" in unnamed["error"], unnamed
+        assert 'no display called "kitchen"' in OrchestratorMock.tool_output("wb-ghost")["error"]
+        slide = OrchestratorMock.tool_output("wb-slides")
+        assert slide["ok"] and slide["display"] == "slides" and slide["page_open"] is False and "not_seen" in slide, slide
+        assert not any(item["type"] == "board" for item in await pong_after(browser)), "a board goes only to its own Display"
+        slides, hello, slide_boards = await open_page(slides_token, "slides")
+        assert [item["id"] for item in slide_boards] == [slide["board_id"]] and slide_boards[0]["display"] == "slides", slide_boards
+        await wait_for(lambda: heard('browser_connected: {"display":"slides"}'), 10)
+        # A browser reads only what a board on its own Display names.
+        status, headers, body = await asyncio.to_thread(file, "/home/daytona/chart.png", icons[-1]["id"], **{"as": "image"})
+        assert status == 200 and body == PNG_BYTES and headers.get("content-type") == "image/png", (status, headers)
+        assert (await asyncio.to_thread(file, "/home/daytona/chart.png", icons[-1]["id"], slides_token, **{"as": "image"}))[0] == 404
+        assert (await asyncio.to_thread(file, "chart.png", slide["board_id"], slides_token, **{"as": "image"}))[0] == 200
+        assert (await asyncio.to_thread(file, "chart.png", slide["board_id"], **{"as": "image"}))[0] == 404
+        # A browser paired to a Display that has one mirrors it, boards and all.
+        await mocks.send_live(transcript("input", "And pair my phone to the main display too.", 102000, 103000))
+        await mocks.send_live(delegation("del-wb-mirror", 103050))
+        mirror_token, said = await pair_another("wm-pair")
+        assert OrchestratorMock.tool_output("wm-pair")["joins_existing_display"] is True and "mirroring" in said, said
+        mirror, hello, mirror_boards = await open_page(mirror_token, "main")
+        assert [item["id"] for item in mirror_boards] == [item["id"] for item in icons], mirror_boards
+        # Renaming keeps a Display's browsers, boards, and grants.
+        await mocks.send_live(transcript("input", "Call the slides display the projector, and put the dev server on it.", 104000, 105000))
+        await mocks.send_live(delegation("del-wb-end", 105050))
+        assert (await recv_type(slides, "display", 15))["name"] == "projector"
+        projector_board = (await recv_type(slides, "board", 15))["board"]
+        assert projector_board["display"] == "projector" and set(projector_board["access"]) == {"preview:5173"}, projector_board
+        await wait_for(outputs_back("we-rename", "we-preview"), 15)
+        assert OrchestratorMock.tool_output("we-rename") == {"ok": True, "display": "projector"}
+        assert OrchestratorMock.tool_output("we-preview")["page_open"] is True
+        assert not heard('browser_disconnected: {"display":"slides"}'), "a rename is not a disconnection"
+        opened = await ask(slides, {"type": "open", "id": 1, "board_id": projector_board["id"], "key": "preview:5173"})
+        projector_link = PROVIDER["signed"][-1]
+        assert opened["url"] == f"https://5173-{projector_link['token']}.preview.test", opened
+        # Access Elements: drawn in the call, they are granted on that Display for the minutes asked.
+        await mocks.send_live(dtmf("9"))
+        access_board = (await recv_type(browser, "board", 15))["board"]
+        assert (await recv_type(mirror, "board", 15))["board"]["id"] == access_board["id"], "a Display's browsers mirror it"
+        await wait_for(outputs_back("k9-access", "k9-state"), 15)
+        drawn = OrchestratorMock.tool_output("k9-access")
+        granted = [("desktop", ""), ("download", "REPORT.md"), ("preview", "5173"), ("ssh", ""), ("terminal", "build")]
+        assert sorted((item["kind"], item["target"]) for item in drawn["access"]) == granted and {item["minutes"] for item in drawn["access"]} == {90}, drawn
+        [gateway] = drawn["access_refused"]
+        assert gateway["key"] == "preview:8765" and "Agent Gateway" in gateway["reason"], drawn
+        assert set(access_board["access"]) == {f"{kind}:{target}" for kind, target in granted}, access_board["access"]
+        assert all(89.9 < (grant["expires_at"] - access_board["at"]) / 60_000 <= 90.1 for grant in access_board["access"].values())
+        displays = {item["name"]: item for item in OrchestratorMock.tool_output("k9-state")["displays"]}
+        assert set(displays) == {"main", "projector"} and len(displays["main"]["browsers"]) == 2, displays
+        assert displays["main"]["latest"]["board_id"] == access_board["id"] and displays["main"]["boards"] == 5, displays["main"]
+        assert sorted((item["kind"], item["target"]) for item in displays["main"]["access"]) == granted, displays["main"]
+        assert [(item["kind"], item["target"]) for item in displays["projector"]["access"]] == [("preview", "5173")], displays
+        # The mirror opens the Preview and SSH Access: a fresh link, and a command rather than a link.
+        opened = await ask(mirror, {"type": "open", "id": 1, "board_id": access_board["id"], "key": "preview:5173"})
+        app_link = PROVIDER["signed"][-1]
+        assert app_link["port"] == 5173 and 5300 <= app_link["seconds"] <= 5400 and app_link["token"] != projector_link["token"], app_link
+        assert opened["url"] == f"https://5173-{app_link['token']}.preview.test", opened
+        opened = await ask(mirror, {"type": "open", "id": 2, "board_id": access_board["id"], "key": "ssh:"})
+        ssh_access = PROVIDER["ssh"][-1]
+        assert opened["ssh"]["command"] == f"ssh {ssh_access['token']}@ssh.preview.test" and "url" not in opened, opened
+        assert ssh_access["minutes"] in (89, 90) and opened["ssh"]["expires_at"] <= access_board["access"]["ssh:"]["expires_at"], (ssh_access, opened)
+        # A desktop reports why it could not start (the mock has no computer use).
+        refused = await ask(browser, {"type": "open", "id": 3, "board_id": access_board["id"], "key": "desktop:"})
+        assert refused["type"] == "error" and "desktop" in refused["error"], refused
+        for key, why in [("preview:8765", "not granted"), ("download:REPORT.md", "from its button")]:
+            refused = await ask(browser, {"type": "open", "id": 4, "board_id": access_board["id"], "key": key})
+            assert refused["type"] == "error" and why in refused["error"], (key, refused)
+        # A Download is read when opened, as an attachment, under its grant.
+        status, headers, body = await asyncio.to_thread(file, "REPORT.md", access_board["id"], download="1")
+        assert status == 200 and body == REPORT_TEXT.encode() and headers.get("content-disposition", "").startswith("attachment"), (status, headers)
+        assert headers.get("content-type") == "application/octet-stream", headers
+        assert (await asyncio.to_thread(file, "REPORT.md", icons[-1]["id"], download="1"))[0] == 404
+        # A named Terminal is its own tmux session, lasting as long as its grant.
+        opened = await ask(browser, {"type": "open", "id": 5, "board_id": access_board["id"], "key": "terminal:build"})
+        ready = await terminal_ready({"ticket": opened["url"].split("#t=", 1)[1]})
+        build_token = ready["token"]
+        assert ready["expires_at"] == access_board["access"]["terminal:build"]["expires_at"], ready
+        assert PROVIDER["pty"][-1] == "human-build", PROVIDER["pty"]
+        # No credential reaches the Orchestrator.
+        context = json.dumps([payload["input"] for _, payload in OrchestratorMock.requests])
+        for secret in (app_link["token"], projector_link["token"], ssh_access["token"], build_token.split(".", 1)[1], "preview.test"):
+            assert secret not in context, secret
+        # Revoking ends every live grant on the Display at once; the boards stay, marked revoked.
+        await mocks.send_live(dtmf("B"))
+        revoked_board = (await recv_type(browser, "board", 15))["board"]
+        assert revoked_board["id"] == access_board["id"] and all(grant.get("revoked") for grant in revoked_board["access"].values()), revoked_board
+        await recv_type(mirror, "board", 15)
+        await wait_for(outputs_back("kB-revoke", "kB-state"), 15)
+        assert OrchestratorMock.tool_output("kB-revoke") == {"ok": True, "display": "main", "grants_revoked": 5}
+        displays = {item["name"]: item for item in OrchestratorMock.tool_output("kB-state")["displays"]}
+        assert displays["main"]["access"] == [] and len(displays["projector"]["access"]) == 1, displays
+        assert (5173, app_link["token"]) in PROVIDER["expired"], PROVIDER["expired"]
+        assert (5173, projector_link["token"]) not in PROVIDER["expired"], "another Display's grant stands"
+        assert f"/api/sandbox/mock-sandbox-1/ssh-access?token={ssh_access['token']}" in DaytonaMock.deleted, DaytonaMock.deleted
+        await terminal_refused({"token": build_token})
+        refused = await ask(mirror, {"type": "open", "id": 6, "board_id": access_board["id"], "key": "preview:5173"})
+        assert refused["type"] == "error" and "revoked" in refused["error"], refused
+        status, _, body = await asyncio.to_thread(file, "REPORT.md", access_board["id"], download="1")
+        assert status == 400 and b"revoked" in body, (status, body)
+        # Unpairing a Display ends it: its browsers, boards, and grants.
+        await mocks.send_live(transcript("input", "Unpair the projector.", 106000, 107000))
+        await mocks.send_live(delegation("del-wb-end2", 107050))
+        await recv_type(slides, "unpaired", 15)
+        await wait_for(outputs_back("we-unpair", "we-state"), 15)
+        assert OrchestratorMock.tool_output("we-unpair") == {"ok": True, "display": "projector", "browsers_unpaired": 1}
+        assert [item["name"] for item in OrchestratorMock.tool_output("we-state")["displays"]] == ["main"]
+        assert (5173, projector_link["token"]) in PROVIDER["expired"], "an ended Display's grants are revoked"
+        await wait_for(lambda: heard('browser_disconnected: {"display":"projector"}'), 10)
+        await slides.close()
+        assert (await asyncio.to_thread(file, "chart.png", slide["board_id"], slides_token, **{"as": "image"}))[0] == 401
+        # Nothing on a board wakes the Sandbox: while it sleeps, files and Documents say so.
+        await asyncio.sleep(15.5)  # past the Worker's brief memory of a running Sandbox
+        DaytonaMock.force_state = "stopped"
+        try:
+            status, _, body = await asyncio.to_thread(file, "/home/daytona/chart.png", icons[-1]["id"], **{"as": "image"})
+            assert status == 503 and json.loads(body).get("asleep") is True, (status, body)
+            asleep = await ask(browser, {"type": "read", "id": 7, "path": "REPORT.md", "board_id": access_board["id"]})
+            assert asleep["type"] == "error" and asleep.get("asleep") is True and "asleep" in asleep["error"], asleep
+        finally:
+            DaytonaMock.force_state = None
+        await mirror.close()
         # A wrong secret for the right identity is refused and closed with 4001.
         async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}") as stranger:
             await stranger.send(json.dumps({"type": "auth", "token": identity + "." + "0" * 48}))
@@ -2011,19 +2257,14 @@ async def run_protocol(identity: str) -> None:
                 await stranger.recv()
             except ConnectionClosed as closed:
                 assert closed.rcvd and closed.rcvd.code == 4001
-        # Unpairing ends the credential: the next connection is refused.
-        async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}") as browser:
-            await browser.send(json.dumps({"type": "auth", "token": token}))
-            await recv_type(browser, "hello")
-            await browser.send(json.dumps({"type": "unpair"}))
-            await recv_type(browser, "unpaired")
-        # Unpairing ends what the browser launched: its terminal token no longer works.
-        async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/terminal/ws?for={identity}") as revoked:
-            await revoked.send(json.dumps({"type": "auth", "token": terminal_token}))
-            await recv_type(revoked, "error")
+        # Unpairing from the page ends that browser's credential; the mirror keeps the Display.
+        await browser.send(json.dumps({"type": "unpair"}))
+        await recv_type(browser, "unpaired")
+        await browser.close()
         async with connect(f"ws://127.0.0.1:{WORKER_PORT}/pair/ws?for={identity}") as browser:
             await browser.send(json.dumps({"type": "auth", "token": token}))
             await recv_type(browser, "error")
+        assert (await asyncio.to_thread(file, "/home/daytona/chart.png", icons[-1]["id"], mirror_token, **{"as": "image"}))[0] in (200, 503), "still paired"
 
         # A theme switch bounces the call: the new theme's greeting is written before the
         # GPT-Live leg hangs up, then the same CallSid returns with the new voice and conceit.
@@ -2177,7 +2418,8 @@ async def run_protocol(identity: str) -> None:
         turn = next(row for row in observed if row["event"] == "agent.turn.stopped")
         assert turn["detail"]["agent_session_id"] and turn["detail"]["ms"] >= 0
         for expected in ("menu.opened", "menu.closed", "menu.restart.requested", "menu.recovery", "voice.keypad.stop", "voice.keypad.status",
-                         "voice.earcons", "voice.theme", "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted", "pairing.page_stale"):
+                         "voice.earcons", "voice.theme", "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted", "pairing.page_stale",
+                         "whiteboard.drawn", "access.opened", "access.revoked", "display.renamed", "display.ended"):
             assert expected in events, (expected, events)
         handoff_rows = OrchestratorMock.user_message('"key":"7"')
         assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows
@@ -2212,8 +2454,10 @@ async def run_protocol(identity: str) -> None:
                 "start_challenge_practice", "start_reenrollment",
             }
             pairing_tool = next(tool for tool in payload["tools"] if tool["name"] == "pair_browser")
-            assert pairing_tool["parameters"].get("properties", {}) == {}, pairing_tool
+            assert set(pairing_tool["parameters"].get("properties", {})) == {"display"}, pairing_tool
             assert not pairing_tool["parameters"].get("required"), pairing_tool
+            names = {tool["name"] for tool in payload["tools"]}
+            assert {"draw_on_whiteboard", "rename_display", "unpair_display", "revoke_access"} <= names and "show_in_browser" not in names, names
             assert "start_voice_donation together in the same response" in payload["instructions"]
             assert "start_challenge_practice together in the same response" in payload["instructions"]
             assert "start_reenrollment together in the same response" in payload["instructions"]
@@ -2915,7 +3159,9 @@ def main() -> int:
     DaytonaMock.preview_reads = 0
     DaytonaMock.executed = []
     DaytonaMock.execute_hooks = [sandbox_toolbox]
-    DaytonaMock.get_hooks = [sandbox_files]
+    DaytonaMock.get_hooks = [sandbox_files, provider_gets]
+    DaytonaMock.post_hooks = [provider_posts]
+    DaytonaMock.delete_hooks = [provider_deletes]
     daytona = ThreadingHTTPServer(("127.0.0.1", DAYTONA_MOCK_PORT), DaytonaMock)
     thread = threading.Thread(target=daytona.serve_forever, daemon=True)
     thread.start()

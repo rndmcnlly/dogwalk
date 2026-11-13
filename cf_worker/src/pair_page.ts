@@ -1,9 +1,8 @@
 // Paired Browser page (DOMAIN.md), served at GET /pair: accepts the spoken Pairing Code as
-// typed text, claims it, waits for the caller to accept, then shows live Managed
-// Session status, a timeline of the call, a read-only Workspace file viewer, Human Takeover
-// launchers, and the Whiteboard (boards the walker draws for the caller to read or answer) over /pair/ws.
-// Media files (images, PDF, audio, video, downloads) come from GET /pair/file as blob URLs, and
-// Whiteboard images, captured when the board was drawn, from GET /pair/asset/<hash>.
+// typed text, claims it, waits for the caller to accept, then shows the Whiteboards drawn on this
+// browser's Display over /pair/ws. The page has no views of its own: anything the User should see
+// is drawn as a board. Files a board shows (Image, Document) are read from GET /pair/file as blob
+// URLs or, for text, over the socket; Access Elements open only on a click, under their Access Grant.
 //
 // String.raw keeps every backslash in the page script literal, so regexes and "\n" escapes
 // reach the browser as written. The page must therefore contain no backtick and no dollar-brace
@@ -58,12 +57,12 @@ header.top{display:flex;align-items:center;gap:8px 14px;padding:14px 0;border-bo
 .mark{font-weight:700;letter-spacing:-.02em;text-decoration:none;font-size:17px}
 .mark b{color:var(--accent)}
 .crumb{font:500 12px/1.5 var(--mono);color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
-.chips{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}
-.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);background:var(--card);font:600 12px/1.3 var(--sans);white-space:nowrap}
-.chip::before{content:"";flex:none;width:.65em;height:.65em;border-radius:50%;background:var(--faint)}
-.chip.ok::before{background:var(--ok)}
-.chip.warn::before{background:var(--warn)}
-.chip.off::before{background:transparent;box-shadow:inset 0 0 0 1.5px var(--muted)}
+/* The paired screen's slim bar: the Display's name large enough to read across a room, then this
+   browser, how long the pairing lasts, and the few things a person can do here. */
+.display-bar{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--line)}
+.display-id{min-width:0}
+.display-name{margin:0;font:600 clamp(24px,4vw,40px)/1.15 var(--serif);color:var(--ink);overflow-wrap:anywhere}
+#status:empty{display:none}
 h2{margin:22px 0 10px;font:600 12px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
 .status{margin:18px 0 6px;font:600 clamp(19px,3vw,24px)/1.3 var(--serif)}
 .status.ok{color:var(--ok)}
@@ -85,154 +84,23 @@ details summary{cursor:pointer}
 #log{max-height:180px;overflow:auto;white-space:pre-wrap;margin-top:6px}
 .diag{margin-top:28px}
 .box{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px}
-.pairing{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;justify-content:space-between}
-.pairing .who{font-weight:600}
 .prefs{display:flex;flex-wrap:wrap;gap:4px 16px;align-items:center;font-size:13px}
 .prefs label{display:inline-flex;gap:6px;align-items:center;min-height:32px;cursor:pointer}
 .prefs input{width:18px;height:18px;accent-color:var(--accent)}
-.permissions{background:var(--highlight);border:1px solid var(--accent);border-radius:var(--radius);padding:10px 14px;margin-top:14px}
-.permissions h2{margin:0 0 6px;color:var(--accent)}
-.permissions ul{margin:0;padding-left:1.2em}
 
-/* Tabs: Live, Files, Hands. Live shows sessions and the call timeline side by side on a wide
-   screen; on a narrow one a segmented control picks one of the two columns. */
-.tabs{position:sticky;top:0;z-index:5;display:flex;gap:2px;background:var(--paper);border-bottom:1px solid var(--rule);margin:14px 0 12px;overflow-x:auto}
-.tab{border:0;border-bottom:3px solid transparent;border-radius:0;background:none;padding:10px 14px;min-height:46px;font-weight:600;color:var(--muted);white-space:nowrap}
-.tab[aria-selected=true]{color:var(--ink);border-bottom-color:var(--accent)}
-.tab .key{font:500 11px/1 var(--mono);color:var(--faint);margin-left:6px}
-@media (hover:none){.tab .key{display:none}}
-.count{display:inline-block;min-width:1.6em;margin-left:6px;padding:2px 6px;border-radius:999px;background:var(--accent);color:var(--accent-ink);font:700 11px/1.2 var(--sans);text-align:center}
-.panel{display:none;min-width:0}
-.panel>h2:first-child,.live-col>h2:first-child{margin-top:4px}
-.panes[data-tab=live] #panelLive,.panes[data-tab=files] #panelFiles,.panes[data-tab=hands] #panelHands{display:block}
+/* Segmented buttons: a board's Tabs */
 .segmented{display:inline-flex;margin:0 0 10px;border:1px solid var(--rule);border-radius:var(--radius);overflow:hidden}
 .segmented button{border:0;border-radius:0;background:var(--card);padding:6px 14px;min-height:38px;font-weight:600;color:var(--muted)}
 .segmented button+button{border-left:1px solid var(--rule)}
 .segmented button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink)}
 .segmented button[aria-pressed=true] .count{background:var(--accent-ink);color:var(--accent)}
-.live-col{min-width:0}
-.live-cols[data-view=sessions] #liveFeed,.live-cols[data-view=timeline] #liveSessions{display:none}
-@media (min-width:1100px){
-  #liveSwitch{display:none}
-  .live-cols{display:grid;grid-template-columns:minmax(0,.85fr) minmax(0,1.15fr);gap:0 28px;align-items:start}
-  .live-cols[data-view] #liveFeed,.live-cols[data-view] #liveSessions{display:block}
-  #liveFeed{position:sticky;top:58px}
-}
-.explain{margin:-4px 0 10px}
-
-/* What the walker shows: a toast for navigations, a banner for tabs only a click may open */
-.toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:20;max-width:min(560px,calc(100vw - 28px));padding:10px 16px;border-radius:var(--radius);background:var(--ink);color:var(--paper);box-shadow:0 4px 16px rgb(0 0 0 / .3);font-size:14px}
-.toast .note{display:block;opacity:.8;font-size:13px}
-.banner{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:20;width:min(720px,calc(100vw - 20px));display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:12px 14px;border:2px solid var(--accent);border-radius:var(--radius);background:var(--highlight);box-shadow:0 6px 20px rgb(0 0 0 / .3)}
-.banner .text{flex:1 1 16em;min-width:0}
-.banner .note{display:block;font-size:13px;color:var(--body)}
-.banner .host{display:block;font:700 19px/1.3 var(--mono);color:var(--ink);overflow-wrap:anywhere}
-.card.flash,.memory.flash{animation:flash 2.4s ease-out}
-.memory{margin:18px 0 0;border-radius:var(--radius)}
-.memory-text{white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.45 var(--mono);background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;margin:0;max-height:24em;overflow:auto}
 @keyframes flash{0%,40%{box-shadow:0 0 0 4px var(--accent);background:var(--highlight)}100%{box-shadow:0 0 0 0 transparent}}
-
-/* Sessions */
-.card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin:0 0 12px}
-.card.turn-in_progress{border-left-color:var(--info)}
-.card.turn-failed{border-left-color:var(--bad)}
-.card.turn-stopped{border-left-color:var(--ok)}
-.card-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px}
-.alias{margin:0;font:600 22px/1.2 var(--serif);display:inline-flex;align-items:center;gap:8px}
-.alias::before{content:"";width:.5em;height:.5em;border-radius:50%;background:hsl(var(--h,200) var(--agent-s) var(--agent-l))}
+/* Badges on boards */
 .badge{font:600 11px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;padding:4px 7px;border-radius:999px;background:var(--line);color:var(--ink)}
 .badge.in_progress,.badge.queued{background:var(--info);color:var(--paper)}
 .badge.failed{background:var(--bad);color:var(--paper)}
 .badge.stopped{background:var(--ok);color:var(--paper)}
-.badge.follow{background:var(--accent);color:var(--accent-ink)}
-.card p{margin:6px 0}
-.card .title{font-weight:600}
-.pathline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:2px}
-.plan,.tools{list-style:none;margin:6px 0;padding:0}
-.plan li{display:flex;gap:8px;align-items:baseline}
-.plan .box-mark{flex:none;width:.9em;height:.9em;border:1.5px solid var(--muted);border-radius:3px;transform:translateY(.1em)}
-.plan .completed .box-mark{background:var(--ok);border-color:var(--ok)}
-.plan .in_progress .box-mark{background:linear-gradient(90deg,var(--info) 50%,transparent 50%);border-color:var(--info)}
-.plan .completed span:last-child{color:var(--muted);text-decoration:line-through}
-.tools li{padding:3px 0;border-top:1px dashed var(--line);font-size:14px}
-.tools .kind{font:600 11px/1 var(--mono);color:var(--muted);text-transform:uppercase;margin-right:6px}
-.tools .paths{display:flex;flex-wrap:wrap;gap:2px 10px;font:12.5px/1.4 var(--mono)}
-.failure{color:var(--bad);font-weight:600}
-.remark{font-style:italic}
-.report{margin-top:6px}
-.closed-group>summary{color:var(--muted);margin:8px 0}
-
-/* Call timeline: one color per role, always with a text label beside it */
-.feed-bar{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
-.filter.f-caller{--c:var(--role-caller)}.filter.f-voice{--c:var(--role-voice)}.filter.f-orchestrator{--c:var(--role-orchestrator)}
-.filter{--c:var(--role-system);display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;font:600 12.5px/1.2 var(--sans);min-height:32px}
-.filter::before{content:"";width:.7em;height:.7em;border-radius:50%;background:var(--c)}
-.filter[aria-pressed=false]{color:var(--faint);border-style:dashed}
-.filter[aria-pressed=false]::before{background:transparent;box-shadow:inset 0 0 0 1.5px var(--c)}
-.filter.f-agent::before{background:conic-gradient(hsl(20 var(--agent-s) var(--agent-l)) 0 33%,hsl(140 var(--agent-s) var(--agent-l)) 0 66%,hsl(260 var(--agent-s) var(--agent-l)) 0)}
-.feed-wrap{position:relative}
-.feed-list{list-style:none;margin:0;padding:10px;height:clamp(320px,calc(100dvh - 240px),1000px);overflow:auto;overscroll-behavior:contain;background:var(--card);border:1px solid var(--line);border-radius:var(--radius)}
-.feed-empty{position:absolute;inset:40px 20px auto;text-align:center;pointer-events:none}
-.fe{--c:var(--role-system);margin:0 0 8px;padding:6px 10px;border-left:3px solid var(--c);border-radius:6px;max-width:94%;overflow-wrap:anywhere}
-.fe.f-caller{--c:var(--role-caller);margin-left:auto;border-left:0;border-right:3px solid var(--c);background:color-mix(in srgb,var(--c) 11%,var(--card))}
-.fe.f-voice{--c:var(--role-voice);background:color-mix(in srgb,var(--c) 9%,var(--card))}
-.fe.f-caller .fe-text,.fe.f-voice .fe-text{font-size:16.5px;line-height:1.45}
-.fe.f-agent{--c:hsl(var(--h,200) var(--agent-s) var(--agent-l))}
-.fe.f-orchestrator{--c:var(--role-orchestrator);color:var(--body)}
-.fe.f-system,.fe.lane-tool{padding:1px 10px;margin-bottom:4px;font-size:12.5px;color:var(--muted)}
-.fe.f-system{border-left-style:dotted}
-.fe-head,.fe-line,.fe-fold summary{display:flex;flex-wrap:wrap;gap:0 8px;align-items:baseline}
-.fe-who{font:700 12px/1.4 var(--sans);color:var(--c);letter-spacing:.02em}
-.fe-lane{font:500 10.5px/1.4 var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
-.fe time{margin-left:auto;font:11px/1.4 var(--mono);color:var(--faint);white-space:nowrap}
-.fe-line .fe-inline{flex:1 1 12em;min-width:0}
-.fe-text{white-space:pre-wrap}
-.fe-fold summary{list-style:none;color:var(--muted)}
-.fe-fold summary::-webkit-details-marker{display:none}
-.fe-fold summary::after{content:"show";font:11px/1.4 var(--mono);color:var(--info);text-decoration:underline}
-.fe-fold[open] summary::after{content:"hide"}
-.fe-peek{flex-basis:100%;order:9;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.fe-fold[open] .fe-peek{display:none}
-.fe-folded{font-size:13px;max-height:40vh;overflow:auto;margin-top:4px}
-.fe .md{border:0;background:none;padding:0;max-height:none;overflow:visible}
-.clamped{max-height:9.5em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 65%,transparent);mask-image:linear-gradient(#000 65%,transparent)}
-.fe-more{font-size:12.5px}
-.feed-list.hide-caller .f-caller,.feed-list.hide-voice .f-voice,.feed-list.hide-agent .f-agent,
-.feed-list.hide-orchestrator .f-orchestrator,.feed-list.hide-system .f-system{display:none}
-.pill{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);border-radius:999px;background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600;box-shadow:0 2px 8px rgb(0 0 0 / .25)}
-
-/* Files */
-.files-cols{display:block}
-@media (min-width:1100px){
-  .files-cols{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:0 28px;align-items:start}
-  .files-cols .viewer{position:sticky;top:58px;margin-top:4px}
-}
-.recent{list-style:none;margin:0;padding:0}
-.recent li{display:flex;gap:8px;align-items:baseline;padding:4px 0;border-top:1px dashed var(--line);font:13px/1.5 var(--mono)}
-.recent li:first-child{border-top:0}
-.recent .dir{color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}
-.who-tag{flex:none;font:600 11px/1.4 var(--sans);color:hsl(var(--h,200) var(--agent-s) var(--agent-l))}
-.crumbs{display:flex;flex-wrap:wrap;gap:2px;align-items:center;font:13px/1.6 var(--mono)}
-.crumbs .slash{color:var(--faint)}
-.entries{list-style:none;margin:8px 0;padding:0;max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:var(--radius);background:var(--card)}
-/* Name, size, modified: the name takes the room; on a narrow list the size drops under it and the date goes. */
-.entries{container-type:inline-size}
-.entries li{display:grid;grid-template-columns:minmax(0,1fr) 7.5ch 6.5ch;gap:0 10px;align-items:baseline;padding:5px 10px;border-top:1px solid var(--line);font:13px/1.5 var(--mono)}
-.entries li.muted{display:block}
-.entries li:first-child{border-top:0}
-.entries .name{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:normal}
-.entries .meta{color:var(--faint);white-space:nowrap;text-align:right;font-size:12px}
-@container (max-width:400px){
-  .entries li{grid-template-columns:minmax(0,1fr);padding:4px 10px}
-  .entries .when{display:none}
-  .entries .size{text-align:left;font-size:11px;line-height:1.3}
-  .entries .size:empty{display:none}
-}
-.viewer{margin-top:10px}
-.viewer-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px 10px;font:12.5px/1.4 var(--mono);color:var(--muted);margin-bottom:6px;word-break:break-all}
-.viewer-actions{display:flex;gap:6px;flex:none}
-#viewerNote{margin:0 0 6px}
-#viewerNote:empty{display:none}
+/* Renderers for Documents */
 .md{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:4px 14px;max-height:75vh;overflow:auto;word-wrap:break-word}
 .md h1,.md h2,.md h3,.md h4,.md h5,.md h6{font:600 1.05em/1.3 var(--sans);text-transform:none;letter-spacing:0;color:var(--ink);margin:14px 0 6px}
 .md h1{font-size:1.35em}.md h2{font-size:1.2em}
@@ -278,7 +146,8 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
 .html-stage:-webkit-full-screen{width:100%;height:100%;border:0;border-radius:0}
 .html-stage:-webkit-full-screen iframe{height:100%}
 
-/* Whiteboard (on Hands, or in a tab of its own): boards the walker draws in openui-lang. Tones and chart series take the page's palette. */
+
+/* Whiteboard (the paired screen, or a tab of its own): boards the walker draws in openui-lang. Tones and chart series take the page's palette. */
 .whiteboard{margin:18px 0 0;--wb-1:var(--info);--wb-2:var(--leash);--wb-3:var(--grass);--wb-4:var(--role-orchestrator);--wb-5:var(--warn);--wb-6:var(--bad)}
 #wbAway{margin-top:18px}
 .wb-board{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:var(--radius);padding:12px 14px;min-width:0}
@@ -350,6 +219,7 @@ div.wb-img-frame{cursor:default}
 .wb-image.zoomed .wb-img-frame{overflow:auto;max-height:80vh;cursor:zoom-out}
 .wb-image.zoomed img{max-width:none}
 .wb-image figcaption{color:var(--muted)}
+.wb-retry{align-self:flex-start}
 .wb-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;margin-top:4px}
 .wb-key::before{content:"";display:inline-block;width:.8em;height:.8em;margin-right:6px;border-radius:3px;background:var(--c);vertical-align:-.05em}
 .wb-numbers>summary{font-size:12.5px;color:var(--muted);margin-top:4px}
@@ -390,10 +260,32 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
 .wb-past>summary time{font:11px/1.4 var(--mono);color:var(--faint)}
 .wb-past .wb-head{display:none}
 .wb-past>.wb-board{margin-top:6px}
+.wb-empty{margin:clamp(24px,8vh,96px) auto;max-width:36em;text-align:center;font:400 clamp(17px,2.4vw,24px)/1.45 var(--serif);color:var(--muted)}
+.wb-empty b{color:var(--ink);font-weight:600}
+@media (min-width:1400px){.whiteboard{font-size:17px}.wb-head .wb-note{font-size:22px}}
 
-/* Hands */
-.launchers{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));max-width:720px}
-.launchers .box p{margin:6px 0 10px}
+/* Documents: a Workspace file shown on a board */
+.wb-doc{display:flex;flex-direction:column;gap:6px;min-width:0}
+.wb-doc-head{display:flex;flex-wrap:wrap;gap:2px 10px;align-items:baseline}
+.wb-doc-head strong{font-size:15.5px}
+.wb-doc-head .mono{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.wb-doc-note:empty{display:none}
+.wb-doc-note{margin:0}
+.wb-doc-body[aria-busy=true],.wb-doc.failed .wb-doc-body{display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:6px;min-height:5em;padding:10px 12px;border:1px dashed var(--line);border-radius:var(--radius);background:var(--paper)}
+.wb-doc .md{max-height:80vh}
+
+/* Access Elements: a card per Terminal, Desktop, Preview, SSH Access or Download, opened only by a click */
+.wb-access{display:flex;flex-direction:column;gap:8px;min-width:0;border:1px solid var(--line);border-left:4px solid var(--info);border-radius:var(--radius);padding:10px 12px;background:var(--paper)}
+.wb-access.dead{border-left-color:var(--line)}
+.wb-access-head{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+.wb-access-head strong{font-size:15.5px}
+.wb-access-row{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center}
+.wb-access-row button{min-height:40px}
+.wb-access-say:empty{display:none}
+.wb-ssh{display:flex;flex-direction:column;gap:6px}
+.wb-ssh pre{margin:0;padding:8px 10px;border-radius:6px;background:var(--code-bg);font:13px/1.45 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;-webkit-user-select:all;user-select:all}
+.wb-preview{display:flex;flex-direction:column;gap:6px}
+.wb-preview iframe{display:block;width:100%;height:clamp(420px,75vh,1400px);border:1px solid var(--line);border-radius:var(--radius);background:#fff}
 
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}
@@ -405,11 +297,6 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
 <header class="top">
   <a class="mark" href="/"><b>dog</b>walk.tools</a>
   <span class="crumb">Paired Browser</span>
-  <div id="chips" class="chips" hidden>
-    <span id="chipCall" class="chip"></span>
-    <span id="chipAgents" class="chip"></span>
-    <span id="chipExpiry" class="chip"></span>
-  </div>
 </header>
 <main>
 <p id="status" class="status" role="status" aria-live="polite"></p>
@@ -430,123 +317,28 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
 </section>
 
 <section id="pairedScreen" hidden>
-  <div id="showBanner" class="banner" role="alert" hidden>
-    <span class="text"><b id="bannerText"></b><span id="bannerNote" class="note"></span></span>
-    <button id="bannerOpen" class="primary"></button>
-    <button id="bannerDismiss">Dismiss</button>
-  </div>
-  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <div class="box pairing">
-    <div>
-      <div class="who" id="who"></div>
+  <div class="display-bar">
+    <div class="display-id">
+      <h1 id="displayName" class="display-name"></h1>
+      <div class="small muted"><span id="who"></span><span id="conn"></span></div>
       <div class="small muted" id="expiry"></div>
-      <div class="small muted" id="conn"></div>
     </div>
     <div class="prefs">
       <label><input type="checkbox" id="wakeToggle"> Keep screen on</label>
-      <label><input type="checkbox" id="alertToggle"> Alerts when this tab is hidden</label>
+      <button id="wbPopOut">Own tab</button>
       <button id="unpair">Unpair</button>
     </div>
-    <div id="prefNote" class="small muted" role="status"></div>
+    <div id="barNote" class="small muted" role="status"></div>
   </div>
-  <div id="permissions" class="permissions" hidden></div>
 
-  <nav id="tabs" class="tabs" role="tablist" aria-label="Views">
-    <button id="tab-live" class="tab" role="tab" aria-controls="panelLive">Live<span id="feedCount" class="count" hidden></span><span class="key">1</span></button>
-    <button id="tab-files" class="tab" role="tab" aria-controls="panelFiles">Files<span class="key">2</span></button>
-    <button id="tab-hands" class="tab" role="tab" aria-controls="panelHands">Hands<span id="boardCount" class="count" title="A new whiteboard" hidden>board</span><span class="key">3</span></button>
-  </nav>
-
-  <div id="panes" class="panes" data-tab="live">
-    <section id="panelLive" class="panel" role="tabpanel" aria-labelledby="tab-live">
-      <div id="liveSwitch" class="segmented" role="group" aria-label="Show">
-        <button id="seg-sessions" aria-pressed="false">Sessions</button>
-        <button id="seg-timeline" aria-pressed="false">Timeline<span id="feedCountSeg" class="count" hidden></span></button>
-      </div>
-      <div id="liveCols" class="live-cols" data-view="timeline">
-        <div id="liveSessions" class="live-col">
-          <h2>Sessions</h2>
-          <p class="explain small muted">Where each session stands</p>
-          <p id="sandbox" class="small muted"></p>
-          <div id="sessions"></div>
-          <div id="closed"></div>
-          <section id="memory" class="memory" aria-labelledby="memoryHeading">
-            <h2 id="memoryHeading">Memory</h2>
-            <p class="explain small muted">What the walker keeps in mind across calls, in its own words. Read-only; ask aloud if something should change.</p>
-            <p id="memoryEmpty" class="small muted">Nothing noted yet.</p>
-            <pre id="memoryText" class="memory-text" hidden></pre>
-            <p id="memoryWhen" class="small muted"></p>
-          </section>
-        </div>
-        <div id="liveFeed" class="live-col">
-          <h2>Call timeline</h2>
-          <p class="explain small muted">What was said and done, as it happens</p>
-          <div id="feedFilters" class="feed-bar" role="group" aria-label="Show or hide"></div>
-          <div class="feed-wrap">
-            <ol id="feedList" class="feed-list" aria-live="off"></ol>
-            <p id="feedEmpty" class="feed-empty muted small">Nothing yet. What is said and done in the call appears here as it happens.</p>
-            <button id="feedPill" class="pill" hidden>New messages below</button>
-          </div>
-        </div>
-      </div>
+  <div id="wbHome">
+    <section id="whiteboard" class="whiteboard" aria-labelledby="displayName">
+      <p id="wbEmpty" class="wb-empty">Nothing on <b data-display-name></b> yet. Ask on the call to put something here.</p>
+      <div id="wbCurrent"></div>
+      <details id="wbOlder" class="wb-older" hidden><summary>Earlier boards (<span id="wbOlderCount">0</span>)</summary><div id="wbOlderList"></div></details>
     </section>
-
-    <section id="panelFiles" class="panel" role="tabpanel" aria-labelledby="tab-files">
-      <div class="files-cols">
-        <div>
-          <h2>Recently touched</h2>
-          <ul id="recent" class="recent"></ul>
-          <h2>Browse</h2>
-          <nav id="crumbs" class="crumbs" aria-label="Path"></nav>
-          <ul id="entries" class="entries"></ul>
-          <p id="fileNote" class="small muted"></p>
-        </div>
-        <div id="viewer" class="viewer" hidden>
-          <div class="viewer-head">
-            <span id="viewerPath"></span>
-            <span class="viewer-actions">
-              <button id="copyPath" class="mini">Copy path</button>
-              <button id="downloadFile" class="mini">Download</button>
-              <button id="closeViewer" class="mini" title="Close (Escape)">Close</button>
-            </span>
-          </div>
-          <p id="viewerNote" class="small muted" role="status"></p>
-          <div id="viewerBody"></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ==== HANDS START: launchers for a terminal and a desktop, each opening in its own browser tab ==== -->
-    <section id="panelHands" class="panel" role="tabpanel" aria-labelledby="tab-hands">
-      <h2>Hands</h2>
-      <p class="muted">Take the controls yourself when a dog is stuck on something only a person can do: a CAPTCHA, a login, a consent page, a program with its own screen. Each opens in a new full-screen tab and ends when this browser is unpaired.</p>
-      <div class="launchers">
-        <div class="box">
-          <button id="handsTerminal">Open terminal</button>
-          <p class="small muted">A shell in the sandbox that survives closing the tab (tmux), good for TUIs such as opencode.</p>
-        </div>
-        <div class="box">
-          <button id="handsDesktop">Open desktop</button>
-          <p class="small muted">The sandbox's graphical desktop with a browser, for a laptop or tablet. The link lasts up to an hour.</p>
-        </div>
-        <div class="box">
-          <button id="handsWhiteboard">Open whiteboard</button>
-          <p class="small muted">What the walker draws for you to read or answer (choices, edit reviews, charts), in a tab of its own. It is also below.</p>
-        </div>
-      </div>
-      <p id="handsNote" class="small muted" role="status"></p>
-      <div id="wbHome">
-        <section id="whiteboard" class="whiteboard" aria-labelledby="wbHeading">
-          <h2 id="wbHeading">Whiteboard</h2>
-          <p id="wbEmpty" class="small muted">Nothing drawn yet. When something is easier to see or decide on a screen, the walker draws it here, and you can answer here or aloud.</p>
-          <div id="wbCurrent"></div>
-          <details id="wbOlder" class="wb-older" hidden><summary>Earlier boards (<span id="wbOlderCount">0</span>)</summary><div id="wbOlderList"></div></details>
-        </section>
-      </div>
-      <p id="wbAway" class="box small" hidden>The whiteboard is open in its own tab. <button id="wbBack" class="mini">Bring it back here</button></p>
-    </section>
-    <!-- ==== HANDS END ==== -->
   </div>
+  <p id="wbAway" class="box small" hidden>The whiteboard is open in its own tab. <button id="wbBack" class="mini">Bring it back here</button></p>
 </section>
 
 <details class="diag small"><summary class="muted">Diagnostics log</summary><div id="log" class="mono muted"></div></details>
@@ -675,9 +467,24 @@ function pairingFailed(message) {
 // ---- Small helpers shared by the paired screen
 const stored = (key, fallback) => { try { const v = localStorage.getItem(key); return v == null ? fallback : v; } catch (error) { return fallback; } };
 const store = (key, value) => { try { localStorage.setItem(key, value); } catch (error) { /* private mode */ } };
-const REDUCED_MOTION = matchMedia("(prefers-reduced-motion: reduce)");
-const WIDE = matchMedia("(min-width: 1100px)");
 const basename = (path) => String(path).split("/").filter(Boolean).pop() || "/";
+const ASLEEP = "The sandbox is asleep; a call wakes it.";
+function badge(text, kind) { return el("span", { class: "badge " + (kind || "") }, text); }
+
+// A path as a board writes it, absolute or relative to /home/daytona, made absolute.
+function resolvePath(directory, path) {
+  let full = String(path || "");
+  if (full.charAt(0) !== "/") {
+    const dir = String(directory || "");
+    full = (dir.charAt(0) === "/" ? dir : HOME + "/" + dir) + "/" + full;
+  }
+  const parts = [];
+  for (const part of full.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop(); else parts.push(part);
+  }
+  return "/" + parts.join("/");
+}
 
 function ago(ms) {
   const seconds = Math.round((Date.now() - ms) / 1000);
@@ -693,7 +500,9 @@ function timeNode(ms) {
   return el("time", { datetime: new Date(at).toISOString(), "data-at": at, title: new Date(at).toLocaleTimeString() }, ago(at));
 }
 
+// The button's own document, so a copy from the whiteboard's own tab works there.
 function copyText(text, button) {
+  const doc = (button && button.ownerDocument) || document;
   const done = () => {
     if (!button) return;
     const label = button.textContent;
@@ -701,18 +510,17 @@ function copyText(text, button) {
     setTimeout(() => { button.textContent = label; }, 1200);
   };
   const fallback = () => {
-    const area = el("textarea", { class: "offscreen" }, text);
-    document.body.append(area);
+    const area = doc.createElement("textarea");
+    area.className = "offscreen";
+    area.value = text;
+    doc.body.append(area);
     area.select();
-    try { document.execCommand("copy"); done(); } catch (error) { log("copy failed: " + error.message); }
+    try { doc.execCommand("copy"); done(); } catch (error) { log("copy failed: " + error.message); }
     area.remove();
   };
-  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, fallback);
+  const view = doc.defaultView || window;
+  if (view.navigator.clipboard && view.isSecureContext) view.navigator.clipboard.writeText(text).then(done, fallback);
   else fallback();
-}
-function copyButton(path) {
-  const button = el("button", { class: "mini", title: "Copy " + path, "aria-label": "Copy path " + path, onclick: () => copyText(path, button) }, "Copy");
-  return button;
 }
 
 // ---- The paired connection
@@ -720,9 +528,8 @@ let socket = null;
 let backoff = 1000;
 let reconnectTimer = null;
 let pingTimer = null;
-let pairing = null;     // the hello message, with idle_expires_at refreshed by pongs
+let pairing = null;     // the hello message, with display renamed and idle_expires_at refreshed by pongs
 let serverError = "";
-let lastStatus = null;  // the newest status message, for the chips and the recent paths
 let unpairRequested = false; // this page asked to unpair, so a 4003 close is expected
 
 function connect() {
@@ -731,7 +538,7 @@ function connect() {
   clearTimeout(reconnectTimer);
   showScreen("paired");
   if (!pairing) setStatus("Connecting");
-  setConnection("Connecting");
+  setConnection("connecting");
   // The identity half routes the socket to its Durable Object; the secret only travels in the auth message.
   const identity = token.split(".")[0];
   const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host
@@ -752,23 +559,46 @@ function send(message) {
   return true;
 }
 
+// Requests that the server answers by id: open (opened) and read (file), or an error with the same id.
+// handlers.done(reply) or handlers.fail({error, asleep}); a dropped socket fails them all.
+let nextId = 1;
+const pending = new Map();
+function request(message, handlers) {
+  const id = nextId++;
+  if (!send(Object.assign({ id }, message))) return false;
+  pending.set(id, handlers);
+  return true;
+}
+function settle(m, ok) {
+  const handlers = pending.get(m.id);
+  if (!handlers) return;
+  pending.delete(m.id);
+  if (ok) handlers.done(m);
+  else handlers.fail({ error: String(m.error || "it failed"), asleep: m.asleep === true });
+}
+function failPending(error) {
+  const all = [...pending.values()];
+  pending.clear();
+  for (const handlers of all) handlers.fail({ error, asleep: false, offline: true });
+}
+
 function onClose(ws, event) {
   if (ws !== socket) return;
   socket = null;
   clearInterval(pingTimer);
+  failPending("the connection dropped");
   log("socket closed " + event.code + (event.reason ? " " + event.reason : ""));
-  renderChips();
   if (event.code === 4001 || event.code === 4003) {
     forgetPairing();
-    // 4003 without our own request: the server allows one Paired Browser, so another one replaced this one.
+    // 4003 without our own request: the server unpaired this browser, as when its Display is unpaired in the call.
     if (event.code === 4003 && unpairRequested) setStatus("Unpaired. Enter a pairing code to pair again.");
-    else if (event.code === 4003) setStatus("This browser was unpaired (another browser may have paired in its place). Enter a pairing code to pair again.", "bad");
+    else if (event.code === 4003) setStatus("This browser was unpaired (perhaps its display was unpaired in the call). Enter a pairing code to pair again.", "bad");
     else setStatus("This pairing is no longer valid" + (serverError ? " (" + serverError + ")" : "") + ". Enter a pairing code to pair again.", "bad");
     serverError = "";
     unpairRequested = false;
     return;
   }
-  setConnection("Disconnected, reconnecting in " + Math.round(backoff / 1000) + " s");
+  setConnection("disconnected, reconnecting in " + Math.round(backoff / 1000) + " s");
   reconnectTimer = setTimeout(connect, backoff);
   backoff = Math.min(backoff * 2, 30000);
 }
@@ -778,44 +608,36 @@ function onMessage(m) {
     case "hello":
       pairing = m;
       backoff = 1000;
-      setStatus("Paired", "ok");
-      setConnection("Connected");
+      setStatus("");
+      setConnection("");
       renderPairing();
+      renderDisplay();
       clearInterval(pingTimer);
       pingTimer = setInterval(() => send({ type: "ping" }), 30000);
-      if (!listedOnce) listDir(currentDir);
-      viewingSent = ""; // a new socket: the server has heard nothing yet
-      reportViewing(true);
       if (m.stale) staleBuild(String(m.build || ""));
+      break;
+    case "display":
+      if (pairing) { pairing.display = String(m.name || ""); renderDisplay(); }
       break;
     case "pong":
       if (pairing && m.idle_expires_at) { pairing.idle_expires_at = m.idle_expires_at; renderPairing(); }
       break;
-    case "status": renderStatus(m); break;
-    case "feed": onFeed(m); break;
-    case "list": if (m.id === pendingList) renderListing(m); break;
-    case "file": if (m.id === pendingRead) renderTextFile(m); break;
-    case "launch": settleLaunch(m); break;
-    case "show": onShow(m); break;
     case "board": wbOnBoard(m.board); break;
     case "boards": wbOnBoards(m.boards); break;
-    case "memory": renderMemory(m.memory); break;
+    case "opened": case "file": settle(m, true); break;
     case "error":
-      if (m.id != null) {
-        if (m.id === pendingList) $("fileNote").textContent = "Error: " + m.error;
-        else if (m.id === pendingRead) readFailed(String(m.error || ""));
-        else settleLaunch(m);
-      } else { serverError = String(m.error || ""); log("server error: " + serverError); }
+      if (m.id != null) settle(m, false);
+      else { serverError = String(m.error || ""); log("server error: " + serverError); }
       break;
     case "unpaired": log("unpaired by request"); break;
   }
 }
 
-function setConnection(text) { $("conn").textContent = text; }
+function setConnection(text) { $("conn").textContent = text ? " (" + text + ")" : ""; }
 
 // A deploy since this tab loaded: reload when nothing would be lost (no field in use, no
-// half-answered board, no whiteboard tab, which only a click reopens). Once per server build,
-// so a page that still comes back stale asks the user instead of looping.
+// half-answered board, no open Access Element or whiteboard tab, which only a click reopens).
+// Once per server build, so a page that still comes back stale asks the user instead of looping.
 let staleTimer = null;
 function staleBuild(build) {
   let reloaded = "";
@@ -826,7 +648,7 @@ function staleBuild(build) {
   const attempt = () => {
     const active = document.activeElement;
     const typing = active && (/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) || active.isContentEditable);
-    if (typing || wbEdited || wbTabOpen()) return;
+    if (typing || wbEdited || wbTabOpen() || wbAccessOpen()) return;
     clearInterval(staleTimer);
     try { sessionStorage.setItem(RELOADED_KEY, build); } catch (error) { /* storage off */ }
     location.reload();
@@ -836,7 +658,12 @@ function staleBuild(build) {
 }
 
 function clock(ms) {
-  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+// A clock time, with the day when it is not today (a grant can run past midnight).
+function clockDay(ms) {
+  const at = new Date(ms);
+  return (at.toDateString() === new Date().toDateString() ? "" : at.toLocaleDateString([], { weekday: "short" }) + " ") + clock(ms);
 }
 function fromNow(ms) {
   const minutes = Math.max(0, Math.round((ms - Date.now()) / 60000));
@@ -845,48 +672,32 @@ function fromNow(ms) {
 function renderPairing() {
   if (!pairing) return;
   $("who").textContent = (pairing.device || "This browser") + (pairing.place ? ", " + pairing.place : "");
+  // An open page pings, so the idle limit rarely arrives; the hard limit is the real end.
   const parts = [];
-  if (pairing.idle_expires_at) parts.push("Ends if idle until " + clock(pairing.idle_expires_at) + " (in " + fromNow(pairing.idle_expires_at) + ")");
-  if (pairing.expires_at) parts.push("ends at " + clock(pairing.expires_at) + " at the latest");
+  if (pairing.expires_at) parts.push("Paired until " + clock(pairing.expires_at) + " (" + fromNow(pairing.expires_at) + ")");
+  if (pairing.idle_expires_at && (!pairing.expires_at || pairing.idle_expires_at < pairing.expires_at)) {
+    parts.push((parts.length ? "or " : "Ends ") + "at " + clock(pairing.idle_expires_at) + " if left unused");
+  }
   $("expiry").textContent = parts.join(", ");
-  renderChips();
 }
 
-// ---- Header chips: is the call on, can the Agents be reached, how long the pairing lasts
-function setChip(id, text, tone) {
-  const chip = $(id);
-  chip.textContent = text;
-  chip.className = "chip " + (tone || "");
-}
-function renderChips() {
-  $("chips").hidden = !pairing;
-  if (!pairing) return;
-  const live = !!socket && socket.readyState === WebSocket.OPEN && !!lastStatus;
-  const sandbox = (lastStatus && lastStatus.sandbox) || {};
-  if (!live) {
-    setChip("chipCall", "Call: unknown", "");
-    setChip("chipAgents", "Agents: unknown", "");
-  } else {
-    setChip("chipCall", sandbox.call_attached ? "Call connected" : "No call", sandbox.call_attached ? "ok" : "off");
-    setChip("chipAgents", sandbox.agent_ready ? "Agents reachable" : "Agents not reachable", sandbox.agent_ready ? "ok" : "warn");
-  }
-  // An open page pings, so the idle limit never arrives; the hard limit is the real end.
-  const ends = pairing.expires_at || pairing.idle_expires_at;
-  if (ends) setChip("chipExpiry", "Pairing ends in " + fromNow(ends), ends - Date.now() < 10 * 60000 ? "warn" : "");
-  else setChip("chipExpiry", "Paired", "ok");
+// The Display's name: in the bar, the empty whiteboard, the tab title, and the whiteboard's own tab.
+const displayName = () => (pairing && pairing.display) || "this display";
+function renderDisplay() {
+  const name = displayName();
+  $("displayName").textContent = (pairing && pairing.display) || "Paired display";
+  document.title = pairing ? "Dogwalk: " + name : "Dogwalk: Paired Browser";
+  for (const node of WB.root.querySelectorAll("[data-display-name]")) node.textContent = name;
+  if (!wbTabOpen()) return;
+  wbTab.document.title = "Dogwalk: " + name;
+  for (const node of wbTab.document.querySelectorAll("[data-display-name]")) node.textContent = name;
 }
 
 function forgetPairing() {
   sessionStorage.removeItem(TOKEN_KEY);
   pairing = null;
-  lastStatus = null;
-  prevTurns = null;
-  prevPermissions = null;
-  closeViewer();
-  clearFeed();
   wbClear();
-  hideBanner();
-  renderChips();
+  renderDisplay();
   showScreen("pair");
 }
 
@@ -901,277 +712,6 @@ function unpair() {
   setStatus("Unpaired. Enter a pairing code to pair again.");
 }
 
-// ---- Tabs: Live (sessions and the call timeline), Files, Hands.
-// A wide screen shows both Live columns; a narrow one shows the column its segmented control picks.
-const TABS = ["live", "files", "hands"];
-const TAB_KEY = "dogwalk.pair.tab";
-const LIVE_KEY = "dogwalk.pair.liveView";
-// The Sessions and Call timeline tabs ("sessions", "feed") became the one Live tab and its two views.
-const savedTab = stored(TAB_KEY, "live");
-if (savedTab === "sessions" || savedTab === "feed") {
-  store(TAB_KEY, "live");
-  store(LIVE_KEY, savedTab === "sessions" ? "sessions" : "timeline");
-}
-let currentTab = TABS.indexOf(stored(TAB_KEY, "live")) >= 0 ? stored(TAB_KEY, "live") : "live";
-let liveView = stored(LIVE_KEY, "timeline") === "sessions" ? "sessions" : "timeline";
-
-function showTab(name) {
-  if (TABS.indexOf(name) < 0) return;
-  currentTab = name;
-  store(TAB_KEY, name);
-  $("panes").dataset.tab = name;
-  for (const tab of TABS) {
-    const button = $("tab-" + tab);
-    button.setAttribute("aria-selected", String(tab === name));
-    button.tabIndex = tab === name ? 0 : -1;
-  }
-  onFeedShown();
-  wbSeen();
-  reportViewing();
-}
-function showLiveView(view) {
-  liveView = view === "sessions" ? "sessions" : "timeline";
-  store(LIVE_KEY, liveView);
-  $("liveCols").dataset.view = liveView;
-  $("seg-sessions").setAttribute("aria-pressed", String(liveView === "sessions"));
-  $("seg-timeline").setAttribute("aria-pressed", String(liveView === "timeline"));
-  onFeedShown();
-}
-// Opens the Live tab with view in front (on a wide screen both columns show anyway).
-function showLive(view) {
-  showLiveView(view);
-  showTab("live");
-}
-
-// ---- What the user is looking at, so the walker can sense it:
-// {"type":"viewing","view":"live"|"files"|"hands"|"whiteboard"|"hidden","path":"...","kind":"file"|"dir"},
-// where "whiteboard" is the Hands tab with the whiteboard in view, or the whiteboard's own tab while it is visible.
-// Sent once it has held still for a second, never twice alike, and never while the tab is hidden,
-// apart from the one "hidden" message; becoming visible or reconnecting sends the current view at once.
-const VIEWING_MS = 1000;
-let viewingFolder = ""; // the folder the file browser last navigated to; closing the viewer clears it
-let viewingSent = "";
-let viewingTimer = null;
-function currentViewing() {
-  if (wbTabVisible()) return { type: "viewing", view: "whiteboard" };
-  if (document.hidden) return { type: "viewing", view: "hidden" };
-  if (currentTab === "hands" && wbOnScreen) return { type: "viewing", view: "whiteboard" };
-  if (currentTab !== "files") return { type: "viewing", view: currentTab };
-  if (viewer.path) return { type: "viewing", view: "files", path: viewer.path, kind: "file" };
-  if (viewingFolder) return { type: "viewing", view: "files", path: viewingFolder, kind: "dir" };
-  return { type: "viewing", view: "files" };
-}
-function reportViewing(now) {
-  clearTimeout(viewingTimer);
-  if (!now) { viewingTimer = setTimeout(() => reportViewing(true), VIEWING_MS); return; }
-  const message = currentViewing();
-  const text = JSON.stringify(message);
-  if (text !== viewingSent && send(message)) viewingSent = text;
-}
-function onFeedShown() {
-  if (!feedVisible()) return;
-  feedUnseen = 0;
-  renderFeedCount();
-  if (feedStick) scrollFeedToEnd();
-}
-const feedVisible = () => currentTab === "live" && (WIDE.matches || liveView === "timeline");
-
-// ---- Session status
-const openReports = new Set();
-let closedOpen = false;
-const TURN_LABELS = { idle: "idle", in_progress: "in progress", stopped: "stopped", failed: "failed" };
-
-function renderStatus(m) {
-  lastStatus = m;
-  renderChips();
-  $("sandbox").replaceChildren("Updated ", timeNode(m.at || Date.now()), ".");
-
-  const permissions = m.pending_permissions || [];
-  $("permissions").hidden = !permissions.length;
-  $("permissions").replaceChildren(
-    el("h2", null, "Permission requests: answer in the call"),
-    el("ul", null, permissions.map((p) => el("li", null, [el("b", null, p.alias), ": ", p.title]))));
-
-  const sessions = m.sessions || [];
-  const open = sessions.filter((s) => s.session_state !== "closed");
-  const closed = sessions.filter((s) => s.session_state === "closed");
-  $("sessions").replaceChildren(...(open.length ? open.map(sessionCard) : [el("p", { class: "muted" }, "No open sessions.")]));
-  if (!closed.length) $("closed").replaceChildren();
-  else {
-    const group = el("details", { class: "closed-group", open: closedOpen, ontoggle: () => { closedOpen = group.open; } },
-      [el("summary", null, "Closed sessions (" + closed.length + ")"), ...closed.map(sessionCard)]);
-    $("closed").replaceChildren(group);
-  }
-  renderRecent(sessions);
-  checkAlerts(m);
-}
-
-function badge(text, kind) { return el("span", { class: "badge " + (kind || "") }, text); }
-
-function sessionCard(s) {
-  const head = el("div", { class: "card-head" }, [
-    el("h3", { class: "alias", style: "--h:" + aliasHue(s.alias) }, s.alias),
-    badge(TURN_LABELS[s.turn_state] || s.turn_state, s.turn_state),
-    s.session_state !== "ready" ? badge(s.session_state) : null,
-    s.followed ? badge("followed", "follow") : null,
-    s.stop_reason ? el("span", { class: "small muted" }, s.stop_reason) : null,
-  ]);
-  const directory = s.directory ? resolvePath("", s.directory) : "";
-  const card = el("article", { class: "card turn-" + s.turn_state, "data-alias": s.alias }, [
-    head,
-    directory ? el("div", { class: "pathline" }, [
-      el("button", { class: "link mono small", onclick: () => { showTab("files"); listDir(directory); } }, s.directory),
-      copyButton(directory),
-    ]) : null,
-    s.title ? el("p", { class: "title" }, s.title) : null,
-    s.assignment ? el("p", null, [el("span", { class: "muted" }, "Assignment: "), s.assignment]) : null,
-  ]);
-  const plan = s.plan || [];
-  if (plan.length) {
-    card.append(el("ul", { class: "plan" }, plan.map((step) =>
-      el("li", { class: step.status }, [el("span", { class: "box-mark", title: step.status }), el("span", null, step.content)]))));
-  }
-  const tools = s.recent_tool_calls || [];
-  if (tools.length) {
-    card.append(el("ul", { class: "tools" }, tools.map((call) => el("li", null, [
-      el("span", { class: "kind" }, call.kind),
-      call.title, " ",
-      el("span", { class: "small muted" }, "(" + call.status + (call.seconds != null ? ", " + Math.round(call.seconds) + " s" : "") + ")"),
-      (call.paths || []).length ? el("div", { class: "paths" }, call.paths.map((p) =>
-        el("button", { class: "link", onclick: () => openFile(resolvePath(s.directory, p)) }, p))) : null,
-    ]))));
-  }
-  if (s.remark) card.append(el("p", { class: "remark" }, s.remark));
-  if (s.failure) card.append(el("p", { class: "failure" }, s.failure));
-  if (s.report) {
-    const report = el("details", { class: "report", open: openReports.has(s.alias), ontoggle: () => {
-      if (report.open) openReports.add(s.alias); else openReports.delete(s.alias);
-    } }, [el("summary", null, "Latest report"), markdownBlock(s.report)]);
-    card.append(report);
-  }
-  if (s.usage && typeof s.usage === "object") {
-    const parts = Object.entries(s.usage).filter((e) => typeof e[1] !== "object").map((e) => e[0] + " " + e[1]);
-    if (parts.length) card.append(el("p", { class: "small muted" }, "Usage: " + parts.join(", ")));
-  }
-  return card;
-}
-
-// A tool-call path is relative to its session's directory, which is relative to /home/daytona.
-function resolvePath(directory, path) {
-  let full = String(path || "");
-  if (full.charAt(0) !== "/") {
-    const dir = String(directory || "");
-    full = (dir.charAt(0) === "/" ? dir : HOME + "/" + dir) + "/" + full;
-  }
-  const parts = [];
-  for (const part of full.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") parts.pop(); else parts.push(part);
-  }
-  return "/" + parts.join("/");
-}
-
-// A stable hue per Alias, so each Agent keeps its color in the feed and on its card.
-function aliasHue(alias) {
-  let hash = 0;
-  for (const ch of String(alias || "")) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  return Math.round((hash * 137.508) % 360);
-}
-
-// ---- Recently touched: paths from every session's latest tool calls, newest first.
-// Tool calls carry no timestamps, only their order within a session, so the lists interleave from the newest end.
-function recentPaths(sessions) {
-  const lists = sessions.slice().reverse().map((s) => ({ s, calls: (s.recent_tool_calls || []).slice().reverse() }));
-  const depth = Math.max(0, ...lists.map((l) => l.calls.length));
-  const seen = new Set(), out = [];
-  for (let i = 0; i < depth; i++) {
-    for (const l of lists) {
-      const call = l.calls[i];
-      if (!call) continue;
-      for (const p of call.paths || []) {
-        const full = resolvePath(l.s.directory, p);
-        if (seen.has(full)) continue;
-        seen.add(full);
-        out.push({ path: full, alias: l.s.alias, kind: call.kind });
-      }
-    }
-  }
-  return out.slice(0, 15);
-}
-function renderRecent(sessions) {
-  const items = recentPaths(sessions).map((r) => {
-    const dir = r.path.slice(0, r.path.length - basename(r.path).length).replace(HOME + "/", "~/");
-    return el("li", null, [
-      el("button", { class: "link", title: r.path, onclick: () => openFile(r.path) }, basename(r.path)),
-      el("span", { class: "dir", title: r.path }, dir),
-      el("span", { class: "who-tag", style: "--h:" + aliasHue(r.alias) }, r.alias),
-      copyButton(r.path),
-    ]);
-  });
-  $("recent").replaceChildren(...(items.length ? items : [el("li", { class: "muted" }, "No files touched yet.")]));
-}
-
-// ---- Alerts: a notification and a soft chime while this tab is hidden (off by default)
-const ALERT_KEY = "dogwalk.pair.alerts";
-let alertsOn = stored(ALERT_KEY, "0") === "1";
-let chimeContext = null;
-let prevTurns = null;       // alias -> turn_state from the previous status
-let prevPermissions = null; // "alias: title" strings from the previous status
-
-async function toggleAlerts(event) {
-  const want = event.target.checked;
-  $("prefNote").textContent = "";
-  if (want && "Notification" in window && Notification.permission !== "granted") {
-    const answer = await Notification.requestPermission().catch(() => "denied");
-    if (answer !== "granted") $("prefNote").textContent = "Notifications are blocked, so alerts will only chime.";
-  }
-  // The chime's audio context has to start inside a click.
-  if (want && !chimeContext && window.AudioContext) chimeContext = new AudioContext();
-  if (chimeContext) chimeContext.resume().catch(() => {});
-  alertsOn = want;
-  store(ALERT_KEY, want ? "1" : "0");
-}
-
-function chime() {
-  if (!chimeContext) return;
-  const now = chimeContext.currentTime;
-  [660, 880].forEach((freq, i) => {
-    const osc = chimeContext.createOscillator(), gain = chimeContext.createGain();
-    osc.type = "sine";
-    osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0, now + i * 0.18);
-    gain.gain.linearRampToValueAtTime(0.08, now + i * 0.18 + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.18 + 0.5);
-    osc.connect(gain).connect(chimeContext.destination);
-    osc.start(now + i * 0.18);
-    osc.stop(now + i * 0.18 + 0.55);
-  });
-}
-
-function raiseAlert(title, body) {
-  log("alert: " + title + ": " + body);
-  if ("Notification" in window && Notification.permission === "granted") {
-    try { new Notification(title, { body, tag: title }); } catch (error) { log("notification failed: " + error.message); }
-  }
-  chime();
-}
-
-function checkAlerts(m) {
-  const turns = new Map((m.sessions || []).map((s) => [s.alias, s.turn_state]));
-  const permissions = new Set((m.pending_permissions || []).map((p) => p.alias + ": " + p.title));
-  if (prevTurns && alertsOn && document.hidden) {
-    for (const p of permissions) if (!prevPermissions.has(p)) raiseAlert("Permission request", p);
-    for (const [alias, state] of turns) {
-      const before = prevTurns.get(alias);
-      if ((before === "in_progress" || before === "queued") && state !== "in_progress" && state !== "queued") {
-        raiseAlert(alias + "'s turn ended", state === "failed" ? "It failed." : "It is ready for you.");
-      }
-    }
-  }
-  prevTurns = turns;
-  prevPermissions = permissions;
-}
-
 // ---- Keep screen on (Screen Wake Lock); the browser drops the lock whenever the tab is hidden
 const WAKE_KEY = "dogwalk.pair.wake";
 let wakeWanted = stored(WAKE_KEY, "0") === "1";
@@ -1183,167 +723,39 @@ async function acquireWake() {
     wakeLock = await navigator.wakeLock.request("screen");
     wakeLock.addEventListener("release", () => { wakeLock = null; });
   } catch (error) {
-    $("prefNote").textContent = "Could not keep the screen on: " + error.message;
+    $("barNote").textContent = "Could not keep the screen on: " + error.message;
   }
 }
 function toggleWake(event) {
   wakeWanted = event.target.checked;
   store(WAKE_KEY, wakeWanted ? "1" : "0");
-  $("prefNote").textContent = "";
+  $("barNote").textContent = "";
   if (wakeWanted) acquireWake();
   else if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
 }
 
-// ---- Call timeline: what was said and done in the call, newest at the bottom
-const FEED_CAP = 500;
-const FILTER_KEY = "dogwalk.pair.feedHidden";
-const ROLES = ["caller", "voice", "agent", "orchestrator", "system"];
-const ROLE_LABELS = { caller: "Caller", voice: "Walker", agent: "Agents", orchestrator: "Walker thinking", system: "System" };
-const LANE_LABELS = {
-  thinking: "context for the voice", say: "asked the voice to say", instructions: "instructions to the voice", prompt: "brief", steer: "steering",
-  tool: "tool", report: "report", event: "event", keypad: "keypad",
+// ---- File renderers for Documents: text arrives over the socket (read); media is fetched from
+// /pair/file into a blob URL. note is the Document's status line, for sizes, durations and failures.
+const EXT_KIND = {};
+const kinds = {
+  image: "png jpg jpeg gif webp svg avif bmp",
+  pdf: "pdf",
+  audio: "mp3 wav m4a aac ogg oga opus flac",
+  video: "mp4 m4v webm mov ogv",
+  markdown: "md markdown mdx",
+  html: "html htm",
+  json: "json geojson ipynb webmanifest",
+  csv: "csv",
+  tsv: "tsv tab",
 };
-const feedEntries = new Map(); // id -> { entry, node }, oldest first
-const feedOpen = new Set();    // ids the reader expanded
-let feedHidden = new Set();
-try { feedHidden = new Set(JSON.parse(stored(FILTER_KEY, "[]"))); } catch (error) { /* keep the default */ }
-let feedStick = true;          // follow the newest entry until the reader scrolls up
-let feedUnseen = 0;            // entries that arrived while the reader was elsewhere
+for (const kind in kinds) for (const ext of kinds[kind].split(" ")) EXT_KIND[ext] = kind;
+const MEDIA_KINDS = new Set(["image", "pdf", "audio", "video"]);
+const WARN_BYTES = 10 * 1024 * 1024;
+const TABLE_ROWS = 500;
 
-function renderFilters() {
-  $("feedFilters").replaceChildren(...ROLES.map((role) => el("button", {
-    class: "filter f-" + role,
-    "aria-pressed": String(!feedHidden.has(role)),
-    title: (feedHidden.has(role) ? "Show " : "Hide ") + ROLE_LABELS[role],
-    onclick: () => {
-      if (feedHidden.has(role)) feedHidden.delete(role); else feedHidden.add(role);
-      store(FILTER_KEY, JSON.stringify([...feedHidden]));
-      applyFilters();
-      renderFilters();
-    },
-  }, ROLE_LABELS[role])));
-}
-function applyFilters() {
-  const list = $("feedList");
-  for (const role of ROLES) list.classList.toggle("hide-" + role, feedHidden.has(role));
-  if (feedStick) scrollFeedToEnd();
-}
-
-function clearFeed() {
-  feedEntries.clear();
-  feedOpen.clear();
-  $("feedList").replaceChildren();
-  $("feedEmpty").hidden = false;
-  feedUnseen = 0;
-  feedStick = true;
-  renderFeedCount();
-}
-
-function onFeed(m) {
-  const list = $("feedList");
-  if (m.snapshot) { clearFeed(); }
-  let added = 0;
-  for (const entry of m.entries || []) {
-    if (!entry || typeof entry.id !== "number") continue;
-    const node = feedNode(entry);
-    const known = feedEntries.get(entry.id);
-    if (known) known.node.replaceWith(node);
-    else {
-      list.append(node);
-      if (!feedHidden.has(entry.role)) added++;
-    }
-    feedEntries.set(entry.id, { entry, node });
-  }
-  while (feedEntries.size > FEED_CAP) {
-    const oldest = feedEntries.keys().next().value;
-    feedEntries.get(oldest).node.remove();
-    feedEntries.delete(oldest);
-    feedOpen.delete(oldest);
-  }
-  $("feedEmpty").hidden = feedEntries.size > 0;
-  if (m.snapshot) { scrollFeedToEnd(); return; }
-  if (feedStick) scrollFeedToEnd();
-  else if (added) { $("feedPill").hidden = false; }
-  if (added && !feedVisible()) { feedUnseen += added; renderFeedCount(); }
-}
-
-function renderFeedCount() {
-  for (const id of ["feedCount", "feedCountSeg"]) {
-    $(id).textContent = feedUnseen ? String(Math.min(feedUnseen, 99)) + (feedUnseen > 99 ? "+" : "") : "";
-    $(id).hidden = !feedUnseen;
-  }
-}
-
-function scrollFeedToEnd() {
-  const list = $("feedList");
-  list.scrollTop = list.scrollHeight;
-  $("feedPill").hidden = true;
-}
-
-function feedNode(e) {
-  const role = ROLES.indexOf(e.role) >= 0 ? e.role : "system";
-  const lane = String(e.lane || "");
-  const text = String(e.text || "");
-  let who = role === "agent" ? String(e.who || "Agent") : ROLE_LABELS[role];
-  if (role === "orchestrator" && (lane === "prompt" || lane === "steer")) who = "Walker to " + (e.who || "an Agent");
-  const attrs = { class: "fe f-" + role + (lane ? " lane-" + lane : ""), "data-id": e.id };
-  if (role === "agent") attrs.style = "--h:" + aliasHue(e.who);
-  const label = el("span", { class: "fe-who" }, who);
-  const laneLabel = lane ? el("span", { class: "fe-lane" }, LANE_LABELS[lane] || lane) : null;
-  const time = timeNode(e.at);
-
-  // Harness events, keypad presses and finished tool calls fit one compact line.
-  if (role === "system" || lane === "tool") {
-    return el("li", attrs, el("div", { class: "fe-line" }, [label, laneLabel, el("span", { class: "fe-inline" }, text), time]));
-  }
-  // Background context and system instructions to the voice are long and rarely needed: folded.
-  if (lane === "thinking" || lane === "instructions") {
-    const fold = el("details", { class: "fe-fold", open: feedOpen.has(e.id), ontoggle: () => {
-      if (fold.open) feedOpen.add(e.id); else feedOpen.delete(e.id);
-    } }, [
-      el("summary", null, [label, laneLabel, time, el("span", { class: "fe-peek" }, text.split("\n")[0].slice(0, 160))]),
-      el("div", { class: "fe-text fe-folded" }, text),
-    ]);
-    return el("li", attrs, fold);
-  }
-  const body = lane === "report" ? markdownBlock(text) : el("div", { class: "fe-text" }, text);
-  const node = el("li", attrs, [el("div", { class: "fe-head" }, [label, laneLabel, time]), body]);
-  if (text.length > 420 || text.split("\n").length > 7) {
-    const expanded = feedOpen.has(e.id);
-    body.classList.toggle("clamped", !expanded);
-    const more = el("button", { class: "link small fe-more", "aria-expanded": String(expanded), onclick: () => {
-      const open = body.classList.toggle("clamped") === false;
-      if (open) feedOpen.add(e.id); else feedOpen.delete(e.id);
-      more.textContent = open ? "less" : "more";
-      more.setAttribute("aria-expanded", String(open));
-    } }, expanded ? "less" : "more");
-    node.append(more);
-  }
-  return node;
-}
-
-// ---- Files: browsing over the socket
-let nextId = 1;
-let pendingList = 0;
-let pendingRead = 0;
-let currentDir = HOME;
-let listedOnce = false;
-
-function listDir(path) {
-  pendingList = nextId++;
-  if (!send({ type: "list", id: pendingList, path })) { $("fileNote").textContent = "Not connected."; return; }
-  $("fileNote").textContent = "Loading " + path;
-}
-
-function renderCrumbs(path) {
-  const parts = path.split("/").filter(Boolean);
-  const nodes = [el("button", { class: "link", onclick: () => listDir("/") }, "/")];
-  parts.forEach((part, i) => {
-    if (i) nodes.push(el("span", { class: "slash" }, "/"));
-    const target = "/" + parts.slice(0, i + 1).join("/");
-    nodes.push(el("button", { class: "link", onclick: () => listDir(target) }, part));
-  });
-  $("crumbs").replaceChildren(...nodes);
+function fileKind(path) {
+  const ext = (/\.([^./]+)$/.exec(basename(path)) || [])[1];
+  return EXT_KIND[String(ext || "").toLowerCase()] || "text";
 }
 
 function size(bytes) {
@@ -1355,141 +767,21 @@ function size(bytes) {
   return scaled(bytes / 1073741824, "GB");
 }
 
-// The sandbox reports modification times as strings, possibly in Go's time.String() form
-// ("2026-11-08 10:01:02.5 +0000 UTC"); a time without a zone is read as local.
-function parseModified(text) {
-  const m = /^(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d(?::\d\d)?)(\.\d+)?\s*(Z|[+-]\d\d:?\d\d)?/.exec(String(text || ""));
-  if (!m) return Date.parse(text);
-  let zone = m[4] || "";
-  if (zone.length === 5) zone = zone.slice(0, 3) + ":" + zone.slice(3);
-  return Date.parse(m[1] + "T" + m[2] + (m[3] ? m[3].slice(0, 4) : "") + zone);
+// GET /pair/file for a file a board on this Display names, exactly as the program writes it.
+function fileUrl(boardId, path, extra) {
+  return "/pair/file?path=" + encodeURIComponent(path) + "&board=" + encodeURIComponent(boardId) + (extra || "");
 }
-// "5 min", "3 h", "Nov 8" within this year, else the year.
-function shortWhen(ms) {
-  const seconds = (Date.now() - ms) / 1000;
-  if (seconds < 60) return "now";
-  if (seconds < 3600) return Math.floor(seconds / 60) + " min";
-  if (seconds < 86400) return Math.floor(seconds / 3600) + " h";
-  const date = new Date(ms);
-  if (date.getFullYear() === new Date().getFullYear()) return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  return String(date.getFullYear());
-}
-function whenNode(text) {
-  const ms = parseModified(text);
-  if (!text || !Number.isFinite(ms)) return el("span", { class: "meta when", title: text || "" }, "");
-  return el("span", { class: "meta when", title: new Date(ms).toLocaleString() }, shortWhen(ms));
-}
-
-function renderListing(m) {
-  listedOnce = true;
-  currentDir = m.path;
-  viewingFolder = m.path;
-  reportViewing();
-  renderCrumbs(m.path);
-  $("fileNote").textContent = "";
-  const entries = (m.entries || []).slice().sort((a, b) => (b.dir - a.dir) || String(a.name).localeCompare(String(b.name)));
-  const items = entries.map((e) => {
-    const target = resolvePath(m.path, e.name);
-    const label = e.name + (e.dir ? "/" : "");
-    return el("li", null, [
-      el("button", { class: "link name", title: label, onclick: () => (e.dir ? listDir(target) : openFile(target, e.size)) }, label),
-      el("span", { class: "meta size" }, e.dir ? "" : size(e.size)),
-      whenNode(e.modified),
-    ]);
-  });
-  $("entries").replaceChildren(...(items.length ? items : [el("li", { class: "muted" }, "Empty directory")]));
-}
-
-// ---- File viewers: text arrives over the socket (read); media is fetched from /pair/file into a blob URL
-const EXT_KIND = {};
-const kinds = {
-  image: "png jpg jpeg gif webp avif bmp ico svg",
-  pdf: "pdf",
-  audio: "mp3 wav m4a aac ogg oga opus flac",
-  video: "mp4 m4v webm mov ogv",
-  markdown: "md markdown mdx",
-  html: "html htm",
-  json: "json geojson ipynb webmanifest",
-  csv: "csv",
-  tsv: "tsv tab",
-  binary: "mid midi zip gz tgz bz2 xz zst tar 7z rar jar whl so dylib dll exe bin o a class pyc wasm sqlite sqlite3 db "
-    + "woff woff2 ttf otf eot psd xcf blend fbx glb npy npz pt pth onnx safetensors parquet doc docx xls xlsx ppt pptx key pages numbers dmg iso",
-};
-for (const kind in kinds) for (const ext of kinds[kind].split(" ")) EXT_KIND[ext] = kind;
-const TEXT_KINDS = new Set(["markdown", "html", "json", "csv", "tsv", "text"]);
-const WARN_BYTES = 10 * 1024 * 1024;
-const TABLE_ROWS = 500;
-
-function fileKind(path) {
-  const ext = (/\.([^./]+)$/.exec(basename(path)) || [])[1];
-  return EXT_KIND[String(ext || "").toLowerCase()] || "text";
-}
-
-// The open viewer; seq invalidates replies and fetches that belong to a file no longer shown.
-const viewer = { path: "", size: null, kind: "", seq: 0, url: "", blob: null, abort: null };
-
-function resetViewer(path, knownSize) {
-  if (viewer.url) URL.revokeObjectURL(viewer.url);
-  if (viewer.abort) viewer.abort.abort();
-  Object.assign(viewer, { path, size: knownSize == null ? null : Number(knownSize), kind: fileKind(path), seq: viewer.seq + 1, url: "", blob: null, abort: null });
-  renderViewerHead();
-  $("viewerNote").textContent = "";
-}
-function renderViewerHead(extra) {
-  const bits = [viewer.size != null ? size(viewer.size) : "", extra || ""].filter(Boolean);
-  $("viewerPath").textContent = viewer.path + (bits.length ? " (" + bits.join(", ") + ")" : "");
-}
-function setViewerBody(node) {
-  $("viewerBody").replaceChildren(node);
-  $("viewer").hidden = false;
-}
-
-function openFile(path, knownSize) {
-  showTab("files");
-  resetViewer(path, knownSize);
-  reportViewing();
-  $("fileNote").textContent = "";
-  const kind = viewer.kind;
-  if (kind === "binary") {
-    return downloadCard(/\.midi?$/i.test(path) ? "Browsers cannot play MIDI files." : "This file cannot be shown here.");
-  }
-  if (TEXT_KINDS.has(kind)) {
-    pendingRead = nextId++;
-    if (!send({ type: "read", id: pendingRead, path })) return viewerFailed("Not connected.");
-    setViewerBody(el("p", { class: "muted" }, "Opening " + basename(path)));
-    return;
-  }
-  if (viewer.size != null && viewer.size > WARN_BYTES) return sizeWarning(viewer.size);
-  loadMedia(false);
-}
-
-function closeViewer() {
-  if (viewer.url) URL.revokeObjectURL(viewer.url);
-  if (viewer.abort) viewer.abort.abort();
-  Object.assign(viewer, { path: "", size: null, kind: "", seq: viewer.seq + 1, url: "", blob: null, abort: null });
-  pendingRead = 0;
-  $("viewer").hidden = true;
-  $("viewerBody").replaceChildren();
-  viewingFolder = "";
-  reportViewing();
-}
-
-function viewerFailed(message) {
-  setViewerBody(el("p", { class: "failure" }, message));
-}
-
-// Fetches a file's bytes with the pairing token in a header. limit > 0 stops before reading a larger body.
-// as "image" asks the server to prove the bytes are an image (Whiteboard images).
-async function fetchFile(path, limit, controller, as) {
-  return fetchPaired("/pair/file?path=" + encodeURIComponent(path) + (as ? "&as=" + encodeURIComponent(as) : ""), limit, controller);
-}
+// Fetches with the pairing token in a header. limit > 0 stops before reading a larger body.
+// A failure carries the server's reason, and asleep when the Sandbox is stopped.
 async function fetchPaired(url, limit, controller) {
   const token = sessionStorage.getItem(TOKEN_KEY);
   if (!token) throw new Error("This browser is not paired.");
   const response = await fetch(url, { headers: { authorization: "Bearer " + token }, signal: controller.signal });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.error ? String(body.error) : "The server answered " + response.status + ".");
+    const error = new Error(body.error ? String(body.error) : "The server answered " + response.status + ".");
+    error.asleep = body.asleep === true;
+    throw error;
   }
   const length = Number(response.headers.get("content-length") || 0);
   if (limit && length > limit) {
@@ -1501,116 +793,34 @@ async function fetchPaired(url, limit, controller) {
   return response.blob();
 }
 
-async function loadMedia(force) {
-  const seq = viewer.seq, path = viewer.path, kind = viewer.kind;
-  const controller = new AbortController();
-  viewer.abort = controller;
-  setViewerBody(el("p", { class: "muted" }, "Loading " + basename(path)));
-  let blob;
-  try {
-    blob = await fetchFile(path, force ? 0 : WARN_BYTES, controller);
-  } catch (error) {
-    if (seq !== viewer.seq) return;
-    if (error.tooBig) { viewer.size = error.tooBig; renderViewerHead(); return sizeWarning(error.tooBig); }
-    return viewerFailed(error.message);
-  }
-  if (seq !== viewer.seq) return;
-  viewer.abort = null;
-  viewer.blob = blob;
-  viewer.size = blob.size;
-  viewer.url = URL.createObjectURL(blob);
-  renderViewerHead();
-  setViewerBody(mediaNode(kind, viewer.url, path));
-}
-
-function mediaNode(kind, url, path) {
+function mediaNode(kind, url, name, note) {
   if (kind === "image") {
     // SVG too goes through <img>, where its scripts never run.
     const wrap = el("div", { class: "img-wrap", title: "Click for actual size" });
-    const img = el("img", { src: url, alt: basename(path) });
-    img.addEventListener("load", () => { $("viewerNote").textContent = img.naturalWidth + " by " + img.naturalHeight + " pixels. Click the image to toggle actual size."; });
-    img.addEventListener("error", () => { $("viewerNote").textContent = "This browser could not decode the image."; });
+    const img = el("img", { src: url, alt: name });
+    img.addEventListener("load", () => { note.textContent = img.naturalWidth + " by " + img.naturalHeight + " pixels. Click the image to toggle actual size."; });
+    img.addEventListener("error", () => { note.textContent = "This browser could not decode the image."; });
     wrap.addEventListener("click", () => wrap.classList.toggle("actual"));
     wrap.append(img);
     return wrap;
   }
   if (kind === "pdf") {
     return el("div", null, [
-      el("iframe", { class: "pdf", src: url, title: basename(path) }),
+      el("iframe", { class: "pdf", src: url, title: name }),
       el("p", { class: "small" }, el("a", { href: url, target: "_blank", rel: "noopener" }, "Open in a new tab")),
     ]);
   }
   const media = el(kind, { src: url, controls: true, preload: "metadata", playsinline: kind === "video" });
   media.addEventListener("loadedmetadata", () => {
     const d = media.duration;
-    $("viewerNote").textContent = isFinite(d) ? "Duration " + Math.floor(d / 60) + ":" + String(Math.floor(d % 60)).padStart(2, "0")
+    note.textContent = isFinite(d) ? "Duration " + Math.floor(d / 60) + ":" + String(Math.floor(d % 60)).padStart(2, "0")
       + (kind === "video" && media.videoWidth ? ", " + media.videoWidth + " by " + media.videoHeight : "") : "";
   });
-  media.addEventListener("error", () => { $("viewerNote").textContent = "This browser cannot play this file. Try Download."; });
+  media.addEventListener("error", () => { note.textContent = "This browser cannot play this file."; });
   return media;
 }
 
-function sizeWarning(bytes) {
-  setViewerBody(el("div", { class: "box" }, [
-    el("p", null, "This file is " + size(bytes) + ". Loading it may take a while and use mobile data."),
-    el("div", { class: "row" }, [
-      el("button", { class: "primary", onclick: () => loadMedia(true) }, "Load anyway"),
-      el("button", { onclick: () => downloadFile(viewer.path) }, "Download"),
-    ]),
-  ]));
-}
-
-function downloadCard(note) {
-  setViewerBody(el("div", { class: "box" }, [
-    el("p", null, [el("b", null, basename(viewer.path)), viewer.size != null ? " (" + size(viewer.size) + ")" : ""]),
-    note ? el("p", { class: "small muted" }, note) : null,
-    el("button", { class: "primary", onclick: () => downloadFile(viewer.path) }, "Download"),
-  ]));
-}
-
-async function downloadFile(path) {
-  if (!path) return;
-  $("viewerNote").textContent = "Preparing the download";
-  let blob = viewer.path === path ? viewer.blob : null;
-  try {
-    if (!blob) blob = await fetchFile(path, 0, new AbortController());
-  } catch (error) {
-    $("viewerNote").textContent = "Download failed: " + error.message;
-    return;
-  }
-  const url = URL.createObjectURL(blob);
-  const link = el("a", { href: url, download: basename(path) });
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
-  if (viewer.path === path) $("viewerNote").textContent = "";
-}
-
-function readFailed(error) {
-  pendingRead = 0;
-  if (/binary/i.test(error)) return downloadCard("This looks like a binary file.");
-  if (/directory/i.test(error)) { const path = viewer.path; closeViewer(); return listDir(path); }
-  viewerFailed("Error: " + error);
-}
-
-function renderTextFile(m) {
-  pendingRead = 0;
-  viewer.size = m.size;
-  renderViewerHead(m.truncated ? "only the first part is shown" : "");
-  const text = String(m.text || "");
-  const kind = viewer.kind;
-  if (kind === "markdown") return setViewerBody(markdownBlock(text));
-  if (kind === "html") return setViewerBody(htmlBlock(text));
-  if (kind === "json") {
-    try { return setViewerBody(codeBlock(JSON.stringify(JSON.parse(text), null, 2))); }
-    catch (error) { $("viewerNote").textContent = m.truncated ? "Too long to pretty-print; shown as is." : "Not valid JSON; shown as is."; }
-  }
-  if (kind === "csv" || kind === "tsv") return setViewerBody(tableBlock(text, kind === "tsv" ? "\t" : ","));
-  setViewerBody(codeBlock(text));
-}
-
-// Source with line numbers (XML, and HTML under its Source toggle, shown as text, never rendered).
+// Source with line numbers (code and plain text, and HTML under its Source toggle, shown as text, never rendered).
 function codeBlock(text) {
   const pre = el("pre", { class: "code" });
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
@@ -1639,8 +849,8 @@ function isolateHtml(text) {
   return doctype + "<meta http-equiv=\"Content-Security-Policy\" content=\"" + REPORT_CSP + "\">"
     + (lead ? text.slice(lead[0].length) : text);
 }
-function htmlBlock(text) {
-  const frame = el("iframe", { sandbox: "allow-scripts", referrerpolicy: "no-referrer", title: basename(viewer.path) });
+function htmlBlock(text, name, status) {
+  const frame = el("iframe", { sandbox: "allow-scripts", referrerpolicy: "no-referrer", title: name });
   frame.srcdoc = isolateHtml(text);
   const stage = el("div", { class: "html-stage" }, frame);
   const source = codeBlock(text);
@@ -1657,7 +867,7 @@ function htmlBlock(text) {
   const canFull = !!(stage.requestFullscreen || stage.webkitRequestFullscreen);
   const full = el("button", { class: "mini", hidden: !canFull, onclick: () => {
     const request = stage.requestFullscreen || stage.webkitRequestFullscreen;
-    Promise.resolve(request.call(stage)).catch((error) => { $("viewerNote").textContent = "Full screen failed: " + error.message; });
+    Promise.resolve(request.call(stage)).catch((error) => { status.textContent = "Full screen failed: " + error.message; });
   } }, "Full screen");
   return el("div", null, [el("div", { class: "html-bar" }, [note, toggle, full]), stage, source]);
 }
@@ -1682,12 +892,12 @@ function parseDelimited(text, sep, max) {
   if (rows.length < max && (field || row.length)) { row.push(field); rows.push(row); }
   return { rows, more: i < text.length };
 }
-function tableBlock(text, sep) {
+function tableBlock(text, sep, note) {
   const parsed = parseDelimited(text, sep, TABLE_ROWS + 1);
   const rows = parsed.rows;
   if (!rows.length) return el("p", { class: "muted" }, "Empty file.");
   const head = rows[0], body = rows.slice(1, TABLE_ROWS + 1);
-  $("viewerNote").textContent = body.length + " rows" + (parsed.more || rows.length > TABLE_ROWS + 1 ? ", the first " + TABLE_ROWS + " shown" : "")
+  note.textContent = body.length + " rows" + (parsed.more || rows.length > TABLE_ROWS + 1 ? ", the first " + TABLE_ROWS + " shown" : "")
     + ", " + head.length + " columns.";
   return el("div", { class: "table-wrap" }, el("table", null, [
     el("thead", null, el("tr", null, head.map((cell) => el("th", { scope: "col", title: cell }, cell)))),
@@ -1914,51 +1124,17 @@ function markdownBlock(source) {
   return box;
 }
 
-// ==== HANDS START: launchers for a terminal and a desktop into the sandbox ====
-// Each opens in its own full-screen browser tab (DOMAIN.md, Human Takeover).
-// Protocol: the page sends {"type":"launch","kind":"terminal"|"desktop","id":n}; the server answers
-// {"type":"launch","id":n,"url":"..."} or {"type":"error","id":n,"error":"..."} (onMessage routes both here).
-const launches = new Map(); // id -> { tab, kind }
-
-// Must run synchronously inside the click handler: a blank tab opened now is allowed by popup
-// blockers, and gets its real address when the reply arrives.
-function launch(kind) {
-  const id = nextId++;
-  const tab = window.open("about:blank", "_blank");
-  if (!tab) { $("handsNote").textContent = "The browser blocked the new tab. Allow pop-ups for this site and try again."; return; }
-  if (!send({ type: "launch", kind, id })) {
-    tab.close();
-    $("handsNote").textContent = "Not connected.";
-    return;
-  }
-  launches.set(id, { tab, kind });
-  $("handsNote").textContent = "Opening the " + kind;
-}
-function launchTerminal() { launch("terminal"); }
-function launchDesktop() { launch("desktop"); }
-
-function settleLaunch(m) {
-  const pending = launches.get(m.id);
-  if (!pending) return;
-  launches.delete(m.id);
-  if (m.type === "launch" && typeof m.url === "string" && /^https:\/\//.test(m.url)) {
-    pending.tab.opener = null;
-    pending.tab.location.href = m.url;
-    $("handsNote").textContent = "";
-    return;
-  }
-  pending.tab.close();
-  $("handsNote").textContent = "Could not open the " + pending.kind + ": " + String(m.error || "no address came back");
-}
-$("handsTerminal").addEventListener("click", launchTerminal);
-$("handsDesktop").addEventListener("click", launchDesktop);
-// ==== HANDS END ====
-
-// ==== WHITEBOARD START: boards the walker draws in openui-lang, answered on this page ====
-// Protocol: the server sends {"type":"board","board":{"id","at","program","note","status":"open"|"answered","answer"}}
-// for a new or updated board, and {"type":"boards","boards":[...]} (newest last) after the feed snapshot.
+// ==== WHITEBOARD START: boards the walker draws in openui-lang on this browser's Display, answered on this page ====
+// Protocol: the server sends {"type":"board","board":{"id","at","display","program","note","status":"open"|"answered",
+// "answer","failed"?,"access"?}} for a new or updated board, and {"type":"boards","boards":[...]} on connecting,
+// both only for this Display. failed maps a path, as the program writes it, to why it failed the draw-time
+// check; access maps "kind:target" to its Access Grant {kind, target, expires_at, revoked?}.
 // The page answers {"type":"board_answer","id","answer":{"button","value","values","decisions","note"}}
 // and reports, once per board, a program it could not fully draw: {"type":"board_error","id","error"}.
+// A Document's text: {"type":"read","id","path","board_id"} -> {"type":"file","id","path","size","truncated","text"}.
+// An Access Element: {"type":"open","id","board_id","key"} -> {"type":"opened","id","url"} or
+// {"type":"opened","id","ssh":{"command","expires_at"}}. Either fails as {"type":"error","id","error","asleep"?}.
+// Media and downloads come from GET /pair/file?path=&board=[&as=image][&download=1].
 // An answer is the caller's input to the walker, like keypad digits; it never authorizes anything.
 // The dialect is OpenChamber's openui-lang (voice_agent_skills/whiteboard.md): one "name = Component(args)"
 // statement per line, positional arguments, root = Stack([...]). Upstream extras kept because they are
@@ -2134,11 +1310,19 @@ const WB_SPECS = {
   Slider: [["name", "str", 1], ["min", "num", 1], ["max", "num", 1], ["label", "str"], ["step", "pos"], ["value", "num"], ["unit", "str"]],
   Button: [["label", "str", 1], ["variant", "variant"], ["value", "str"]],
   Image: [["path", "imagepath", 1], ["alt", "str", 1], ["caption", "str"], ["size", "imagesize"]],
+  Document: [["path", "docpath", 1], ["title", "str"]],
+  // Access Elements: the first argument is the grant's target (Desktop and SshAccess have none).
+  Terminal: [["name", "str"], ["label", "str"]],
+  Desktop: [["label", "str"]],
+  Preview: [["port", "port", 1], ["label", "str"], ["inline", "bool"]],
+  SshAccess: [["label", "str"]],
+  Download: [["path", "docpath", 1], ["label", "str"]],
 };
 // What may not sit anywhere inside each container; Tabs holds only Tab, and Series sits only in a chart.
 const WB_FORBIDS = { Card: ["Card", "Tabs"], Row: ["Row", "Tabs", "Details"], Tab: ["Tabs"], Details: ["Card", "Tabs", "Details"] };
+// args keeps the arguments as written (references resolved), for the targets the server keys on.
 class WbNode {
-  constructor(type, props, line) { this.type = type; this.props = props; this.line = line; }
+  constructor(type, props, line, args) { this.type = type; this.props = props; this.line = line; this.args = args || []; }
 }
 const wbEnum = (choices) => (v, problems) => choices.indexOf(v) >= 0 ? v : (problems.push("must be one of " + choices.join(", ")), undefined);
 const wbStr = (v) => typeof v === "string" ? v : typeof v === "number" ? String(v) : undefined;
@@ -2177,16 +1361,23 @@ const WB_KINDS = {
   options: (v, p) => wbList(v, p, "options (strings or {label, description?} objects)", (x) => wbStr(x) !== undefined ? { label: wbStr(x), description: "" }
     : wbIsObject(x) && wbStr(x.label) !== undefined ? { label: wbStr(x.label), description: wbStr(x.description) || "" } : undefined),
   series: (v, p) => wbList(v, p, "Series(...) components", (x) => x instanceof WbNode && x.type === "Series" ? x : undefined),
-  // A Workspace image file, made absolute. Never a URL, data, or blob: only the Sandbox is ever read.
-  imagepath: (v, p) => {
+  // A Workspace file, made absolute. Never a URL, data, or blob: only the Sandbox is ever read.
+  docpath: (v, p) => {
     const s = (wbStr(v) || "").trim();
     if (!s) { p.push("must be a Workspace path"); return undefined; }
     if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(s)) { p.push("must be a Workspace path, never a URL"); return undefined; }
     const full = resolvePath("", s);
     if (full.indexOf(HOME + "/") !== 0) { p.push("must be a file under " + HOME); return undefined; }
+    return full;
+  },
+  // A Workspace image file, likewise.
+  imagepath: (v, p) => {
+    const full = WB_KINDS.docpath(v, p);
+    if (full === undefined) return undefined;
     if (!/\.(?:png|jpe?g|gif|webp|svg)$/i.test(full)) { p.push("must name a .png, .jpg, .gif, .webp, or .svg file"); return undefined; }
     return full;
   },
+  port: (v, p) => { const n = wbNum(v); if (!(Number.isInteger(n) && n >= 1 && n <= 65535)) { p.push("must be a port number from 1 to 65535"); return undefined; } return n; },
   imagesize: wbEnum(["icon", "small", "medium", "large", "full"]),
 };
 
@@ -2218,7 +1409,7 @@ function wbComponent(name, args, line, errors) {
     props[prop] = value;
   }
   if (name === "Slider" && !(props.max > props.min)) { errors.push(at + "Slider max must be greater than min (left out)"); return undefined; }
-  return new WbNode(name, props, line);
+  return new WbNode(name, props, line, args);
 }
 
 // ---- A program: statements resolved from root, with references, cycles and unused names reported.
@@ -2337,6 +1528,8 @@ function wbRender(node, ancestors, ctx) {
     ])));
     case "BarChart": case "LineChart": return wbChart(node, ctx);
     case "Image": return wbImage(node, ctx);
+    case "Document": return wbDocument(node, ctx);
+    case "Terminal": case "Desktop": case "Preview": case "SshAccess": case "Download": return wbAccess(node, ctx);
     case "Choice": {
       const group = "wb" + (++wbUid);
       const inputs = p.options.map((o) => el("input", { type: p.multiple ? "checkbox" : "radio", name: group, value: o.label }));
@@ -2520,36 +1713,41 @@ function wbChart(node, ctx) {
   return figure;
 }
 
-// ---- Images: a program carries only the path; the board's manifest maps it to the Board Asset
-// captured when it was drawn (or why it was not), so viewing a board never reads the Sandbox.
-// Assets are fetched with the pairing token into blob URLs this page owns. SVG only ever sits in an
-// <img>, where its scripts never run and it loads nothing else. Each asset is fetched once and
-// shared by every board showing it (reference counted by hash); a board releases its assets when
-// it leaves the page, and the last release aborts the fetch and revokes the URL. Boards moved into
-// the whiteboard's own tab keep using this page's URLs, which stay valid because that tab closes
-// with this page. A failed fetch is retried by the next board.
+// ---- Files a board shows (Image, Document). The program carries only the path; the page reads
+// the file through its pairing while the board is shown, and only while the Sandbox runs. A path
+// that failed the draw-time check (board.failed, keyed by the path as written) shows its reason
+// instead, and the Orchestrator already knows. Images are fetched with the pairing token into blob
+// URLs this page owns; SVG only ever sits in an <img>, where its scripts never run and it loads
+// nothing else. Each image is fetched once per board and shared by that board's nodes (reference
+// counted by board id and path), so a rebuilt board keeps what it loaded; a board releases its
+// images when it leaves the page, and the last release aborts the fetch and revokes the URL. Boards
+// moved into the whiteboard's own tab keep using this page's URLs, which stay valid because that tab
+// closes with this page. A failed fetch is retried by the next acquire, as Try again does.
 const WB_IMAGE_MAX = 8;   // images per board; the rest are left out with an error
+const WB_DOC_MAX = 4;     // Documents per board, likewise
 const WB_IMAGE_LOADS = 3; // fetches at once
-const wbImages = new Map(); // hash -> { hash, refs, url, error, waiters, controller }
+const wbImages = new Map(); // board id + path -> { key, href, refs, url, error, asleep, waiters, controller }
 const wbImageQueue = [];
 let wbImageLoads = 0;
 
-function wbImageAcquire(hash, done) {
-  let entry = wbImages.get(hash);
-  if (entry && entry.error) { wbImages.delete(hash); entry = null; }
+function wbImageAcquire(boardId, path, done) {
+  const key = boardId + "\u0001" + path;
+  let entry = wbImages.get(key);
+  if (entry && entry.error) { wbImages.delete(key); entry = null; }
   if (!entry) {
-    entry = { hash, refs: 0, url: "", error: "", waiters: [], controller: null };
-    wbImages.set(hash, entry);
+    entry = { key, href: fileUrl(boardId, path, "&as=image"), refs: 0, url: "", error: "", asleep: false, waiters: [], controller: null };
+    wbImages.set(key, entry);
     wbImageQueue.push(entry);
     wbImagePump();
   }
   entry.refs++;
   if (entry.url) done(entry); else entry.waiters.push(done);
+  return entry;
 }
-function wbImageRelease(hash) {
-  const entry = wbImages.get(hash);
-  if (!entry || --entry.refs > 0) return;
-  wbImages.delete(hash);
+// By entry, not key: a retry replaces a failed entry, and the old holder must not release the new one.
+function wbImageRelease(entry) {
+  if (--entry.refs > 0) return;
+  if (wbImages.get(entry.key) === entry) wbImages.delete(entry.key);
   entry.waiters = [];
   if (entry.controller) entry.controller.abort();
   if (entry.url) URL.revokeObjectURL(entry.url);
@@ -2557,75 +1755,308 @@ function wbImageRelease(hash) {
 function wbImagePump() {
   while (wbImageLoads < WB_IMAGE_LOADS && wbImageQueue.length) {
     const entry = wbImageQueue.shift();
-    if (wbImages.get(entry.hash) !== entry) continue; // released while it waited
+    if (wbImages.get(entry.key) !== entry) continue; // released while it waited
     wbImageLoads++;
     entry.controller = new AbortController();
-    fetchPaired("/pair/asset/" + entry.hash, 0, entry.controller)
-      .then((blob) => { if (wbImages.get(entry.hash) === entry) entry.url = URL.createObjectURL(blob); })
-      .catch((error) => { entry.error = error.message || "it could not be fetched"; })
+    fetchPaired(entry.href, 0, entry.controller)
+      .then((blob) => { if (wbImages.get(entry.key) === entry) entry.url = URL.createObjectURL(blob); })
+      .catch((error) => { entry.error = error.message || "it could not be fetched"; entry.asleep = error.asleep === true; })
       .finally(() => {
         wbImageLoads--;
         entry.controller = null;
         const waiters = entry.waiters;
         entry.waiters = [];
-        if (wbImages.get(entry.hash) === entry) for (const done of waiters) done(entry);
+        if (wbImages.get(entry.key) === entry) for (const done of waiters) done(entry);
         wbImagePump();
       });
   }
 }
 
+// The first argument as the program writes it (references resolved, a number as its decimal string,
+// trimmed as the server reads it): the path /pair/file and board.failed know, and an Access Grant's target.
+function wbTarget(node) {
+  const v = node.args[0];
+  return typeof v === "number" ? String(v) : typeof v === "string" ? v.trim() : "";
+}
+// While the Sandbox sleeps a file is not shown, and that is no fault of the board: Try again reads it
+// once a call has woken it. Other failures reach the Orchestrator once (see wbShownFailed).
+function wbRetry(retry) {
+  return el("button", { type: "button", class: "mini wb-retry", onclick: retry }, "Try again");
+}
+
 // A figure that holds its place while loading and, on failure, keeps its alt text and the reason
-// so the rest of the board reads and answers as usual. alt "" marks a decorative image. A capture
-// failure was already in draw_on_whiteboard's result, so only a failure here reaches the walker.
+// so the rest of the board reads and answers as usual. alt "" marks a decorative image.
 function wbImage(node, ctx) {
-  const p = node.props;
+  const p = node.props, path = wbTarget(node);
   const size = p.size || "medium";
   const decorative = !p.alt;
   const zoomable = !decorative && size !== "icon";
   const status = el("span", { class: "small muted" }, decorative ? "" : "Loading " + basename(p.path));
   const frame = el(zoomable ? "button" : "div", { class: "wb-img-frame", type: zoomable ? "button" : null, "aria-busy": "true", title: p.path }, status);
   const figure = el("figure", { class: "wb-image size-" + size }, [frame, p.caption ? wbInline("figcaption", "small", p.caption) : null]);
-  const fail = (reason, known) => {
+  const fail = (reason, known, retry) => {
     figure.classList.add("failed");
     frame.removeAttribute("aria-busy");
     if (zoomable) frame.disabled = true;
-    status.textContent = (p.alt ? p.alt + ". " : "") + "Not shown: " + reason;
-    if (ctx.open && !known) wbImageFailed(ctx.boardId, p.path, reason);
+    status.replaceChildren((p.alt ? p.alt + ". " : "") + (retry ? reason + " " : "Not shown: " + reason));
+    if (retry && !decorative) figure.append(wbRetry(retry));
+    if (!known && !retry) wbShownFailed(ctx, "image", path, reason);
   };
-  if (ctx.images.length >= WB_IMAGE_MAX) {
-    ctx.errors.push("line " + node.line + ": a board shows at most " + WB_IMAGE_MAX + " images; " + p.path + " was left out");
-    fail("too many images on this board");
+  if (ctx.imageCount >= WB_IMAGE_MAX) {
+    ctx.errors.push("line " + node.line + ": a board shows at most " + WB_IMAGE_MAX + " images; " + path + " was left out");
+    fail("too many images on this board", true);
     return figure;
   }
-  const asset = ctx.manifest[p.path];
-  if (!asset || !asset.hash) {
-    fail(asset && asset.error ? String(asset.error) : "it was not captured when the board was drawn", Boolean(asset));
-    return figure;
-  }
-  ctx.images.push(asset.hash);
-  wbImageAcquire(asset.hash, (entry) => {
-    const img = el("img", { alt: p.alt, decoding: "async" });
-    img.src = entry.url;
-    img.decode().then(() => {
-      img.width = img.naturalWidth; // with height:auto, the box keeps the image's proportions
-      img.height = img.naturalHeight;
-      frame.removeAttribute("aria-busy");
-      frame.replaceChildren(img);
-    }, () => fail("this browser could not decode it"));
-  });
+  ctx.imageCount++;
+  if (Object.prototype.hasOwnProperty.call(ctx.failed, path)) { fail(String(ctx.failed[path]), true); return figure; }
+  const load = () => {
+    figure.classList.remove("failed");
+    for (const button of figure.querySelectorAll(":scope > .wb-retry")) button.remove();
+    frame.setAttribute("aria-busy", "true");
+    if (zoomable) frame.disabled = false;
+    status.textContent = decorative ? "" : "Loading " + basename(p.path);
+    ctx.images.push(wbImageAcquire(ctx.boardId, path, (entry) => {
+      if (entry.asleep) return fail(ASLEEP, true, load);
+      if (entry.error) return fail(entry.error);
+      const img = el("img", { alt: p.alt, decoding: "async" });
+      img.src = entry.url;
+      img.decode().then(() => {
+        img.width = img.naturalWidth; // with height:auto, the box keeps the image's proportions
+        img.height = img.naturalHeight;
+        frame.removeAttribute("aria-busy");
+        frame.replaceChildren(img);
+      }, () => fail("this browser could not decode it"));
+    }));
+  };
+  load();
   if (zoomable) frame.addEventListener("click", () => { if (!frame.hasAttribute("aria-busy")) figure.classList.toggle("zoomed"); });
   return figure;
 }
-// An open board's image that did not show reaches the Orchestrator once, as a whiteboard_error.
-const wbImageFailures = new Set();
-function wbImageFailed(boardId, path, reason) {
-  const key = boardId + "\u0001" + path;
-  if (wbImageFailures.has(key)) return;
-  if (send({ type: "board_error", id: boardId, error: "the image " + path + " was not shown (" + reason + "); the rest of the board is drawn" })) wbImageFailures.add(key);
+
+// A Document: media is fetched as a blob this board owns (released with it); anything else is read
+// over the socket and rendered as Markdown, a table, an isolated HTML report, or text with line numbers.
+function wbDocument(node, ctx) {
+  const p = node.props, path = wbTarget(node);
+  const name = basename(p.path);
+  const kind = fileKind(p.path);
+  const sizeNote = el("span", { class: "small muted" });
+  const note = el("p", { class: "small muted wb-doc-note", role: "status" });
+  const body = el("div", { class: "wb-doc-body" });
+  const box = el("section", { class: "wb-doc" }, [
+    el("div", { class: "wb-doc-head" }, [el("strong", null, p.title || name), p.title ? el("span", { class: "mono", title: p.path }, name) : null, sizeNote]),
+    note, body,
+  ]);
+  let url = "", controller = null, gone = false;
+  ctx.cleanups.push(() => { gone = true; if (controller) controller.abort(); if (url) URL.revokeObjectURL(url); });
+  const busy = (text) => { box.classList.remove("failed"); body.setAttribute("aria-busy", "true"); note.textContent = ""; body.replaceChildren(el("span", { class: "small muted" }, text)); };
+  const show = (child) => { body.removeAttribute("aria-busy"); body.replaceChildren(child); };
+  const fail = (reason, known, retry) => {
+    if (gone) return;
+    box.classList.add("failed");
+    body.removeAttribute("aria-busy");
+    body.replaceChildren(el("span", null, (retry ? "" : "Not shown: ") + reason), retry ? wbRetry(retry) : null);
+    if (!known && !retry) wbShownFailed(ctx, "document", path, reason);
+  };
+  if (ctx.docCount >= WB_DOC_MAX) {
+    ctx.errors.push("line " + node.line + ": a board shows at most " + WB_DOC_MAX + " documents; " + path + " was left out");
+    fail("too many documents on this board", true);
+    return box;
+  }
+  ctx.docCount++;
+  if (Object.prototype.hasOwnProperty.call(ctx.failed, path)) { fail(String(ctx.failed[path]), true); return box; }
+  const failed = (error, retry) => error.asleep ? fail(ASLEEP, true, retry) : error.offline ? fail("Not connected.", true, retry) : fail(error.error || error.message);
+  async function loadMedia(force) {
+    busy("Loading " + name);
+    if (url) { URL.revokeObjectURL(url); url = ""; }
+    controller = new AbortController();
+    let blob;
+    try {
+      blob = await fetchPaired(fileUrl(ctx.boardId, path), force ? 0 : WARN_BYTES, controller);
+    } catch (error) {
+      if (gone) return;
+      if (error.tooBig) {
+        sizeNote.textContent = size(error.tooBig);
+        return show(el("div", null, [
+          el("p", null, "This file is " + size(error.tooBig) + ". Loading it may take a while and use mobile data."),
+          el("button", { type: "button", class: "primary", onclick: () => loadMedia(true) }, "Load anyway"),
+        ]));
+      }
+      return failed(error, () => loadMedia(force));
+    }
+    if (gone) return;
+    controller = null;
+    url = URL.createObjectURL(blob);
+    sizeNote.textContent = size(blob.size);
+    show(mediaNode(kind, url, name, note));
+  }
+  function loadText() {
+    busy("Opening " + name);
+    const sent = request({ type: "read", path, board_id: ctx.boardId }, {
+      done(m) {
+        if (gone) return;
+        sizeNote.textContent = [size(m.size), m.truncated ? "truncated: only the first part is shown" : ""].filter(Boolean).join(", ");
+        const text = String(m.text || "");
+        if (kind === "markdown") return show(markdownBlock(text));
+        if (kind === "html") return show(htmlBlock(text, name, note));
+        if (kind === "json") {
+          try { return show(codeBlock(JSON.stringify(JSON.parse(text), null, 2))); }
+          catch (error) { note.textContent = m.truncated ? "Too long to pretty-print; shown as is." : "Not valid JSON; shown as is."; }
+        }
+        if (kind === "csv" || kind === "tsv") return show(tableBlock(text, kind === "tsv" ? "\t" : ",", note));
+        show(codeBlock(text));
+      },
+      fail(error) { failed(error, loadText); },
+    });
+    if (!sent) fail("Not connected.", true, loadText);
+  }
+  if (MEDIA_KINDS.has(kind)) loadMedia(false); else loadText();
+  return box;
 }
-function wbReleaseImages(entry) {
-  for (const hash of entry.images || []) wbImageRelease(hash);
+
+// An open board's image or Document that did not show reaches the Orchestrator once, as a whiteboard_error.
+const wbShownFailures = new Set();
+function wbShownFailed(ctx, what, path, reason) {
+  if (!ctx.open) return;
+  const key = ctx.boardId + "\u0001" + path;
+  if (wbShownFailures.has(key)) return;
+  if (send({ type: "board_error", id: ctx.boardId, error: "the " + what + " " + path + " was not shown (" + reason + "); the rest of the board is drawn" })) wbShownFailures.add(key);
+}
+function wbRelease(entry) {
+  for (const image of entry.images || []) wbImageRelease(image);
+  for (const cleanup of entry.cleanups || []) cleanup();
   entry.images = [];
+  entry.cleanups = [];
+}
+
+// ---- Access Elements (DOMAIN.md: Access Grant). The program names the element and its target; the
+// grant behind it arrives in board.access, keyed "kind:target", and may change (expire, be revoked)
+// without the board being redrawn, so each card reads it afresh from ctx.live and on a timer. A click
+// sends open and the server mints a credential for this browser alone; nothing opens by itself.
+const WB_ACCESS = {
+  Terminal: { kind: "terminal", button: "Open terminal", tab: true, label: (t) => t ? "Terminal: " + t : "Terminal" },
+  Desktop: { kind: "desktop", button: "Open desktop", tab: true, label: () => "Desktop" },
+  Preview: { kind: "preview", button: "Open preview", tab: true, label: (t) => "Preview of port " + t },
+  SshAccess: { kind: "ssh", button: "Show SSH command", label: () => "SSH access" },
+  Download: { kind: "download", button: "Download", label: (t) => basename(t) },
+};
+function wbGrant(board, key) {
+  const grant = board.access[key];
+  if (!grant || typeof grant !== "object") return { live: false, tone: "warning", text: "not available: ask on the call" };
+  if (grant.revoked) return { live: false, tone: "neutral", text: "revoked" };
+  const at = Number(grant.expires_at);
+  if (!(at > Date.now())) return { live: false, tone: "neutral", text: "expired" };
+  return { live: true, tone: "success", text: "open until " + clockDay(at) };
+}
+// Whether any card holds something open that only a click brings back (an inline preview, an SSH command).
+function wbAccessOpen() {
+  for (const entry of wbBoards.values()) if (entry.node.querySelector(".wb-access[data-open]")) return true;
+  return false;
+}
+
+function wbAccess(node, ctx) {
+  const spec = WB_ACCESS[node.type], p = node.props;
+  const target = node.type === "Desktop" || node.type === "SshAccess" ? "" : wbTarget(node);
+  const key = spec.kind + ":" + target;
+  const inline = node.type === "Preview" && p.inline === true;
+  const grantBadge = el("span", { class: "wb-badge" });
+  const say = el("span", { class: "small wb-access-say", role: "status" });
+  const button = el("button", { type: "button", class: "primary" }, spec.button);
+  const extra = el("div", { hidden: true });
+  const card = el("section", { class: "wb-access", "data-access": key }, [
+    el("div", { class: "wb-access-head" }, [el("strong", null, p.label || spec.label(target)), grantBadge]),
+    el("div", { class: "wb-access-row" }, [button, say]),
+    extra,
+  ]);
+  const doc = () => card.ownerDocument || document;
+  const close = () => { extra.hidden = true; extra.replaceChildren(); card.removeAttribute("data-open"); };
+  let busy = false;
+  const refresh = () => {
+    const grant = wbGrant(ctx.live.board, key);
+    grantBadge.className = "wb-badge tone-" + grant.tone;
+    grantBadge.textContent = grant.text;
+    card.classList.toggle("dead", !grant.live);
+    button.classList.toggle("primary", grant.live);
+    button.disabled = busy || !grant.live;
+    if (!grant.live && card.hasAttribute("data-open")) { close(); say.textContent = "Closed: the access " + (grant.text === "revoked" ? "was revoked." : "expired."); }
+  };
+  const failed = (error) => error.asleep ? ASLEEP : error.offline ? "Not connected." : "Could not open: " + error.error;
+  const finish = (text) => { busy = false; say.textContent = text; refresh(); };
+  const open = (then, abandon) => {
+    busy = true;
+    refresh();
+    say.textContent = "Opening";
+    const sent = request({ type: "open", board_id: ctx.boardId, key }, {
+      done(m) { finish(""); then(m); },
+      fail(error) { if (abandon) abandon(); finish(failed(error)); },
+    });
+    if (!sent) { if (abandon) abandon(); finish("Not connected."); }
+  };
+  button.addEventListener("click", () => {
+    if (spec.kind === "download") return download();
+    if (spec.tab && !inline) {
+      // A blank tab opened inside the click is allowed by popup blockers, and gets its real address
+      // when the reply arrives. It opens from the button's own window (this page or the whiteboard's tab).
+      const tab = (doc().defaultView || window).open("about:blank", "_blank");
+      if (!tab) { say.textContent = "The browser blocked the new tab. Allow pop-ups for this site and try again."; return; }
+      return open((m) => {
+        if (typeof m.url !== "string" || !/^https:\/\//.test(m.url)) { tab.close(); say.textContent = "Could not open: no address came back."; return; }
+        tab.opener = null;
+        tab.location.href = m.url;
+      }, () => tab.close());
+    }
+    if (inline) {
+      return open((m) => {
+        if (typeof m.url !== "string" || !/^https:\/\//.test(m.url)) { say.textContent = "Could not open: no address came back."; return; }
+        extra.replaceChildren(el("div", { class: "wb-preview" }, [
+          el("iframe", { src: m.url, title: p.label || spec.label(target), sandbox: "allow-scripts allow-same-origin allow-forms allow-popups", referrerpolicy: "no-referrer" }),
+          el("p", { class: "small" }, [
+            el("a", { href: m.url, target: "_blank", rel: "noopener noreferrer" }, "Open in a new tab"), " ",
+            el("button", { type: "button", class: "mini", onclick: close }, "Close"),
+          ]),
+        ]));
+        extra.hidden = false;
+        card.setAttribute("data-open", "");
+        button.textContent = "Reload preview";
+      });
+    }
+    open((m) => {
+      const ssh = m.ssh && typeof m.ssh === "object" ? m.ssh : null;
+      if (!ssh || typeof ssh.command !== "string") { say.textContent = "Could not open: no command came back."; return; }
+      const copy = el("button", { type: "button", class: "mini", onclick: () => copyText(ssh.command, copy) }, "Copy");
+      extra.replaceChildren(el("div", { class: "wb-ssh" }, [
+        el("pre", null, ssh.command),
+        el("div", { class: "wb-access-row" }, [copy,
+          Number(ssh.expires_at) ? el("span", { class: "small muted" }, "Works until " + clockDay(Number(ssh.expires_at)) + ".") : null,
+          el("button", { type: "button", class: "mini", onclick: close }, "Hide")]),
+      ]));
+      extra.hidden = false;
+      card.setAttribute("data-open", "");
+    });
+  });
+  // A Download is read when it is opened: fetched with the pairing token, then saved under its own name.
+  async function download() {
+    busy = true;
+    refresh();
+    say.textContent = "Preparing the download";
+    let blob;
+    try {
+      blob = await fetchPaired(fileUrl(ctx.boardId, target, "&download=1"), 0, new AbortController());
+    } catch (error) {
+      return finish(error.asleep ? ASLEEP : "Download failed: " + error.message);
+    }
+    const url = URL.createObjectURL(blob);
+    const link = doc().createElement("a");
+    link.href = url;
+    link.download = basename(target);
+    doc().body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    finish("");
+  }
+  ctx.cards.push(refresh);
+  refresh();
+  return card;
 }
 
 // ---- One board: rendered program, errors, and the answer bar (or the answer, once given).
@@ -2634,7 +2065,8 @@ function wbReleaseImages(entry) {
 // they collect per item and send once every item has one, or early with Send now.
 function wbBoardNode(board) {
   const ctx = {
-    errors: [], fields: [], buttons: [], items: [], controls: [], images: [], manifest: board.images, boardId: board.id, open: board.status === "open",
+    errors: [], fields: [], buttons: [], items: [], controls: [], boardId: board.id, open: board.status === "open", failed: board.failed,
+    images: [], imageCount: 0, docCount: 0, cleanups: [], cards: [], live: { board },
     field(name, line, controls, get, set) {
       this.controls.push(...controls);
       if (this.fields.some((f) => f.name === name)) { this.errors.push("line " + line + ": two fields are named " + JSON.stringify(name) + "; only the first is sent (drawn anyway)"); return; }
@@ -2686,9 +2118,9 @@ function wbBoardNode(board) {
     }
     for (const c of ctx.controls.concat(ctx.buttons.map((b) => b.node))) c.disabled = true;
     node.append(wbAnswerNode(board.answer));
-    return { node, errors: ctx.errors, images: ctx.images };
+    return wbBuilt(node, ctx);
   }
-  if (!ctx.fields.length && !ctx.buttons.length) return { node, errors: ctx.errors, images: ctx.images };
+  if (!ctx.fields.length && !ctx.buttons.length) return wbBuilt(node, ctx);
 
   let sent = false;
   const note = el("textarea", { class: "wb-input", rows: 2, placeholder: "Anything the walker should know" });
@@ -2734,7 +2166,11 @@ function wbBoardNode(board) {
   }
   refresh();
   node.append(el("div", { class: "wb-actions" }, [noteField, noteToggle, tally, status, el("span", { class: "spacer" }), sendNow, sendButton]));
-  return { node, errors: ctx.errors, images: ctx.images };
+  return wbBuilt(node, ctx);
+}
+
+function wbBuilt(node, ctx) {
+  return { node, errors: ctx.errors, images: ctx.images, cleanups: ctx.cleanups, cards: ctx.cards, live: ctx.live };
 }
 
 function wbAnswerNode(answer) {
@@ -2750,33 +2186,38 @@ function wbAnswerNode(answer) {
     rows.length ? el("dl", { class: "wb-kv" }, [].concat(...rows.map((r) => [el("dt", null, r[0]), el("dd", null, r[1])]))) : null]);
 }
 
-// ---- The boards on this page: id -> { board, key, node, fold, errors }
+// ---- The boards on this page: id -> { board, key, node, fold, errors, images, cleanups, cards, live }
 const wbBoards = new Map();
 const wbErrorsSent = new Set();
-let wbUnseen = false;   // an open board arrived while the whiteboard was out of sight
-let wbOnScreen = false; // the whiteboard is in this page's viewport, for the viewing report
 // Held by reference, not looked up by id: the section moves into the whiteboard's own tab and back.
 const WB = { root: $("whiteboard"), empty: $("wbEmpty"), current: $("wbCurrent"), older: $("wbOlder"), olderCount: $("wbOlderCount"), olderList: $("wbOlderList") };
 let wbEdited = false;   // a board has input not yet sent, so a stale page waits to reload
 WB.root.addEventListener("input", () => { wbEdited = true; });
 WB.root.addEventListener("change", () => { wbEdited = true; });
 
+const wbObject = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : {};
 function wbNormalize(raw) {
   if (!raw || typeof raw !== "object" || raw.id == null) return null;
   return {
     id: String(raw.id), at: Number(raw.at) || Date.now(), program: String(raw.program || ""), note: String(raw.note || "").slice(0, 300),
     status: raw.status === "answered" ? "answered" : "open", answer: raw.answer && typeof raw.answer === "object" ? raw.answer : null,
-    images: raw.images && typeof raw.images === "object" ? raw.images : {},
+    failed: wbObject(raw.failed), access: wbObject(raw.access),
   };
 }
-// Rebuilds a board only when what it shows changed, so an update never wipes half-entered input.
+// Rebuilds a board only when what it shows changed, so an update never wipes half-entered input or
+// closes an open Access Element; a grant that changes alone only refreshes the cards.
 function wbUpsert(board) {
-  const key = [board.status, board.note, board.program, JSON.stringify(board.answer)].join("\u0001");
+  const key = [board.status, board.note, board.program, JSON.stringify(board.answer), JSON.stringify(board.failed)].join("\u0001");
   const known = wbBoards.get(board.id);
-  if (known && known.key === key) { known.board = board; return false; }
+  if (known && known.key === key) {
+    known.board = board;
+    known.live.board = board;
+    for (const refresh of known.cards) refresh();
+    return false;
+  }
   const built = wbBoardNode(board); // acquires its images before the old node releases them, so shared ones stay loaded
-  if (known) { known.node.remove(); wbReleaseImages(known); }
-  const entry = { board, key, node: built.node, fold: known ? known.fold : null, errors: built.errors, images: built.images };
+  if (known) { known.node.remove(); wbRelease(known); }
+  const entry = Object.assign({ board, key, fold: known ? known.fold : null }, built);
   wbBoards.set(board.id, entry);
   wbReportErrors(entry);
   return !known;
@@ -2786,37 +2227,30 @@ function wbReportErrors(entry) {
   if (!entry.errors.length || b.status !== "open" || wbErrorsSent.has(b.id)) return;
   if (send({ type: "board_error", id: b.id, error: entry.errors.slice(0, 12).join("\n").slice(0, 2000) })) wbErrorsSent.add(b.id);
 }
-// In sight: the whiteboard's own tab is visible, or this page is visible on the Hands tab.
-const wbInSight = () => wbTabVisible() || (currentTab === "hands" && !document.hidden && !wbTabOpen());
 function wbOnBoard(raw) {
   const board = wbNormalize(raw);
   if (!board) return;
   const fresh = wbUpsert(board);
   if (board.status !== "open") wbEdited = false;
   wbLayout();
-  if (!fresh || board.status !== "open") return;
+  if (!fresh) return;
   log("whiteboard: " + (board.note || board.id));
-  if (wbInSight()) return;
-  wbUnseen = true;
-  renderBoardCount();
-  notifyHidden("The walker drew on the whiteboard", board.note);
+  wbFlash(wbBoards.get(board.id).node);
 }
-// After the feed snapshot: the server's boards replace this page's.
+// On connecting: the server's boards for this Display replace this page's.
 function wbOnBoards(list) {
   const boards = (Array.isArray(list) ? list : []).map(wbNormalize).filter(Boolean);
   const ids = new Set(boards.map((b) => b.id));
-  for (const id of [...wbBoards.keys()]) if (!ids.has(id)) { wbBoards.get(id).node.remove(); wbReleaseImages(wbBoards.get(id)); wbBoards.delete(id); }
+  for (const id of [...wbBoards.keys()]) if (!ids.has(id)) { wbBoards.get(id).node.remove(); wbRelease(wbBoards.get(id)); wbBoards.delete(id); }
   for (const b of boards) {
-    if (wbUpsert(b) && b.status === "open" && !wbInSight()) wbUnseen = true;
-    else wbReportErrors(wbBoards.get(b.id)); // a report that could not go out before the socket dropped
+    if (!wbUpsert(b)) wbReportErrors(wbBoards.get(b.id)); // a report that could not go out before the socket dropped
   }
-  renderBoardCount();
   wbLayout();
 }
 // The newest board on top; older ones, newest first, each folded beneath it.
 function wbLayout() {
   const entries = [...wbBoards.values()].sort((a, b) => a.board.at - b.board.at);
-  while (entries.length > WB_KEEP) { const old = entries.shift(); old.node.remove(); wbReleaseImages(old); wbBoards.delete(old.board.id); }
+  while (entries.length > WB_KEEP) { const old = entries.shift(); old.node.remove(); wbRelease(old); wbBoards.delete(old.board.id); }
   WB.empty.hidden = entries.length > 0;
   const latest = entries.pop();
   WB.current.replaceChildren(...(latest ? [latest.node] : []));
@@ -2829,74 +2263,56 @@ function wbLayout() {
   WB.olderCount.textContent = String(older.length);
   WB.olderList.replaceChildren(...older);
 }
-// Pairing ends or the page goes away: every board's images are released, so every blob URL is revoked.
+// A new board flashes once, so a glance across the room catches the change.
+function wbFlash(node) {
+  if (!node) return; // the reduced-motion rule turns the animation off
+  node.classList.remove("flash");
+  void node.offsetWidth; // restart the animation
+  node.classList.add("flash");
+}
+// Pairing ends or the page goes away: every board's files are released, so every blob URL is revoked.
 function wbClear() {
-  for (const entry of wbBoards.values()) wbReleaseImages(entry);
+  for (const entry of wbBoards.values()) wbRelease(entry);
   wbBoards.clear();
   wbErrorsSent.clear();
-  wbImageFailures.clear();
-  wbUnseen = false;
-  renderBoardCount();
+  wbShownFailures.clear();
   wbLayout();
   wbCloseTab();
 }
-function renderBoardCount() { $("boardCount").hidden = !wbUnseen; }
-function wbSeen() {
-  if (!wbUnseen || !wbInSight()) return;
-  wbUnseen = false;
-  renderBoardCount();
-}
-// Flashes the newest board and brings the whiteboard into view, here or in its own tab.
-function wbReveal() {
-  const board = WB.current.firstElementChild;
-  if (board) {
-    board.classList.remove("flash");
-    void board.offsetWidth; // restart the animation
-    board.classList.add("flash");
-  }
-  if (wbTabOpen()) { wbTab.focus(); return; }
-  showTab("hands");
-  WB.root.scrollIntoView({ block: "start", behavior: REDUCED_MOTION.matches ? "auto" : "smooth" });
-}
-if (window.IntersectionObserver) {
-  new IntersectionObserver((entries) => {
-    const e = entries[entries.length - 1];
-    wbOnScreen = e.isIntersecting && (e.intersectionRatio >= 0.25 || e.intersectionRect.height >= innerHeight * 0.4);
-    reportViewing();
-  }, { threshold: [0, 0.25, 0.5, 1] }).observe(WB.root);
-}
+// Grants expire on the clock, not by message: re-read every card.
+setInterval(() => { for (const entry of wbBoards.values()) for (const refresh of entry.cards) refresh(); }, 5000);
+
 
 // ---- The whiteboard in its own tab: a blank tab this page fills and keeps driving, so the one paired
 // socket stays here and the server sees nothing new. The section's nodes move there with their listeners;
-// closing that tab (or Bring it back) moves them home to Hands, and leaving this page closes it.
+// closing that tab (or Bring it back) moves them home, and leaving this page closes it.
 let wbTab = null;
 let wbTabTimer = null;
 const wbTabOpen = () => !!wbTab && !wbTab.closed;
-const wbTabVisible = () => wbTabOpen() && wbTab.document.visibilityState === "visible";
 // Must run inside the click: browsers open new tabs only from one.
 function wbOpenTab() {
   if (wbTabOpen()) { wbTab.focus(); return; }
   const tab = window.open("", "_blank");
-  if (!tab) { $("handsNote").textContent = "The browser blocked the new tab. Allow pop-ups for this site and try again."; return; }
+  if (!tab) { $("barNote").textContent = "The browser blocked the new tab. Allow pop-ups for this site and try again."; return; }
   const doc = tab.document;
   doc.open();
   doc.write("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Dogwalk: Whiteboard</title></head><body></body></html>");
   doc.close();
   doc.head.append(document.querySelector("style").cloneNode(true));
   doc.body.append(el("div", { class: "page" }, [
-    el("header", { class: "top" }, [el("span", { class: "mark" }, [el("b", null, "dog"), "walk.tools"]), el("span", { class: "crumb" }, "Whiteboard")]),
-    el("p", { class: "small muted" }, "Drawn by the walker on your call. This tab follows your Paired Browser tab, so keep that one open; answer here or aloud."),
+    el("div", { class: "display-bar" }, el("div", { class: "display-id" }, [
+      el("h1", { class: "display-name", "data-display-name": true }),
+      el("div", { class: "small muted" }, "This tab follows your Paired Browser tab, so keep that one open; answer here or aloud."),
+    ])),
     WB.root,
   ]));
   wbTab = tab;
   $("wbAway").hidden = false;
-  $("handsNote").textContent = "";
+  $("barNote").textContent = "";
+  renderDisplay();
   tab.addEventListener("pagehide", wbTabClosed);
-  doc.addEventListener("visibilitychange", () => { wbSeen(); reportViewing(true); });
   clearInterval(wbTabTimer);
   wbTabTimer = setInterval(() => { if (!wbTabOpen()) wbTabClosed(); }, 1000);
-  wbSeen();
-  reportViewing(true);
 }
 function wbTabClosed() {
   if (!wbTab) return;
@@ -2904,144 +2320,17 @@ function wbTabClosed() {
   clearInterval(wbTabTimer);
   $("wbHome").append(WB.root);
   $("wbAway").hidden = true;
-  reportViewing(true);
 }
 function wbCloseTab() {
   const tab = wbTab;
   wbTabClosed();
   if (tab && !tab.closed) tab.close();
 }
-$("handsWhiteboard").addEventListener("click", wbOpenTab);
+$("wbPopOut").addEventListener("click", wbOpenTab);
 $("wbBack").addEventListener("click", wbCloseTab);
 addEventListener("pagehide", wbCloseTab);
-addEventListener("pagehide", (event) => { if (!event.persisted) for (const entry of wbBoards.values()) wbReleaseImages(entry); });
+addEventListener("pagehide", (event) => { if (!event.persisted) for (const entry of wbBoards.values()) wbRelease(entry); });
 // ==== WHITEBOARD END ====
-
-// ---- The walker shows the user something: {"type":"show","uri":"...","note":"..."}.
-// dogwalk:file/<path>, dogwalk:dir/<path>, dogwalk:session/<Alias>, dogwalk:timeline, dogwalk:whiteboard and dogwalk:memory navigate
-// this page at once, with a toast. dogwalk:terminal, dogwalk:desktop and http(s) URLs need a new tab,
-// which a browser opens only from a click, so they raise a banner with a button instead.
-const BANNER_MS = 120000;
-let bannerAction = null;
-let bannerTimer = null;
-let toastTimer = null;
-
-function onShow(m) {
-  const uri = String(m.uri || "");
-  const note = String(m.note || "").slice(0, 300);
-  const path = /^dogwalk:(file|dir)\/(.*)$/.exec(uri);
-  if (path) {
-    // Paths are absolute under the sandbox home; anything else is ignored.
-    const full = resolvePath("", path[2]);
-    if (path[2].charAt(0) !== "/" || (full !== HOME && full.indexOf(HOME + "/") !== 0)) {
-      console.warn("show: ignoring a path outside " + HOME + ": " + uri);
-      return;
-    }
-    if (path[1] === "file") openFile(full);
-    else { showTab("files"); listDir(full); }
-    return walkerShowed("The walker opened " + (path[1] === "dir" ? "the folder " : "") + basename(full), note);
-  }
-  const session = /^dogwalk:session\/(.+)$/.exec(uri);
-  if (session) {
-    const alias = session[1];
-    showLive("sessions");
-    const card = [...document.querySelectorAll(".card[data-alias]")].find((node) => node.dataset.alias === alias);
-    if (card) {
-      const group = card.closest("details");
-      if (group && !group.open) { group.open = true; closedOpen = true; }
-      card.classList.remove("flash");
-      void card.offsetWidth; // restart the animation
-      card.classList.add("flash");
-      card.scrollIntoView({ block: "center", behavior: REDUCED_MOTION.matches ? "auto" : "smooth" });
-    }
-    return walkerShowed("The walker pointed you to " + alias, note);
-  }
-  if (uri === "dogwalk:timeline") {
-    showLive("timeline");
-    feedStick = true;
-    scrollFeedToEnd();
-    const last = $("feedList").lastElementChild;
-    if (last) last.scrollIntoView({ block: "nearest", behavior: REDUCED_MOTION.matches ? "auto" : "smooth" });
-    return walkerShowed("The walker opened the call timeline", note);
-  }
-  if (uri === "dogwalk:whiteboard") {
-    wbReveal();
-    return walkerShowed(wbBoards.size ? "The walker pointed you to the whiteboard" : "The walker opened the whiteboard, but nothing is drawn on it yet", note);
-  }
-  if (uri === "dogwalk:memory") {
-    showLive("sessions");
-    const section = $("memory");
-    section.classList.remove("flash");
-    void section.offsetWidth; // restart the animation
-    section.classList.add("flash");
-    section.scrollIntoView({ block: "start", behavior: REDUCED_MOTION.matches ? "auto" : "smooth" });
-    return walkerShowed("The walker showed you what it keeps in mind", note);
-  }
-  if (uri === "dogwalk:terminal" || uri === "dogwalk:desktop") {
-    const kind = uri.slice("dogwalk:".length);
-    return showBanner("The walker wants to show you the " + kind, "", note, "Open " + kind, () => launch(kind));
-  }
-  if (/^https?:/i.test(uri)) {
-    let url = null;
-    try { url = new URL(uri); } catch (error) { /* ignored below */ }
-    if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) {
-      console.warn("show: ignoring a malformed web address: " + uri);
-      return;
-    }
-    const href = url.href;
-    return showBanner("The walker wants to show you a web page", url.hostname, note, "Open page",
-      () => window.open(href, "_blank", "noopener,noreferrer"));
-  }
-  console.warn("show: ignoring an unknown URI: " + uri);
-}
-
-// ---- Memory: {"type":"memory","memory":{"ts":...,"text":"..."}|null}, the Session Orchestrator's own
-// note, sent after the feed snapshot and whenever it is rewritten. Shown as text, never as markup.
-function renderMemory(memory) {
-  const text = memory && typeof memory.text === "string" ? memory.text : "";
-  $("memoryEmpty").hidden = Boolean(text);
-  $("memoryText").hidden = !text;
-  $("memoryText").textContent = text;
-  $("memoryWhen").textContent = text && memory.ts ? "Last rewritten " + new Date(memory.ts).toLocaleString() : "";
-}
-
-// A navigation already happened: say so briefly, and notify if the tab is hidden.
-function walkerShowed(text, note) {
-  log("show: " + text + (note ? " (" + note + ")" : ""));
-  const toast = $("toast");
-  toast.replaceChildren(...[text, note ? el("span", { class: "note" }, note) : null].filter(Boolean));
-  toast.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toast.hidden = true; }, note ? 8000 : 5000);
-  notifyHidden(text, note);
-}
-function notifyHidden(title, body) {
-  if (alertsOn && document.hidden) raiseAlert(title, body || "Open the Paired Browser to see it.");
-}
-
-function showBanner(text, host, note, button, action) {
-  log("show: " + text + (host ? " " + host : "") + (note ? " (" + note + ")" : ""));
-  $("bannerText").replaceChildren(...[text, host ? el("span", { class: "host" }, host) : null].filter(Boolean));
-  $("bannerNote").textContent = note;
-  $("bannerNote").hidden = !note;
-  $("bannerOpen").textContent = button;
-  bannerAction = action;
-  $("showBanner").hidden = false;
-  clearTimeout(bannerTimer);
-  bannerTimer = setTimeout(hideBanner, BANNER_MS);
-  notifyHidden(text, [host, note].filter(Boolean).join(": "));
-}
-function hideBanner() {
-  clearTimeout(bannerTimer);
-  bannerAction = null;
-  $("showBanner").hidden = true;
-}
-// Runs inside the click, so the new tab is allowed.
-function openBanner() {
-  const action = bannerAction;
-  hideBanner();
-  if (action) action();
-}
 
 // ---- Start
 $("pairForm").addEventListener("submit", (event) => {
@@ -3049,48 +2338,12 @@ $("pairForm").addEventListener("submit", (event) => {
   claim($("pairCode").value);
 });
 $("unpair").addEventListener("click", unpair);
-$("closeViewer").addEventListener("click", closeViewer);
-$("copyPath").addEventListener("click", (event) => copyText(viewer.path, event.currentTarget));
-$("downloadFile").addEventListener("click", () => downloadFile(viewer.path));
-for (const tab of TABS) $("tab-" + tab).addEventListener("click", () => showTab(tab));
-$("seg-sessions").addEventListener("click", () => showLiveView("sessions"));
-$("seg-timeline").addEventListener("click", () => showLiveView("timeline"));
-$("bannerDismiss").addEventListener("click", hideBanner);
-$("bannerOpen").addEventListener("click", openBanner);
-$("tabs").addEventListener("keydown", (event) => {
-  // Arrow keys move between tabs, as in the ARIA tabs pattern.
-  const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
-  if (!step) return;
-  const next = TABS[(TABS.indexOf(currentTab) + step + TABS.length) % TABS.length];
-  showTab(next);
-  $("tab-" + next).focus();
-});
-$("feedList").addEventListener("scroll", () => {
-  const list = $("feedList");
-  feedStick = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
-  if (feedStick) $("feedPill").hidden = true;
-}, { passive: true });
-$("feedPill").addEventListener("click", () => { feedStick = true; scrollFeedToEnd(); });
 $("wakeToggle").checked = wakeWanted;
 $("wakeToggle").disabled = !("wakeLock" in navigator);
 if (!("wakeLock" in navigator)) $("wakeToggle").parentNode.title = "This browser cannot keep the screen on.";
 $("wakeToggle").addEventListener("change", toggleWake);
-$("alertToggle").checked = alertsOn && (!("Notification" in window) || Notification.permission !== "denied");
-$("alertToggle").addEventListener("change", toggleAlerts);
-WIDE.addEventListener("change", () => showTab(currentTab));
-document.addEventListener("keydown", (event) => {
-  if (event.altKey || event.ctrlKey || event.metaKey) return;
-  const target = event.target;
-  if (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable)) return;
-  if (event.key === "Escape" && !$("showBanner").hidden) { hideBanner(); return; }
-  if (event.key === "Escape" && !$("viewer").hidden) { closeViewer(); return; }
-  const index = "123".indexOf(event.key);
-  if (index >= 0 && event.key.length === 1 && !$("pairedScreen").hidden) showTab(TABS[index]);
-});
 document.addEventListener("visibilitychange", () => {
-  reportViewing(true); // "hidden" on the way out, the current view on the way back
   if (document.visibilityState !== "visible") return;
-  wbSeen();
   acquireWake();
   // Backgrounded tabs lose their sockets: reconnect at once on return instead of waiting out the backoff.
   if (!socket && sessionStorage.getItem(TOKEN_KEY)) { backoff = 1000; connect(); }
@@ -3098,14 +2351,11 @@ document.addEventListener("visibilitychange", () => {
 // Relative timestamps and the expiry countdown tick together.
 function tick() {
   for (const node of document.querySelectorAll("time[data-at]")) node.textContent = ago(Number(node.dataset.at));
+  if (wbTabOpen()) for (const node of wbTab.document.querySelectorAll("time[data-at]")) node.textContent = ago(Number(node.dataset.at));
   renderPairing();
 }
 setInterval(tick, 15000);
-renderCrumbs(HOME);
-renderFilters();
-applyFilters();
-showLiveView(liveView);
-showTab(currentTab);
+renderDisplay();
 acquireWake();
 if (sessionStorage.getItem(TOKEN_KEY)) connect();
 else { showScreen("pair"); setStatus("Enter the pairing code spoken in the call"); }

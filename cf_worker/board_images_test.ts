@@ -1,6 +1,6 @@
 // node --experimental-strip-types cf_worker/board_images_test.ts
 import assert from "node:assert/strict";
-import { boardImagePaths, checkRasterSize } from "./src/board_images.ts";
+import { ACCESS_COMPONENTS, boardElements, boardImagePaths, checkRasterSize } from "./src/board_images.ts";
 
 function png(width: number, height: number): Uint8Array {
   const bytes = new Uint8Array(24), view = new DataView(bytes.buffer);
@@ -56,4 +56,34 @@ assert.deepEqual(boardImagePaths('root = Stack([Image("a.png", "Image(\\\"ghost.
 assert.deepEqual(boardImagePaths('root = Stack([Image(path, "x")])\npath = alias\nalias = "chart.png"'), ["chart.png"]);
 assert.deepEqual(boardImagePaths('root = Stack([Image(path, "x")])\npath = alias\nalias = path'), []);
 assert.deepEqual(boardImagePaths('root = Stack([Image(path, "x")])\npath = "old.png"\npath = "new.png"'), ["new.png"]);
-console.log("board image header limits and path capture: passed");
+
+// Board elements: files a board shows and Access Elements, each with its target as written.
+const elements = boardElements(`
+root = Stack([shot, Document("REPORT.md", "The report"), app, Preview(3000.0), Terminal(), Terminal(name), Desktop("The desktop"),
+  SshAccess("Copy this"), Download('out/report.zip', "Get it"), Text("Preview(9) and Terminal('ghost')"), Preview(unbound)])
+// Preview(4444)
+shot = Image("shot.png", "x")
+app = Preview(port, "The dev server")
+port = 5173
+name = "build"
+`);
+assert.deepEqual(elements, [
+  { component: "Document", target: "REPORT.md" },
+  { component: "Preview", target: "3000" },
+  { component: "Terminal", target: "" },
+  { component: "Terminal", target: "build" },
+  { component: "Desktop", target: "" },
+  { component: "SshAccess", target: "" },
+  { component: "Download", target: "out/report.zip" },
+  { component: "Image", target: "shot.png" },
+  { component: "Preview", target: "5173" },
+]);
+// The page derives the same grant keys from the same program.
+assert.deepEqual(
+  elements.filter((item) => item.component in ACCESS_COMPONENTS).map((item) => `${ACCESS_COMPONENTS[item.component]}:${item.target}`),
+  ["preview:3000", "terminal:", "terminal:build", "desktop:", "ssh:", "download:out/report.zip", "preview:5173"],
+);
+assert.deepEqual(boardElements("root = Stack([Preview(0080), Desktop(), SshAccess()])"),
+  [{ component: "Preview", target: "80" }, { component: "Desktop", target: "" }, { component: "SshAccess", target: "" }]);
+assert.deepEqual(boardImagePaths('root = Stack([Document("a.png"), Image("b.png"), Download("c.png")])'), ["b.png"]);
+console.log("board image header limits, path capture, and board elements: passed");

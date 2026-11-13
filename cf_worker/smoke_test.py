@@ -71,6 +71,8 @@ class DaytonaMock(BaseHTTPRequestHandler):
     # Paths of every DELETE, answered or not, and optional handlers: path -> status or None.
     deleted: list[str] = []
     delete_hooks: list = []
+    # Optional handlers for other POSTs: (path, payload) -> a JSON reply, or None to fall through.
+    post_hooks: list = []
 
     def sandbox(self, state: str = "started") -> dict:
         return {
@@ -176,6 +178,11 @@ class DaytonaMock(BaseHTTPRequestHandler):
             )
             self.reply({"result": result, "exitCode": 0})
             return
+        for hook in DaytonaMock.post_hooks:
+            answer = hook(self.path, payload)
+            if answer is not None:
+                self.reply(answer)
+                return
         self.send_error(404)
 
     def do_DELETE(self) -> None:
