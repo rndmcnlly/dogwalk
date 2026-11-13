@@ -134,7 +134,7 @@ details summary{cursor:pointer}
 
 /* Sessions */
 .card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin:0 0 12px}
-.card.turn-in_progress,.card.turn-queued{border-left-color:var(--info)}
+.card.turn-in_progress{border-left-color:var(--info)}
 .card.turn-failed{border-left-color:var(--bad)}
 .card.turn-stopped{border-left-color:var(--ok)}
 .card-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px}
@@ -979,7 +979,7 @@ const feedVisible = () => currentTab === "live" && (WIDE.matches || liveView ===
 // ---- Session status
 const openReports = new Set();
 let closedOpen = false;
-const TURN_LABELS = { idle: "idle", queued: "queued", in_progress: "in progress", stopped: "stopped", failed: "failed" };
+const TURN_LABELS = { idle: "idle", in_progress: "in progress", stopped: "stopped", failed: "failed" };
 
 function renderStatus(m) {
   lastStatus = m;
@@ -1200,7 +1200,7 @@ const FILTER_KEY = "dogwalk.pair.feedHidden";
 const ROLES = ["caller", "voice", "agent", "orchestrator", "system"];
 const ROLE_LABELS = { caller: "Caller", voice: "Walker", agent: "Agents", orchestrator: "Walker thinking", system: "System" };
 const LANE_LABELS = {
-  thinking: "context for the voice", say: "asked the voice to say", instructions: "instructions to the voice", prompt: "brief",
+  thinking: "context for the voice", say: "asked the voice to say", instructions: "instructions to the voice", prompt: "brief", steer: "steering",
   tool: "tool", report: "report", event: "event", keypad: "keypad",
 };
 const feedEntries = new Map(); // id -> { entry, node }, oldest first
@@ -1285,7 +1285,7 @@ function feedNode(e) {
   const lane = String(e.lane || "");
   const text = String(e.text || "");
   let who = role === "agent" ? String(e.who || "Agent") : ROLE_LABELS[role];
-  if (role === "orchestrator" && lane === "prompt") who = "Walker to " + (e.who || "an Agent");
+  if (role === "orchestrator" && (lane === "prompt" || lane === "steer")) who = "Walker to " + (e.who || "an Agent");
   const attrs = { class: "fe f-" + role + (lane ? " lane-" + lane : ""), "data-id": e.id };
   if (role === "agent") attrs.style = "--h:" + aliasHue(e.who);
   const label = el("span", { class: "fe-who" }, who);

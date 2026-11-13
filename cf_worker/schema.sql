@@ -148,7 +148,7 @@ CREATE TABLE IF NOT EXISTS call_activity (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   call_sid TEXT NOT NULL,
   ts INTEGER NOT NULL,
-  source TEXT NOT NULL CHECK (source IN ('voice', 'access', 'hosting', 'menu', 'acp')),
+  source TEXT NOT NULL CHECK (source IN ('voice', 'access', 'hosting', 'menu', 'agent')),
   direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound', 'internal')),
   event TEXT NOT NULL,
   detail TEXT

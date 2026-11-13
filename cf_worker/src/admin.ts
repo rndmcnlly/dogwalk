@@ -53,7 +53,7 @@ th{color:var(--fnt);text-transform:uppercase;font-size:9px;letter-spacing:.06em}
 .tr{display:grid;grid-template-columns:64px 56px 1fr;gap:8px;padding:5px 12px;border-bottom:1px solid #20231d;font-size:10px;align-items:start}
 .tr time{color:var(--mut)}
 .chan{padding:0 4px;border:1px solid currentColor;text-align:center;text-transform:uppercase;font-size:8px}
-.chan.voice{color:var(--blu)}.chan.access{color:var(--amb)}.chan.hosting{color:var(--grn)}.chan.menu{color:var(--vio)}.chan.acp{color:var(--pnk)}
+.chan.voice{color:var(--blu)}.chan.access{color:var(--amb)}.chan.hosting{color:var(--grn)}.chan.menu{color:var(--vio)}.chan.agent{color:var(--pnk)}
 .tr .dt{display:block;color:var(--mut);margin-top:3px;white-space:pre-wrap;word-break:break-word}
 .standby{padding:34px 16px;color:var(--fnt);text-align:center;text-transform:uppercase;letter-spacing:.08em;font-size:11px}
 .errorbox{padding:20px 16px;color:var(--red)}
@@ -113,7 +113,7 @@ function renderTree(){
   });
 
   // ROOT: Agent Connections / Managed Sessions (not wired yet)
-  t.append(node(0,{root:true,icon:"\\u21c4",label:"Agent Connections",tag:"acp / session mgmt",notWired:true}));
+  t.append(node(0,{root:true,icon:"\\u21c4",label:"Agent Connections",tag:"agent / session mgmt",notWired:true}));
   t.append(el("div","managed sessions & prompt turns: telemetry not wired","standby"));
 
   // ROOT: Sandbox Assignments (wired via registrations)
@@ -161,7 +161,7 @@ function renderCall(d,c){
   head(d,["Voice Calls",c.phone_number],c.phone_number,"blu",
     "CallSid "+c.call_sid+" \\u00b7 "+elapsed(c.started_at,DATA.generated_at)+" \\u00b7 status "+(c.status||"connected"));
   const sec=el("div",undefined,"sec");sec.append(el("h4","Correlated call activity"));
-  const th=el("div",undefined,"tailhead");th.append(el("span","sources: voice / access / hosting / menu / acp"),el("span","tailing \\u25bc","grn"));
+  const th=el("div",undefined,"tailhead");th.append(el("span","sources: voice / access / hosting / menu / agent"),el("span","tailing \\u25bc","grn"));
   d.append(sec);const wrap=el("div",undefined,"tail");wrap.append(th);
   (c.activity||[]).slice().reverse().forEach((a)=>{
     const row=el("div",undefined,"tr");row.append(el("time",clock(a.ts)),el("span",a.source,"chan "+a.source));

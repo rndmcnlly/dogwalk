@@ -138,7 +138,7 @@ function kv(key: string, value: unknown): KeyValue | null {
 
 // Journal key -> exported attribute key. Anything not listed is dropped. Keys whose meaning
 // depends on the event (`status`, `name`, `method`, `tool_call_id`) are mapped per event in
-// `attributes()`: ACP rows carry the Agent's tool call IDs, Orchestrator `tool.*` rows the model's.
+// `attributes()`: Agent rows carry the Agent's tool call IDs, Orchestrator `tool.*` rows the model's.
 const ALLOW: Record<string, string> = {
   seq: "dogwalk.observation.sequence",
   clock_id: "dogwalk.clock.id",
@@ -154,16 +154,18 @@ const ALLOW: Record<string, string> = {
   error_type: "error.type",
   tool_call_id: "dogwalk.tool_call.id",
   tool_call_ids: "dogwalk.tool_call.ids",
-  rpc_id: "dogwalk.acp.rpc.id",
+  agent_request_id: "dogwalk.agent.request.id",
   agent_connection_id: "dogwalk.agent_connection.id",
-  session_id: "dogwalk.acp.session.id",
-  acp_session_id: "dogwalk.acp.session.id",
-  update: "dogwalk.acp.session_update",
+  session_id: "dogwalk.agent.session.id",
+  agent_session_id: "dogwalk.agent.session.id",
+  agent_event: "dogwalk.agent.event",
+  route: "dogwalk.agent.route",
+  http_status: "http.response.status_code",
   tool_status: "dogwalk.agent_tool.status",
   tool_kind: "dogwalk.agent_tool.kind",
-  stop_reason: "dogwalk.acp.stop_reason",
   outcome: "dogwalk.outcome",
-  error: "dogwalk.acp.error_response",
+  interrupt_reason: "dogwalk.agent.interrupt_reason",
+  error: "dogwalk.agent.error_response",
   queue_ms: "dogwalk.queue_ms",
   ms: "dogwalk.observed_interval_ms",
   started_ms: "dogwalk.lifecycle.started_ms",
@@ -229,7 +231,7 @@ function attributes(name: string, detail: Detail): { attrs: KeyValue[]; dropped:
     }
     if (key === "name" && name.startsWith("tool.")) { push("gen_ai.tool.name", value); continue; }
     if (key === "method") {
-      push(name.startsWith("provider.twilio.") ? "dogwalk.twilio.webhook.method" : "dogwalk.acp.method", value);
+      push(name.startsWith("provider.twilio.") ? "dogwalk.twilio.webhook.method" : "http.request.method", value);
       continue;
     }
     const mapped = ALLOW[key];
@@ -289,7 +291,7 @@ const spanId = (...parts: unknown[]) => digestHex(["span", ...parts], 8);
 
 // ---- Projection --------------------------------------------------------------------
 
-type Kind = "model" | "tool" | "turn" | "rpc";
+type Kind = "model" | "tool" | "turn" | "request";
 /** The interval a row belongs to, read from that row alone. */
 type Role = { kind: Kind; id: unknown; key: string; begin: boolean; finish: boolean };
 
@@ -323,21 +325,21 @@ function derivedRole(o: Observation): Role | null {
     return { kind: "tool", id: d.tool_call_id, key: scopeKey(o, "tool", d.tool_call_id),
       begin: o.name === "tool.started", finish: o.name === "tool.completed" || o.name === "tool.failed" };
   }
-  if (o.name.startsWith("acp.turn.") && d.acp_session_id && finite(d.started_ms)) {
+  if (o.name.startsWith("agent.turn.") && d.agent_session_id && finite(d.started_ms)) {
     // A Prompt Turn is identified by its session and recorded start, which every lifecycle
     // row repeats. This survives the end being recorded under a different Voice Call.
-    const id = [d.acp_session_id, d.started_ms];
+    const id = [d.agent_session_id, d.started_ms];
     return { kind: "turn", id, key: JSON.stringify(["turn", id]),
-      begin: o.name === "acp.turn.started", finish: o.name === "acp.turn.stopped" || o.name === "acp.turn.failed" };
+      begin: o.name === "agent.turn.started" || o.name === "agent.turn.observed",
+      finish: o.name === "agent.turn.stopped" || o.name === "agent.turn.failed" };
   }
-  if (d.rpc_id !== undefined && d.rpc_id !== null && typeof d.agent_connection_id === "string") {
-    // JSON-RPC IDs repeat across reconnects, so roundtrips require Agent Connection identity;
-    // older rows lack it and stay unlinked logs. Only our requests and the Agent's responses
-    // count: Agent-initiated requests and our replies to them share the ID space but not the span.
-    const begin = o.name === "acp.sent" && typeof d.method === "string";
-    const finish = o.name === "acp.received" && d.method === undefined;
-    if (begin || finish) return { kind: "rpc", id: d.rpc_id, begin, finish,
-      key: JSON.stringify([d.agent_connection_id, "rpc", typeof d.rpc_id, d.rpc_id]) };
+  if (d.agent_request_id !== undefined && d.agent_request_id !== null && typeof d.clock_id === "string") {
+    // Agent request IDs restart with each Durable Object instance, so a roundtrip is matched
+    // within the instance's clock identity. Agent events carry no request ID and stay logs.
+    const begin = o.name === "agent.sent" && typeof d.method === "string";
+    const finish = o.name === "agent.received";
+    if (begin || finish) return { kind: "request", id: d.agent_request_id, begin, finish,
+      key: JSON.stringify([d.clock_id, "request", d.agent_request_id]) };
   }
   return null;
 }
@@ -514,13 +516,13 @@ export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<
       ? [{ traceId: callTrace, spanId: callSpanId, attributes: [kv("dogwalk.link.reason", "observed_during_call")!] }] : [];
     if (r.kind === "turn") {
       // Prompt Turns are their own work traces, linked to the call that recorded the start.
-      const stop = typeof end.detail.stop_reason === "string" ? end.detail.stop_reason : null;
+      const outcome = typeof end.detail.outcome === "string" ? end.detail.outcome : null;
       const link = context ? { traceId: start.detail.link_trace_id as string, spanId: start.detail.link_span_id as string }
         : callSpanExported ? { traceId: callTrace, spanId: callSpanId } : null;
-      spans.push({ ...base, name: "acp.prompt_turn", kind: SPAN_KIND.client,
-        status: end.name === "acp.turn.failed" ? { code: STATUS.error }
-          : stop === "end_turn" ? { code: STATUS.ok } : { code: STATUS.unset },
-        attributes: [...attrs, kv("dogwalk.acp.session.id", (r.id as unknown[])[0])!, ...(stop ? [kv("dogwalk.acp.stop_reason", stop)!] : [])],
+      spans.push({ ...base, name: "agent.prompt_turn", kind: SPAN_KIND.client,
+        status: end.name === "agent.turn.failed" ? { code: STATUS.error }
+          : outcome === "completed" ? { code: STATUS.ok } : { code: STATUS.unset },
+        attributes: [...attrs, kv("dogwalk.agent.session.id", (r.id as unknown[])[0])!],
         links: link && isTraceContext(link) ? [{ ...link,
           attributes: [kv("dogwalk.link.reason", "turn_started_during_call")!] }] : [] });
     } else if (r.kind === "model") {
@@ -554,10 +556,11 @@ export async function projectSpans(call: CallRow, rows: ActivityRow[]): Promise<
           kv("dogwalk.outcome", outcome)!, ...(failed ? [kv("error.type", outcome)!] : [])],
         links: [...callLink, ...(model ? [{ ...model, attributes: [kv("dogwalk.link.reason", "requested_by_model_response")!] }] : [])] });
     } else {
-      spans.push({ ...base, parentSpanId, links: callLink, name: `acp ${String(start.detail.method)}`, kind: SPAN_KIND.client,
-        status: { code: end.detail.error === true ? STATUS.error : STATUS.unset },
-        attributes: [...attrs, kv("dogwalk.acp.rpc.id", r.id)!, kv("dogwalk.acp.method", start.detail.method)!,
-          kv("dogwalk.agent_connection.id", start.detail.agent_connection_id)!] });
+      spans.push({ ...base, parentSpanId, links: callLink, name: `agent ${String(start.detail.method)} ${String(start.detail.route ?? "")}`.trim(),
+        kind: SPAN_KIND.client, status: { code: end.detail.error === true ? STATUS.error : STATUS.unset },
+        attributes: [...attrs, kv("dogwalk.agent.request.id", r.id)!, kv("http.request.method", start.detail.method)!,
+          ...(typeof start.detail.route === "string" ? [kv("dogwalk.agent.route", start.detail.route)!] : []),
+          ...(typeof start.detail.agent_connection_id === "string" ? [kv("dogwalk.agent_connection.id", start.detail.agent_connection_id)!] : [])] });
     }
   }
   return spans;

@@ -2,8 +2,8 @@
 //
 // OpenCode 2.2.5 `read` returns PNG, JPEG, GIF, WebP, and PDF files (up to
 // 20 MiB) as base64 data URIs in the tool result. On 2026-11-08 an 8.7 MB PDF
-// became an 11.7 MB event, over the 10 MiB SSE limit between `opencode acp` and
-// its server: the Prompt Turn failed and the session history kept the payload.
+// became an 11.7 MB event, over the 10 MiB SSE limit OpenCode's ACP adapter then
+// had between itself and its server: the Prompt Turn failed and the session history kept the payload.
 //
 // This plugin wraps the built-in `read` executor, so it decides before any
 // bytes are loaded or encoded. Text files and small images pass through

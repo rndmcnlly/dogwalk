@@ -1,8 +1,8 @@
 // The public landing page. Its hero is an animated scene that shows the Park conceit and the
 // deployed path at once: the User in a far-off phone booth (Twilio's phone network), the walker
 // speaking on a phone (GPT-Live), the walker's head (the Session Orchestrator on Cloudflare),
-// leashes (ACP), and dogs (Managed Sessions of OpenCode) loose in the park (the Daytona Sandbox).
-// The script loops one grounded call and the quiet between calls: tool chips are ACP tool
+// leashes (Agent Connections), and dogs (Managed Sessions of OpenCode) loose in the park (the Daytona Sandbox).
+// The script loops one grounded call and the quiet between calls: tool chips are Agent tool
 // kinds, the cloud shows real Orchestrator tool names, the gate offers OpenCode's own permission
 // options, a request that arrives between calls waits for the next Opening, following ends with
 // the call, and a closed session goes home with its history (DOMAIN.md).
@@ -232,7 +232,7 @@ const WALK_SVG = String.raw`
   <text class="lbl" x="246" y="322" text-anchor="end"><tspan class="b">Twilio</tspan><tspan class="r"> · phone network</tspan></text>
   <path class="leader" d="M398 302 L384 290"/>
   <text class="lbl" x="398" y="310"><tspan class="b">OpenAI GPT-Live</tspan><tspan class="r"> · the walker's voice</tspan></text>
-  <text class="lbl" x="512" y="388" text-anchor="middle"><tspan class="b">ACP</tspan><tspan class="r"> · leashes</tspan></text>
+  <text class="lbl" x="512" y="388" text-anchor="middle"><tspan class="b">Agent API</tspan><tspan class="r"> · leashes</tspan></text>
   <text class="lbl" x="16" y="428"><tspan class="b">Daytona</tspan><tspan class="r"> · the park, your sandbox</tspan></text>
   <text class="lbl" x="16" y="496"><tspan class="b">the path</tspan><tspan class="r"> · outside the sandbox</tspan></text>
   <text class="lbl" x="910" y="182" text-anchor="middle"><tspan class="b">the open web</tspan></text>
@@ -402,7 +402,7 @@ const WALK_SCRIPT = String.raw`
       }
     }, function(){ state.thinking = false; idle(); });
   }
-  // ACP tool calls rise off a dog; an unfollowed dog's are faint, out of earshot.
+  // Agent tool calls rise off a dog; an unfollowed dog's are faint, out of earshot.
   function chip(t0, dog, kind, arg){
     if (kind === "execute"){ state["squat-" + dog] = mod(t0 + .1); }
     if (kind === "execute") poop(t0 + .6, dog === "pepper" ? 594 : 808, dog === "pepper" ? 432 : 394, dog === "pepper" ? 59 : 40);
@@ -472,9 +472,9 @@ const WALK_SCRIPT = String.raw`
       b.setAttribute("opacity", 1 - ease(Math.max(0, p - .7) / .3));
     }, function(){ b.remove(); });
   }
-  // An ACP message riding a leash: down to the dog, or up from it to the walker's hand.
+  // An Agent message riding a leash: down to the dog, or up from it to the walker's hand.
   function pulse(t0, id, up){
-    var dot = el("circle", {r: 5.5, "class": "dot acp", opacity: 0}), path = $(id);
+    var dot = el("circle", {r: 5.5, "class": "dot msg", opacity: 0}), path = $(id);
     sprite(t0, .9, function(p){
       var len = path.getTotalLength();
       if (!len) return;
@@ -902,10 +902,10 @@ const WALK_TIPS: Record<string, [string, string]> = {
   voice: ["OpenAI GPT-Live · the walker's voice", "The voice you talk with. It listens, answers, and copes with interruptions, and passes questions about your projects to the walker's head."],
   head: ["Cloudflare · the walker's head", "The coordinator: it turns your requests into actions and keeps notes across calls. When you hang up, the dogs keep working, and keep using paid models."],
   walker: ["The walker", "Your go-between. It carries your instructions to the right dog and brings back what it hears. You choose; the dogs do the programming, and the walker reports it as theirs."],
-  leash: ["ACP · a leash", "One connection to one coding agent. It carries your instructions to the dog and brings back updates, results, and questions."],
+  leash: ["The Agent API · a leash", "One connection to one coding agent. It carries your instructions to the dog and brings back updates, results, and questions."],
   pepper: ["Pepper · a coding agent", "Ask to follow it and you hear short updates as it reads, edits, and runs things, until you hang up. Following changes what you hear, not what it does."],
   juniper: ["Juniper · a coding agent", "Working without spoken updates. When it needs your permission, the walker brings the question to you."],
-  gate: ["A permission request", "The walker reads you the agent's own choices, and you decide. Hanging up approves nothing; the request waits as long as the connection to the park holds."],
+  gate: ["A permission request", "The walker reads you the agent's own choices, and you decide. Hanging up approves nothing; the request waits with the agent until someone answers it, here or from another screen."],
   biscuit: ["Biscuit · a coding agent", "Waiting for its next task. Send it home and its conversation is kept; ask for it back and it carries on where it left off."],
   home: ["Home", "Where a closed session rests. Its history stays in the park, though its turn has ended, so you can pick it up later, even on another call."],
   park: ["Daytona · the park", "A separate computer in the cloud where the agents work and your projects stay between calls. Their thinking happens at a model provider, so prompts do leave the park."],
@@ -930,18 +930,18 @@ const WALK_TECH: Record<string, string> = {
   voice: `OpenAI GPT-Live, reached over secure SIP: the <em>Voice Frontend</em>. It has no session tools; questions about work become a <em>Handoff</em> by client delegation, and it speaks the answer in its own words. <a href="${DOC}DOMAIN.md">Domain language</a>`,
   head: `The <em>Session Orchestrator</em>: a Responses API tool loop in a <a href="https://developers.cloudflare.com/durable-objects/">Durable Object</a> keyed by your sandbox, calling neutral tools such as <code>follow_managed_session</code> and <code>resolve_permission</code> and rewriting its own <em>Memory</em> to fit its context. Between calls it records incoming events and acts on none.`,
   walker: `The <em>Voice Agent</em>: one character performed by the Voice Frontend and the Session Orchestrator. What happened is read from recorded Managed Session and Prompt Turn state, not from the model's recollection.`,
-  leash: `<a href="https://agentclientprotocol.com/">ACP</a> JSON-RPC over a WebSocket, through Daytona's preview proxy, to a narrow gateway running <code>opencode acp</code> over stdio. Down the leash: <code>session/prompt</code> and permission answers. Up: <code>session/update</code> and <code>session/request_permission</code>. <a href="${DOC}SANDBOX_ACP_GATEWAY.md">ACP Gateway</a>`,
-  pepper: `A <em>Managed Session</em> (Alias "Pepper") wrapping one ACP Session in <a href="https://opencode.ai/">OpenCode</a>. As the <em>Followed Session</em>, its tool calls, plan steps, and remarks become spoken <em>Progress Beats</em>, built without a model: a beat never contains command text or tool names, and file names are dropped before it is spoken. The agents are asked to narrate themselves in one plain sentence per step; that is where Pepper's quotes come from.`,
+  leash: `<a href="https://opencode.ai/docs/api/">OpenCode's native API</a>, through Daytona's preview proxy, to a narrow gateway that keeps the sandbox's shared OpenCode service running. Down the leash: plain HTTP requests (prompts, steering, permission answers). Up: the service's live events over a WebSocket. Agent work lives in the service, so it outlives the leash. <a href="${DOC}SANDBOX_AGENT_GATEWAY.md">Agent Gateway</a>`,
+  pepper: `A <em>Managed Session</em> (Alias "Pepper") wrapping one Agent Session in <a href="https://opencode.ai/">OpenCode</a>. As the <em>Followed Session</em>, its tool calls, plan steps, and remarks become spoken <em>Progress Beats</em>, built without a model: a beat never contains command text or tool names, and file names are dropped before it is spoken. The agents are asked to narrate themselves in one plain sentence per step; that is where Pepper's quotes come from.`,
   juniper: `An unfollowed session keeps working. During a call, a <em>Bid</em> (a permission request, a turn ending, a streak of failed tool calls) reaches the Voice Agent, which mentions it and offers to follow, but never switches on its own.`,
-  gate: `<code>session/request_permission</code>. Dogwalk presents exactly the options the agent supplied and returns the one chosen. Rejecting an option is not cancelling the turn. Pending requests are held in memory, not stored: if the connection to the park drops, the errand fails and the walker tells you next call.`,
-  biscuit: `<em>Ready</em>: no Prompt Turn in progress. <code>close_managed_session</code> releases the ACP Session without deleting its history; <code>load_persisted_session</code> restores that history as a new Managed Session under a fresh Alias, which may be its old one.`,
-  home: `Two stores, two lifecycles: OpenCode keeps ACP Session history in the durable sandbox filesystem, while the Durable Object keeps the Managed Session record. Closing is not deleting.`,
-  park: `A durable <a href="https://www.daytona.io/">Daytona</a> Sandbox from an immutable snapshot, running the ACP Gateway and OpenCode. Dogwalk's policy: it auto-stops when idle and archives after long inactivity, with no automatic deletion. Model keys arrive as Daytona Secret placeholders.`,
-  patch: `A <em>Workspace</em>: a directory in the sandbox where an ACP Session is rooted (its working directory). Sessions sharing one can edit the same files, so they can collide.`,
+  gate: `<code>permission.asked</code>. Dogwalk presents the agent's own decisions (allow once, always allow what it would save, reject) and returns the one chosen. Pending requests live with the agent, not with Dogwalk: after a dropped connection they are read back, and one answered from another client (an OpenCode terminal, say) is dropped from what the walker presents.`,
+  biscuit: `<em>Ready</em>: no Prompt Turn in progress. <code>close_managed_session</code> releases the Agent Session without deleting its history; <code>load_persisted_session</code> restores that history as a new Managed Session under a fresh Alias, which may be its old one.`,
+  home: `Two stores, two lifecycles: OpenCode keeps Agent Session history in the durable sandbox filesystem, while the Durable Object keeps the Managed Session record. Closing is not deleting.`,
+  park: `A durable <a href="https://www.daytona.io/">Daytona</a> Sandbox from an immutable snapshot, running the Agent Gateway and OpenCode. Dogwalk's policy: it auto-stops when idle and archives after long inactivity, with no automatic deletion. Model keys arrive as Daytona Secret placeholders.`,
+  patch: `A <em>Workspace</em>: a directory in the sandbox where an Agent Session is rooted (its working directory). Sessions sharing one can edit the same files, so they can collide.`,
   notes: `<code>start_recording</code> captures your voice into <code>recordings/recording-&lt;time&gt;.wav</code> in the Workspace, voicemail style: <code>#</code> saves, <code>*</code> discards, and a long silence or the length limit also ends it. After that it is an ordinary file; what a dog does with it is an Assignment like any other.`,
-  log: `Tool output streams up the leash in <code>session/update</code>. Dogwalk keeps only the last few tool calls per session (kind, status, paths), never their output, and spoken beats never read it out. On disk, a command's output is whatever the agent chose to keep.`,
-  artifact: `Files in the durable sandbox filesystem outlive ACP Sessions, turns, and calls: one session's output becomes another's input. Dogwalk manages sessions, not files; the walker knows about an artifact only through what an agent reports.`,
-  path: `The Worker and Durable Object run on Cloudflare, outside the sandbox. They keep no copy of your project files and reach the agents only through ACP.`,
+  log: `Tool events stream up the leash (<code>session.tool.*</code>). Dogwalk keeps only the last few tool calls per session (kind, status, paths), never their output, and spoken beats never read it out. On disk, a command's output is whatever the agent chose to keep.`,
+  artifact: `Files in the durable sandbox filesystem outlive Agent Sessions, turns, and calls: one session's output becomes another's input. Dogwalk manages sessions, not files; the walker knows about an artifact only through what an agent reports.`,
+  path: `The Worker and Durable Object run on Cloudflare, outside the sandbox. They keep no copy of your project files and reach the agents only through the Agent Gateway.`,
   stream: `The sandbox separates its files, processes, and credentials from everything else, the walker included. It is not a network firewall: agents have outbound access, and model inference happens at the provider.`,
   web: `Network access is not write access: tools such as <code>fetch</code> and <code>execute</code> contact outside services, and credentials and service permissions decide what succeeds. Which actions ask first is the agent's configured policy, not something Dogwalk can guarantee.`,
   mailbox: `A push is an ordinary <code>execute</code> tool call (<code>git push</code>) using whatever credentials the sandbox holds. The walker reports what the agent says about it; it does not verify the result.`,
@@ -955,7 +955,7 @@ export const LANDING_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Dogwalk is an eyes-free ACP client. Phone it from any phone and supervise several coding agents by voice.">
+<meta name="description" content="Dogwalk is an eyes-free client for coding agents. Phone it from any phone and supervise several coding agents by voice.">
 <meta name="color-scheme" content="light dark">
 <title>Dogwalk: take your coding agents for a walk</title>
 <style>
@@ -1093,7 +1093,7 @@ h1 em{font-style:italic;font-weight:500;color:var(--leash)}
 .bubble text{font:600 15px var(--sans);fill:#fffaf0}
 .bubble.you rect,.tail.you,.dot.you{fill:var(--leash)}
 .bubble.walker rect,.tail.walker,.dot.walker{fill:var(--grass)}
-.dot.acp{fill:var(--leash);stroke:var(--card);stroke-width:2.5}
+.dot.msg{fill:var(--leash);stroke:var(--card);stroke-width:2.5}
 .dot.you,.dot.walker{stroke:var(--card);stroke-width:2}
 @media (prefers-color-scheme:dark){.bubble text{fill:#111815}}
 .chip rect{fill:var(--card);stroke:var(--rule)}
@@ -1170,7 +1170,7 @@ footer.site a{text-underline-offset:3px;text-decoration-color:var(--rule)}
     </section>
     <div class="tip" id="tip" role="tooltip"><b id="tip-t"></b><p id="tip-p"></p></div>
     <figcaption class="sr">
-      <p>An illustrated cycle that repeats. You walk from a barn to a phone booth on a distant farm, far from any internet connection, and call; the call crosses the phone network (Twilio) to a dog walker, whose voice is OpenAI GPT-Live and whose thinking (the Session Orchestrator) runs on Cloudflare. The walker keeps to a concrete path outside a park, your Daytona sandbox, holding leashes (ACP) to three dogs, each an OpenCode coding session, on the grass. Across a stream at the park's edge lie the open web and a mailbox.</p>
+      <p>An illustrated cycle that repeats. You walk from a barn to a phone booth on a distant farm, far from any internet connection, and call; the call crosses the phone network (Twilio) to a dog walker, whose voice is OpenAI GPT-Live and whose thinking (the Session Orchestrator) runs on Cloudflare. The walker keeps to a concrete path outside a park, your Daytona sandbox, holding leashes (connections to the coding agents) to three dogs, each an OpenCode coding session, on the grass. Across a stream at the park's edge lie the open web and a mailbox.</p>
       <ol>
         <li>Throughout, whenever a dog runs something it leaves a small heap of logs behind, which drifts off with the grass as the walk moves on.</li>
         <li>Between calls, Juniper reached a gate: it wants permission to run a migration. The walker only noted it.</li>

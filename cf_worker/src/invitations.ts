@@ -2,7 +2,7 @@
 // Invite Code row (single use, 24 hours) with its inviting User, an optional bound recipient
 // number, revocation, and hiding; the User whose Registration redeems it is the
 // inviter -> invitation -> invitee edge. Access Control only: phone numbers, Handles, and the
-// graph never reach ACP Agents, Sandbox files, or provider labels.
+// graph never reach Agents, Sandbox files, or provider labels.
 
 export const INVITATION_TTL_SECONDS = 24 * 60 * 60;
 export const MAX_ACTIVE_INVITATIONS = 3;

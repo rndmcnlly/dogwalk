@@ -53,7 +53,7 @@ let result = (await operatorCallContent(env, callSid))!;
 assert.equal(result.entries.length, 6);
 assert.equal(result.entries.find(e => e.kind === "say")?.observed_at_ms, 1234);
 assert.equal(result.entries.find(e => e.kind === "handoff")?.observed_at_ms, 1200);
-assert.equal(result.entries.find(e => e.kind === "acp_prompt")?.alias, "Oak");
+assert.equal(result.entries.find(e => e.kind === "agent_prompt")?.alias, "Oak");
 assert.ok(result.entries.filter(e => e.source === "saved_transcript").every(e => e.observed_at_ms === null && !e.live_session_id));
 assert.doesNotMatch(JSON.stringify(result), /PRIVATE|SECRET|OTHER CALL SAY/);
 assert.match(result.note!, /compaction/);
