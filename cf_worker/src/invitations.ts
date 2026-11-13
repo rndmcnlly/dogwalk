@@ -285,7 +285,7 @@ export function findInviteCode(heard: string[], candidates: string[]): InviteMat
     }
   }
   const nearest = Math.min(...best.values());
-  const close = [...best].filter(([, distance]) => distance === nearest && distance <= INVITE_NEAR_LETTERS);
+  const close = [...best].filter(([, distance]) => distance <= INVITE_NEAR_LETTERS);
   if (close.length === 1) return { code: close[0][0], how: "near" };
   return { code: null, nearest: Number.isFinite(nearest) ? nearest : null };
 }

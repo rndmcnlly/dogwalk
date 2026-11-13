@@ -22,9 +22,12 @@ assert.equal(far.code, null);
 assert.ok(far.code === null && far.nearest !== null && far.nearest > 2, JSON.stringify(far));
 assert.deepEqual(findInviteCode([], codes), { code: null, nearest: null });
 assert.deepEqual(findInviteCode(heard("breadline stethoscope atlas"), []), { code: null, nearest: null });
-// Two codes equally near is no match: the caller is asked again rather than guessed for.
+// Two codes within reach is no match, even when one is closer: the caller is asked again
+// rather than guessed for.
 const twins = ["absurd adviser adrift", "absurd adviser adult"];
-assert.equal(findInviteCode(heard("absurd adviser adrit"), twins).code, twins[0]);
+assert.equal(findInviteCode(heard("absurd adviser adrit"), twins).code, null);
 assert.equal(findInviteCode(heard("absurd adviser adr"), twins).code, null);
+// With only one of them live, the same near miss matches.
+assert.equal(findInviteCode(heard("absurd adviser adrit"), [twins[0]]).code, twins[0]);
 
 console.log("invite matching: exact, split compounds, surrounding words, near misses, and ambiguity checks passed");
