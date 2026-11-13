@@ -263,3 +263,18 @@ CREATE TABLE IF NOT EXISTS pairing_claim_budget (
   minute INTEGER PRIMARY KEY,
   attempts INTEGER NOT NULL
 );
+
+-- Spend accounting (issue #57, spend.ts): an estimate per architectural component, priced by the
+-- Worker from what it sees. call_sid is null for Agent work while no call is attached.
+CREATE TABLE IF NOT EXISTS spend (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  component TEXT NOT NULL CHECK (component IN ('voice_frontend', 'orchestrator', 'sandbox_agents', 'baseline')),
+  usd REAL NOT NULL,
+  sandbox_id TEXT,
+  call_sid TEXT,
+  detail TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_spend_ts ON spend(ts);
+CREATE INDEX IF NOT EXISTS idx_spend_call ON spend(call_sid) WHERE call_sid IS NOT NULL;

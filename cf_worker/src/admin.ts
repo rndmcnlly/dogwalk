@@ -70,6 +70,7 @@ th{color:var(--fnt);text-transform:uppercase;font-size:9px;letter-spacing:.06em}
       <button id="refresh">reconnect</button>
     </div>
     <div id="generated" class="mut">waiting for signal</div>
+    <div id="spend" class="mut" title="Dogwalk's own estimate (spend.ts); the OpenAI Platform is the authority"></div>
   </div>
 </div>
 <div class="layout">
@@ -240,6 +241,18 @@ function renderAudit(d){
   d.append(wrap);
 }
 
+// --- spend --------------------------------------------------------------
+const usd=(v)=>"$"+Number(v||0).toFixed(2);
+const SHORT={voice_frontend:"voice",orchestrator:"orchestrator",sandbox_agents:"agents",baseline:"carried in"};
+function renderSpend(s){
+  const n=q("#spend");if(!s){n.textContent="";return}
+  const today=s.days[0]&&s.days[0].day===new Date().toISOString().slice(0,10)?s.days[0]:{total_usd:0,by_component:{}};
+  const parts=Object.entries(today.by_component).map(([k,v])=>(SHORT[k]||k)+" "+usd(v)).join(" \\u00b7 ");
+  const month="month "+usd(s.month_usd)+(s.budget_usd?" of "+usd(s.budget_usd):"");
+  n.textContent="spend today "+usd(today.total_usd)+(parts?" ("+parts+")":"")+" \\u00b7 "+month+" (estimate)";
+  n.style.color=s.budget_usd&&s.month_usd>=s.budget_usd*0.75?"var(--amb)":"";
+}
+
 // --- stream -------------------------------------------------------------
 function render(data){
   DATA=data;
@@ -247,6 +260,7 @@ function render(data){
   q("#live").classList.add("on");
   q("#privacy").textContent=data.verbose?"verbose \\u2014 identifiers visible":"demo-safe";
   q("#privacy").style.color=data.verbose?"var(--amb)":"var(--fnt)";
+  renderSpend(data.spend);
   renderTree();renderDetail();
 }
 let source;

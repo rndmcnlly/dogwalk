@@ -57,6 +57,11 @@ ORCHESTRATOR_MOCK_PORT = PORT_BASE + 5
 # wrangler dev's output, kept per port base and shown when the suite fails.
 WRANGLER_LOG = Path(tempfile.gettempdir()) / f"dogwalk-voice-session-{PORT_BASE}.log"
 IDENTITY_SECRET = f"local-identity-secret-{secrets.token_hex(8)}"
+# Responses usage with cache reads and writes, kept verbatim, and what the Worker charges for it:
+# 100 ordinary at $2/M, 600 cached at $0.10/M, 300 written at 1.25 x $2/M, 50 out at $10/M.
+MOCK_USAGE = {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 300},
+              "output_tokens": 50, "output_tokens_details": {"reasoning_tokens": 20}}
+MOCK_STEP_USD = (100 * 2.0 + 600 * 0.1 + 300 * 1.25 * 2.0 + 50 * 10.0) / 1_000_000
 OPENAI_WEBHOOK_KEY = secrets.token_bytes(32)
 OPENAI_WEBHOOK_SECRET = "whsec_" + base64.b64encode(OPENAI_WEBHOOK_KEY).decode()
 TRACEPARENT = re.compile(r"00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-01")
@@ -957,7 +962,7 @@ class OrchestratorMock(BaseHTTPRequestHandler):
         # Provider correlation metadata, derived from the client's ID so the test can match rows.
         client = headers.get("x-client-request-id", "").replace("-", "")
         self.respond({"id": f"resp_{client}", "model": "mock-model-2026-11-10", "output": output,
-                      "usage": {"input_tokens": 1, "output_tokens": 1}}, {"x-request-id": f"req_{client}"})
+                      "usage": MOCK_USAGE}, {"x-request-id": f"req_{client}"})
 
     def respond(self, value: dict, extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(value).encode()
@@ -1568,7 +1573,12 @@ async def run_protocol(identity: str) -> None:
             heard = next(row for row in timed if row["event"] == "model.headers" and row["request_id"] == start["request_id"])
             assert heard["provider_request_id"] == f"req_{client}", heard
             assert (done["response_id"], done["response_model"], done["usage"]) == (
-                f"resp_{client}", "mock-model-2026-11-10", {"input_tokens": 1, "output_tokens": 1}), done
+                f"resp_{client}", "mock-model-2026-11-10", MOCK_USAGE), done
+        # Spend ledger (issue #57): every step priced from its usage, and GPT-Live's 6 s.
+        ledger = d1("SELECT component, usd, call_sid FROM spend WHERE component != 'baseline'")
+        steps = [row for row in ledger if row["component"] == "orchestrator"]
+        assert steps and all(abs(row["usd"] - MOCK_STEP_USD) < 1e-9 for row in steps), ledger
+        assert any(row["component"] == "voice_frontend" and abs(row["usd"] - 6 * 0.05 / 60) < 1e-9 for row in ledger), ledger
         assert not any({"input", "output", "instructions"} & row.keys() for row in timed if row["event"].startswith("model."))
         received = next(row for row in timed if row["event"] == "live.received" and row.get("type") == "session.input_transcript.delta")
         assert received["end_ms"] >= received["start_ms"] and received["queue_ms"] >= 0
@@ -2449,7 +2459,8 @@ async def run_protocol(identity: str) -> None:
         requests = OrchestratorMock.requests
         assert {step for step, _ in OrchestratorMock.issued} == set(STEP_IDS)
         for headers, payload in requests:
-            assert headers.get("authorization") == "Bearer local-openai-token"
+            # The Orchestrator bills to its own key, never the Voice Frontend's.
+            assert headers.get("authorization") == "Bearer local-orchestrator-token"
             assert payload["model"] == "gpt-6.1-sol"
             assert payload["store"] is False and payload["parallel_tool_calls"] is True
             assert "Session Orchestrator" in payload["instructions"]
@@ -3241,6 +3252,8 @@ def start_wrangler(wrangler: str) -> subprocess.Popen:
             f"DAYTONA_API_BASE:http://127.0.0.1:{DAYTONA_MOCK_PORT}/api",
             "--var",
             "OPENAI_API_KEY:local-openai-token",
+            "--var",
+            "ORCHESTRATOR_API_KEY:local-orchestrator-token",
             "--var",
             "OPENAI_PROJECT_ID:proj_test",
             "--var",

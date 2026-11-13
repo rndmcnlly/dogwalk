@@ -37,6 +37,7 @@ import {
   type Exits, handleIdentityHeard, handleIdentityResult, handleIdentityStream, handleIdentityWho, identityStreamStop, roamingAdmits,
   startHomeCheck, startRegistrationEnrollment, startRoamingFromGreeting,
 } from "./identity_check";
+import { BUDGET_NOTICE_RATIO, callSpend, spendSummary } from "./spend";
 import { asksToDonate, donationConsent, donationTone, handleDonationConsent, handleDonationRound, handleDonationStream } from "./voice_donation";
 export { TerminalRelay, VoiceSession };
 
@@ -778,6 +779,8 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
     invitations,
     invites: inviteSummary,
     live_calls: liveCalls,
+    // Totals only, no identifiers, so the redacted lens shows them too.
+    spend: await spendSummary(env, 7).catch(() => null),
     audit: auditResult.results ?? [],
   };
   if (verbose) return snapshot;
@@ -996,8 +999,13 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
       activity: (await env.DB.prepare(
         "SELECT ts, source, event, detail FROM call_activity WHERE call_sid = ? AND (? OR event != 'voice.timing') ORDER BY id",
       ).bind(call.call_sid, timing ? 1 : 0).all()).results,
+      spend: await callSpend(env, String(call.call_sid)),
     })));
     return jsonResponse(withActivity);
+  }
+  if (pathname === "/admin/api/spend") {
+    const days = Math.min(31, Math.max(1, Number(new URL(req.url).searchParams.get("days") ?? "7") || 7));
+    return jsonResponse(await spendSummary(env, days));
   }
   if (pathname === "/admin/api/conversations") {
     // Conversation content is never part of the redacted default lens.
@@ -1391,8 +1399,15 @@ async function voiceRefusal(env: Env, callSid: string): Promise<string | null> {
   ).bind(callSid, Math.floor(Date.now() / 1000) - 300).first<{ detail: string }>().catch(() => null);
   if (!row) return null;
   const detail = JSON.parse(row.detail) as { status?: number; code?: string | null };
-  if (detail.code === "insufficient_quota" || detail.code === "credit_balance_exhausted") {
-    return "The voice service is out of credit, so it refused the call. Restarting the sandbox will not fix that. ";
+  if (detail.status === 429 || detail.code === "insufficient_quota" || detail.code === "credit_balance_exhausted") {
+    // Two stops look alike from here: the account's prepaid credit, and the Dogwalk project's
+    // hard monthly budget. The ledger's estimate says which is likelier.
+    const spend = await spendSummary(env, 1).catch(() => null);
+    const over = spend?.budget_usd && spend.month_usd >= spend.budget_usd * BUDGET_NOTICE_RATIO;
+    const budget = spend?.budget_usd ? `its ${spend.budget_usd} dollar monthly budget` : "its monthly budget";
+    const reason = detail.code === "credit_balance_exhausted" ? "the account is out of credit"
+      : over ? `Dogwalk has reached ${budget}` : `the account is out of credit or Dogwalk has reached ${budget}`;
+    return `The voice service refused the call: ${reason}. Restarting the sandbox will not fix that. `;
   }
   return `The voice service refused the call${detail.status ? `, error ${detail.status}` : ""}. `;
 }
