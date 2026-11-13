@@ -315,6 +315,8 @@ class SessionManager:
         try:
             active = (await self.agent.request("GET", "/api/session/active")).get("data") or {}
             for s in list(self.by_id.values()):
+                # A live execution.started handled while these requests await makes `active` stale.
+                executions, started = s.executions, s.current and s.current.started_ms
                 try:
                     snapshot = (await self.agent.request("GET", self._path(s))).get("data") or {}
                 except AgentRequestError as exc:
@@ -329,8 +331,9 @@ class SessionManager:
                 inbox = (await self.agent.request("GET", f"{self._path(s)}/inbox")).get("data") or []
                 s.undelivered = {i["id"]: str((i.get("payload") or {}).get("text", "")) for i in inbox if i.get("id")}
                 if s.running and not running:
-                    self._finish_from_snapshot(s, snapshot, await self.agent.request(
-                        "GET", f"{self._path(s)}/message?order=desc&limit=10"))
+                    listed = await self.agent.request("GET", f"{self._path(s)}/message?order=desc&limit=10")
+                    if s.executions == executions and s.running and s.current.started_ms == started:
+                        self._finish_from_snapshot(s, snapshot, listed)
                 elif running and not s.running:
                     self._start_turn(s)
                     self.events.put_nowait({"kind": "turn_started_elsewhere", "alias": s.alias})
