@@ -1703,7 +1703,7 @@ export class VoiceSession {
     // Roaming as this User since their last Home call follows the caller-ID clause: both say who could be calling.
     const roaming = await this.roamingNotice(admission).catch(() => null);
     const heard = roaming ? `${clause} ${roaming}` : clause;
-    if (this.firstCall) return { opening: `${heard} Dogwalk. ${this.theme.firstCallWelcome}`, context: null };
+    if (this.firstCall) return { opening: [heard, "Dogwalk.", budget, this.theme.firstCallWelcome].filter(Boolean).join(" "), context: null };
     // Each is used once: a later call gets a freshly written welcome or the fallback.
     await this.state.storage.delete(["next_greeting", "since_greeting"]);
     const parts = [heard, "Dogwalk."];
@@ -1731,6 +1731,8 @@ export class VoiceSession {
 
   // When a call ends, one short Orchestrator-model call (no tool use) writes the next welcome.
   private async writeNextGreeting(theme = this.theme, switching = false, register?: Rung): Promise<void> {
+    // The call this greeting closes, captured before the request: the next one may attach meanwhile.
+    const callSid = this.callSid;
     try {
       const pending = this.orchestratorQueue.join("\n");
       // Mid-loop (set_theme), the context ends with this response's calls, still unanswered;
@@ -1765,7 +1767,7 @@ export class VoiceSession {
       });
       if (!response.ok) throw new Error(`greeting model ${response.status}`);
       const body = await response.json<{ output?: Record<string, any>[]; usage?: unknown }>();
-      await this.recordSpend("orchestrator", tokenCost(endpoint.model, responseUsage(body.usage)), this.callSid,
+      await this.recordSpend("orchestrator", tokenCost(endpoint.model, responseUsage(body.usage)), callSid,
         { purpose: "greeting", model: endpoint.model });
       const text = outputText(body).replace(/\s+/g, " ");
       if (!text || UNSPEAKABLE.test(text) || text.length > 240) throw new Error("unusable greeting");
@@ -3181,7 +3183,7 @@ export class VoiceSession {
     const scope = { callSid, liveSessionId: null };
     let stored = false;
     try {
-      const version = await this.storeMemory(await this.writeMemory(snapshot, focus), callSid);
+      const version = await this.storeMemory(await this.writeMemory(snapshot, focus, callSid), callSid);
       stored = true;
       // Only what the writer read is cut: the anchor is a user message in the snapshot, and
       // everything added since lies after it. A backstop cut past it leaves nothing to do.
@@ -3200,16 +3202,17 @@ export class VoiceSession {
   // One model request with the Orchestrator's own prefix (instructions, tools, Memory, context),
   // so the provider's prompt cache serves it, ending in the request for the new Memory. A draft
   // over the limit gets one cheap request to condense it, with nothing but the draft.
-  private async writeMemory(snapshot: unknown[], focus: string): Promise<string> {
+  private async writeMemory(snapshot: unknown[], focus: string, callSid: string | null): Promise<string> {
     const ask = `[write memory] Write your complete new Memory now, as notes to yourself. It replaces your previous Memory entirely, so carry over everything from it that is still worth keeping: the caller's preferences, ongoing projects and what each session is for, commitments, and loose ends. At most ${MAX_MEMORY_CHARS} characters. Reply with the Memory text only.${focus ? ` It must keep: ${focus}` : ""}`;
-    let text = await this.memoryRequest([...this.pinnedMemory(), ...snapshot, { role: "developer", content: ask }], true);
+    let text = await this.memoryRequest([...this.pinnedMemory(), ...snapshot, { role: "developer", content: ask }], true, callSid);
     if (text.length > MAX_MEMORY_CHARS) {
-      text = await this.memoryRequest([{ role: "developer", content: `[condense memory] This Memory is ${text.length} characters. Condense it to at most ${MAX_MEMORY_CHARS}, keeping what matters most across calls. Reply with the Memory text only.\n\n${text}` }], false);
+      text = await this.memoryRequest([{ role: "developer", content: `[condense memory] This Memory is ${text.length} characters. Condense it to at most ${MAX_MEMORY_CHARS}, keeping what matters most across calls. Reply with the Memory text only.\n\n${text}` }], false, callSid);
     }
     return text;
   }
 
-  private async memoryRequest(input: unknown[], withTools: boolean): Promise<string> {
+  // callSid is the call that asked: a Memory can finish after the next call attaches.
+  private async memoryRequest(input: unknown[], withTools: boolean, callSid: string | null): Promise<string> {
     const endpoint = orchestratorEndpoint(this.env);
     const response = await fetch(`${endpoint.base}/responses`, {
       method: "POST",
@@ -3227,7 +3230,7 @@ export class VoiceSession {
     });
     if (!response.ok) throw new Error(`memory model ${response.status}: ${(await response.text()).slice(0, 200)}`);
     const body = await response.json<{ output?: Record<string, any>[]; usage?: unknown }>();
-    await this.recordSpend("orchestrator", tokenCost(endpoint.model, responseUsage(body.usage)), this.callSid,
+    await this.recordSpend("orchestrator", tokenCost(endpoint.model, responseUsage(body.usage)), callSid,
       { purpose: "memory", model: endpoint.model });
     return outputText(body);
   }
@@ -3238,6 +3241,22 @@ export class VoiceSession {
     const added = seconds - this.liveBilledSeconds;
     this.liveBilledSeconds = seconds;
     await this.recordSpend("voice_frontend", liveCost(added), this.callSid, { seconds: added, live_session_id: this.liveSessionId });
+  }
+
+  // OpenCode's cost is the Agent Session's running total. The billed high-water mark is kept
+  // by Agent Session ID, apart from the Managed Session, so closing and reloading a session
+  // never bills its history again. Work between calls belongs to no call.
+  // A session with no mark yet starts from the cost it already showed: its history
+  // predates the ledger.
+  private async billAgentCost(session: ManagedSession, total: number, shown: number): Promise<void> {
+    if (!Number.isFinite(total)) return;
+    const billed = await this.state.storage.get<Record<string, number>>("agent_billed_cost") ?? {};
+    const before = billed[session.agentSessionId] ?? shown;
+    if (total <= before) return;
+    billed[session.agentSessionId] = total;
+    await this.state.storage.put("agent_billed_cost", billed);
+    await this.recordSpend("sandbox_agents", total - before, this.liveAttached ? this.callSid : null,
+      { agent_session_id: session.agentSessionId, alias: session.alias });
   }
 
   // Best effort, like the ledger itself; a model with no known price records nothing.
@@ -4546,14 +4565,9 @@ export class VoiceSession {
         break;
       }
       case "session.usage.updated": {
-        // OpenCode's cost is the Agent Session's running total, persisted with the session,
-        // so the ledger records each increase once, whether or not a call is attached.
-        const before = Number(session.usage?.cost), after = Number(data.cost);
+        const previous = Number(session.usage?.cost);
         session.usage = { ...session.usage, cost: data.cost };
-        if (Number.isFinite(after) && after > (Number.isFinite(before) ? before : 0)) {
-          await this.recordSpend("sandbox_agents", after - (Number.isFinite(before) ? before : 0), this.callSid,
-            { agent_session_id: session.agentSessionId, alias: session.alias });
-        }
+        await this.billAgentCost(session, Number(data.cost), Number.isFinite(previous) ? previous : 0);
         break;
       }
       default:

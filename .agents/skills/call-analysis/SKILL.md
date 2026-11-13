@@ -62,7 +62,7 @@ Keep `playtest.py` small; this skill carries the checklist as prose.
 - **Invitations:** at most 3 active; a recipient bound only after a confirmed readback; flag any code left active (Reminders); keep numbers and words masked.
 - **Agent errors and websearch:** `agent.turn.failed` (its `message`, and `agent_termination` when the service died), `agent.disconnected`; distinguish a failed fetch (403) from broken search; check whether beats went stale after a failure.
 - **Cost and consent:** for paid generation, the caller agreed before the spend, and the actual spend was reported.
-- **Spend:** the stats `cost:` line is the Worker's estimate by component (voice, orchestrator, agents); an orchestrator share far above voice usually means cache misses or a long context. `--spend` totals by day against the budget; the OpenAI Platform (Usage, grouped by API key) is the authority (`cf_worker/README.md`, OpenAI Keys and Budget). A call refused at the accept with status 429 is the credit balance or the project budget, not the Sandbox.
+- **Spend:** the stats `cost:` line is the Worker's estimate by component (voice, orchestrator, agents); an orchestrator share far above voice usually means cache misses or a long context. `--spend` totals by day against the budget; the OpenAI Platform (Usage, grouped by API key) is the authority (`cf_worker/README.md`, OpenAI Keys and Budget). A call refused at the accept with code `credit_balance_exhausted`, `insufficient_quota`, or `billing_hard_limit_reached` is the credit balance or the project budget, and another 429 is a rate limit; neither is the Sandbox.
 - **Cache misses:** `cached_tokens` 0 with large input away from a voice session start means the prompt prefix changed.
 
 ## Lessons learned

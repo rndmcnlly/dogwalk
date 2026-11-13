@@ -198,7 +198,8 @@ target, has its own expiry, can be revoked by voice (`revoke_access`,
   limit, below the organization's, verified on the Platform 2026-11-13. Reaching it
   refuses every Dogwalk request, calls included, until the month resets: an Agent with
   `sudo` spending through the Sandbox key can exhaust it for everyone, but cannot spend
-  past it or into other projects. The organization's prepaid credit is a second, shared stop.
+  much past it (enforcement is not instantaneous, so recorded spend can overshoot the
+  limit slightly) or into other projects. The organization's prepaid credit is a second, shared stop.
 - **No call time limit** is set on the Twilio `<Dial>`, so the provider default
   applies.
 - **Bounds that exist:** one live call per Sandbox; 24 Orchestrator steps per run;

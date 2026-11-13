@@ -37,7 +37,7 @@ import {
   type Exits, handleIdentityHeard, handleIdentityResult, handleIdentityStream, handleIdentityWho, identityStreamStop, roamingAdmits,
   startHomeCheck, startRegistrationEnrollment, startRoamingFromGreeting,
 } from "./identity_check";
-import { BUDGET_NOTICE_RATIO, callSpend, spendSummary } from "./spend";
+import { callSpend, spendSummary } from "./spend";
 import { asksToDonate, donationConsent, donationTone, handleDonationConsent, handleDonationRound, handleDonationStream } from "./voice_donation";
 export { TerminalRelay, VoiceSession };
 
@@ -1399,15 +1399,21 @@ async function voiceRefusal(env: Env, callSid: string): Promise<string | null> {
   ).bind(callSid, Math.floor(Date.now() / 1000) - 300).first<{ detail: string }>().catch(() => null);
   if (!row) return null;
   const detail = JSON.parse(row.detail) as { status?: number; code?: string | null };
-  if (detail.status === 429 || detail.code === "insufficient_quota" || detail.code === "credit_balance_exhausted") {
+  if (detail.code === "credit_balance_exhausted") {
+    return "The voice service refused the call: the account is out of credit. Restarting the sandbox will not fix that. ";
+  }
+  if (detail.code === "insufficient_quota" || detail.code === "billing_hard_limit_reached") {
     // Two stops look alike from here: the account's prepaid credit, and the Dogwalk project's
-    // hard monthly budget. The ledger's estimate says which is likelier.
+    // hard monthly budget. Only an estimate at or past the budget names the budget alone.
     const spend = await spendSummary(env, 1).catch(() => null);
-    const over = spend?.budget_usd && spend.month_usd >= spend.budget_usd * BUDGET_NOTICE_RATIO;
     const budget = spend?.budget_usd ? `its ${spend.budget_usd} dollar monthly budget` : "its monthly budget";
-    const reason = detail.code === "credit_balance_exhausted" ? "the account is out of credit"
-      : over ? `Dogwalk has reached ${budget}` : `the account is out of credit or Dogwalk has reached ${budget}`;
+    const reason = spend?.budget_usd && spend.month_usd >= spend.budget_usd ? `Dogwalk has most likely reached ${budget}`
+      : `the account is out of credit or Dogwalk has reached ${budget}`;
     return `The voice service refused the call: ${reason}. Restarting the sandbox will not fix that. `;
+  }
+  if (detail.status === 429) {
+    // A rate limit, not billing: it passes on its own.
+    return "The voice service is busy and refused the call for now. Try again in a minute. ";
   }
   return `The voice service refused the call${detail.status ? `, error ${detail.status}` : ""}. `;
 }
@@ -1606,7 +1612,7 @@ async function decideLiveCall(
   let code: string | null = null;
   try {
     const error = (JSON.parse(detail) as { error?: { type?: string; code?: string } }).error;
-    code = error?.type === "insufficient_quota" ? "insufficient_quota" : error?.code ?? error?.type ?? null;
+    code = error?.code ?? error?.type ?? null;
   } catch {
     // not JSON
   }
