@@ -373,8 +373,12 @@ export const ORCHESTRATOR_TOOLS = [
     description: "A short message the Voice Frontend should speak to the caller now, in its own words. No URLs, identifiers, or markdown.",
     parameters: {
       type: "object",
-      properties: { text: { type: "string" }, delegation_id: { type: ["string", "null"] } },
-      required: ["text", "delegation_id"],
+      properties: {
+        text: { type: "string" },
+        delegation_id: { type: ["string", "null"] },
+        continues: { type: "boolean", description: "true when you will act again right after this speech (for example, play the clip you are announcing); false when this speech ends your turn, so you wait for the caller or the next event." },
+      },
+      required: ["text", "delegation_id", "continues"],
       additionalProperties: false,
     },
   },
@@ -668,7 +672,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "compact_context",
-    description: `Rewrite your Memory and shed old conversation, in the background. Returns at once: the caller is told briefly that you are tidying your notes, and you keep working meanwhile. A separate request then writes your complete new Memory from your context as it stands now (replacing the previous Memory entirely, at most ${MAX_MEMORY_CHARS} characters), and the conversation before a safe point (the start of this call, or a recent stretch if this call is long) is removed from your context and archived; anything added meanwhile stays. context_compacted arrives when the new Memory is pinned at the head of your context, or compaction_failed if it could not be written (the old Memory stands).`,
+    description: `Rewrite your Memory and shed old conversation, in the background. Returns at once: the caller is told briefly that you are tidying your notes, and you keep working meanwhile. A separate request then writes your complete new Memory from your context as it stands now (replacing the previous Memory entirely, at most ${MAX_MEMORY_CHARS} characters), and the conversation before a safe point (the start of this call, or a recent stretch if this call is long) is removed from your context and archived; anything added meanwhile stays. context_compacted arrives when the new Memory is pinned at the head of your context, or compaction_failed if it could not be written (the old Memory stands); with a focus it arrives at once so you can tell the caller what you kept, without one it waits for your next step.`,
     parameters: {
       type: "object",
       properties: { focus: { type: "string", description: `Optional, at most ${MAX_COMPACT_FOCUS_CHARS} characters: what the new Memory must not lose, such as something the caller just asked you to remember. Leave it out otherwise.` } },
@@ -849,6 +853,7 @@ Inputs arrive as messages:
 - [handoff <delegation_id>] blocks carry the recent call transcript when the Voice Frontend asks for help. Transcripts contain recognition mistakes, fragments, and corrections; act on the latest intent. When an action matters and a detail is missing, ask through say rather than guessing. A newer handoff may correct or supersede an older one; preserve unrelated work.
 - [continued <delegation_id>] blocks carry what the caller went on to say after that handoff, before the Voice Frontend answered and without a new handoff: often a correction or the rest of the request. Treat it as part of that handoff, act on the latest intent, and answer with its delegation_id; if you already acted on the earlier words, set it right.
 - [harness event] lines are Session Management notifications (call started or ended, Prompt Turn stopped, Permission Request). They are not caller speech.
+- You are woken only by a handoff, its continuation, or an event that needs you (caller input, a browser pairing accepted, a whiteboard error, a Permission Request or Elicitation, a Prompt Turn's end or failure, a bid, a recording's outcome, the sandbox failing, agent_connected when work waits on it, an unclaimed pairing code, a compaction with a focus). Other events (call_started outside a first call, call_ended, browser connections, other pairing outcomes, permission_resolved, turns started elsewhere or by steering, a discarded recording, agent_connecting, a keypad restart) are delivered with the next thing that wakes you, earlier lines first: they are background that may already be stale, so act on the newest line and mention older ones only when they bear on it. A step where you only call say ends your turn unless a say has continues true.
 
 Your outputs go only through tools. Plain assistant text is discarded.
 - brief(text, delegation_id): context the Voice Frontend should know but not say now: what you understood, what you are doing, partial findings.
@@ -968,6 +973,11 @@ export class VoiceSession {
   // events accumulate while no call is attached, and the model runs only during a call).
   private orchestratorContext: unknown[] = [];
   private orchestratorQueue: string[] = [];
+  // Whether the queue holds an event that wakes the Orchestrator; the rest wait for one (#58).
+  private orchestratorWake = false;
+  // A session tool failed fast while the Agent Connection was starting, or the Orchestrator
+  // restarted the Sandbox itself: agent_connected then wakes it to carry on.
+  private agentAwaited = false;
   private orchestrating = false;
   private memory: MemoryVersion | null = null;
   // Input tokens of the last Orchestrator model call, which the backstop and the model sense.
@@ -1036,6 +1046,7 @@ export class VoiceSession {
       this.attachedSandboxId = await state.storage.get<string>("sandbox_id") ?? null;
       this.orchestratorContext = await state.storage.get<unknown[]>("orchestrator_context") ?? [];
       this.orchestratorQueue = await state.storage.get<string[]>("orchestrator_queue") ?? [];
+      this.orchestratorWake = await state.storage.get<boolean>("orchestrator_wake") ?? false;
       this.memory = await state.storage.get<MemoryVersion>("orchestrator_memory") ?? null;
       this.contextTokens = await state.storage.get<number>("orchestrator_context_tokens") ?? 0;
       // Anything else stored (the retired "default" and "fm") means the tonal set.
@@ -1209,7 +1220,9 @@ export class VoiceSession {
       // The Agent Connection came up during the opening: still resolve the phrase call_started began.
       this.queueEarcon("agent_connected");
     }
-    await this.orchestratorEvent(events.join("\n"));
+    // The Opening is deterministic, so the call's news waits for the first Handoff; only a
+    // first call's spoken tour cannot wait for the caller to ask.
+    await this.orchestratorEvent(events.join("\n"), this.firstCall);
     return new Response(null, { status: 204 });
   }
 
@@ -1267,9 +1280,12 @@ export class VoiceSession {
         if (this.liveAttached && this.agentConnecting) {
           this.agentConnecting = false;
           this.queueEarcon("agent_connected");
+          // It wakes the Orchestrator only when something waits on it; the earcon tells the caller.
+          const awaited = this.agentAwaited;
+          this.agentAwaited = false;
           await this.orchestratorEvent(`[harness event] agent_connected: ${JSON.stringify({
             managed_session_count: Array.from(this.sessions.values()).filter((item) => item.sessionState !== "closed").length,
-          })}`);
+          })}`, awaited);
         }
         return;
       } catch (error) {
@@ -1292,6 +1308,7 @@ export class VoiceSession {
   private requireAgent(): void {
     if (this.agentConnected()) return;
     const gaveUp = this.agentGaveUp;
+    if (!gaveUp) this.agentAwaited = true;
     this.ensureAgent();
     throw new Error(gaveUp ? AGENT_UNAVAILABLE_ERROR : AGENT_STARTING_ERROR);
   }
@@ -2077,7 +2094,10 @@ export class VoiceSession {
         expired: "Nobody pressed one in time, so the browser was not paired. Say so in a few words.",
       }[outcome],
     });
-    await this.orchestratorEvent(`[harness event] browser_pairing: ${JSON.stringify({ outcome, display, device: claim.device, place: claim.place })}`);
+    // The system spoke the outcome. Only an accepted browser wakes the Orchestrator: the press
+    // completes its own pairing, and what the caller wanted shown comes next.
+    await this.orchestratorEvent(`[harness event] browser_pairing: ${JSON.stringify({ outcome, display, device: claim.device, place: claim.place })}`,
+      outcome === "accepted");
   }
 
   // Drop these browsers' pairings and close their pages. A Display left with no browser ends.
@@ -2126,8 +2146,8 @@ export class VoiceSession {
     const closed = was.filter((name) => !open.includes(name));
     if (!opened.length && !closed.length) return;
     await this.state.storage.put("displays_open", open);
-    for (const display of opened) await this.orchestratorEvent(`[harness event] browser_connected: ${JSON.stringify({ display })}`);
-    for (const display of closed) await this.orchestratorEvent(`[harness event] browser_disconnected: ${JSON.stringify({ display })}`);
+    for (const display of opened) await this.orchestratorEvent(`[harness event] browser_connected: ${JSON.stringify({ display })}`, false);
+    for (const display of closed) await this.orchestratorEvent(`[harness event] browser_disconnected: ${JSON.stringify({ display })}`, false);
   }
 
   // Every Display as the Voice Agent can sense it without changing it: who is joined, whether a
@@ -2426,7 +2446,7 @@ export class VoiceSession {
       });
       if (stale) {
         await this.record("pairing.page_stale", { reloads_itself: Boolean(build) });
-        await this.orchestratorEvent(`[harness event] browser_page_stale: ${JSON.stringify({ display: browser.display, reloads_itself: Boolean(build) })}`);
+        await this.orchestratorEvent(`[harness event] browser_page_stale: ${JSON.stringify({ display: browser.display, reloads_itself: Boolean(build) })}`, false);
       }
       send({ type: "boards", boards: (await this.boards()).filter((item) => item.display === browser.display) });
       return;
@@ -2842,6 +2862,7 @@ export class VoiceSession {
       await this.closeMenu("restart");
     } else {
       await this.record("voice.restart.requested", {});
+      this.agentAwaited = true;
     }
     const sandboxId = this.sandboxId;
     if (!sandboxId) return;
@@ -2851,7 +2872,7 @@ export class VoiceSession {
       ).bind(this.phone, this.callSid, JSON.stringify({ via })).run().catch(() => undefined);
     }
     // The Orchestrator chose a voice restart itself; only a keypad restart is news to it.
-    if (via === "keypad menu") await this.orchestratorEvent(`[harness event] sandbox_restart_requested: ${JSON.stringify({ via })}`);
+    if (via === "keypad menu") await this.orchestratorEvent(`[harness event] sandbox_restart_requested: ${JSON.stringify({ via })}`, false);
     // Stop, wait (bounded) for the provider to report it stopped, then start; the dropped
     // Agent Connection reconnects in the background and agent_connected follows.
     this.agentConnecting = true;
@@ -3000,24 +3021,30 @@ export class VoiceSession {
     await this.orchestratorEvent(`[continued ${handoff.id}]\n${lines.join("\n")}`);
   }
 
-  private async orchestratorEvent(text: string): Promise<void> {
+  // The Orchestrator snoozes (DOMAIN.md, Session Orchestrator): every event is appended to the
+  // queue, but only a waking one starts a model step; the rest reach the model with the next
+  // woken step, in order, in the same user message, so the context stays append-only.
+  private async orchestratorEvent(text: string, wake = true): Promise<void> {
     this.orchestratorQueue.push(text);
-    this.timing("orchestrator.queued", { queued_events: this.orchestratorQueue.length, chars: text.length });
-    await this.state.storage.put("orchestrator_queue", this.orchestratorQueue);
-    if (this.liveAttached) void this.runOrchestrator();
+    this.orchestratorWake ||= wake;
+    this.timing("orchestrator.queued", { queued_events: this.orchestratorQueue.length, chars: text.length, wake });
+    await this.state.storage.put({ orchestrator_queue: this.orchestratorQueue, orchestrator_wake: this.orchestratorWake });
+    if (wake && this.liveAttached) void this.runOrchestrator();
   }
 
   private async runOrchestrator(): Promise<void> {
     if (this.orchestrating) return;  // a running loop drains new events before its next model call
     this.orchestrating = true;
     try {
-      let more = this.orchestratorQueue.length > 0;
+      let more = this.orchestratorWake;
       for (let step = 0; more && step < 24 && this.liveAttached; step++) {
-        // Steering: corrections that arrive mid-loop reach the model before its next action.
+        // Steering: corrections that arrive mid-loop reach the model before its next action,
+        // and snoozed events ride along with whatever woke it.
         if (this.orchestratorQueue.length) {
           this.orchestratorContext.push({ role: "user", content: this.orchestratorQueue.splice(0).join("\n") });
+          this.orchestratorWake = false;
           this.inviteeNewsInContext.push(...this.inviteeNewsUnread.splice(0));
-          await this.state.storage.put("orchestrator_queue", this.orchestratorQueue);
+          await this.state.storage.put({ orchestrator_queue: this.orchestratorQueue, orchestrator_wake: false });
         }
         const output = await this.orchestratorModel();
         // A failed step throws before this, so the news stays pending for the next successful one.
@@ -3035,9 +3062,10 @@ export class VoiceSession {
           this.compactionRequested = null;
           await this.startCompaction(focus);
         }
-        // Always give the model a turn after its tool results: a playtest showed it announcing
-        // a clip with say, intending to play it next, and a say-only shortcut ended the loop.
-        more = calls.length > 0 || this.orchestratorQueue.length > 0;
+        // A step of speech alone ends the run unless a say declared more follows (an announced
+        // clip about to play) or was refused; any other tool's result goes back to the model.
+        more = calls.some((call, index) => call.name !== "say" || sayContinues(call)
+          || (results[index] as { ok?: unknown } | null)?.ok === false) || this.orchestratorWake;
       }
     } catch (error) {
       await this.record("orchestrator.failed", { message: errorMessage(error) });
@@ -3048,7 +3076,7 @@ export class VoiceSession {
       this.compactionRequested = null;
       await this.trimOrchestratorContext();
       await this.state.storage.put("orchestrator_context", this.orchestratorContext);
-      if (this.orchestratorQueue.length && this.liveAttached) void this.runOrchestrator();
+      if (this.orchestratorWake && this.liveAttached) void this.runOrchestrator();
     }
   }
 
@@ -3178,12 +3206,14 @@ export class VoiceSession {
       const index = anchor ? this.orchestratorContext.indexOf(anchor) : -1;
       if (index > 0) await this.cutContext(index, "compaction", callSid);
       await this.record("orchestrator.compaction", { ms: Date.now() - started, memory_chars: version.chars, removed_items: Math.max(index, 0), call_ended: !sameCall() }, scope);
-      if (sameCall()) await this.orchestratorEvent(`[harness event] context_compacted: ${JSON.stringify({ memory_chars: version.chars, removed_items: Math.max(index, 0) })}`);
+      // A focus means the caller asked what will be kept, so the outcome wakes the Orchestrator
+      // to tell them; a voluntary compaction's outcome waits for the next woken step.
+      if (sameCall()) await this.orchestratorEvent(`[harness event] context_compacted: ${JSON.stringify({ memory_chars: version.chars, removed_items: Math.max(index, 0) })}`, Boolean(focus.trim()));
     } catch (error) {
       await this.record("orchestrator.compaction.failed", { ms: Date.now() - started, memory_stored: stored, message: errorMessage(error) }, scope);
       const note = stored ? "Your new Memory is pinned, but cutting older conversation failed; your context may still hold it until the next compaction."
         : "Your previous Memory stands; nothing was cut.";
-      if (sameCall()) await this.orchestratorEvent(`[harness event] compaction_failed: ${JSON.stringify({ error: errorMessage(error), note })}`);
+      if (sameCall()) await this.orchestratorEvent(`[harness event] compaction_failed: ${JSON.stringify({ error: errorMessage(error), note })}`, Boolean(focus.trim()));
     }
   }
 
@@ -3758,7 +3788,7 @@ export class VoiceSession {
     await this.record("agent.turn.observed", { alias: session.alias, agent_session_id: session.agentSessionId,
       started_ms: session.turnStartedAt, ...spanFields(turnTrace),
       ...(turnTrace.link ? { link_trace_id: turnTrace.link.traceId, link_span_id: turnTrace.link.spanId } : {}) });
-    if (this.liveAttached) await this.orchestratorEvent(`[harness event] turn_started_elsewhere: ${JSON.stringify({ alias: session.alias })}`);
+    if (this.liveAttached) await this.orchestratorEvent(`[harness event] turn_started_elsewhere: ${JSON.stringify({ alias: session.alias })}`, false);
   }
 
   // Steering of ours that reached the session just after its turn ended here: OpenCode starts a
@@ -3773,7 +3803,7 @@ export class VoiceSession {
       started_ms: session.turnStartedAt, ...spanFields(turnTrace), admitted_by: "steer", inbox_id: steer.inboxId,
       ...(turnTrace.link ? { link_trace_id: turnTrace.link.traceId, link_span_id: turnTrace.link.spanId } : {}) });
     this.queueEarcon("turn_started");
-    await this.orchestratorEvent(`[harness event] turn_started_by_steer: ${JSON.stringify({ alias: session.alias, guidance: steer.guidance })}`);
+    await this.orchestratorEvent(`[harness event] turn_started_by_steer: ${JSON.stringify({ alias: session.alias, guidance: steer.guidance })}`, false);
   }
 
   // A terminal execution event ends the Prompt Turn unless the Agent goes on, decided by events
@@ -4066,7 +4096,7 @@ export class VoiceSession {
     if (!save || recording.bytes === 0) {
       await this.record("voice.recording.discarded", { seconds, ended_by: endedBy, muted: recording.muted, levels });
       this.queueEarcon("recording_discarded");
-      await this.orchestratorEvent(`[harness event] recording_discarded: ${JSON.stringify({ seconds, ended_by: endedBy })}`);
+      await this.orchestratorEvent(`[harness event] recording_discarded: ${JSON.stringify({ seconds, ended_by: endedBy })}`, false);
       return;
     }
     try {
@@ -4813,7 +4843,7 @@ export class VoiceSession {
     this.permissions.delete(requestId);
     const reply = typeof data.reply === "string" ? data.reply : null;
     await this.record("agent.permission.resolved_elsewhere", { alias: permission.alias, reply });
-    await this.orchestratorEvent(`[harness event] permission_resolved: ${JSON.stringify({ alias: permission.alias, reply, elsewhere: true })}`);
+    await this.orchestratorEvent(`[harness event] permission_resolved: ${JSON.stringify({ alias: permission.alias, reply, elsewhere: true })}`, false);
   }
 
   // Elicitations (DOMAIN.md) are not answerable by voice yet; the caller hears that one waits.
@@ -4959,9 +4989,10 @@ export class VoiceSession {
     this.sessions.clear();
     this.follow = null;
     this.orchestratorQueue = [];
+    this.orchestratorWake = false;
     this.orchestratorContext = [];
     await this.revokeGrants(grantIds(await this.boards())).catch(() => undefined);
-    await this.state.storage.delete(["managed_sessions", "orchestrator_queue", "orchestrator_context", "paired_browsers",
+    await this.state.storage.delete(["managed_sessions", "orchestrator_queue", "orchestrator_wake", "orchestrator_context", "paired_browsers",
       "whiteboard_boards", "displays_open", "terminal_tickets", "terminal_tokens", "signed_links", "ssh_tokens"]);
     // A replaced Sandbox is a different Workspace: browsers paired to the old one are revoked.
     for (const ws of this.state.getWebSockets("browser")) ws.close(4001, "sandbox replaced");
@@ -5036,7 +5067,7 @@ export class VoiceSession {
       error: null,
       last_words: lastWords(recovered),
     } satisfies LastCall);
-    await this.orchestratorEvent(`[harness event] call_ended: ${JSON.stringify({ reason: "telephone call completed; voice end not observed" })}`);
+    await this.orchestratorEvent(`[harness event] call_ended: ${JSON.stringify({ reason: "telephone call completed; voice end not observed" })}`, false);
   }
 
   private async cleanupVoice(reason: string): Promise<void> {
@@ -5085,7 +5116,7 @@ export class VoiceSession {
     };
     await this.state.storage.put("last_call", ending);
     await this.state.storage.put("onboarded", true);
-    await this.orchestratorEvent(`[harness event] call_ended: ${JSON.stringify({ reason: ending.reason, error: ending.error })}`);
+    await this.orchestratorEvent(`[harness event] call_ended: ${JSON.stringify({ reason: ending.reason, error: ending.error })}`, false);
     this.cleaningUpVoice = false;
     // Off the critical path of both calls: the next opening is ready before anyone dials.
     // A theme switch already wrote the bounce's greeting.
@@ -5497,6 +5528,15 @@ function cacheDiagnosis(value: unknown): Record<string, unknown> | null {
   if (!type) return null;
   return Object.fromEntries(Object.entries({ type, reason: label(raw?.reason), ...tokenUsage(raw,
     { comparison_reusable_tokens: true, cache_missed_tokens: true }) }).filter(([, field]) => field !== undefined));
+}
+
+// Whether a say call declared that the Orchestrator acts again right after it.
+function sayContinues(call: Record<string, any>): boolean {
+  try {
+    return JSON.parse(String(call.arguments ?? "{}")).continues === true;
+  } catch {
+    return true;  // unreadable arguments come back as a tool error the model should see
+  }
 }
 
 // A tool-free Responses reply's text, joined.
