@@ -190,17 +190,25 @@ target, has its own expiry, can be revoked by voice (`revoke_access`,
 
 ### Accounting
 
-- **No per-User spending caps** on inference, telephony, or compute. All Agents,
-  the Session Orchestrator, and GPT-Live bill to shared keys.
+- **No per-User spending caps** on inference, telephony, or compute. Every Sandbox's
+  Agents share one key, as do all calls' Session Orchestrators and GPT-Live sessions.
+- **One deployment-wide inference cap (issue #57):** each component bills to its own key
+  in the OpenAI Dogwalk project (`dogwalk-voice-frontend`, `dogwalk-orchestrator`,
+  `dogwalk-sandbox-agents`, `dogwalk-dev-laptop`), and the project has a hard $80 monthly
+  limit, below the organization's, verified on the Platform 2026-11-13. Reaching it
+  refuses every Dogwalk request, calls included, until the month resets: an Agent with
+  `sudo` spending through the Sandbox key can exhaust it for everyone, but cannot spend
+  much past it (enforcement is not instantaneous, so recorded spend can overshoot the
+  limit slightly) or into other projects. The organization's prepaid credit is a second, shared stop.
 - **No call time limit** is set on the Twilio `<Dial>`, so the provider default
   applies.
 - **Bounds that exist:** one live call per Sandbox; 24 Orchestrator steps per run;
   Sandboxes auto-stop after 15 idle minutes and are reaped after 30 days without
   calls; pairing guess budgets; 3 active Invitations per User; Roaming pause limits.
 - **Records:** `voice_calls` (duration, User), `call_activity` (per-call timeline),
-  and `audit_log` (phone number, no User column). OpenCode's per-session cost is
-  held only in memory, and Orchestrator token usage goes to OTLP. Nothing totals
-  cost per User.
+  `audit_log` (phone number, no User column), and `spend`, the Worker's estimate per
+  component, Sandbox, and call (`cf_worker/src/spend.ts`). Spend can be totalled per
+  Sandbox, so per User, but nothing caps or reports it that way yet.
 
 ## Accepted risks
 
@@ -214,8 +222,9 @@ Accepted for one operator-managed deployment whose only Users are invited:
 - An Agent with `sudo` can create durable access, spend the inference budget, and
   likely self-approve Permission Requests. The Sandbox is the trust boundary, and
   everything inside it is trusted equally.
-- No per-User spending cap exists. A provider-side budget may limit spend, but
-  whether one is configured is unverified, and idle timeouts stop idle Sandboxes
+- No per-User spending cap exists. The OpenAI Dogwalk project's hard $80 monthly
+  limit (verified 2026-11-13) bounds inference spend for the whole deployment, so one
+  User's Agents can exhaust it for every User; idle timeouts stop idle Sandboxes
   without limiting spend during active work.
 
 Each acceptance holds only while the portfolio stays narrow. Connecting a

@@ -57,6 +57,11 @@ ORCHESTRATOR_MOCK_PORT = PORT_BASE + 5
 # wrangler dev's output, kept per port base and shown when the suite fails.
 WRANGLER_LOG = Path(tempfile.gettempdir()) / f"dogwalk-voice-session-{PORT_BASE}.log"
 IDENTITY_SECRET = f"local-identity-secret-{secrets.token_hex(8)}"
+# Responses usage with cache reads and writes, kept verbatim, and what the Worker charges for it:
+# 100 ordinary at $2/M, 600 cached at $0.10/M, 300 written at 1.25 x $2/M, 50 out at $10/M.
+MOCK_USAGE = {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 300},
+              "output_tokens": 50, "output_tokens_details": {"reasoning_tokens": 20}}
+MOCK_STEP_USD = (100 * 2.0 + 600 * 0.1 + 300 * 1.25 * 2.0 + 50 * 10.0) / 1_000_000
 OPENAI_WEBHOOK_KEY = secrets.token_bytes(32)
 OPENAI_WEBHOOK_SECRET = "whsec_" + base64.b64encode(OPENAI_WEBHOOK_KEY).decode()
 TRACEPARENT = re.compile(r"00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-01")
@@ -661,16 +666,7 @@ def created_alias(context: list[dict]) -> str:
 
 # Each step fires once its trigger appears in a user message, in order, after the
 # previous step's outputs are back. Steps that answer a handoff use its delegation id.
-# The provider's usage and cache diagnosis, and what Dogwalk records from them: token counts,
-# cache writes, and the miss reason survive (#54, #58), anything else is dropped.
-MOCK_USAGE = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2,
-              "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 1, "unlisted": 9,
-                                       "cache_write_tokens_details": {"ttl_30m_tokens": 1, "ttl_12h_tokens": 0}},
-              "output_tokens_details": {"reasoning_tokens": 1}}
-RECORDED_USAGE = {"input_tokens": 1, "output_tokens": 1,
-                  "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 1,
-                                           "cache_write_tokens_details": {"ttl_30m_tokens": 1, "ttl_12h_tokens": 0}},
-                  "output_tokens_details": {"reasoning_tokens": 1}}
+# OpenAI's cache diagnosis, and what Dogwalk records of it: classification and counts (#58).
 MOCK_CACHE_DIAGNOSIS = {"type": "cache_miss", "reason": "input_changed", "comparison_reusable_tokens": 7,
                         "cache_missed_tokens": 5, "detail": "dropped"}
 RECORDED_CACHE_DIAGNOSIS = {"type": "cache_miss", "reason": "input_changed", "comparison_reusable_tokens": 7,
@@ -1590,8 +1586,13 @@ async def run_protocol(identity: str) -> None:
             heard = next(row for row in timed if row["event"] == "model.headers" and row["request_id"] == start["request_id"])
             assert heard["provider_request_id"] == f"req_{client}", heard
             assert (done["response_id"], done["response_model"], done["usage"]) == (
-                f"resp_{client}", "mock-model-2026-11-10", RECORDED_USAGE), done
+                f"resp_{client}", "mock-model-2026-11-10", MOCK_USAGE), done
             assert done["prompt_cache"] == RECORDED_CACHE_DIAGNOSIS, done
+        # Spend ledger (issue #57): every step priced from its usage, and GPT-Live's 6 s.
+        ledger = d1("SELECT component, usd, call_sid FROM spend WHERE component != 'baseline'")
+        steps = [row for row in ledger if row["component"] == "orchestrator"]
+        assert steps and all(abs(row["usd"] - MOCK_STEP_USD) < 1e-9 for row in steps), ledger
+        assert any(row["component"] == "voice_frontend" and abs(row["usd"] - 6 * 0.05 / 60) < 1e-9 for row in ledger), ledger
         assert not any({"input", "output", "instructions"} & row.keys() for row in timed if row["event"].startswith("model."))
         # OpenAI-only request options stay off any other Responses-compatible endpoint, like this mock.
         assert not any("prompt_cache_options" in payload or "context" in payload["reasoning"]
@@ -2005,7 +2006,7 @@ async def run_protocol(identity: str) -> None:
         assert main_display["boards"] == 0 and main_display["latest"] is None and main_display["access"] == [], main_display
         assert 55 <= main_display["expires_in_minutes"] <= 60, main_display
         assert state["earcon_style"] == "tonal", state
-        assert state["context_tokens"] == 1 and state["memory"]["chars"] == len(EARLY_MEMORY) and "compacting" not in state["memory"], state
+        assert state["context_tokens"] == MOCK_USAGE["input_tokens"] and state["memory"]["chars"] == len(EARLY_MEMORY) and "compacting" not in state["memory"], state
         # The Orchestrator draws a board; the caller answers it on the page; it hears the answer.
         await mocks.send_live(dtmf("5"))
         board = (await recv_type(browser, "board", 15))["board"]
@@ -2484,7 +2485,8 @@ async def run_protocol(identity: str) -> None:
         requests = OrchestratorMock.requests
         assert {step for step, _ in OrchestratorMock.issued} == set(STEP_IDS)
         for headers, payload in requests:
-            assert headers.get("authorization") == "Bearer local-openai-token"
+            # The Orchestrator bills to its own key, never the Voice Frontend's.
+            assert headers.get("authorization") == "Bearer local-orchestrator-token"
             assert payload["model"] == "gpt-6.1-sol"
             assert payload["store"] is False and payload["parallel_tool_calls"] is True
             assert "Session Orchestrator" in payload["instructions"]
@@ -3289,6 +3291,8 @@ def start_wrangler(wrangler: str) -> subprocess.Popen:
             f"DAYTONA_API_BASE:http://127.0.0.1:{DAYTONA_MOCK_PORT}/api",
             "--var",
             "OPENAI_API_KEY:local-openai-token",
+            "--var",
+            "ORCHESTRATOR_API_KEY:local-orchestrator-token",
             "--var",
             "OPENAI_PROJECT_ID:proj_test",
             "--var",
