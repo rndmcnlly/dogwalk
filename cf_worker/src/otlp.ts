@@ -495,7 +495,9 @@ function inferenceConvention(start: Observation, headers: Observation | undefine
     ["server.port", start.detail.server_port],
     ["dogwalk.model_request.provider_request_id", headers?.detail.provider_request_id],
     ...(ok ? [["gen_ai.response.id", end.detail.response_id], ["gen_ai.response.model", end.detail.response_model],
-      ...usageCounts(usage), ...cacheDiagnosisPairs((end.detail.prompt_cache ?? {}) as Detail)]
+      // Counts as the log projection accepts them: older rows stored usage verbatim.
+      ...usageCounts(usage).filter(([, count]) => Number.isSafeInteger(count) && (count as number) >= 0),
+      ...cacheDiagnosisPairs((end.detail.prompt_cache ?? {}) as Detail)]
       : [["error.type", errorType]]),
   ].map(([key, value]) => (value === undefined || value === null ? null : kv(key as string, value)))
     .filter((pair): pair is KeyValue => pair !== null) };

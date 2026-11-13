@@ -302,9 +302,9 @@ def input_detail(usage: dict, key: str) -> int:
 def mid_call_misses(activity: list) -> list[dict]:
     """Orchestrator steps after a call's first that processed over 15k fresh input tokens (#58).
     The first step of a call is expected to miss when the cache lapsed between calls."""
-    steps = [r for r in activity if r["event"] == "orchestrator.model" and detail(r).get("usage")]
-    return [r for r in steps[1:]
-            if detail(r)["usage"].get("input_tokens", 0) - input_detail(detail(r)["usage"], "cached_tokens") > 15000]
+    steps = [r for r in activity if r["event"] == "orchestrator.model"][1:]
+    return [r for r in steps if detail(r).get("usage")
+            and detail(r)["usage"].get("input_tokens", 0) - input_detail(detail(r)["usage"], "cached_tokens") > 15000]
 
 
 def stats_lines(call: dict, items: list) -> list[str]:

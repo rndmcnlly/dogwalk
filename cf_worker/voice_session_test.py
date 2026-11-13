@@ -1734,10 +1734,11 @@ async def run_protocol(identity: str) -> None:
         dozer_marker = 'turn_stopped: {"alias":"Dozer","outcome":"completed"'
         await wait_for(lambda: dozer_marker in latest_user_text(), 10)
         # A returning caller's call_started and agent_connected snooze (#58): they reach the model
-        # with the event that woke it, or wait in the queue for the next, never on their own.
+        # with the event that woke it (here the Permission Request asked between calls, whose wake
+        # waited for this call, or Dozer's end), or wait in the queue for the next, never alone.
         returning = [str(payload["input"][-1].get("content")) for _, payload in OrchestratorMock.requests
                      if RETURN_OPENING in str(payload["input"][-1].get("content"))]
-        assert returning and all(dozer_marker in text for text in returning), returning
+        assert returning and all("permission_requested:" in text or dozer_marker in text for text in returning), returning
         await wait_for(lambda: agent_connected_count() >= 2, 10)
         assert AWAY_REPORT in OrchestratorMock.user_message(dozer_marker)
         second_rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")

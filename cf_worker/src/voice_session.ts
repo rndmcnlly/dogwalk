@@ -1308,7 +1308,8 @@ export class VoiceSession {
   private requireAgent(): void {
     if (this.agentConnected()) return;
     const gaveUp = this.agentGaveUp;
-    if (!gaveUp) this.agentAwaited = true;
+    // Whether this starts, joins, or retries a connection attempt, its success resumes the work.
+    this.agentAwaited = true;
     this.ensureAgent();
     throw new Error(gaveUp ? AGENT_UNAVAILABLE_ERROR : AGENT_STARTING_ERROR);
   }
@@ -3029,7 +3030,9 @@ export class VoiceSession {
     this.orchestratorWake ||= wake;
     this.timing("orchestrator.queued", { queued_events: this.orchestratorQueue.length, chars: text.length, wake });
     await this.state.storage.put({ orchestrator_queue: this.orchestratorQueue, orchestrator_wake: this.orchestratorWake });
-    if (wake && this.liveAttached) void this.runOrchestrator();
+    // The queue's wake, not this event's: a waking event queued between calls (a Permission
+    // Request, a turn's end) runs once the next call attaches, snoozed call_started or not.
+    if (this.orchestratorWake && this.liveAttached) void this.runOrchestrator();
   }
 
   private async runOrchestrator(): Promise<void> {
