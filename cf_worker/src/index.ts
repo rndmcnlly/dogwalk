@@ -24,7 +24,7 @@ import type { Env } from "./types";
 import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
 import { TerminalRelay } from "./terminal_relay";
 import {
-  INVITATION_STATUS_SQL, noteEnrollmentOutcome, noteInviteHeard, redemptionStatements, USABLE_FOR_PHONE_SQL,
+  findInviteCode, INVITATION_STATUS_SQL, noteEnrollmentOutcome, noteInviteHeard, redemptionStatements, USABLE_FOR_PHONE_SQL,
 } from "./invitations";
 import { availableHandles } from "./handles";
 import { frontendInstructions, VoiceSession } from "./voice_session";
@@ -241,7 +241,6 @@ async function openAiWebhookValid(req: Request, env: Env, body: string): Promise
 // --- ritual constants ---------------------------------------------------
 
 const MAX_ATTEMPTS = 3;
-const WORDS_REQUIRED = 3;
 const MENU_HINTS = ["status", "hang up"];
 
 /** D1 lookup result for an inbound caller. */
@@ -254,19 +253,6 @@ function normalizeSpeech(raw: string | null | undefined): string[] {
     .trim()
     .split(/\s+/)
     .filter((t) => t.length > 0);
-}
-
-/** Return the canonical invite phrase only for an exact normalized match. */
-function matchInviteCode(
-  spoken: string[],
-  candidates: { code_words: string }[],
-): string | null {
-  if (spoken.length !== WORDS_REQUIRED) return null;
-  const target = spoken.join(" ");
-  for (const c of candidates) {
-    if (c.code_words === target) return c.code_words;
-  }
-  return null;
 }
 
 const normalizePhone = (raw: FormDataEntryValue | null): string | null => {
@@ -1864,7 +1850,10 @@ async function handleClaim(req: Request, env: Env, ctx: ExecutionContext): Promi
   if (roaming) return twiml(roaming);
 
   const candidates = await usableInviteCodes(env, from);
-  const match = matchInviteCode(spoken, candidates);
+  const found = findInviteCode(spoken, candidates.map((c) => c.code_words));
+  // How it matched, or how close it came: never the words themselves.
+  await audit(env, "claim.match", from, callSid, found.code === null ? { how: "none", nearest: found.nearest } : { how: found.how });
+  const match = found.code;
 
   if (!match) {
     return retryOrHangup(
@@ -1900,10 +1889,9 @@ async function inviteReadback(env: Env, from: string, callSid: string, match: st
 async function inviteTwiml(env: Env, from: string, callSid: string, heard: string[]): Promise<string> {
   await audit(env, "claim.ritual.start", from, callSid, { via: "identity check" });
   const invites = await usableInviteCodes(env, from);
-  for (let i = 0; i + WORDS_REQUIRED <= heard.length; i++) {
-    const match = matchInviteCode(heard.slice(i, i + WORDS_REQUIRED), invites);
-    if (match) return inviteReadback(env, from, callSid, match, 1);
-  }
+  const found = findInviteCode(heard, invites.map((i) => i.code_words));
+  await audit(env, "claim.match", from, callSid, found.code === null ? { how: "none", nearest: found.nearest, via: "identity check" } : { how: found.how, via: "identity check" });
+  if (found.code !== null) return inviteReadback(env, from, callSid, found.code, 1);
   return GatherSpeech("Say your three invite words.", "/voice/claim", 1, invites.map((i) => i.code_words));
 }
 

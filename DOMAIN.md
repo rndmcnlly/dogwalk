@@ -552,6 +552,12 @@ only while unexpired and below its maximum. Registering from a number that is
 already a Home displaces it, as re-homing does. An operator mints Invite Codes
 directly; a User mints one by creating an Invitation.
 
+Hearing an Invite Code tolerates how speech recognition writes it: the code may
+be any run of the words heard (a caller adds words around it), its spaces are
+ignored (recognition splits compounds such as breadline into "bread line"), and
+a near miss of up to two letters counts when exactly one usable code is that
+close. The readback and the caller's yes still confirm every match.
+
 ### Invitation
 
 **Context:** Access Control
