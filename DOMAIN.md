@@ -1071,7 +1071,7 @@ An Agent-reported execution strategy whose entries and status can change during 
 
 ### Connection Lifecycle
 
-Dogwalk connects to the Agent service through the Agent Gateway, subscribes to its events, catches up from snapshots, uses the connection for all of its Managed Sessions, and eventually disconnects. Losing the connection makes Managed Sessions unavailable to Dogwalk without interrupting Agent work or changing their identity. On reconnecting, Dogwalk again subscribes first and then catches up (see Agent Connection), so nothing that happened while it was away goes unreported.
+Dogwalk connects to the Agent service through the Agent Gateway, subscribes to its events, catches up from snapshots, uses the connection for all of its Managed Sessions, and eventually disconnects. Losing the connection makes Managed Sessions unavailable to Dogwalk without interrupting Agent work or changing their identity. On reconnecting, Dogwalk again subscribes first and then catches up (see Agent Connection), so each Managed Session's latest turn outcome is reported. An earlier turn that finished during the disconnection may not be.
 
 ### Managed Session Lifecycle
 

@@ -52,6 +52,9 @@ environment, and waits for registration.
 - A child that has not registered within 60 s is stopped (`agent_start_timeout`) and
   recorded as a `killed` Agent Termination with `"stalled":"startup"`, then retried with
   the same backoff as below, which a stalled start does not reset.
+- A child that registered is probed on the same schedule. Three failures in a row while
+  its process lives (`agent_probe_failed`, then `agent_unresponsive`) stop it, recorded as
+  a `killed` Agent Termination with `"stalled":"unresponsive"`, and it is replaced.
 - A child that exits otherwise is an Agent Termination. The gateway reads cgroup v2
   `memory.events` (its own cgroup and ancestors, since the limit may sit on the
   container) to tell an OOM kill from another signal or exit, logs `agent_terminated`,

@@ -222,8 +222,9 @@ class Child:
     started: float
     # Resolves to an Agent Termination, or None for a clean exit (another process owns the service).
     ended: asyncio.Task | None = None
-    # Set when the gateway stopped it for never registering.
-    startup_timed_out: bool = False
+    # Why the gateway stopped it, if it did: "startup" (never registered) or "unresponsive"
+    # (registered, then failed its probes while the process lived).
+    stalled: str | None = None
 
 
 class AgentGateway:
@@ -351,10 +352,26 @@ class AgentGateway:
             while not child.ended.done() and await self.refresh() is None:
                 if time.monotonic() - child.started > self.startup_seconds:
                     LOG.warning("agent_start_timeout pid=%s seconds=%s", child.process.pid, self.startup_seconds)
-                    child.startup_timed_out = True
+                    child.stalled = "startup"
                     await self.stop(child)
                     break
                 await asyncio.wait({child.ended}, timeout=0.25)
+            # Registered: probed like a service someone else owns, but replacing it means stopping
+            # it first, since a live process that answers nothing still holds the state file.
+            while not child.ended.done():
+                await asyncio.wait({child.ended}, timeout=self.poll_seconds)
+                if child.ended.done():
+                    break
+                if await self.refresh() is not None:
+                    failures = 0
+                    continue
+                failures += 1
+                LOG.warning("agent_probe_failed pid=%s failures=%s", child.process.pid, failures)
+                if failures >= self.probe_failures_to_replace:
+                    LOG.warning("agent_unresponsive pid=%s", child.process.pid)
+                    child.stalled = "unresponsive"
+                    await self.stop(child)
+            failures = 0
             termination = await child.ended
             self.child = None
             self.service = None
@@ -363,7 +380,7 @@ class AgentGateway:
                 LOG.info("agent_handoff pid=%s service_pid=%s", child.process.pid, self.service and self.service.pid)
                 continue
             # A child that served for a while earns a fresh backoff; one that never started does not.
-            if not child.startup_timed_out and time.monotonic() - child.started > 60:
+            if child.stalled != "startup" and time.monotonic() - child.started > 60:
                 delay = 1.0
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30)
@@ -385,17 +402,19 @@ class AgentGateway:
 
     async def _watch(self, child: Child) -> dict | None:
         returncode = await child.process.wait()
-        if returncode == 0 and not child.startup_timed_out:
+        if returncode == 0 and child.stalled is None:
             LOG.info("agent_exited pid=%s exit_status=0", child.process.pid)
             return None
         termination = agent_termination(
             returncode, child.oom_before, oom_kills(self.cgroups), memory_limit(self.cgroups)
         )
-        if child.startup_timed_out and termination["reason"] != "out_of_memory":
+        if child.stalled is not None and termination["reason"] != "out_of_memory":
             # The gateway stopped it, so "killed" (a reason the Worker parses), with the cause.
             termination.update(
-                reason="killed", signal=termination.get("signal", "SIGTERM"), stalled="startup",
-                detail=f"The Agent did not start within {self.startup_seconds:g} s and was stopped.",
+                reason="killed", signal=termination.get("signal", "SIGTERM"), stalled=child.stalled,
+                detail=f"The Agent did not start within {self.startup_seconds:g} s and was stopped."
+                if child.stalled == "startup" else
+                f"The Agent stopped answering {self.probe_failures_to_replace} probes in a row and was stopped.",
             )
         self.last_termination = termination
         LOG.warning("agent_terminated %s", json.dumps(termination))
@@ -607,7 +626,9 @@ class AccessLogger(AbstractAccessLogger):
     """One line per request without its query string, which may name Workspace paths."""
 
     def log(self, request: web.BaseRequest, response: web.StreamResponse, elapsed: float) -> None:
-        self.logger.info("%s %s %s %.3fs", request.method, request.path, response.status, elapsed)
+        # The path as it arrived, still percent-encoded: `request.path` is decoded, so a `%0A`
+        # in it would write a forged log line.
+        self.logger.info("%s %s %s %.3fs", request.method, request.rel_url.raw_path, response.status, elapsed)
 
 
 def create_app(gateway: AgentGateway) -> web.Application:
@@ -784,6 +805,13 @@ async def run_test() -> None:
     capture = logging.Handler()
     capture.emit = lambda record: logged.append(record.getMessage())
     LOG.addHandler(capture)
+    accessed: list[str] = []
+    access = logging.Handler()
+    access.emit = lambda record: accessed.append(record.getMessage())
+    access_log = logging.getLogger("aiohttp.access")
+    access_log.addHandler(access)
+    access_level = access_log.level
+    access_log.setLevel(logging.INFO)
     gateway = AgentGateway(root, fake_command, cgroups, cgroups / "proc-cgroup")
     assert gateway.cgroups == [cgroups / "gateway", cgroups]
     gateway.poll_seconds = 0.2
@@ -876,6 +904,13 @@ async def run_test() -> None:
             for secret in ("SECRET", "client-secret", "preview-secret", "directory", "BODY_MARKER"):
                 assert secret not in text, secret
             passed.append("proxy with auth injection, header stripping, and trace log lines")
+
+            # A decoded newline in the path cannot start a forged access-log line.
+            async with session.get(URL(f"{base_url}/api/x%0AINFO%20agent_handoff%20forged?directory=%2Fx", encoded=True)) as response:
+                assert response.status == 404
+            forged = [line for line in accessed if "forged" in line]
+            assert forged and all("\n" not in line and "%0A" in line and "directory" not in line for line in forged), accessed
+            passed.append("access log keeps the path percent-encoded and drops the query")
 
             # A cached password gone stale (the service restarted) is re-resolved once.
             assert gateway.service is not None
@@ -977,6 +1012,8 @@ async def run_test() -> None:
             assert service is not None and service.password not in "\n".join(logged)
     finally:
         LOG.removeHandler(capture)
+        access_log.removeHandler(access)
+        access_log.setLevel(access_level)
         await runner.cleanup()
         if external is not None and external.poll() is None:
             external.kill()
@@ -1003,9 +1040,21 @@ async def run_test() -> None:
         print(f"  ok  {name}")
 
 
+# Registers a service at the URL in argv[1] under its own pid, then lives on without serving it.
+REGISTERING_CHILD = r'''
+import json, os, sys, time
+from pathlib import Path
+state = Path(os.environ["XDG_STATE_HOME"]) / "opencode" / "service.json"
+state.parent.mkdir(parents=True, exist_ok=True)
+state.write_text(json.dumps({"url": sys.argv[1], "password": "x", "pid": os.getpid()}))
+time.sleep(600)
+'''
+
+
 async def supervision_scenarios() -> list[str]:
-    """Supervision without a working service: a child that never registers, and a registered
-    service that stops answering probes while its process lives."""
+    """Supervision without a working service: a child that never registers, a service someone
+    else owns that stops answering probes while its process lives, and a child of our own that
+    does the same."""
     root = Path(tempfile.mkdtemp(prefix="agent-gateway-supervise-"))
     os.environ["XDG_STATE_HOME"] = str(root / "state")
     stuck = shlex.join([sys.executable, "-I", "-c", "import time; time.sleep(600)"])
@@ -1019,6 +1068,21 @@ async def supervision_scenarios() -> list[str]:
     silent = socket.socket()
     silent.bind(("127.0.0.1", 0))
     silent.listen(16)
+    # Answers `/api/info` while `answering[0]` holds, 503 otherwise: a service gone unresponsive.
+    answering = [True]
+
+    async def info(request: web.Request) -> web.Response:
+        return web.json_response({}, status=200 if answering[0] else 503)
+
+    toggled = web.Application()
+    toggled.router.add_get("/api/info", info)
+    toggled_runner = web.AppRunner(toggled)
+    await toggled_runner.setup()
+    toggled_listener = socket.socket()
+    toggled_listener.bind(("127.0.0.1", 0))
+    toggled_listener.listen(16)
+    toggled_listener.setblocking(False)
+    toggled_site = web.SockSite(toggled_runner, toggled_listener)
 
     def gateway() -> AgentGateway:
         result = AgentGateway(root, stuck, root / "no-cgroup", root / "no-proc-cgroup")
@@ -1074,9 +1138,33 @@ async def supervision_scenarios() -> list[str]:
         await current.start(app)
         await until(lambda: current.child is not None)
         assert not any(line.startswith("agent_probe_failed ") for line in logged), logged
+        await current.cleanup(app)
         passed.append("a live service survives a failed probe; a dead one is replaced at once")
+
+        # A child that registered, then stops answering while its process lives, is stopped
+        # after the same run of failed probes and replaced.
+        logged.clear()
+        await toggled_site.start()
+        info_url = f"http://127.0.0.1:{toggled_listener.getsockname()[1]}"
+        current = gateway()
+        current.agent_command = shlex.join([sys.executable, "-I", "-c", REGISTERING_CHILD, info_url])
+        await current.start(app)
+        await until(lambda: current.child is not None and current.service is not None)
+        registered_pid = current.child.process.pid
+        answering[0] = False
+        await until(lambda: current.last_termination is not None)
+        termination = current.last_termination
+        assert termination["reason"] == "killed" and termination["stalled"] == "unresponsive", termination
+        assert "stopped answering" in termination["detail"], termination
+        assert sum(line.startswith("agent_probe_failed ") for line in logged) == current.probe_failures_to_replace, logged
+        assert any(line.startswith("agent_unresponsive ") for line in logged), logged
+        await until(lambda: current.child is not None and current.child.process.pid != registered_pid)
+        answering[0] = True
+        await until(lambda: current.service is not None)
+        passed.append("a registered child that stops answering is stopped and replaced")
     finally:
         await current.cleanup(app)
+        await toggled_runner.cleanup()
         LOG.removeHandler(capture)
         if holder.poll() is None:
             holder.kill()

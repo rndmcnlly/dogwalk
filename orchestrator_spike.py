@@ -66,8 +66,8 @@ class AgentRequestError(RuntimeError):
 class AgentConnection:
     """OpenCode's native API: JSON over HTTP, events over SSE. Stdlib only, blocking calls in threads."""
 
-    def __init__(self, on_event):
-        self.on_event = on_event
+    def __init__(self, on_event, on_reconnect):
+        self.on_event, self.on_reconnect = on_event, on_reconnect
         self.proc: asyncio.subprocess.Process | None = None
 
     async def start(self, workspace: str, server: str | None) -> None:
@@ -111,12 +111,14 @@ class AgentConnection:
         return json.loads(raw) if raw.strip() else {}
 
     def _read_events(self, loop: asyncio.AbstractEventLoop, connected: asyncio.Event) -> None:
-        while True:
+        for attempt in itertools.count():
             try:
                 req = urllib.request.Request(self.base + "/api/event", headers={"authorization": self.auth,
                                                                                 "accept": "text/event-stream"})
                 with urllib.request.urlopen(req) as stream:
                     loop.call_soon_threadsafe(connected.set)
+                    if attempt:   # subscribed again: catch up on what ended or began while away
+                        asyncio.run_coroutine_threadsafe(self.on_reconnect(), loop)
                     for line in stream:
                         if line.startswith(b"data:"):
                             try:
@@ -143,6 +145,7 @@ class PromptTurn:
     message: str = ""                    # Agent message text, accumulated
     activity: list[str] = field(default_factory=list)
     started: float = field(default_factory=time.monotonic)
+    started_ms: float = field(default_factory=lambda: time.time() * 1000)   # against the Agent's clock, on catch-up
 
 
 @dataclass
@@ -169,7 +172,7 @@ class SessionManager:
         self.workspace, self.events = workspace, events
         self.sessions: dict[str, ManagedSession] = {}   # alias -> session
         self.by_id: dict[str, ManagedSession] = {}
-        self.agent = AgentConnection(self._on_event)
+        self.agent = AgentConnection(self._on_event, self.catch_up)
         self.permission_ids = itertools.count(1)
         self.steers: dict[str, tuple[str, str]] = {}     # inbox id -> (session id, when)
 
@@ -202,9 +205,12 @@ class SessionManager:
         turn = self._start_turn(session)
         try:
             await self.agent.request("POST", f"{self._path(session)}/prompt", {"text": prompt})
-        except Exception as exc:  # never admitted: the tool's error says so, and no turn event follows
-            turn.state = turn.outcome = "failed"
-            return {"error": f"The prompt was not delivered: {exc}"}
+        except Exception as exc:
+            # A refusal proves it was not admitted; a lost answer does not, so the Agent's active
+            # sessions decide. Not admitted: the tool's error says so, and no turn event follows.
+            if isinstance(exc, AgentRequestError) or not await self._active(session):
+                turn.state = turn.outcome = "failed"
+                return {"error": f"The prompt was not delivered: {exc}"}
         return {"alias": alias, "turn": turn.number, "state": "in_progress",
                 "note": "Started, not completed. A harness event arrives when it stops."}
 
@@ -214,14 +220,27 @@ class SessionManager:
         session = self._get(alias)
         if not session.running:
             return {"error": f"{alias} has no running Prompt Turn to steer; use begin_prompt_turn to give it new work"}
+        # In the grace window the last execution already ended: the steer starts the next one at once
+        # (OpenCode 2.2.7), and an interrupt would only stop it unresumed. See the Worker's steerPromptTurn.
+        ended = session.turn_end is not None
         admitted = await self.agent.request("POST", f"{self._path(session)}/prompt", {"text": guidance, "delivery": "steer"})
         if inbox_id := admitted.get("data", {}).get("id"):
             self.steers[inbox_id] = (session.session_id, when)
-        if when == "now":
-            await self.agent.request("POST", f"{self._path(session)}/interrupt?resume=true")
-        return {"alias": alias, "when": when,
-                "delivery": "the step under way was interrupted; the Agent resumes with this at once" if when == "now"
-                else "the Agent reads this when the step under way ends",
+        delivery = ("the step under way was interrupted; the Agent resumes with this at once" if when == "now"
+                    else "the Agent reads this when the step under way ends")
+        if ended:
+            self._cancel_turn_end(session)
+            delivery = "the Agent had just finished its last step, so it started on this at once"
+        elif when == "now":
+            withdrawn = self._withdraw_permissions(session)   # the interrupt ends them too
+            try:
+                result = await self.agent.request("POST", f"{self._path(session)}/interrupt?resume=true")
+                if result.get("interrupted") is False:
+                    delivery = "nothing was under way to interrupt; the Agent reads this at once"
+            except Exception:   # the steer was admitted, so it must not be sent again
+                session.permissions.update(withdrawn)
+                delivery = "the interrupt failed, so the Agent reads this when the step under way ends instead; do not send it again"
+        return {"alias": alias, "when": when, "delivery": delivery,
                 "note": "Still the same Prompt Turn; one harness event arrives when it stops."}
 
     async def inspect_managed_session(self, alias: str) -> dict:
@@ -255,8 +274,12 @@ class SessionManager:
             except AgentRequestError as exc:
                 if exc.status != 404:  # 404: delivered meanwhile, nothing left to withdraw
                     raise
-        s.permissions.clear()
-        await self.agent.request("POST", f"{self._path(s)}/interrupt")
+        withdrawn = self._withdraw_permissions(s)
+        try:
+            await self.agent.request("POST", f"{self._path(s)}/interrupt")
+        except Exception:   # not interrupted: its Permission Requests are still pending
+            s.permissions.update(withdrawn)
+            raise
         return {"alias": alias, "note": "Cancellation requested; the stop event confirms it."}
 
     async def resolve_permission(self, alias: str, permission_id: str, option_id: str) -> dict:
@@ -270,14 +293,77 @@ class SessionManager:
         del s.permissions[permission_id]
         try:
             await self.agent.request("POST", f"{self._path(s)}/permission/{p['request_id']}/reply", {"decision": option_id})
-        except AgentRequestError as exc:
-            if exc.status == 404:
+        except Exception as exc:   # a transport error too: the request may still be pending
+            if isinstance(exc, AgentRequestError) and exc.status == 404:
                 return {"error": "That Permission Request is no longer pending: answered elsewhere or its turn ended"}
             s.permissions[permission_id] = p
             raise
         return {"alias": alias, "resolved": permission_id, "option_id": option_id}
 
+    async def catch_up(self) -> None:
+        """After resubscribing, reconcile with the Agent's snapshots, as the Worker's catchUp does:
+        events sent while the stream was down are lost. Only each session's latest ending is found."""
+        try:
+            active = (await self.agent.request("GET", "/api/session/active")).get("data") or {}
+            for s in list(self.by_id.values()):
+                try:
+                    snapshot = (await self.agent.request("GET", self._path(s))).get("data") or {}
+                except AgentRequestError as exc:
+                    if exc.status != 404:
+                        raise
+                    s.state = "unavailable"
+                    s.permissions.clear()
+                    continue
+                running = bool(active.get(s.session_id))
+                if running:   # a pending end whose resume was missed: it runs
+                    self._cancel_turn_end(s)
+                if s.running and not running and not s.turn_end:
+                    self._finish_from_snapshot(s, snapshot, await self.agent.request(
+                        "GET", f"{self._path(s)}/message?order=desc&limit=10"))
+                elif running and not s.running:
+                    self._start_turn(s)
+                    self.events.put_nowait({"kind": "turn_started_elsewhere", "alias": s.alias})
+                pending = (await self.agent.request("GET", f"{self._path(s)}/permission")).get("data") or []
+                held = {p.get("id") for p in pending}
+                for pid, p in list(s.permissions.items()):   # answered while away, here or elsewhere
+                    if p["request_id"] not in held:
+                        del s.permissions[pid]
+                for request in pending:
+                    self._on_permission(request)
+            log("agent", "caught up after reconnecting", DIM)
+        except Exception as exc:
+            log("agent", f"catch-up failed: {exc}", YELLOW)
+
+    def _finish_from_snapshot(self, s: ManagedSession, snapshot: dict, listed: dict) -> None:
+        # Only an ending recorded since this turn began says how it ended; an older one is an earlier turn's.
+        since = s.current.started_ms
+        recent = listed.get("data") or []
+        ended = next((m for m in recent if m.get("type") == "idle" and (m.get("time") or {}).get("created", 0) >= since), None)
+        recorded = (ended or {}).get("outcome") or (
+            snapshot.get("outcome") if (snapshot.get("time") or {}).get("updated", 0) >= since else None)
+        outcome = {"succeeded": "completed", "interrupted": "cancelled"}.get(recorded, "failed")
+        latest = next((m for m in recent if m.get("type") == "assistant"), {})
+        error = None if outcome != "failed" else (
+            "it ended while Dogwalk was not listening; outcome unknown" if recorded is None
+            else str((latest.get("error") or {}).get("message") or "the Agent reported a failure"))
+        self._end_turn(s, outcome, error, None)
+
     # Projection of Agent events.
+
+    async def _active(self, session: ManagedSession) -> bool:
+        try:
+            active = await self.agent.request("GET", "/api/session/active")
+        except Exception:
+            return False
+        return bool((active.get("data") or {}).get(session.session_id))
+
+    @staticmethod
+    def _withdraw_permissions(session: ManagedSession) -> dict[str, dict]:
+        # Forgotten before an interrupt that ends them, so the permission.replied it causes is not
+        # taken for another client's answer; the caller restores them if the interrupt fails.
+        withdrawn = dict(session.permissions)
+        session.permissions.clear()
+        return withdrawn
 
     def _get(self, alias: str) -> ManagedSession:
         if alias not in self.sessions:
@@ -372,6 +458,8 @@ class SessionManager:
         session = self.by_id.get(request.get("sessionID"))
         if not session or not request.get("id"):
             return
+        if any(p["request_id"] == request["id"] for p in session.permissions.values()):
+            return   # already presented: catch-up lists every pending request
         # The Agent's decisions are fixed; always is offered only with patterns it would save.
         save = [str(p) for p in request.get("save") or [] if p]
         options = [{"option_id": "once", "name": "Allow once"},

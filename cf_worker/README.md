@@ -218,7 +218,7 @@ cannot talk to a migrated Sandbox either), so do steps 2–5 in one sitting:
    leave a gap where the old Worker serves calls:
 
    ```bash
-   cd cf_worker && npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-17-agent-activity.sql
+   (cd cf_worker && npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-17-agent-activity.sql)
    ```
 
 4. Set `DAYTONA_SNAPSHOT = "dogwalk-agent-20261112-v1"` in `wrangler.toml`, so Sandboxes
