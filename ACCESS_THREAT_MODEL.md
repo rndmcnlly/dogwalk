@@ -169,6 +169,15 @@ The Paired Browser is the largest gap: for up to twelve hours after the call it
 reaches a `sudo` shell, and no voice tool unpairs it. Only the keypad press
 separates it from the model, and anyone holding the handset can press one.
 
+Proposed, not built (`DOMAIN.md`: Display, Access Grant): a Paired Browser
+alone opens nothing. A terminal, desktop, preview, SSH access, or download
+needs an Access Grant drawn during a call, scoped to one Display and one
+target, with its own expiry and revocable by voice, as is a whole Display.
+This narrows the gap above to the grants a call chose to make. It adds SSH
+Access, a credential usable outside any browser, and several browsers paired
+at once, each still needing its own keypad press. Building it reopens this
+table.
+
 ### Hangup
 
 - Instructions through the call end. Outstanding Pairing Codes and unclaimed
@@ -250,8 +259,8 @@ These are mirrored briefly under Open Questions in `DOMAIN.md`.
 4. Which durable-access operations can be separated from ordinary Sandbox work?
    Candidates: a voice tool to unpair, pairing allowed only on a call whose
    Identity Check matched, the Paired Browser losing its terminal when the call
-   that created it ends, and the OpenCode service password moved out of the
-   Agent's reach.
+   that created it ends (the proposed Access Grant generalizes this), and the
+   OpenCode service password moved out of the Agent's reach.
 5. What exactly ends on hangup, and should the User have a spoken "end everyone's
    access" short of hanging up?
 6. How does Dogwalk explain connected powers and residual risk by voice, concretely
