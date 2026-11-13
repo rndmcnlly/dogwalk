@@ -103,7 +103,7 @@ interface ToolCallActivity {
   name: string;  // the Agent's own tool name (read, shell, execute, ...); never spoken
   kind: string;  // Dogwalk's own kind (toolKind): read, search, edit, execute, fetch, think, other
   title: string;  // the command, path, pattern, URL, or query from the tool's input
-  status: string;  // pending, in_progress, completed, failed
+  status: string;  // pending, in_progress, completed, failed, interrupted
   paths: string[];  // files the tool names, relative to the session's directory
   startedAt: number;
   endedAt: number | null;
@@ -997,6 +997,13 @@ export class VoiceSession {
   // and is batched off the voice message chain. Each row captures its
   // call identity now, so a late flush cannot attach it to a subsequent call.
   private timingRows: { callSid: string; ts: number; detail: string }[] = [];
+  // An Agent Connection made with no call attached (prewarm, or a reconnect between calls) is
+  // recorded into the next call at attach, with its setup requests' timing rows (bounded).
+  private agentConnectedEarly: Record<string, unknown> | null = null;
+  private agentConnectStartedMs: number | null = null;
+  // Set once attach has taken the early connection: liveSessionId is set before attach finishes.
+  private agentConnectionReported = false;
+  private earlyTimingRows: Record<string, unknown>[] = [];
   private timingTimer: ReturnType<typeof setTimeout> | null = null;
   private timingSequence = 0;
   private timingClockId = crypto.randomUUID();
@@ -1135,6 +1142,7 @@ export class VoiceSession {
         alias: session.alias, agent_session_id: session.agentSessionId, session_state: session.sessionState, turn_state: session.turnState,
       })),
     });
+    await this.recordEarlyAgentConnection();
     // Diagnostics must never block a call from connecting.
     const callerId = await this.callerIdAttestation().catch(() => null);
     const admission = await this.callIdentity().catch(() => null);
@@ -1228,11 +1236,13 @@ export class VoiceSession {
   // The Sandbox may be starting: the preview URL or the WebSocket upgrade fails until the
   // gateway listens. Back off and retry for a few minutes, then report the Agent unavailable.
   private async connectAgentWithRetry(): Promise<void> {
-    const deadline = Date.now() + AGENT_CONNECT_WINDOW_MS;
+    const startedMs = Date.now();
+    this.agentConnectStartedMs = startedMs;
+    const deadline = startedMs + AGENT_CONNECT_WINDOW_MS;
     let delay = 1000;
     for (let attempt = 1; ; attempt++) {
       try {
-        await this.connectAgent();
+        await this.connectAgent(startedMs, attempt);
         if (attempt > 1) await this.record("agent.connect.recovered", { attempt });
         if (this.liveAttached && this.agentConnecting) {
           this.agentConnecting = false;
@@ -1369,7 +1379,7 @@ export class VoiceSession {
 
   // Subscribe first, then snapshot: events that arrive during catchUp queue behind it on the
   // event chain. The Agent's work never depended on this connection, so nothing is resumed.
-  private async connectAgent(): Promise<void> {
+  private async connectAgent(startedMs: number, attempts: number): Promise<void> {
     if (this.agentConnected()) return;
     if (!this.sandboxId) throw new Error("sandbox ID is unavailable");
     const socket = await this.openAgentEvents(this.sandboxId);
@@ -1428,7 +1438,26 @@ export class VoiceSession {
     this.agentEventChain = caughtUp.catch(() => undefined);
     await caughtUp;
     this.agentReady = true;
-    await this.record("agent.connected", { session_count: this.sessions.size, agent_version: info?.data?.version ?? info?.version ?? null });
+    const connected = { session_count: this.sessions.size, agent_version: info?.data?.version ?? info?.version ?? null,
+      agent_connection_id: connectionId, started_ms: startedMs, connected_ms: Date.now(), ms: Date.now() - startedMs, attempts };
+    if (this.agentConnectionReported) return this.record("agent.connected", connected);
+    this.agentConnectedEarly = connected;
+  }
+
+  // At attach: the Agent Connection this call inherits, marked as made before the call, and
+  // the timing rows of its setup requests (also of an attempt still under way).
+  private async recordEarlyAgentConnection(): Promise<void> {
+    const connected = this.agentConnectedEarly;
+    const rows = this.earlyTimingRows.splice(0);
+    this.agentConnectedEarly = null;
+    this.agentConnectionReported = true;
+    const since = connected ? Number(connected.started_ms) : this.agentConnectAttempt ? this.agentConnectStartedMs : null;
+    if (since === null) return;
+    for (const row of rows) {
+      if (Number(row.ts_ms) < since) continue;
+      this.queueTimingRow({ ...row, before_call: true }, Number(row.ts_ms), { callSid: this.callSid, liveSessionId: this.liveSessionId });
+    }
+    if (connected) await this.record("agent.connected", { ...connected, before_call: true });
   }
 
   // Reconciles the projection with the Agent after subscribing: sessions it no longer has,
@@ -4347,7 +4376,7 @@ export class VoiceSession {
     const tool = type.startsWith("session.tool.");
     this.timing("agent.received", {
       agent_event: type, session_id: sessionId, agent_connection_id: connectionId, queue_ms: Date.now() - receivedMs,
-      ...(tool ? { tool_call_id: data.id, tool_status: TOOL_EVENT_STATUS[type] } : {}),
+      ...(tool ? { tool_call_id: data.id, tool_status: type === "session.tool.failed" ? toolFailedStatus(data) : TOOL_EVENT_STATUS[type] } : {}),
       ...(type === "session.tool.input.started" ? { tool_kind: toolKind(String(data.name ?? "")) } : {}),
       ...(type === "session.text.delta" && typeof data.delta === "string" ? { content_text: data.delta, content_kind: "agent_report" } : {}),
     }, receivedMs);
@@ -4475,7 +4504,7 @@ export class VoiceSession {
       case "session.tool.success":
         return this.applyToolCall(session, id, { status: "completed" });
       case "session.tool.failed":
-        return this.applyToolCall(session, id, { status: "failed" });
+        return this.applyToolCall(session, id, { status: toolFailedStatus(data) });
     }
   }
 
@@ -4507,7 +4536,7 @@ export class VoiceSession {
       if (call.status === "in_progress" && call.kind !== previousKind) this.toolCallStarted(session, call);
       return;
     }
-    if (call.status === "completed" || call.status === "failed") {
+    if (call.status === "completed" || call.status === "failed" || call.status === "interrupted") {
       call.endedAt = Date.now();
       this.feedPush("agent", `${call.title || call.kind} (${call.status})`, { who: session.alias, lane: "tool" });
     }
@@ -4997,6 +5026,7 @@ export class VoiceSession {
     this.live = null;
     this.liveAttached = false;
     this.liveSessionId = null;
+    this.agentConnectionReported = false;
     if (pendingCodeHash) this.state.waitUntil(
       this.env.DB.prepare("DELETE FROM pairing_codes WHERE code_hash = ?").bind(pendingCodeHash).run()
         .catch(() => { console.warn("pairing code cleanup failed; in-memory attempt is already invalid"); }),
@@ -5025,6 +5055,7 @@ export class VoiceSession {
   private resetCallState(sessionId: string): void {
     this.liveSessionId = sessionId;
     this.liveAttached = false;
+    this.agentConnectionReported = false;
     this.agentConnecting = false;
     this.firstCall = false;
     this.endMenu();
@@ -5077,16 +5108,25 @@ export class VoiceSession {
 
   private timing(event: string, detail: Record<string, unknown> = {}, tsMs = Date.now(),
     scope = { callSid: this.callSid, liveSessionId: this.liveSessionId }): void {
-    if (!scope.callSid || !scope.liveSessionId) return;
     // Private operator evidence: the admin API may expose this, never Paired Browser
     // permissions. Bound at collection, independently of the UI's content opt-in.
     if (typeof detail.content_text === "string") detail = { ...detail,
       content_text: detail.content_text.slice(0, 12_000),
       content_truncated: detail.content_text.length > 12_000 };
+    const row = { ...detail, event, ts_ms: tsMs, clock_id: this.timingClockId, seq: ++this.timingSequence, ...this.producer };
+    if (!scope.callSid || !scope.liveSessionId) {
+      // Kept for the next attach, which takes only an early Agent Connection's own rows.
+      if (!this.liveSessionId) this.earlyTimingRows = [...this.earlyTimingRows, row].slice(-20);
+      return;
+    }
+    this.queueTimingRow(row, tsMs, scope);
+  }
+
+  private queueTimingRow(row: Record<string, unknown>, tsMs: number, scope: { callSid: string | null; liveSessionId: string | null }): void {
+    if (!scope.callSid || !scope.liveSessionId) return;
     this.timingRows.push({
       callSid: scope.callSid, ts: Math.floor(tsMs / 1000),
-      detail: JSON.stringify({ ...detail, event, ts_ms: tsMs, clock_id: this.timingClockId,
-        seq: ++this.timingSequence, live_session_id: scope.liveSessionId, ...this.producer }),
+      detail: JSON.stringify({ ...row, live_session_id: scope.liveSessionId }),
     });
     if (this.timingRows.length >= 50) this.state.waitUntil(this.flushTiming());
     else if (!this.timingTimer) this.timingTimer = setTimeout(() => {
@@ -5452,6 +5492,12 @@ const TOOL_EVENT_STATUS: Record<string, string> = {
   "session.tool.success": "completed", "session.tool.failed": "failed",
 };
 
+// OpenCode ends a step it aborted (a Redirect's interrupt, a cancel, a rejected Permission
+// Request) as a failed tool: that was asked for, so it is interrupted, not failed.
+function toolFailedStatus(data: Record<string, any>): string {
+  return data.error?.type === "aborted" ? "interrupted" : "failed";
+}
+
 // Dogwalk's own tool kinds, from the Agent's tool names. Code mode's execute is other until
 // its progress names the tool it runs; anything unknown is other.
 function toolKind(name: string): string {
@@ -5564,7 +5610,7 @@ function closeOpenToolCalls(session: ManagedSession): void {
   }
 }
 
-// Failed tool calls since the last completed one.
+// Failed tool calls since the last completed one; an interrupted one neither counts nor breaks it.
 function failureStreak(session: ManagedSession): number {
   let streak = 0;
   for (const item of [...session.toolCalls].reverse()) {

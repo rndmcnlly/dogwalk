@@ -325,7 +325,7 @@ function draw() {
     if (e.name.startsWith('model.')) { kind='model'; id=d.request_id; begin=e.name==='model.started'; finish=['model.completed','model.failed'].includes(e.name); }
     if (e.name.startsWith('tool.')) { kind='orchestrator-tool'; id=d.tool_call_id; begin=e.name==='tool.started'; finish=['tool.completed','tool.failed'].includes(e.name); }
     if (e.name.startsWith('agent.turn.') && agentSession(e)) { kind='Prompt Turn'; id=agentSession(e); begin=['agent.turn.started','agent.turn.observed'].includes(e.name); finish=['agent.turn.stopped','agent.turn.failed'].includes(e.name); }
-    if (agentTool(e)) { kind='agent-tool:' + agentSession(e); id=d.tool_call_id; begin=['pending','in_progress'].includes(d.tool_status); finish=['completed','failed','cancelled'].includes(d.tool_status); }
+    if (agentTool(e)) { kind='agent-tool:' + agentSession(e); id=d.tool_call_id; begin=['pending','in_progress'].includes(d.tool_status); finish=['completed','failed','interrupted','cancelled'].includes(d.tool_status); }
     if (kind && ident(id)) {
       const k = key(e,kind,id);
       if (begin && !pending.has(k)) pending.set(k,e);
