@@ -43,8 +43,9 @@ possible after it ends.**
    weak, what the Workspace can do is the real control. Owners connect scoped,
    revocable, budgeted powers (a repository-specific token, a limited service
    account, an inference project with a budget), not their personal credential
-   collection. The plain statement Dogwalk gives owners is: **anyone admitted to
-   your call can exercise every capability you connected to this Workspace.**
+   collection. The plain statement Dogwalk should give owners (not yet delivered;
+   see Open question 6) is: **anyone admitted to your call can exercise every
+   capability you connected to this Workspace.**
    Limiting powers lowers the cost of impersonation; it does not strengthen the
    ceremony.
 
@@ -209,7 +210,9 @@ Accepted for one operator-managed deployment whose only Users are invited:
 - An Agent with `sudo` can create durable access, spend the inference budget, and
   likely self-approve Permission Requests. The Sandbox is the trust boundary, and
   everything inside it is trusted equally.
-- Spending is bounded only by provider-side budgets and idle timeouts.
+- No per-User spending cap exists. A provider-side budget may limit spend, but
+  whether one is configured is unverified, and idle timeouts stop idle Sandboxes
+  without limiting spend during active work.
 
 Each acceptance holds only while the portfolio stays narrow. Connecting a
 production deployment credential, a personal GitHub token, or a payment method to
@@ -237,7 +240,11 @@ These are mirrored briefly under Open Questions in `DOMAIN.md`.
 1. What impostor success rate, against which attacks, is acceptable for the
    portfolio owners actually connect?
 2. Is there an overhear-safe, hands-free admission ceremony a driver can perform
-   without a personal smartphone, screen, or cognitively demanding ritual?
+   without a personal smartphone, screen, or cognitively demanding ritual? This
+   record does not compare complete ceremonies. Answering it with a comparison of
+   two or three concrete ceremonies against the driving scenario (criteria fixed
+   in advance, including setup and recovery burden) is a prerequisite for
+   enforcing the Identity Check on Home calls or changing the ceremony.
 3. What does first-call enrollment establish, and how do Re-enrollment and
    re-invitation avoid becoming weaker side doors?
 4. Which durable-access operations can be separated from ordinary Sandbox work?
