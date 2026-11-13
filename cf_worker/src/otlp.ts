@@ -31,7 +31,9 @@
 //   `request_model`: name `chat {gen_ai.request.model}`, kind CLIENT, gen_ai.operation.name
 //   `chat` (the Responses create call; openai.md names no Responses-specific value),
 //   gen_ai.request.model, gen_ai.request.reasoning.level, server.address, server.port,
-//   gen_ai.response.id, gen_ai.response.model, gen_ai.usage.input_tokens/output_tokens, and on
+//   gen_ai.response.id, gen_ai.response.model, gen_ai.usage.input_tokens/output_tokens,
+//   gen_ai.usage.cache_read.input_tokens, gen_ai.usage.cache_write.input_tokens,
+//   gen_ai.usage.reasoning.output_tokens, and on
 //   failure error.type (HTTP status, exception class, or `_OTHER`). gen_ai.provider.name
 //   `openai` and openai.api.type `responses` only when the recorded host is OpenAI's: for any
 //   other Responses-compatible base the provider is unknown, so this Required attribute is
@@ -40,6 +42,8 @@
 //   INTERNAL, gen_ai.operation.name `execute_tool`, gen_ai.tool.name, gen_ai.tool.call.id (the
 //   model supplied it), gen_ai.tool.type `function`, and error.type = the recorded outcome
 //   (`error_result`, `threw`, or legacy `failed`) when status is Error.
+// OpenAI's prompt cache diagnostics (type, miss reason, missed tokens) have no convention and
+// export as dogwalk.prompt_cache.*.
 // Not adopted: gen_ai.conversation.id (no provider-side conversation exists; store is false),
 // gen_ai.agent.name, GenAI metrics and events, and the interim `dogwalk.usage.*` names.
 
@@ -198,6 +202,27 @@ const ALLOW: Record<string, string> = {
   event_time_source: "dogwalk.timestamp.source",
 };
 // Read for timestamps or span matching, then represented by fields rather than attributes.
+// A recorded Responses `usage` (the provider's nested shape) as GenAI attribute pairs, unchecked.
+function usageCounts(usage: Detail): [string, unknown][] {
+  const nested = (key: string, field: string) => (usage[key] as Detail | undefined)?.[field];
+  return [
+    ["gen_ai.usage.input_tokens", usage.input_tokens],
+    ["gen_ai.usage.output_tokens", usage.output_tokens],
+    ["gen_ai.usage.cache_read.input_tokens", nested("input_tokens_details", "cached_tokens")],
+    ["gen_ai.usage.cache_write.input_tokens", nested("input_tokens_details", "cache_write_tokens")],
+    ["gen_ai.usage.reasoning.output_tokens", nested("output_tokens_details", "reasoning_tokens")],
+  ];
+}
+
+// OpenAI's prompt-cache diagnosis of a step against the previous one; no convention exists.
+function cacheDiagnosisPairs(diagnosis: Detail): [string, unknown][] {
+  return [
+    ["dogwalk.prompt_cache.diagnosis", diagnosis.type],
+    ["dogwalk.prompt_cache.miss_reason", diagnosis.reason],
+    ["dogwalk.prompt_cache.missed_tokens", diagnosis.cache_missed_tokens],
+  ];
+}
+
 const STRUCTURAL = new Set(["event", "ts_ms", "occurred_at_ms", "received_at_ms", "service_version", "deployment_environment",
   "trace_id", "span_id", "parent_span_id", "link_trace_id", "link_span_id"]);
 
@@ -215,11 +240,14 @@ function attributes(name: string, detail: Detail): { attrs: KeyValue[]; dropped:
     if (key === "usage" && value && typeof value === "object") {
       // Token counts only, and only as nonnegative integers: older rows stored usage verbatim.
       const usage = value as Detail;
-      for (const key of ["input_tokens", "output_tokens"] as const) {
-        const count = usage[key];
-        if (Number.isSafeInteger(count) && (count as number) >= 0) push(`gen_ai.usage.${key}`, count);
+      for (const [key, count] of usageCounts(usage)) {
+        if (Number.isSafeInteger(count) && (count as number) >= 0) push(key, count);
         else if (count !== undefined && count !== null) dropped++;
       }
+      continue;
+    }
+    if (key === "prompt_cache" && value && typeof value === "object") {
+      for (const [key, field] of cacheDiagnosisPairs(value as Detail)) push(key, field);
       continue;
     }
     if (key === "tool_call_id" && name.startsWith("tool.")) { push("gen_ai.tool.call.id", value); continue; }
@@ -445,7 +473,7 @@ export function openRecordedSpanIds(rows: ActivityRow[]): string[] {
 }
 
 /** Only a request that went to OpenAI's own API host is labelled as OpenAI. */
-const isOpenAiHost = (host: unknown): boolean =>
+export const isOpenAiHost = (host: unknown): boolean =>
   typeof host === "string" && (host === "api.openai.com" || host.endsWith(".api.openai.com"));
 
 /**
@@ -467,7 +495,9 @@ function inferenceConvention(start: Observation, headers: Observation | undefine
     ["server.port", start.detail.server_port],
     ["dogwalk.model_request.provider_request_id", headers?.detail.provider_request_id],
     ...(ok ? [["gen_ai.response.id", end.detail.response_id], ["gen_ai.response.model", end.detail.response_model],
-      ["gen_ai.usage.input_tokens", usage.input_tokens], ["gen_ai.usage.output_tokens", usage.output_tokens]]
+      // Counts as the log projection accepts them: older rows stored usage verbatim.
+      ...usageCounts(usage).filter(([, count]) => Number.isSafeInteger(count) && (count as number) >= 0),
+      ...cacheDiagnosisPairs((end.detail.prompt_cache ?? {}) as Detail)]
       : [["error.type", errorType]]),
   ].map(([key, value]) => (value === undefined || value === null ? null : kv(key as string, value)))
     .filter((pair): pair is KeyValue => pair !== null) };
