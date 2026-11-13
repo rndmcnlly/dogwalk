@@ -884,9 +884,10 @@ export class VoiceSession {
   // marked noticed when sendLive actually sends it.
   private roamingNoticed: string[] = [];
   private roamingNoticeMessage: unknown = null;
-  // Invitee news queued in call_started and not yet read by a model step: the Session
-  // Orchestrator tells it, so it is marked noticed only once a step that read it succeeds.
+  // Invitee news in a queued call_started, then in the context: the Session Orchestrator tells
+  // it, so it is marked noticed only once a model step that read it succeeds, however many fail first.
   private inviteeNewsUnread: InviteeNews[] = [];
+  private inviteeNewsInContext: InviteeNews[] = [];
   // The renaming ritual's offers in the current call: set_handle accepts only these.
   private handleOffers: { callSid: string | null; offered: string[]; spins: number } = { callSid: null, offered: [], spins: 0 };
   private sandboxId: string | null = null;
@@ -1134,8 +1135,10 @@ export class VoiceSession {
     })}`];
     // Decided with no await before the event is queued, so agent_connected can only follow it.
     this.agentConnecting = !this.acpReady;
-    // Likewise, so the next model step's queue holds the call_started that carries this news.
+    // Likewise, so the next model step's queue holds the call_started that carries this news,
+    // which supersedes any a failed step left unmarked.
     this.inviteeNewsUnread = invitees;
+    this.inviteeNewsInContext = [];
     if (this.agentConnecting) {
       events.push(`[harness event] agent_connecting: ${JSON.stringify({ note: ACP_STARTING_ERROR })}`);
     } else if (openedWaking) {
@@ -2791,15 +2794,15 @@ export class VoiceSession {
       let more = this.orchestratorQueue.length > 0;
       for (let step = 0; more && step < 24 && this.liveAttached; step++) {
         // Steering: corrections that arrive mid-loop reach the model before its next action.
-        let reading: InviteeNews[] = [];
         if (this.orchestratorQueue.length) {
           this.orchestratorContext.push({ role: "user", content: this.orchestratorQueue.splice(0).join("\n") });
-          [reading, this.inviteeNewsUnread] = [this.inviteeNewsUnread, []];
+          this.inviteeNewsInContext.push(...this.inviteeNewsUnread.splice(0));
           await this.state.storage.put("orchestrator_queue", this.orchestratorQueue);
         }
         const output = await this.orchestratorModel();
-        // A failed step leaves the news unmarked, so the inviter's next call tells it again.
-        if (reading.length && this.userId) void markInviteeNewsNoticed(this.env.DB, this.userId, reading).catch(() => {});
+        // A failed step throws before this, so the news stays pending for the next successful one.
+        const read = this.inviteeNewsInContext.splice(0);
+        if (read.length && this.userId) void markInviteeNewsNoticed(this.env.DB, this.userId, read).catch(() => {});
         this.orchestratorContext.push(...output);
         const calls = output.filter((item: any) => item.type === "function_call") as Array<Record<string, any>>;
         const results = await Promise.all(calls.map((call) => this.executeOrchestratorTool(call)));
