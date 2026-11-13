@@ -266,6 +266,8 @@ def orchestrator_lines(items: list) -> list[str]:
                 out.append(f"  {name.upper():5} {args.get('text', '')}")
             elif name == "begin_prompt_turn":
                 out.append(f"  prompt {args.get('alias')}: {args.get('prompt', '')}")
+            elif name == "steer_prompt_turn":
+                out.append(f"  steer  {args.get('alias')} ({args.get('when')}): {args.get('guidance', '')}")
             else:
                 out.append(f"  tool  {name} {json.dumps(args) if args else ''}")
         elif item.get("type") == "function_call_output" and failed(loads(item.get("output"))):
@@ -274,15 +276,15 @@ def orchestrator_lines(items: list) -> list[str]:
 
 
 def boundary_lines(items: list) -> list[str]:
-    """Theme words and phone numbers must never cross into ACP prompts (DOMAIN.md, Themes; Invitation)."""
+    """Theme words and phone numbers must never cross into Agent prompts or steering (DOMAIN.md, Themes; Invitation)."""
     source = (ROOT / "cf_worker/src/themes.ts").read_text()
     lexicon = {word: theme for theme, body in re.findall(r'\bid:\s*"(\w+)".*?\blexicon:\s*\[([^\]]*)\]', source, re.DOTALL)
                for word in re.findall(r'"([^"]+)"', body)}
     prompts = [loads(i.get("arguments")) for i in items
-               if i.get("type") == "function_call" and i.get("name") == "begin_prompt_turn"]
+               if i.get("type") == "function_call" and i.get("name") in ("begin_prompt_turn", "steer_prompt_turn")]
     out = []
     for args in prompts:
-        prompt, alias = str(args.get("prompt", "")), args.get("alias")
+        prompt, alias = str(args.get("prompt", args.get("guidance", ""))), args.get("alias")
         for word, theme in lexicon.items():
             for match in re.finditer(rf"\b{re.escape(word)}(?:s|es|ed|ing)?\b", prompt, re.IGNORECASE):
                 out.append(f"!! {theme} word {match.group(0)!r} in prompt to {alias}: "
@@ -324,9 +326,10 @@ def stats_lines(call: dict, items: list) -> list[str]:
            f" (cached {sum((u.get('input_tokens_details') or {}).get('cached_tokens', 0) for u in usage)})"
            f", out {sum(u.get('output_tokens', 0) for u in usage)}" if usage else ""),
         f"tools: {', '.join(f'{n}×{names.count(n)}' for n in dict.fromkeys(names)) or 'none'}; errors {errors}",
-        f"turns: {sum(1 for r in activity if r['event'] == 'acp.turn.started')} started, "
-        f"{sum(1 for r in activity if r['event'] == 'acp.turn.stopped')} stopped, "
-        f"{sum(1 for r in activity if r['event'] == 'acp.turn.failed')} failed",
+        f"turns: {sum(1 for r in activity if r['event'] == 'agent.turn.started')} started, "
+        f"{sum(1 for r in activity if r['event'] == 'agent.turn.stopped')} stopped, "
+        f"{sum(1 for r in activity if r['event'] == 'agent.turn.failed')} failed, "
+        f"{sum(1 for r in activity if r['event'] == 'agent.turn.steered')} steered",
     ]
     fixtures = [(r["event"].removeprefix("voice.fixture."), detail(r).get("label")) for r in activity
                 if r["event"].startswith("voice.fixture.")]
@@ -400,11 +403,11 @@ def reminder_lines(conversation: dict, call: dict, bounds: tuple[int, int], depl
             error = str(loads(body).get("error", body))
             out.append(f"whiteboard_error {error[:70]!r}: the paired page may predate the deploy (stale tab), "
                        "compare with cf_worker/src/pair_page.ts")
-    agent_errors = sorted({m for r in activity if r["event"].startswith("acp.")
-                           for m in re.findall(r"SseError|ServerUnavailable|disconnected|connect\.failed",
+    agent_errors = sorted({m for r in activity if r["event"].startswith("agent.")
+                           for m in re.findall(r"SseError|ServerUnavailable|disconnected|connect\.failed|out_of_memory",
                                                r["event"] + " " + str(r.get("detail")))})
     if agent_errors:
-        out.append(f"Agent connection errors ({', '.join(agent_errors)}): check acp.turn.failed in activity and the "
+        out.append(f"Agent connection errors ({', '.join(agent_errors)}): check agent.turn.failed in activity and the "
                    "Sandbox gateway/OpenCode logs (disk, memory) before blaming the Orchestrator")
     # A cold start or a new voice session (Theme change) rewrites the prefix, so a miss then is expected.
     fresh = [r["ts"] for r in activity if r["event"] == "voice.live.attached"]
@@ -473,7 +476,7 @@ def main() -> None:
         print("\n## orchestrator")
         emit(orchestrator_lines(items))
     if args.only in (None, "boundary"):
-        print("\n## boundary (ACP prompts)")
+        print("\n## boundary (Agent prompts)")
         emit(boundary_lines(items))
     if args.only in (None, "stats"):
         print("\n## stats")

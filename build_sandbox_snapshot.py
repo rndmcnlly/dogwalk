@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 from pathlib import Path
 
 from daytona import (
@@ -20,8 +21,13 @@ from daytona import (
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_NAME = "dogwalk-acp-20261108-v2"
-OPENCODE_VERSION = "2.2.5"
+DEFAULT_NAME = "dogwalk-agent-20261112-v1"
+OPENCODE_VERSION = "2.2.7"
+# Also what `deploy.py --patch-sandboxes` installs into an existing Sandbox with another version.
+OPENCODE_URL = (
+    "https://github.com/anomalyco/opencode/releases/download/"
+    f"v{OPENCODE_VERSION}/opencode-linux-x64.tar.gz"
+)
 BASE_IMAGE = (
     "python:3.13.5-slim-bookworm@"
     "sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7b0ceaccb55e9dd7e30987419"
@@ -41,9 +47,15 @@ CHROMIUM_FLAGS = (
     'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS '
     '--no-sandbox --test-type --disable-dev-shm-usage"'
 )
-ACP_INITIALIZE = (
-    '{"jsonrpc":"2.0","id":1,"method":"initialize",'
-    '"params":{"protocolVersion":1,"clientCapabilities":{}}}'
+# Start the shared OpenCode service as the daytona user, wait for it to register, and
+# check its API with the password it registered; then stop it.
+SERVICE_CHECK = (
+    "state=/home/daytona/.local/state/opencode/service.json; "
+    "opencode serve --service & pid=$!; "
+    'for i in $(seq 60); do [ -f "$state" ] && break; sleep 0.5; done; '
+    'curl -fsS -u "opencode:$(jq -r .password "$state")" "$(jq -r .url "$state")/api/info" '
+    f"| jq -e '.version == \"{OPENCODE_VERSION}\"'; "
+    'status=$?; kill "$pid"; wait "$pid"; exit "$status"'
 )
 
 
@@ -52,7 +64,7 @@ ACP_INITIALIZE = (
 # changing one of these files rarely needs a new snapshot or a replaced Sandbox.
 # Packages, binaries (OpenCode itself), and image settings are not covered.
 SNAPSHOT_FILES = (
-    ("sandbox_acp_gateway.py", "/opt/dogwalk/sandbox_acp_gateway.py", "755"),
+    ("sandbox_agent_gateway.py", "/opt/dogwalk/sandbox_agent_gateway.py", "755"),
     ("sandbox_opencode.json", "/home/daytona/.config/opencode/opencode.json", "644"),
     # Global rules OpenCode loads into every session: narrate between tool calls,
     # since Dogwalk relays the Agent's text, not its tool arguments.
@@ -73,9 +85,8 @@ def snapshot_image() -> Image:
             "rm -rf /var/lib/apt/lists/*",
             f"printf '%s\\n' '{CHROMIUM_FLAGS}' > /etc/chromium.d/dogwalk",
             "pip install --no-cache-dir aiohttp==3.14.2",
-            "curl -fsSL --retry 5 --retry-all-errors "
-            f"https://github.com/anomalyco/opencode/releases/download/v{OPENCODE_VERSION}/"
-            "opencode-linux-x64.tar.gz | tar -xz -C /usr/local/bin opencode && "
+            f"curl -fsSL --retry 5 --retry-all-errors {OPENCODE_URL} "
+            "| tar -xz -C /usr/local/bin opencode && "
             "chmod 755 /usr/local/bin/opencode",
             "useradd --create-home --shell /bin/bash daytona && "
             "mkdir -p /opt/dogwalk /home/daytona/.config/opencode "
@@ -88,24 +99,25 @@ def snapshot_image() -> Image:
         image = image.add_local_file(ROOT / source, destination)
     return (
         image.run_commands(
-            "chmod 755 /opt/dogwalk/sandbox_acp_gateway.py && "
+            "chmod 755 /opt/dogwalk/sandbox_agent_gateway.py && "
             "chmod 0700 /home/daytona/.config/dogwalk && "
             "chown -R daytona:daytona /home/daytona /opt/dogwalk",
-            # OpenCode 2.x prints "opencode v2.2.5"; 1.x printed the bare version.
+            # OpenCode 2.x prints "opencode v2.2.7"; 1.x printed the bare version.
             f'v="$(opencode --version)" && echo "$v" && '
             f'case "$v" in *"{OPENCODE_VERSION}") ;; *) exit 1 ;; esac',
             "python -c 'import aiohttp'",
             "file --version && command -v pdftotext unzip sqlite3 xxd strings ffmpeg convert",
-            "cd /tmp && python /opt/dogwalk/sandbox_acp_gateway.py test",
-            # The Agent command must still answer ACP initialize over stdio.
-            f"cd /home/daytona && ( printf '%s\\n' '{ACP_INITIALIZE}'; sleep 15 ) | "
-            "sudo -u daytona -H timeout 30 /usr/local/bin/opencode acp | "
-            "grep -q '\"protocolVersion\":1'",
+            "cd /tmp && python /opt/dogwalk/sandbox_agent_gateway.py test",
+            "cd /home/daytona && sudo -u daytona -H sh -c " + shlex.quote(SERVICE_CHECK),
             # Leave no OpenCode state from these checks in the image. The root
             # `opencode --version` above creates $TMPDIR/opencode owned by root,
-            # which the daytona user then cannot write tool output into.
+            # which the daytona user then cannot write tool output into. The service
+            # check leaves two files named service.json: the saved password (and any
+            # port) in ~/.config/opencode, which each Sandbox must generate for itself,
+            # and the running service's url, pid, and password in
+            # ~/.local/state/opencode, which goes with ~/.local.
             "rm -rf /home/daytona/.local /home/daytona/.cache /tmp/opencode "
-            "/tmp/.bun-*.so",
+            "/home/daytona/.config/opencode/service.json /tmp/.bun-*.so",
             "sudo -u daytona sudo -n true",
             "ping -c 1 127.0.0.1",
             "tmux -V",
@@ -123,7 +135,7 @@ def snapshot_image() -> Image:
         .entrypoint(
             [
                 "/usr/local/bin/python",
-                "/opt/dogwalk/sandbox_acp_gateway.py",
+                "/opt/dogwalk/sandbox_agent_gateway.py",
                 "serve",
                 "--workspace",
                 "/home/daytona",
@@ -132,7 +144,7 @@ def snapshot_image() -> Image:
                 "--port",
                 "8765",
                 "--agent-command",
-                "/usr/local/bin/opencode acp",
+                "/usr/local/bin/opencode serve --service",
             ]
         )
     )

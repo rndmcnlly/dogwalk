@@ -18,10 +18,10 @@ Phone
   -> OpenAI GPT-Live over secure SIP (Voice Frontend: speech, no tools)
        -> sideband WebSocket to sandbox-keyed VoiceSession Durable Object
             -> Session Orchestrator (Responses API tool loop, gpt-6.1-sol)
-       -> ACP over WebSocket through Daytona preview proxy
-            -> sandbox_acp_gateway.py
-            -> opencode acp over stdio
-                 -> many ACP Sessions
+       -> HTTP (/api/*) and an event WebSocket (/events) through Daytona preview proxy
+            -> sandbox_agent_gateway.py
+            -> opencode serve --service (the Sandbox's shared OpenCode service)
+                 -> many OpenCode sessions
 ```
 
 One Durable Object coordinates one retained Agent Connection and many Managed
@@ -77,16 +77,19 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 
 - Provides the filesystem, process, network, and credential isolation required
   by coding Agents.
-- Runs the ACP Gateway and OpenCode 2 from an immutable versioned snapshot.
+- Runs the Agent Gateway and OpenCode 2 from an immutable versioned snapshot.
 - Receives Agent inference credentials only as Daytona Secret placeholders.
 - Auto-stops after idle time and auto-archives after extended inactivity, but is
   never automatically deleted.
 - Retains files and Agent-held session history across calls and restarts.
 
-The ACP Gateway is deliberately narrow glue: it upgrades `GET /acp` to a
-WebSocket, owns one `opencode acp` subprocess, and forwards newline-delimited ACP
-JSON-RPC frames between WebSocket and stdio. It does not implement session
-semantics.
+The Agent Gateway is deliberately narrow glue: it keeps the Sandbox's shared
+OpenCode service running (starting `opencode serve --service` when none answers,
+restarting it after an abnormal exit), proxies `/api/*` to it with the service's
+credentials, and relays its `/api/event` stream to each `/events` WebSocket. Client
+disconnects never stop the service, so Agent work outlives the connection, and a
+TUI in a Takeover Terminal attaches to the same service. It does not implement
+session semantics (`SANDBOX_AGENT_GATEWAY.md`).
 
 ## Persistence
 

@@ -1,6 +1,6 @@
 # Dogwalk
 
-Dogwalk aims to provide the capability surface of an agentic coding-session manager, including juggling many concurrent sessions, entirely through hands-free voice with zero dependence on visual user interaction. A deliberately engineering-weak Voice Agent coordinates stronger ACP Agents running in isolated sandboxes; the diagnostic web UI exists only for iterative harness development, telemetry, and debugging, not as a required user interface.
+Dogwalk aims to provide the capability surface of an agentic coding-session manager, including juggling many concurrent sessions, entirely through hands-free voice with zero dependence on visual user interaction. A deliberately engineering-weak Voice Agent coordinates stronger coding Agents (OpenCode) running in isolated sandboxes; the diagnostic web UI exists only for iterative harness development, telemetry, and debugging, not as a required user interface.
 
 ## Accessibility Ethos
 
@@ -16,7 +16,7 @@ When weighing a feature or architecture change, ask: does this make more capabil
 
 ## Deployment and Development
 
-The production path is Twilio PSTN -> Cloudflare Worker access and Sandbox wake-up -> OpenAI GPT-Live over secure SIP as the Voice Frontend, with a client-delegation sideband to the sandbox-keyed Durable Object, which runs the Session Orchestrator -> ACP-over-WebSocket -> the Daytona-hosted ACP Gateway and OpenCode 2. `orchestrator_spike.py` is a text-only harness for judging Orchestrator behavior against local `opencode acp`. Run `uv run --script cf_worker/smoke_test.py`, `uv run --script cf_worker/voice_session_test.py`, and `uv run --script sandbox_acp_gateway.py test`; run `npm run typecheck` from `cf_worker/`. `cf_worker/README.md` is the operational runbook and `PSTN_CLOUDFLARE.md` records the deployed architecture. To review a call or playtest, run `uv run --script playtest.py` and follow the `call-analysis` skill (`.agents/skills/call-analysis/SKILL.md`), which holds the review checklist and the rule for when a check moves into the CLI. For speaker verification, Voice Donations, or a voice score that looks wrong, follow the `voice-research` skill (`.agents/skills/voice-research/SKILL.md`) and start from its soundboard. Before tuning a timer or window that depends on how GPT-Live behaves, measure it with the `provider-probe` skill (`.agents/skills/provider-probe/SKILL.md`) and `delegation_probe.py`.
+The production path is Twilio PSTN -> Cloudflare Worker access and Sandbox wake-up -> OpenAI GPT-Live over secure SIP as the Voice Frontend, with a client-delegation sideband to the sandbox-keyed Durable Object, which runs the Session Orchestrator -> HTTP requests and an event WebSocket -> the Daytona-hosted Agent Gateway, which supervises the Sandbox's shared OpenCode service (`opencode serve --service`) and proxies its native API. Agent work lives in that service, so it outlives the connection, a deploy, and Durable Object eviction. `orchestrator_spike.py` is a text-only harness for judging Orchestrator behavior against a local `opencode serve`. Run `uv run --script cf_worker/smoke_test.py`, `uv run --script cf_worker/voice_session_test.py`, and `uv run --script sandbox_agent_gateway.py test`; run `npm run typecheck` from `cf_worker/`. `cf_worker/README.md` is the operational runbook and `PSTN_CLOUDFLARE.md` records the deployed architecture. To review a call or playtest, run `uv run --script playtest.py` and follow the `call-analysis` skill (`.agents/skills/call-analysis/SKILL.md`), which holds the review checklist and the rule for when a check moves into the CLI. For speaker verification, Voice Donations, or a voice score that looks wrong, follow the `voice-research` skill (`.agents/skills/voice-research/SKILL.md`) and start from its soundboard. Before tuning a timer or window that depends on how GPT-Live behaves, measure it with the `provider-probe` skill (`.agents/skills/provider-probe/SKILL.md`) and `delegation_probe.py`.
 
 Changes land through pull requests so review bots can comment while other work continues. Greptile reviews each PR once, when it opens (`greptile.json`); each review costs real money, so never request a Greptile re-review or mention it after the PR is open. CodeRabbit reviews follow-up commits. Address findings on the branch, reply on each thread, and merge when the remaining findings are fixed or answered. Run a branch's suites with nothing else running before merging, and give parallel worktrees separate `DOGWALK_TEST_PORT_BASE` values.
 
@@ -24,7 +24,7 @@ This is a public repository for one operator-managed deployment. It is acceptabl
 
 Adam is the only user. Prefer destructive back-patches of D1 and Durable Object storage (a migration file, a one-time fix, or letting state be recreated) over backwards-compatibility code paths; when a schema or stored shape changes, migrate the data and delete the compatibility branch.
 
-A Managed Session wraps one retained ACP Session. Its mutable Alias is pronounceable, while the ACP Session ID remains an opaque implementation identifier.
+A Managed Session wraps one retained Agent Session. Its mutable Alias is pronounceable, while the Agent Session ID remains an opaque implementation identifier.
 
 ## Domain Language
 
@@ -32,13 +32,14 @@ A Managed Session wraps one retained ACP Session. Its mutable Alias is pronounce
 
 Core distinctions:
 
-- Dogwalk is an eyes-free ACP Client. An ACP Agent is a coding harness such as OpenCode, distinct from the Voice Agent.
-- A Managed Session wraps one ACP Session and owns its pronounceable Alias.
-- A Prompt Turn completes or is cancelled; its Managed Session can remain available for later turns.
+- Dogwalk is an eyes-free Agent Client. An Agent is a coding harness (OpenCode), distinct from the Voice Agent.
+- A Managed Session wraps one Agent Session and owns its pronounceable Alias.
+- A Prompt Turn completes, is cancelled, or fails; its Managed Session can remain available for later turns. Steering (a Steer or a Redirect) joins a running Prompt Turn rather than starting another.
 - Cancelling a Prompt Turn, closing an active session, and deleting persisted session history are distinct operations.
 - Permission Requests authorize actions. Elicitations ask for information. Do not collapse them into one protocol response type.
-- OpenCode, OpenAI GPT-Live, and Daytona are adapters or deployment choices, not domain concepts.
+- OpenCode is a deliberate, pinned dependency (issue #28): its API terms (executions, inbox, delivery) stop at the Agent Integration boundary. OpenAI GPT-Live and Daytona are adapters or deployment choices, not domain concepts.
+- Co-present clients (an OpenCode TUI, OpenChamber) may act on the same Agent Sessions; none may become required.
 - Dogwalk is a product codename. A Theme (currently Park, the canine fiction) may flavor UI copy and Voice Agent speech, but it is not domain vocabulary and carries no rules: every Voice Agent rule is stated neutrally in the core prompts, and `themes.ts` only presents it.
-- Voice Agent tool names, payloads, logs, schemas, tests, ACP prompts, and sandbox internals use neutral ACP and session-management terms.
+- Voice Agent tool names, payloads, logs, schemas, tests, prompts sent to Agents, and sandbox internals use neutral session-management terms.
 
 When introducing or changing a domain concept, use the canonical term from `DOMAIN.md` in core code and tests, update `DOMAIN.md` in the same change, and record unresolved ambiguity under Open Questions rather than silently choosing a new meaning.

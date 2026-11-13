@@ -40,14 +40,17 @@ store its `whsec_...` signing secret as `OPENAI_WEBHOOK_SECRET`.
 `DAYTONA_SNAPSHOT` is currently `dogwalk-acp-20261108-v2` (see `wrangler.toml`). It contains the ACP
 Gateway, OpenCode `2.2.5`, tmux and Daytona's computer-use desktop (Xvfb, xfce4,
 x11vnc, noVNC, Chromium with `--no-sandbox`) for Human Takeover, passwordless sandbox-local `sudo`, and network
-diagnostic utilities. The OpenCode config selects `openai/gpt-6.1-sol`.
+diagnostic utilities. The OpenCode config selects `openai/gpt-6.1-sol`. `build_sandbox_snapshot.py` now
+builds `dogwalk-agent-20261112-v1` instead: OpenCode `2.2.7` and the Agent Gateway, which
+supervises the shared OpenCode service and serves its native API rather than ACP. The
+Worker on this branch speaks only that API, so adopting it is an ordered cut-over (below).
 
 From the repository root, build a new immutable version rather than replacing
 this snapshot in place:
 
 ```bash
 set -a; source ~/.tokens/daytona-api; set +a
-uv run --script build_sandbox_snapshot.py --name dogwalk-acp-YYYYMMDD-vN
+uv run --script build_sandbox_snapshot.py --name dogwalk-agent-YYYYMMDD-vN
 ```
 
 Verify the new snapshot before changing `wrangler.toml` and deploying the Worker.
@@ -64,7 +67,7 @@ The Worker submits this mapping at sandbox creation:
 `dogwalk-openai` is an org Daytona Secret allowlisted to `api.openai.com`,
 named by `DAYTONA_AGENT_SECRET`. The Worker sends only its name. Daytona's
 egress proxy substitutes the value into HTTPS headers, so the Sandbox holds a
-`dtn_secret_` placeholder; see `../SANDBOX_ACP_GATEWAY.md`. A Sandbox created
+`dtn_secret_` placeholder; see `../SANDBOX_AGENT_GATEWAY.md`. A Sandbox created
 before the secret existed must be replaced (or restarted after
 `update_secrets`) to receive it.
 
@@ -161,6 +164,78 @@ script waits until no call is in progress, then stops the Sandbox so the object
 reloads; stopping it mid-call would leave the caller without dogs while the
 object, still on old code, reconnects. `--no-deploy` performs
 only the refresh.
+
+A deploy is refused unless `DAYTONA_SNAPSHOT` names a `dogwalk-agent-*` snapshot and
+every managed Sandbox either was created from one or carries the
+`dogwalk.dev/agent-api=native` label that an in-place migration sets; an ACP-era
+Sandbox would fail every call. `--allow-legacy-sandboxes` overrides the second check
+(it still warns), for example when the operator's Sandbox is about to be deleted anyway.
+
+### Cutting Over to the Native API
+
+The Worker talks to OpenCode's native API through the Agent Gateway's `/events` and
+`/api/*`. An ACP-era Sandbox (`dogwalk-acp-*`) boots `sandbox_acp_gateway.py` with
+`opencode acp` from its image entrypoint and serves neither, so every Sandbox must move
+before the Worker does. Run these in order, from the repository root unless noted, with
+no call in progress. From step 2 to step 5 calls fail in both directions (the old Worker
+cannot talk to a migrated Sandbox either), so do steps 2–5 in one sitting:
+
+1. Build and verify the snapshot. The build runs the gateway self-test and starts
+   `opencode serve --service` once to check `/api/info` reports `2.2.7`:
+
+   ```bash
+   set -a; source ~/.tokens/daytona-api; set +a
+   uv run --script build_sandbox_snapshot.py --name dogwalk-agent-20261112-v1
+   ```
+
+2. Migrate each existing Sandbox in place. A dry run first, then apply:
+
+   ```bash
+   uv run --script deploy.py --no-deploy --patch-sandboxes          # lists what would change
+   uv run --script deploy.py --no-deploy --patch-sandboxes --apply
+   ```
+
+   Since the image entrypoint cannot change, the patch uploads OpenCode `2.2.7` (fetched
+   on the laptop, so the Sandbox needs no egress to GitHub) and renames it over
+   `/usr/local/bin/opencode`, writes the Agent Gateway and the other snapshot files,
+   and replaces `/opt/dogwalk/sandbox_acp_gateway.py` with a shim that execs the Agent
+   Gateway, mapping `opencode acp` to `opencode serve --service`. It checks the gateway's
+   self-test, the new OpenCode serving `/api/info` under a scratch HOME (the live
+   database is left to the new version's first real start), and the shim; any failure
+   restores every file and the old binary from the `.dogwalk-backup-<stamp>` copies.
+   Success labels the Sandbox `dogwalk.dev/agent-api=native`, and the refresh stops it
+   so the next start boots the shim. The Workspace, `~/.local/share/opencode` (session
+   history), Takeover Terminal state, and the Sandbox's Daytona identity all survive.
+   It keeps the old image's other packages, which matched this snapshot at the cut-over.
+
+   Recreation is the fallback when a migration fails twice: delete the Sandbox in
+   Daytona and let the next call provision one from the new snapshot. That loses its
+   Workspace files and all Agent-held session history; the User's Memory, Registration,
+   and Voice Donations live in Cloudflare and stay.
+
+3. Apply the D1 migration to remote D1, immediately before the deploy. It narrows
+   `call_activity.source` to exclude `acp`, which the old Worker still writes, so do not
+   leave a gap where the old Worker serves calls:
+
+   ```bash
+   cd cf_worker && npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-17-agent-activity.sql
+   ```
+
+4. Set `DAYTONA_SNAPSHOT = "dogwalk-agent-20261112-v1"` in `wrangler.toml`, so Sandboxes
+   created from now on start from the new snapshot.
+
+5. Deploy: `uv run --script deploy.py`. It refuses if step 2 or 4 was skipped, then
+   refreshes the Durable Object.
+
+6. Verify with a call: the Opening, `agent_connected` in the call timeline, a short
+   Prompt Turn that reads a Workspace file, and a session from before the cut-over
+   still listed. `uv run --script playtest.py` shows `agent.*` activity for that call.
+   In the Sandbox, `curl -s localhost:8765/healthz` should report `"service": "resolved"`
+   with a `child_pid`.
+
+To roll back before step 3, restore the backups (`cp -p` each `.dogwalk-backup-<stamp>`
+file over its original, `sudo` for the binary), remove the label, and stop the Sandbox.
+After step 3, the old Worker also needs the migration reversed, which has no script.
 
 ## Invite Codes
 
@@ -540,7 +615,7 @@ npm run typecheck
 uv run --script smoke_test.py
 uv run --script voice_session_test.py
 uv run --script admin_test.py
-uv run --script ../sandbox_acp_gateway.py test
+uv run --script ../sandbox_agent_gateway.py test
 node --experimental-strip-types challenge_phrases_test.ts
 node --experimental-strip-types voice_verify_test.ts
 node --experimental-strip-types endpointer_test.ts
@@ -562,7 +637,9 @@ created before `migrations/2026-11-11-call-handoff-donation.sql`,
 `migrations/2026-11-14-reenrollment.sql`,
 `migrations/2026-11-14-roaming-admission.sql`, or
 `migrations/2026-11-16-invitee-onboarding.sql` needs those files applied with
-`--local` once, since `schema.sql` only creates missing tables.
+`--local` once, since `schema.sql` only creates missing tables. The suites apply
+`migrations/2026-11-17-agent-activity.sql` themselves when `call_activity` still
+allows the `acp` source.
 
 The smoke test runs `wrangler dev -c wrangler.toml -c speaker_mock.toml`, so the
 `SPEAKER` binding reaches `speaker_mock.js`, whose answers follow from the audio
@@ -614,20 +691,21 @@ session count) or `agent_unavailable`. Session tools that need the Agent fail
 fast with "the sandbox is still starting; try again after agent_connected", while
 `list_managed_sessions` and `inspect_managed_session` answer from the persisted
 projection. A dropped Agent Connection mid-call reconnects in the background
-instead of hanging up. When the Agent process dies, the gateway reads cgroup v2
-`memory.events` (its own cgroup and ancestors) to tell an OOM kill from another
-signal or exit, answers unanswered requests with JSON-RPC error data
-`{reason, signal, exit_status, limit_bytes, detail}`, and closes with 1011 and
-the same reason; the Durable Object puts it in `failure`, `turn_failed`, and
+instead of hanging up. When the OpenCode service the gateway started dies, the gateway reads
+cgroup v2 `memory.events` (its own cgroup and ancestors) to tell an OOM kill from another
+signal or exit, closes each `/events` WebSocket with 1011 and the reason as compact JSON
+`{reason, signal, exit_status, limit_bytes}`, and restarts the service with backoff
+(`../SANDBOX_AGENT_GATEWAY.md`); the Durable Object puts it in `failure`, `turn_failed`, and
 `agent_unavailable` (`agent_termination`, `failed_turns`). The gateway is baked
-into the snapshot at `/opt/dogwalk/sandbox_acp_gateway.py`, so a change reaches
+into the snapshot at `/opt/dogwalk/sandbox_agent_gateway.py`, so a change reaches
 a Sandbox through a new snapshot (new Sandboxes only) or a back-patch:
 `uv run --script deploy.py --no-deploy --patch-sandboxes` lists which snapshot-owned
 files (`SNAPSHOT_FILES` in `build_sandbox_snapshot.py`: gateway, OpenCode config,
 rules, plugin) differ in each managed Sandbox, and `--apply` writes them with
 backups, self-tests a patched gateway inside the Sandbox (restoring everything on
-failure), and stops the Sandbox so the next call boots them. Packages and binaries,
-OpenCode included, still need a new snapshot. On reconnect, Managed Sessions are restored with
+failure), and stops the Sandbox so the next call boots them. It also installs
+OpenCode at the snapshot's version when a Sandbox has another (see Cutting Over to the
+Native API); other packages still need a new snapshot. On reconnect, Managed Sessions are restored with
 `session/resume` when the Agent advertises `sessionCapabilities.resume` in
 `initialize`, otherwise `session/load`, always from the session's recorded
 directory (OpenCode rejects a reload from any other). A record without a
@@ -1141,9 +1219,10 @@ Each ACP request Dogwalk sends carries its own span (the one on its `acp.sent` r
 `params._meta.traceparent`, merged into any existing `_meta`; the ACP extensibility spec
 reserves that key, and upgrade headers cannot name individual requests. No `tracestate`,
 `baggage`, credentials, or content go in `_meta`. Notifications (`session/cancel`) and
-responses to Agent-initiated requests carry none: they are not Dogwalk spans. The Sandbox
-gateway forwards `_meta` unchanged and logs a metadata-only `acp_trace_context` line
-(`SANDBOX_ACP_GATEWAY.md`). OpenCode 2.2.6 accepts the key, but its ACP layer does not read it,
+responses to Agent-initiated requests carry none: they are not Dogwalk spans. The Agent
+Gateway now proxies OpenCode's native API instead: it forwards a request's `traceparent`
+header upstream and logs a metadata-only `agent_trace_context` line
+(`SANDBOX_AGENT_GATEWAY.md`). OpenCode 2.2.6 accepts the key, but its ACP layer does not read it,
 and nothing here gives the Sandbox an OTLP endpoint, so ACP spans end at the request/response
 boundary.
 

@@ -39,26 +39,26 @@ def main():
                      "detail": {"ts_ms": T0 * 1000 + at, "live_session_id": "live_test", **detail}})
 
     add("voice.live.attached", 1, managed_sessions=[{
-        "alias": '<img src=x onerror="window.__injected=1">', "acp_session_id": "ses_test", "turn_state": "ready",
+        "alias": '<img src=x onerror="window.__injected=1">', "agent_session_id": "ses_test", "turn_state": "ready",
     }])
     add("voice.timing", 100, event="model.started", request_id="req", clock_id="clock")
     add("voice.timing", 1100, event="model.completed", request_id="req", clock_id="clock", ms=1000)
-    add("acp.turn.started", 1200, acp_session_id="ses_test", alias="Example", started_ms=T0 * 1000 + 1000)
+    add("agent.turn.started", 1200, agent_session_id="ses_test", alias="Example", started_ms=T0 * 1000 + 1000)
     for index in range(2):
         for status, delta in (("in_progress", 0), ("completed", 50)):
-            add("voice.timing", 1300 + index * 100 + delta, event="acp.received", method="session/update",
-                session_id="ses_test", update="tool_call_update", tool_call_id=f"tool{index}",
+            add("voice.timing", 1300 + index * 100 + delta, event="agent.received",
+                session_id="ses_test", agent_event="session.tool.called", tool_call_id=f"tool{index}",
                 tool_kind="execute", tool_status=status, clock_id="clock")
     for index in range(520):
         add("voice.timing", 1600 + index * 200, event="live.received", type="session.output_audio.delta",
             chars=12800, start_ms=index * 200, end_ms=(index + 1) * 200, clock_id="clock")
-    add("acp.turn.stopped", 106000, acp_session_id="ses_test", alias="Example", ms=104000, ended_ms=T0 * 1000 + 105000,
+    add("agent.turn.stopped", 106000, agent_session_id="ses_test", alias="Example", ms=104000, ended_ms=T0 * 1000 + 105000,
         thoughts={"chunks": 2, "chars": 42, "tail": "PRIVATE_REASONING_SENTINEL"})
     for text in ("CONTENTSECRET caller ", '<img src=x onerror="window.__contentInjected=1">'):
         add("voice.timing", 106100, event="live.received", type="session.input_audio_transcript.delta",
             content_kind="caller", content_text=text, chars=len(text))
     for text in ("Agent coherent ", "progress snippet"):
-        add("voice.timing", 106200, event="acp.received", update="agent_message_chunk", session_id="ses_test",
+        add("voice.timing", 106200, event="agent.received", agent_event="session.text.delta", session_id="ses_test",
             content_kind="agent_report", content_text=text, chars=len(text))
     add("session.beat", 106300, text="CONTENTSECRET hidden beat", label="CONTENTSECRET hidden label",
         nested={"prompt": "CONTENTSECRET hidden prompt", "last_words": "CONTENTSECRET last words"})
@@ -214,12 +214,12 @@ def main():
         # Same identifiers in different clocks must not manufacture spans.
         for kind, identity in (("model", {"request_id": "cross-clock"}),
                                ("tool", {"tool_call_id": "cross-clock"}),
-                               ("acp.turn", {"acp_session_id": "ses_test"})):
+                               ("agent.turn", {"agent_session_id": "ses_test"})):
             add("voice.timing", 107000, event=kind + ".started", clock_id="clock-a", **identity)
-            add("voice.timing", 107500, event=kind + (".stopped" if kind == "acp.turn" else ".completed"),
+            add("voice.timing", 107500, event=kind + (".stopped" if kind == "agent.turn" else ".completed"),
                 clock_id="clock-b", **identity)
-        add("voice.timing", 107600, event="acp.sent", rpc_id="cross-clock", method="session/prompt", clock_id="clock-a")
-        add("voice.timing", 107700, event="acp.received", rpc_id="cross-clock", clock_id="clock-b")
+        add("voice.timing", 107600, event="agent.sent", agent_request_id="cross-clock", method="POST", clock_id="clock-a")
+        add("voice.timing", 107700, event="agent.received", agent_request_id="cross-clock", clock_id="clock-b")
         page.wait_for_function("n => document.querySelector('#counts').textContent.startsWith(n + ' loaded')", arg=len(rows))
         assert initial_cursor in requests["after"], "backfill did not use the retained insertion cursor"
         assert "Twilio/PSTN" in page.locator("#heads").inner_text()
@@ -258,14 +258,14 @@ def main():
         assert provenance["positioned_by"] == "receipt time (occurrence unknown)"
         assert provenance["precision"] == "provider precision unknown"
         assert page.locator("#plot .event[aria-label*='matched #']").count() == 4, "cross-clock spans were joined"
-        assert page.locator("#plot .event[aria-label='matched RPC response']").count() == 0
+        assert page.locator("#plot .event[aria-label='matched request response']").count() == 0
         assert page.locator("#plot .event[aria-label^='Observed live']").count() == live_arrows, "provider observations invented live arrows"
 
         # Adaptive streams cross wall-clock bucket boundaries without treating a backchannel as a flush.
         def delta(at, text, role="caller", session=None, **metadata):
-            add("voice.timing", at, event="acp.received" if session else "live.received",
+            add("voice.timing", at, event="agent.received" if session else "live.received",
                 type="session.input_audio_transcript.delta" if role == "caller" else "session.output_audio_transcript.delta",
-                update="agent_message_chunk" if session else None, acp_session_id=session,
+                agent_event="session.text.delta" if session else None, agent_session_id=session,
                 content_kind="agent_report" if session else role, content_text=text, chars=len(text), clock_id="stream-clock", **metadata)
             return len(rows)
 
@@ -276,7 +276,7 @@ def main():
         delta(118000, "BURST caller after long gap")
         delta(118100, "BURST agent A ", role="agent_report", session="ses_test")
         delta(118200, "BURST agent B ", role="agent_report", session="ses_other")
-        add("acp.turn.stopped", 118250, acp_session_id="ses_test")
+        add("agent.turn.stopped", 118250, agent_session_id="ses_test")
         delta(118300, "BURST agent A next", role="agent_report", session="ses_test")
         delta(118350, "continues B", role="agent_report", session="ses_other")
         add("voice.live.closed", 118400)
@@ -284,7 +284,7 @@ def main():
         delta(118475, " after voice closes", role="agent_report", session="ses_other")
         add("voice.live.detached", 118500)
         delta(118550, "BURST caller after detach")
-        add("acp.turn.stopped", 118600, acp_session_id="ses_other", live_session_id=None)
+        add("agent.turn.stopped", 118600, agent_session_id="ses_other", live_session_id=None)
         # Matching explicit provider offsets fuse batched delivery, without inventing Unix media positions.
         delta(120000, "BURST media begins ", role="voice", media_clock_id="provider-a", start_ms=0, end_ms=200)
         delta(124000, "batched continuation", role="voice", media_clock_id="provider-a", start_ms=250, end_ms=400)
@@ -309,11 +309,11 @@ def main():
         assert 750 < caller_burst["threshold_ms"] <= 2000, "cadence did not adapt above the minimum"
         assert burst("BURST backchannel")["burst"]["count"] == 1
         assert "explicit voice.live.closed" in burst("BURST caller after long gap")["burst"]["end_reason"]
-        assert "explicit acp.turn.stopped" in burst("BURST agent A ")["burst"]["end_reason"]
+        assert "explicit agent.turn.stopped" in burst("BURST agent A ")["burst"]["end_reason"]
         assert burst("BURST agent A next")["burst"]["count"] == 1
         agent_b=burst("BURST agent B continues B after voice closes")["burst"]
-        assert agent_b["count"] == 3, "voice closure split an independent ACP stream"
-        assert "explicit acp.turn.stopped" in agent_b["end_reason"], "ACP completion after voice detach lost its boundary"
+        assert agent_b["count"] == 3, "voice closure split an independent Agent stream"
+        assert "explicit agent.turn.stopped" in agent_b["end_reason"], "Agent completion after voice detach lost its boundary"
         assert "explicit voice.live.detached" in burst("BURST caller after close")["burst"]["end_reason"]
         assert burst("BURST caller after detach")["burst"]["state"] == "idle"
         media = burst("BURST media begins batched continuation")

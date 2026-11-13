@@ -1,5 +1,5 @@
 // Voice Agent Skills: version-controlled guidance the Session Orchestrator loads on demand.
-// Distinct from skills ACP Agents keep in the Sandbox; these are read-only at runtime and
+// Distinct from skills Agents keep in the Sandbox; these are read-only at runtime and
 // change only through this repository. Each file has `name` and `description` (the trigger)
 // frontmatter, an Orchestrator body, and an optional "## Voice Frontend guidance" section that
 // is pushed to the Voice Frontend when the skill loads. A themed skill also appends a body

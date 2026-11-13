@@ -3,7 +3,7 @@
 // that moves along an Intensity ladder, cast with a GPT-Live voice and scored with earcons. It
 // also words the few deterministic strings spoken without a model. Every behavioral rule lives in the neutral
 // core prompts in voice_session.ts, so swapping a theme changes how things sound, never
-// what the Voice Agent does. Nothing here is ever sent to an ACP Agent.
+// what the Voice Agent does. Nothing here is ever sent to an Agent.
 //
 // Each theme carries authoring notes kept out of the standing prompts. They hold the intent
 // the surface text must keep serving, for authors checking an edit against them and for
@@ -52,7 +52,7 @@ export interface Theme {
   genre: string;
   // The register's Intensity ladder and when to move along it, for the Voice Frontend.
   register: string;
-  // Words that would betray a theme leaking into ACP prompts (checked by the tests).
+  // Words that would betray a theme leaking into Agent prompts (checked by the tests).
   lexicon: string[];
   // Deterministic speech: the first-ever welcome and the keypad status readout.
   firstCallWelcome: string;

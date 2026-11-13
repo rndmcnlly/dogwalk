@@ -32,7 +32,7 @@ const EVENTS: Record<EarconName, EventInfo> = {
   },
   agent_connected: {
     title: "Sandbox ready",
-    meaning: "The Sandbox finished waking during the call and the ACP Agents are reachable. It completes the phrase the opening sound left hanging.",
+    meaning: "The Sandbox finished waking during the call and the coding agents are reachable. It completes the phrase the opening sound left hanging.",
     label: "Dogs awake.",
   },
   call_started_ready: {
@@ -67,17 +67,17 @@ const EVENTS: Record<EarconName, EventInfo> = {
   },
   turn_truncated: {
     title: "Prompt Turn cut short",
-    meaning: "The turn hit a token or request limit and stopped partway. Whatever it did may be incomplete.",
+    meaning: "The turn hit a token or request limit and stopped partway. Whatever it did may be incomplete. Not played at present: coding agents report this as a failure.",
     label: "Dog ran out of room.",
   },
   turn_refused: {
     title: "Prompt Turn refused",
-    meaning: "The Agent declined the request and ended its turn without doing the work.",
+    meaning: "The Agent declined the request and ended its turn without doing the work. Not played at present: coding agents do not report it apart from finishing.",
     label: "Dog refused.",
   },
   turn_failed: {
     title: "Prompt Turn failed",
-    meaning: "The turn broke on an error rather than ending with a stop reason. The Voice Agent will say what went wrong.",
+    meaning: "The turn broke on an error, or the coding agent's service died partway. The Voice Agent will say what went wrong.",
     label: "Errand failed.",
   },
   follow_started: {

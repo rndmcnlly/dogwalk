@@ -17,11 +17,11 @@ import { ENROLL_ANSWERS } from "./identity_check";
 import { availableHandles, HANDLE_OPTIONS_PER_SPIN, HANDLE_QUARANTINE_SECONDS, HANDLE_SPINS_PER_CALL, renameUser } from "./handles";
 import { PAIR_BUILD } from "./pair_page";
 import { producerFields } from "./otlp";
-import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, type TraceContext, withTraceparent } from "./trace_context";
+import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, type TraceContext } from "./trace_context";
 import { boardImagePaths, checkRasterSize } from "./board_images";
 import { hostSpeaker } from "./voice_verify";
 
-const ACP_PORT = 8765;
+const GATEWAY_PORT = 8765;
 const WORKSPACE = "/home/daytona";
 const MAX_ACTIVITY = 20;
 // Following (DOMAIN.md, Followed Session and Progress Beat).
@@ -41,7 +41,15 @@ const PHASE_EARCONS: Record<string, EarconName> = {
   looking: "progress_looking", changing: "progress_changing", running: "progress_running",
 };
 // A stopped or archived Sandbox can take minutes to start; the call goes on meanwhile.
-const ACP_CONNECT_WINDOW_MS = 3 * 60 * 1000;
+const AGENT_CONNECT_WINDOW_MS = 3 * 60 * 1000;
+// The event stream's first frame is server.connected; a gateway that never sends it is down.
+const AGENT_HELLO_MS = 15_000;
+// A terminal execution event waits this long before it ends the Prompt Turn: a Redirect
+// interrupts the step under way and resumes in a new execution within the same millisecond,
+// and an execution that starts meanwhile continues the same turn.
+const RESUME_GRACE_MS = 1000;
+// The assignment of a Prompt Turn another client began (Co-presence).
+const OBSERVED_ASSIGNMENT = "(from another client)";
 const MENU_TIMEOUT_MS = 15_000;
 // The menu waits fifteen seconds after its prompt has been heard, however long the prompt grows.
 const menuTimeoutMs = () => MENU_TIMEOUT_MS + prompt("menu").seconds * 1000;
@@ -57,16 +65,17 @@ const MAX_SESSION_LIST_PAGES = 10;
 // Alarm interval that keeps this object resident during a call (see alarm()).
 const KEEPALIVE_MS = 30_000;
 const MAX_WORKSPACE_PROJECTS = 60;
-const ACP_STARTING_ERROR = "the sandbox is still starting; try again after agent_connected";
-const ACP_UNAVAILABLE_ERROR = "the sandbox could not be reached; another attempt has started, and open_recovery_menu offers a restart";
+const AGENT_STARTING_ERROR = "the sandbox is still starting; try again after agent_connected";
+const AGENT_UNAVAILABLE_ERROR = "the sandbox could not be reached; another attempt has started, and open_recovery_menu offers a restart";
 
 type SessionState = "creating" | "ready" | "closing" | "closed" | "unavailable";
-type TurnState = "idle" | "queued" | "in_progress" | "stopped" | "failed";
+type TurnState = "idle" | "in_progress" | "stopped" | "failed";
+type TurnOutcome = "completed" | "cancelled" | "failed";
 
 interface ManagedSession {
   id: string;
   alias: string;
-  acpSessionId: string;
+  agentSessionId: string;
   sessionState: SessionState;
   turnState: TurnState;
   assignment: string | null;
@@ -80,11 +89,10 @@ interface ManagedSession {
   remark: string | null;
   // The latest local failure: a failed or interrupted turn, or a session that would not reload.
   failure: string | null;
-  stopReason: string | null;
+  outcome: TurnOutcome | null;
   title: string | null;
   usage: { used?: number; size?: number; cost?: unknown } | null;
-  // The Workspace directory chosen at creation; ACP requires it again on load and resume.
-  // Absent in older projections, which were all created in WORKSPACE.
+  // The Workspace directory chosen at creation; tool paths are spoken relative to it.
   cwd: string;
   // Epoch milliseconds, for spoken "how long" readouts; absent in older projections.
   turnStartedAt?: number | null;
@@ -96,17 +104,18 @@ interface ManagedSession {
 
 interface ToolCallActivity {
   toolCallId: string;
-  kind: string;  // ACP ToolKind: read, edit, delete, move, search, execute, think, fetch, switch_mode, other
-  title: string;
-  status: string;  // ACP ToolCallStatus: pending, in_progress, completed, failed
-  paths: string[];  // ACP locations, relative to the session's directory
+  name: string;  // the Agent's own tool name (read, shell, execute, ...); never spoken
+  kind: string;  // Dogwalk's own kind (toolKind): read, search, edit, execute, fetch, think, other
+  title: string;  // the command, path, pattern, URL, or query from the tool's input
+  status: string;  // pending, in_progress, completed, failed
+  paths: string[];  // files the tool names, relative to the session's directory
   startedAt: number;
   endedAt: number | null;
 }
 
 interface PlanEntry {
   content: string;
-  status: string;  // ACP PlanEntryStatus: pending, in_progress, completed
+  status: string;  // the Agent's todo status: pending, in_progress, completed, cancelled
 }
 
 // The Followed Session (DOMAIN.md): at most one per Voice Call. Its Progress Beats reach the
@@ -126,20 +135,18 @@ interface Follow {
 }
 
 interface PendingPermission {
-  requestId: string | number;
+  requestId: string;
   sessionId: string;
   alias: string;
   title: string;
   options: Array<{ optionId: string; name: string; kind?: string }>;
 }
 
-interface JsonRpcMessage {
-  jsonrpc?: string;
-  id?: string | number;
-  method?: string;
-  params?: Record<string, unknown>;
-  result?: Record<string, unknown>;
-  error?: unknown;
+// One frame of the Agent's event stream: an OpenCode event, as the Agent Gateway relays it.
+interface AgentEvent {
+  id?: string;
+  type?: string;
+  data?: Record<string, any>;
 }
 
 interface TranscriptEntry {
@@ -234,7 +241,7 @@ const MAX_COMPACT_FOCUS_CHARS = 500;
 const MEMORY_WRITE_TIMEOUT_MS = 120_000;
 const COMPACTION_BRIEF = "Tell the caller briefly that you are tidying your notes, and that they can keep talking meanwhile.";
 
-interface AcpPreview {
+interface GatewayPreview {
   url: string;
   token: string;
 }
@@ -352,20 +359,11 @@ const SVG_CSP = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src
 
 const UNSPEAKABLE = /https?:\/\/|\bses_[A-Za-z0-9]+|\b[0-9a-f]{12,}\b/;
 
-const TOOLS_NEEDING_ACP = new Set([
-  "create_managed_session", "begin_prompt_turn", "cancel_prompt_turn", "resolve_permission",
+const TOOLS_NEEDING_AGENT = new Set([
+  "create_managed_session", "begin_prompt_turn", "steer_prompt_turn", "cancel_prompt_turn", "resolve_permission",
   "discover_persisted_sessions", "load_persisted_session", "close_managed_session",
   "play_audio", "start_recording", "list_workspace_projects",
 ]);
-
-interface PendingRpc {
-  resolve: (result: Record<string, unknown>) => void;
-  reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-  trace: { context: TraceContext; parent: TraceContext | null };
-  // Journal scope at send, for a response that arrives between calls.
-  scope: { callSid: string | null; liveSessionId: string | null };
-}
 
 export const ORCHESTRATOR_TOOLS = [
   {
@@ -407,7 +405,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "begin_prompt_turn",
-    description: "Give an assignment or follow-up prompt to an existing managed session.",
+    description: "Give an assignment or follow-up prompt to an existing managed session whose turn is not running. To correct or add to work already running, use steer_prompt_turn.",
     parameters: {
       type: "object",
       properties: {
@@ -415,6 +413,25 @@ export const ORCHESTRATOR_TOOLS = [
         prompt: { type: "string", description: "The complete engineering assignment or follow-up" },
       },
       required: ["alias", "prompt"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "steer_prompt_turn",
+    description: "Correct or add to a session's running Prompt Turn without cancelling it: the work so far is kept, no new turn starts, and the turn's end still arrives as one event.",
+    parameters: {
+      type: "object",
+      properties: {
+        alias: { type: "string" },
+        guidance: { type: "string", description: "The complete correction or addition, written for the Agent the way a coworker would say it" },
+        when: {
+          type: "string",
+          enum: ["next_step", "now"],
+          description: "next_step: the Agent finishes the step under way, then reads this; for additions and corrections that can wait a moment. now: interrupts the step under way, and the Agent resumes at once with this; for \"stop, do this instead\".",
+        },
+      },
+      required: ["alias", "guidance", "when"],
       additionalProperties: false,
     },
   },
@@ -455,7 +472,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "cancel_prompt_turn",
-    description: "Cancel current work in a session while retaining the session for follow-up.",
+    description: "Cancel current work in a session while retaining the session for follow-up. Steering the Agent has not yet read is discarded.",
     parameters: {
       type: "object",
       properties: { alias: { type: "string" } },
@@ -466,7 +483,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "resolve_permission",
-    description: "Resolve a pending ACP permission request using one exact option ID previously announced.",
+    description: "Resolve a pending Permission Request with one exact option_id from its permission_requested event: once allows it this time, always also allows matching requests from now on, reject refuses it.",
     parameters: {
       type: "object",
       properties: { alias: { type: "string" }, option_id: { type: "string" } },
@@ -533,7 +550,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "restart_sandbox",
-    description: "Stop and start the caller's Sandbox, for when ACP Agents are stuck or unreachable. Running Agent work stops. Only call it after the caller has confirmed aloud that running work may stop. It returns at once; agent_connected follows when the Sandbox is back (or sandbox_restart_failed).",
+    description: "Stop and start the caller's Sandbox, for when Agents are stuck or unreachable. Running Agent work stops. Only call it after the caller has confirmed aloud that running work may stop. It returns at once; agent_connected follows when the Sandbox is back (or sandbox_restart_failed).",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -756,13 +773,13 @@ export const ORCHESTRATOR_TOOLS = [
 // The Voice Agent is one character performed by two components: this Voice Frontend
 // (GPT-Live, conversation only, no tools) and the Session Orchestrator below. Each prompt is
 // a neutral core that holds every rule, plus the Theme's presentation (themes.ts), which
-// never reaches ACP prompts.
+// never reaches Agent prompts.
 
 // Shared by both models: the session model that a theme's fiction presents.
 const SESSION_MODEL = `The session model:
-- Coding sessions do the work. Each is a Managed Session wrapping one ACP Session: an Agent with a mind of its own and the real power in the caller's sandbox. The Voice Agent never does or claims a session's work: say "I'll have <alias> look into that", never "I'll look into that".
+- Coding sessions do the work. Each is a Managed Session wrapping one Agent Session: an Agent with a mind of its own and the real power in the caller's sandbox. The Voice Agent never does or claims a session's work: say "I'll have <alias> look into that", never "I'll look into that".
 - Each session has a pronounceable alias, and aliases can be changed. Sessions from earlier work may exist in the Agent's history without being attached; they have no alias until loading attaches one under a fresh alias. In these instructions, <alias> stands for a real session's alias; it is never a name to say.
-- The Voice Agent starts work, checks on it, cancels it, passes along what comes back, and keeps few sessions attached, closing idle ones. Closing deletes nothing from the Agent's history: a closed session can be discovered and loaded again later, under a fresh alias.
+- The Voice Agent starts work, checks on it, corrects it while it runs, cancels it, passes along what comes back, and keeps few sessions attached, closing idle ones. Closing deletes nothing from the Agent's history: a closed session can be discovered and loaded again later, under a fresh alias.
 - Sessions take initiative; the Voice Agent suggests work, it does not command. It follows one session at a time, keeping up with what it does and telling the caller in quiet moments; a session just given work is the one followed. The others work unobserved until one bids for attention (it needs permission, finished, or seems stuck); the Voice Agent mentions it and offers to follow it.`;
 
 // The Intensity floor (DOMAIN.md, Theme): no theme or intensity may obscure these.
@@ -784,7 +801,7 @@ Match the caller's sophistication, especially on technical topics. With a newcom
 Speech: short natural phone speech, usually one sentence, at most two, except when reading permission choices. After answering, stop and listen. Never speak identifiers, URLs, file paths, or provider details; invite words and phone numbers the Session Orchestrator gives you for an invitation, the caller's Handle (their two-word name on Dogwalk) and Handle options, and the Pairing Code and pairing address ("dogwalk dot tools slash pair"), are the exception: say them slowly and clearly, and repeat them on request. Speak a Pairing Code exactly as given, saying the hyphens between the number and words. Refer to sessions by their aliases, and name only aliases the Session Orchestrator, a Following thought, or a status readout gave you in this call; never invent or guess one, and if you are unsure which sessions exist, think it over.
 
 Delegation policy:
-Backend tools: starting work in sessions, checking on sessions and what they reported, finding earlier sessions that are not attached, attaching, renaming, or closing sessions, cancelling a session's current work, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its theme, leaning into the theme or interpreting it for something it does not cover (runtime dramaturgy), changing the theme or the sounds, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, pairing a browser and creating a fresh spoken pairing code, showing things on the caller's paired screen, drawing on the whiteboard, inviting someone to Dogwalk, invitations and their status, who invited the caller, the caller's name on Dogwalk (their Handle) and choosing a new one, recovery controls, donating voice samples for research, practicing voice challenges (testing how well their voice matches), and ending the call.
+Backend tools: starting work in sessions, checking on sessions and what they reported, finding earlier sessions that are not attached, attaching, renaming, or closing sessions, correcting or cancelling a session's current work, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its theme, leaning into the theme or interpreting it for something it does not cover (runtime dramaturgy), changing the theme or the sounds, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, pairing a browser and creating a fresh spoken pairing code, showing things on the caller's paired screen, drawing on the whiteboard, inviting someone to Dogwalk, invitations and their status, who invited the caller, the caller's name on Dogwalk (their Handle) and choosing a new one, recovery controls, donating voice samples for research, practicing voice challenges (testing how well their voice matches), and ending the call.
 Generate <|SpawnThinking|> when: the caller asks for or about any of those, including questions about the setup or environment, or says a pairing page is open or ready, or asks you to lean into the theme, deepen the metaphor, or do runtime dramaturgy (climb the register at once, and think it over for the theme's sources), or corrects or cancels something they asked earlier, or wants to hang up.
 Do not generate <|SpawnThinking|> when: greeting, small talk, conversational repair, or repeating what you were already told.
 Generate <|SpawnThinking|> before giving an answer that depends on that work. Do not guess the result while waiting, and never answer "I don't have that detail" when a session could find out.
@@ -809,7 +826,7 @@ ${theme.register}
 
 ${REGISTER_RULE}`;
 
-export const orchestratorInstructions = (theme: Theme) => `You are the Session Orchestrator inside Dogwalk, an eyes-free agentic development environment used over the phone. A separate realtime Voice Frontend model talks with the caller; you never speak directly. Together you present as one character, the Voice Agent, and the Voice Frontend may say "let me think" while it waits on you. The Voice Frontend is good at conversation and weak at engineering; you supply engineering judgment and operate Managed Sessions, each wrapping one ACP Session with a coding Agent working in the caller's sandbox Workspace.
+export const orchestratorInstructions = (theme: Theme) => `You are the Session Orchestrator inside Dogwalk, an eyes-free agentic development environment used over the phone. A separate realtime Voice Frontend model talks with the caller; you never speak directly. Together you present as one character, the Voice Agent, and the Voice Frontend may say "let me think" while it waits on you. The Voice Frontend is good at conversation and weak at engineering; you supply engineering judgment and operate Managed Sessions, each wrapping one Agent Session with a coding Agent working in the caller's sandbox Workspace.
 
 ${SESSION_MODEL}
 ${themeConceit(theme)}
@@ -833,8 +850,10 @@ Rules:
 - A note the caller wants left on the sandbox, or notes they want read back, are work for a session like any other; you cannot touch files yourself.
 - When the caller asks for research or diagnosis a session could verify (facts, specs, procedures), prefer beginning a Prompt Turn over answering from your own knowledge. When you do answer from your own knowledge, say so plainly ("from what I know, unverified").
 - Never say or brief that a session will do, plans to do, or is doing something unless its Prompt Turn is already running or you begin it in the same response. When the caller asks for work a session should do, begin the turn now (after any consent it needs); if you have not, say plainly that you have not started it.
-- A started Prompt Turn is not a completed one. Report completion only from a turn event or inspection. end_turn means the Agent stopped normally, not that the work is correct; say what was verified versus merely claimed.
+- A started Prompt Turn is not a completed one. Report completion only from a turn event or inspection. Outcome completed means the Agent stopped normally, not that the work is correct; say what was verified versus merely claimed. Cancelled means it was interrupted, by a cancel, another client, or a rejected Permission Request.
+- To correct or add to a running turn, steer it with steer_prompt_turn rather than cancelling and beginning again, which throws away the work under way. Choose when: next_step for additions and corrections that can wait for the step under way, now when the caller wants it to stop what it is doing and do something else. Steering goes to the Agent, so write the guidance as you would a prompt. Cancelling discards steering the Agent has not yet read.
 - Cancelling a Prompt Turn is not closing a session, and closing is not deleting history.
+- Other clients, such as a terminal the caller opened, can work in the same sessions. turn_started_elsewhere means a session began a turn you did not start; its end arrives like any other, with started_elsewhere true (also when it began between calls, unannounced). permission_resolved with elsewhere true means a Permission Request was answered elsewhere: stop presenting it. elicitation_waiting means a session asked the caller a question that cannot be answered by voice yet: say so plainly.
 - Permission Requests: describe the supplied choices plainly, and resolve only with an option_id the application supplied, after the caller chooses.
 - For a turn event: if the caller is likely waiting on it or it needs a decision, say it briefly; otherwise brief it and let the Voice Frontend mention it at a natural pause. A turn event with followed true is for the session being followed: say it now.
 - Following: beginning a Prompt Turn follows that session, replacing any other. The Voice Frontend then hears its progress directly and narrates it in quiet moments without you. Use follow_managed_session when the caller wants to keep up with a session, and stop_following when they want to let it work unobserved; both are cheap. Following observes; it never directs the Agent. A bid event, or a turn or permission event with followed false, is a session you are not following asking for attention: mention it and offer to follow it, and do not call follow_managed_session unless the caller agrees.
@@ -870,7 +889,8 @@ Reply with one spoken sentence of at most twenty words that reorients the caller
 
 export class VoiceSession {
   private live: WebSocket | null = null;
-  private acp: WebSocket | null = null;
+  // The Agent's event stream through the Agent Gateway; requests go over plain fetch.
+  private agentEvents: WebSocket | null = null;
   private liveSessionId: string | null = null;
   private callSid: string | null = null;
   // The Voice Call's trace context, from the front door's `traceparent`. Operations snapshot it
@@ -901,22 +921,28 @@ export class VoiceSession {
   private feedDirty = new Set<number>();
   private feedTimer: ReturnType<typeof setTimeout> | null = null;
   private boardDraws: Promise<void> = Promise.resolve();
-  private rpcId = 1;
-  // Agent Connection identity for telemetry: JSON-RPC IDs repeat across reconnects.
-  private acpConnectionId: string | null = null;
-  private pendingRpc = new Map<string | number, PendingRpc>();
+  private agentRequestId = 1;
+  // Agent Connection identity for telemetry: request IDs restart with each object instance.
+  private agentConnectionId: string | null = null;
   private sessions = new Map<string, ManagedSession>();
-  // agent_thought_chunk traffic per session's current turn, recorded at its end and otherwise
+  // session.reasoning.delta traffic per session's current turn, recorded at its end and otherwise
   // unused until playtests show whether the production model's thoughts are worth narrating.
   private thoughts = new Map<string, { chunks: number; chars: number; tail: string }>();
-  private permissions = new Map<string | number, PendingPermission>();
+  private permissions = new Map<string, PendingPermission>();
   private liveAttached = false;
-  private acpReady = false;
+  private agentReady = false;
   // Background Agent Connection: talking starts before the Sandbox is reachable.
-  private acpConnecting: Promise<void> | null = null;
-  private acpGaveUp = false;
-  private agentCapabilities: Record<string, any> = {};
-  private acpPreview: (AcpPreview & { sandboxId: string }) | null = null;
+  private agentConnectAttempt: Promise<void> | null = null;
+  private agentGaveUp = false;
+  private gatewayPreview: (GatewayPreview & { sandboxId: string }) | null = null;
+  // The default model's context window, for the context-low beat; fetched once per connection.
+  private contextLimit: number | null = null;
+  // Terminal execution events waiting out RESUME_GRACE_MS, by Managed Session ID.
+  private turnEnds = new Map<string, ReturnType<typeof setTimeout>>();
+  // execution.started events handled per Managed Session ID, for telling a queued turn end it is stale.
+  private executionStarts = new Map<string, number>();
+  // Steering sent and not yet read by the Agent, by inbox ID, for the delivery beat.
+  private steers = new Map<string, { sessionId: string; when: string }>();
   private agentConnecting = false;
   private menu: SystemMenu | null = null;
   private firstCall = false;
@@ -934,7 +960,7 @@ export class VoiceSession {
   private compactionRequested: { focus: string } | null = null;
   private compaction: Promise<void> | null = null;
   private delegations = new Set<string>();
-  private persistedRefs = new Map<string, { acpSessionId: string; cwd: string }>();
+  private persistedRefs = new Map<string, { agentSessionId: string; cwd: string }>();
   private liveCloseReason: string | null = null;
   // Output fixtures interrupt the model and reject appends, so appends wait for playback.
   private fixture: { eventId: string; done: (outcome: "played" | "rejected", message?: string) => void;
@@ -972,19 +998,20 @@ export class VoiceSession {
   private lastHandoff: { id: string; offsetMs: number; voiceAtMs: number } | null = null;
   private continuationTimer: ReturnType<typeof setTimeout> | null = null;
   private transcriptSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  private acpMessageChain: Promise<void> = Promise.resolve();
+  private agentEventChain: Promise<void> = Promise.resolve();
   private liveMessageChain: Promise<void> = Promise.resolve();
 
   constructor(private state: DurableObjectState, private env: Env) {
     state.blockConcurrencyWhile(async () => {
       const stored = await state.storage.get<ManagedSession[]>("managed_sessions");
-      for (const session of stored ?? []) this.sessions.set(session.id, session);
+      // Projections from before the native Agent API lack agentSessionId: they are dropped, and
+      // their sessions can be rediscovered and loaded.
+      for (const session of stored ?? []) if (session.agentSessionId) this.sessions.set(session.id, session);
       this.attachedSandboxId = await state.storage.get<string>("sandbox_id") ?? null;
       this.orchestratorContext = await state.storage.get<unknown[]>("orchestrator_context") ?? [];
       this.orchestratorQueue = await state.storage.get<string[]>("orchestrator_queue") ?? [];
       this.memory = await state.storage.get<MemoryVersion>("orchestrator_memory") ?? null;
       this.contextTokens = await state.storage.get<number>("orchestrator_context_tokens") ?? 0;
-      this.agentCapabilities = await state.storage.get<Record<string, any>>("agent_capabilities") ?? {};
       // Anything else stored (the retired "default" and "fm") means the tonal set.
       const storedStyle = await state.storage.get<string>("earcon_preference");
       this.earconPreference = EARCON_PREFERENCES.find((item) => item === storedStyle) ?? "tonal";
@@ -996,12 +1023,12 @@ export class VoiceSession {
 
   // Cloudflare keeps a Durable Object resident for an open outbound WebSocket only during its
   // first 15 minutes; after that, with no incoming events, it is evicted like an idle object,
-  // and the GPT-Live sideband and the ACP connection die without close events (two calls
+  // and the GPT-Live sideband and the Agent Connection die without close events (two calls
   // ended this way at 902 s and 918 s). An alarm is an incoming event, so one every 30 s keeps
   // the object resident while a call is attached or Agent work is running, and lapses after.
   async alarm(): Promise<void> {
     const working = Array.from(this.sessions.values())
-      .some((session) => session.turnState === "in_progress" || session.turnState === "queued");
+      .some((session) => session.turnState === "in_progress");
     // A compaction outlives the call that asked for it: the next call gets its Memory and cut.
     if (this.liveAttached || working || this.compaction) await this.state.storage.setAlarm(Date.now() + KEEPALIVE_MS);
   }
@@ -1051,7 +1078,7 @@ export class VoiceSession {
       this.sandboxId = sandboxId;
       this.attachedSandboxId = sandboxId;
       await this.state.storage.put("sandbox_id", sandboxId);
-      this.ensureAcp();
+      this.ensureAgent();
       return new Response(null, { status: 202 });
     }
     this.phone = request.headers.get("x-dogwalk-phone");
@@ -1075,7 +1102,7 @@ export class VoiceSession {
     this.attachedSandboxId = incomingSandboxId;
     await this.state.storage.put("sandbox_id", incomingSandboxId);
     if (url.pathname === "/prepare") {
-      this.ensureAcp();
+      this.ensureAgent();
       return Response.json(this.voiceContextSnapshot());
     }
     if (url.pathname !== "/attach") return new Response("not found", { status: 404 });
@@ -1091,12 +1118,12 @@ export class VoiceSession {
       await this.cleanupVoice("live sideband unavailable");
       return new Response(errorMessage(error), { status: 502 });
     }
-    // Voice never waits on the Agent: ACP connects (or keeps connecting) in the background.
-    this.ensureAcp();
+    // Voice never waits on the Agent: it connects (or keeps connecting) in the background.
+    this.ensureAgent();
     await this.state.storage.setAlarm(Date.now() + KEEPALIVE_MS);
-    await this.record("voice.live.attached", { live_session_id: incomingLiveSessionId, acp_ready: this.acpReady,
+    await this.record("voice.live.attached", { live_session_id: incomingLiveSessionId, agent_ready: this.agentReady,
       managed_sessions: Array.from(this.sessions.values()).map((session) => ({
-        alias: session.alias, acp_session_id: session.acpSessionId, session_state: session.sessionState, turn_state: session.turnState,
+        alias: session.alias, agent_session_id: session.agentSessionId, session_state: session.sessionState, turn_state: session.turnState,
       })),
     });
     // Diagnostics must never block a call from connecting.
@@ -1108,7 +1135,7 @@ export class VoiceSession {
     const { opening, context: openingContext } = await this.composeOpening(callerId, sinceLastCall, admission);
     // The opening is one phrase: call_started leaves it unresolved and agent_connected resolves it,
     // so a call whose Agent Connection is already up hears the whole phrase at once.
-    const openedWaking = !this.acpReady;
+    const openedWaking = !this.agentReady;
     const opener: EarconName = openedWaking ? "call_started" : "call_started_ready";
     if (this.earconStyle) await this.playFixture(earcon(opener, this.earconStyle), opener);
     // A notice in an Opening that never reached the caller (a hangup, or one held behind the
@@ -1134,13 +1161,13 @@ export class VoiceSession {
       ...(this.firstCall ? { first_call: true } : {}),
     })}`];
     // Decided with no await before the event is queued, so agent_connected can only follow it.
-    this.agentConnecting = !this.acpReady;
+    this.agentConnecting = !this.agentReady;
     // Likewise, so the next model step's queue holds the call_started that carries this news,
     // which supersedes any a failed step left unmarked.
     this.inviteeNewsUnread = invitees;
     this.inviteeNewsInContext = [];
     if (this.agentConnecting) {
-      events.push(`[harness event] agent_connecting: ${JSON.stringify({ note: ACP_STARTING_ERROR })}`);
+      events.push(`[harness event] agent_connecting: ${JSON.stringify({ note: AGENT_STARTING_ERROR })}`);
     } else if (openedWaking) {
       // The Agent Connection came up during the opening: still resolve the phrase call_started began.
       this.queueEarcon("agent_connected");
@@ -1177,23 +1204,27 @@ export class VoiceSession {
 
   // Start connecting the Agent in the background unless connected or already trying.
   // Idempotent: prewarm, prepare, attach, and a dropped connection mid-call all call it.
-  private ensureAcp(): void {
-    if ((this.acpReady && this.acp?.readyState === WebSocket.OPEN) || this.acpConnecting || !this.sandboxId) return;
-    this.acpGaveUp = false;
-    this.acpConnecting = this.connectAcpWithRetry().finally(() => {
-      this.acpConnecting = null;
+  private ensureAgent(): void {
+    if (this.agentConnected() || this.agentConnectAttempt || !this.sandboxId) return;
+    this.agentGaveUp = false;
+    this.agentConnectAttempt = this.connectAgentWithRetry().finally(() => {
+      this.agentConnectAttempt = null;
     });
+  }
+
+  private agentConnected(): boolean {
+    return this.agentReady && this.agentEvents?.readyState === WebSocket.OPEN;
   }
 
   // The Sandbox may be starting: the preview URL or the WebSocket upgrade fails until the
   // gateway listens. Back off and retry for a few minutes, then report the Agent unavailable.
-  private async connectAcpWithRetry(): Promise<void> {
-    const deadline = Date.now() + ACP_CONNECT_WINDOW_MS;
+  private async connectAgentWithRetry(): Promise<void> {
+    const deadline = Date.now() + AGENT_CONNECT_WINDOW_MS;
     let delay = 1000;
     for (let attempt = 1; ; attempt++) {
       try {
-        await this.connectAcp();
-        if (attempt > 1) await this.record("acp.connect.recovered", { attempt });
+        await this.connectAgent();
+        if (attempt > 1) await this.record("agent.connect.recovered", { attempt });
         if (this.liveAttached && this.agentConnecting) {
           this.agentConnecting = false;
           this.queueEarcon("agent_connected");
@@ -1203,11 +1234,11 @@ export class VoiceSession {
         }
         return;
       } catch (error) {
-        this.closeAcp("connect attempt failed");
-        if (attempt === 1 || attempt % 5 === 0) await this.record("acp.connect.retry", { attempt, message: errorMessage(error) });
+        this.closeAgent("connect attempt failed");
+        if (attempt === 1 || attempt % 5 === 0) await this.record("agent.connect.retry", { attempt, message: errorMessage(error) });
         if (Date.now() + delay > deadline) {
-          this.acpGaveUp = true;
-          await this.record("acp.connect.failed", { attempts: attempt, message: errorMessage(error) });
+          this.agentGaveUp = true;
+          await this.record("agent.connect.failed", { attempts: attempt, message: errorMessage(error) });
           if (this.liveAttached) {
             await this.orchestratorEvent(`[harness event] agent_unavailable: ${JSON.stringify({ error: errorMessage(error) })}`);
           }
@@ -1219,147 +1250,256 @@ export class VoiceSession {
     }
   }
 
-  private requireAcp(): void {
-    if (this.acpReady && this.acp?.readyState === WebSocket.OPEN) return;
-    const gaveUp = this.acpGaveUp;
-    this.ensureAcp();
-    throw new Error(gaveUp ? ACP_UNAVAILABLE_ERROR : ACP_STARTING_ERROR);
+  private requireAgent(): void {
+    if (this.agentConnected()) return;
+    const gaveUp = this.agentGaveUp;
+    this.ensureAgent();
+    throw new Error(gaveUp ? AGENT_UNAVAILABLE_ERROR : AGENT_STARTING_ERROR);
   }
 
-  // The preview URL and token for the ACP port are cached per Sandbox (memory and storage)
-  // and refetched once whenever a connection through them fails.
-  private async acpPreviewFor(sandboxId: string, fresh: boolean): Promise<AcpPreview> {
-    const key = `acp_preview:${sandboxId}`;
+  // The preview URL and token for the Agent Gateway port are cached per Sandbox (memory and
+  // storage) and refetched once whenever a request or connection through them fails.
+  private async gatewayPreviewFor(sandboxId: string, fresh: boolean): Promise<GatewayPreview> {
+    const key = `gateway_preview:${sandboxId}`;
     if (!fresh) {
-      if (this.acpPreview?.sandboxId === sandboxId) return this.acpPreview;
-      const stored = await this.state.storage.get<AcpPreview>(key);
+      if (this.gatewayPreview?.sandboxId === sandboxId) return this.gatewayPreview;
+      const stored = await this.state.storage.get<GatewayPreview>(key);
       if (stored) {
-        this.acpPreview = { ...stored, sandboxId };
+        this.gatewayPreview = { ...stored, sandboxId };
         return stored;
       }
     }
-    const preview = await this.daytona<AcpPreview>(`/sandbox/${encodeURIComponent(sandboxId)}/ports/${ACP_PORT}/preview-url`);
-    this.acpPreview = { url: preview.url, token: preview.token, sandboxId };
+    const preview = await this.daytona<GatewayPreview>(`/sandbox/${encodeURIComponent(sandboxId)}/ports/${GATEWAY_PORT}/preview-url`);
+    this.gatewayPreview = { url: preview.url, token: preview.token, sandboxId };
     await this.state.storage.put(key, { url: preview.url, token: preview.token });
     return preview;
   }
 
-  private async openAcpSocket(sandboxId: string): Promise<WebSocket> {
-    const upgrade = async (preview: AcpPreview) => {
-      const url = new URL(preview.url);
-      url.pathname = "/acp";
-      const response = await fetch(url.toString(), {
-        headers: {
-          Upgrade: "websocket",
-          "x-daytona-preview-token": preview.token,
-          "x-daytona-skip-preview-warning": "true",
-        },
-      });
-      if (!response.webSocket) throw new Error(`ACP Gateway upgrade failed (${response.status})`);
-      return response.webSocket;
-    };
-    const wasCached = this.acpPreview?.sandboxId === sandboxId || Boolean(await this.state.storage.get(`acp_preview:${sandboxId}`));
+  // A cached preview that throws or is refused is retried once through a fresh one. A request
+  // that may change state is retried only when refused, never after an ambiguous failure, so a
+  // prompt is never admitted twice.
+  private async throughGateway(sandboxId: string, retryOnError: boolean,
+    send: (preview: GatewayPreview) => Promise<Response>): Promise<Response> {
+    const wasCached = this.gatewayPreview?.sandboxId === sandboxId || Boolean(await this.state.storage.get(`gateway_preview:${sandboxId}`));
     try {
-      return await upgrade(await this.acpPreviewFor(sandboxId, false));
+      const response = await send(await this.gatewayPreviewFor(sandboxId, false));
+      if (!wasCached || (response.status !== 401 && response.status !== 403)) return response;
     } catch (error) {
-      if (!wasCached) throw error;
-      return upgrade(await this.acpPreviewFor(sandboxId, true));
+      if (!wasCached || !retryOnError) throw error;
     }
+    return send(await this.gatewayPreviewFor(sandboxId, true));
   }
 
-  private closeAcp(reason: string): void {
-    const acp = this.acp;
-    this.acp = null;
-    this.acpReady = false;
-    if (acp?.readyState === WebSocket.OPEN) acp.close(1000, reason);
+  private async openAgentEvents(sandboxId: string): Promise<WebSocket> {
+    const response = await this.throughGateway(sandboxId, true, async (preview) => {
+      const url = new URL(preview.url);
+      url.pathname = "/events";
+      const response = await fetch(url.toString(), { headers: { Upgrade: "websocket", ...gatewayHeaders(preview) } });
+      if (!response.webSocket) throw new Error(`Agent Gateway upgrade failed (${response.status})`);
+      return response;
+    });
+    return response.webSocket!;
   }
 
-  private async connectAcp(): Promise<void> {
-    if (this.acpReady && this.acp?.readyState === WebSocket.OPEN) return;
-    if (!this.sandboxId) throw new Error("sandbox ID is unavailable");
-    const acp = await this.openAcpSocket(this.sandboxId);
-    const connectionId = crypto.randomUUID();
-    this.acp = acp;
-    this.acpConnectionId = connectionId;
-    acp.accept();
-    acp.addEventListener("message", (event) => {
-      const receivedMs = Date.now();
-      this.acpMessageChain = this.acpMessageChain
-        .then(() => this.handleAcpMessage(event, receivedMs, connectionId))
-        .catch((error) => this.record("acp.message.failed", { message: errorMessage(error) }));
-    });
-    acp.addEventListener("close", (event) => {
-      if (this.acp === acp) void this.acpDisconnected("closed", parseAgentTermination(event.reason));
-    });
-    acp.addEventListener("error", () => {
-      if (this.acp === acp) void this.acpDisconnected("errored");
-    });
-
-    const initialized = await this.acpRequest("initialize", {
-      protocolVersion: 1,
-      clientInfo: { name: "dogwalk", version: "0.1.0" },
-      clientCapabilities: {},
-    });
-    if (initialized.protocolVersion !== 1) throw new Error("ACP protocol version mismatch");
-    this.agentCapabilities = (initialized.agentCapabilities ?? {}) as Record<string, any>;
-    await this.state.storage.put("agent_capabilities", this.agentCapabilities);
-    await this.restoreSessions();
-    this.acpReady = true;
-    await this.record("acp.initialized", { session_count: this.sessions.size });
-  }
-
-  private async restoreSessions(): Promise<void> {
-    // Resume restores the Agent's context without replaying history as session/update
-    // notifications; load (which replays) is the fallback for Agents without resume.
-    const method = this.agentCapabilities.sessionCapabilities?.resume ? "session/resume" : "session/load";
-    const restore = (session: ManagedSession, cwd: string) => this.acpRequest(method, {
-      sessionId: session.acpSessionId, cwd, mcpServers: [],
-    });
-    // The Agent rejects a reload from any directory but the session's own, so a session the
-    // Agent has since associated elsewhere is repaired from session/list, fetched at most once
-    // per restore.
-    let listed: Map<string, string> | null = null;
-    const agentCwd = async (acpSessionId: string) => {
-      listed ??= await this.listAgentSessions()
-        .then((items) => new Map(items.map((item) => [item.sessionId, item.cwd])))
-        .catch(() => new Map<string, string>());
-      return listed.get(acpSessionId) ?? null;
+  // One request to the Agent's API through the Agent Gateway, answered with OpenCode's JSON
+  // (or {} for an empty body). Each request is its own span, a child of `parent` (the Prompt
+  // Turn for its prompts and steering, otherwise the Voice Call snapshot at send time) or a new
+  // root when there is neither, sent as a W3C traceparent header.
+  private async agentFetch(method: "GET" | "POST" | "DELETE", path: string, body?: Record<string, unknown>,
+    { timeoutMs = 30_000, parent = this.callTrace }: { timeoutMs?: number; parent?: TraceContext | null } = {}): Promise<Record<string, any>> {
+    const sandboxId = this.sandboxId;
+    if (!sandboxId) throw new Error("sandbox ID is unavailable");
+    const context = parent ? childOf(parent) : newRootContext();
+    const scope = { callSid: this.callSid, liveSessionId: this.liveSessionId };
+    const fields = {
+      agent_request_id: this.agentRequestId++, method, route: agentRoute(path),
+      session_id: /\/api\/session\/(ses_[^/?]+)/.exec(path)?.[1], agent_connection_id: this.agentConnectionId,
+      ...spanFields(context, parent),
     };
-    for (const session of this.sessions.values()) {
-      if (session.sessionState === "closed") continue;
-      try {
-        let cwd = session.cwd;
-        try {
-          await restore(session, cwd);
-        } catch (error) {
-          const actual = await agentCwd(session.acpSessionId);
-          if (!actual || actual === cwd) throw error;
-          await restore(session, actual);
-          cwd = actual;
-        }
-        if (session.cwd !== cwd) {
-          await this.record("acp.session.directory_repaired", {
-            alias: session.alias, from: relativeDirectory(session.cwd), to: relativeDirectory(cwd),
-          });
-          session.cwd = cwd;
-        }
-        session.sessionState = "ready";
-        if (session.turnState === "in_progress" || session.turnState === "queued") {
-          session.turnState = "failed";
-          session.stopReason = null;
-          session.turnEndedAt = Date.now();
-          session.failure = "The previous Prompt Turn was interrupted by a disconnected Agent Connection.";
-          // Detection, not the turn's end: this row names the turn's persisted span but cannot
-          // complete it, since when the work actually stopped was never observed.
-          await this.record("acp.turn.interrupted", { alias: session.alias, acp_session_id: session.acpSessionId,
-            started_ms: session.turnStartedAt, detected_ms: session.turnEndedAt, ...spanFields(session.turnTrace ?? null) });
-        }
-      } catch (error) {
-        session.sessionState = "unavailable";
-        session.failure = `Could not reload persisted session: ${errorMessage(error)}`;
+    // Only prompt and steering text, never other request bodies.
+    const prompt = path.endsWith("/prompt") && typeof body?.text === "string" ? body.text : undefined;
+    this.timing("agent.sent", { ...fields, ...(prompt !== undefined ? { content_text: prompt, content_kind: "agent_prompt" } : {}) });
+    const started = Date.now();
+    let response: Response;
+    try {
+      response = await this.throughGateway(sandboxId, method === "GET", (preview) => fetch(new URL(path, preview.url).toString(), {
+        method,
+        headers: {
+          ...gatewayHeaders(preview), traceparent: formatTraceparent(context),
+          ...(body ? { "content-type": "application/json" } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(timeoutMs),
+      }));
+    } catch (error) {
+      this.timing("agent.received", { ...fields, error: true, ms: Date.now() - started }, Date.now(), this.completionScope(scope));
+      throw error;
+    }
+    const text = await response.text();
+    this.timing("agent.received", { ...fields, http_status: response.status, error: !response.ok, ms: Date.now() - started },
+      Date.now(), this.completionScope(scope));
+    let parsed: Record<string, any> = {};
+    try {
+      if (text) parsed = JSON.parse(text);
+    } catch {
+      // Not OpenCode's: the gateway's or the preview proxy's own answer, kept as the message.
+    }
+    if (!response.ok) {
+      throw new AgentRequestError(response.status, typeof parsed._tag === "string" ? parsed._tag : null,
+        typeof parsed.message === "string" ? parsed.message : text.slice(0, 200) || `HTTP ${response.status}`);
+    }
+    return parsed;
+  }
+
+  private closeAgent(reason: string): void {
+    const socket = this.agentEvents;
+    this.agentEvents = null;
+    this.agentReady = false;
+    if (socket?.readyState === WebSocket.OPEN) socket.close(1000, reason);
+  }
+
+  // Subscribe first, then snapshot: events that arrive during catchUp queue behind it on the
+  // event chain. The Agent's work never depended on this connection, so nothing is resumed.
+  private async connectAgent(): Promise<void> {
+    if (this.agentConnected()) return;
+    if (!this.sandboxId) throw new Error("sandbox ID is unavailable");
+    const socket = await this.openAgentEvents(this.sandboxId);
+    const connectionId = crypto.randomUUID();
+    this.agentEvents = socket;
+    this.agentConnectionId = connectionId;
+    let greeted = false;
+    let hello!: () => void;
+    let refused!: (error: Error) => void;
+    const greeting = new Promise<void>((resolve, reject) => {
+      hello = resolve;
+      refused = reject;
+    });
+    socket.accept();
+    socket.addEventListener("message", (event) => {
+      const receivedMs = Date.now();
+      const frame = parseAgentEvent(event.data);
+      if (!greeted && frame?.type === "server.connected") {
+        greeted = true;
+        hello();
       }
+      if (!frame) return;
+      this.agentEventChain = this.agentEventChain
+        .then(() => this.handleAgentEvent(frame, receivedMs, connectionId))
+        .catch((error) => this.record("agent.event.failed", { message: errorMessage(error) }));
+    });
+    // A disconnect is handled in order behind the events received before it, so a terminal
+    // event already queued is applied before the connection's turns are judged.
+    const disconnected = (reason: string, termination: AgentTermination | null = null) => {
+      if (this.agentEvents !== socket) return;
+      this.agentEventChain = this.agentEventChain
+        .then(() => this.agentDisconnected(reason, termination, socket))
+        .catch((error) => this.record("agent.event.failed", { message: errorMessage(error) }));
+    };
+    socket.addEventListener("close", (event) => {
+      if (!greeted) refused(new Error(`Agent Gateway closed the event stream (${event.code} ${event.reason})`));
+      else disconnected("closed", parseAgentTermination(event.reason));
+    });
+    socket.addEventListener("error", () => {
+      if (!greeted) refused(new Error("Agent Gateway event stream errored"));
+      else disconnected("errored");
+    });
+    const timer = setTimeout(() => refused(new Error("Agent Gateway sent no server.connected")), AGENT_HELLO_MS);
+    try {
+      await greeting;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (this.contextLimit === null) {
+      const model = await this.agentFetch("GET", "/api/model/default").catch(() => null);
+      const limit = Number(model?.data?.limit?.context);
+      this.contextLimit = limit > 0 ? limit : null;
+    }
+    const info = await this.agentFetch("GET", "/api/info").catch(() => null);
+    const caughtUp = this.agentEventChain.then(() => this.catchUp());
+    this.agentEventChain = caughtUp.catch(() => undefined);
+    await caughtUp;
+    this.agentReady = true;
+    await this.record("agent.connected", { session_count: this.sessions.size, agent_version: info?.data?.version ?? info?.version ?? null });
+  }
+
+  // Reconciles the projection with the Agent after subscribing: sessions it no longer has,
+  // turns that ended or began while Dogwalk was not listening, and pending Permission Requests.
+  // A turn that ended between calls ends here through endPromptTurn, whose harness event waits
+  // in the Orchestrator queue for the next call.
+  private async catchUp(): Promise<void> {
+    const active = (await this.agentFetch("GET", "/api/session/active")).data ?? {};
+    for (const session of [...this.sessions.values()]) {
+      if (session.sessionState === "closed") continue;
+      let snapshot: Record<string, any>;
+      try {
+        snapshot = (await this.agentFetch("GET", `/api/session/${encodeURIComponent(session.agentSessionId)}`)).data ?? {};
+      } catch (error) {
+        if (!(error instanceof AgentRequestError && error.status === 404)) throw error;
+        session.sessionState = "unavailable";
+        session.failure = `The Agent no longer has this session: ${errorMessage(error)}`;
+        this.forgetPermissions(session);
+        continue;
+      }
+      session.sessionState = "ready";
+      const directory = snapshot.location?.directory;
+      if (typeof directory === "string" && directory && directory !== session.cwd) {
+        await this.record("agent.session.directory_repaired", {
+          alias: session.alias, from: relativeDirectory(session.cwd), to: relativeDirectory(directory),
+        });
+        session.cwd = directory;
+      }
+      if (typeof snapshot.title === "string" && snapshot.title) session.title = snapshot.title;
+      const running = Boolean(active[session.agentSessionId]);
+      const inProgress = session.turnState === "in_progress";
+      // A pending turn end whose resume this connection missed: the server says it runs.
+      if (running) this.cancelTurnEnd(session);
+      if (inProgress && !running && !this.turnEnds.has(session.id)) await this.finishFromSnapshot(session, snapshot);
+      else if (!inProgress && running) await this.observeTurn(session);
+      await this.syncPermissions(session);
     }
     await this.persistSessions();
+  }
+
+  // A turn that ended while Dogwalk was not listening. Only an ending recorded since the turn
+  // began says how: an idle entry in its messages (OpenCode writes one per execution end) or the
+  // session's outcome, each no older than turnStartedAt (the Sandbox's clock against the
+  // Worker's; both are NTP-synced). Anything older belongs to an earlier turn, so a turn that
+  // left no ending (lost with the service, or never admitted) fails as unknown rather than
+  // passing for completed.
+  private async finishFromSnapshot(session: ManagedSession, snapshot: Record<string, any>): Promise<void> {
+    const listed = await this.agentFetch("GET", `/api/session/${encodeURIComponent(session.agentSessionId)}/message?order=desc&limit=10`)
+      .catch(() => null);
+    const recent: Array<Record<string, any>> = Array.isArray(listed?.data) ? listed.data : [];
+    const startedMs = session.turnStartedAt ?? 0;
+    const ended = recent.find((item) => item?.type === "idle" && Number(item.time?.created) >= startedMs);
+    const recorded: string | null = typeof ended?.outcome === "string" ? ended.outcome
+      : typeof snapshot.outcome === "string" && Number(snapshot.time?.updated) >= startedMs ? snapshot.outcome : null;
+    const outcome: TurnOutcome = recorded === "succeeded" ? "completed" : recorded === "interrupted" ? "cancelled" : "failed";
+    const latest = recent.find((item) => item?.type === "assistant");
+    if (recorded) {
+      const report = latestReport(recent);
+      if (report) session.report = report.slice(-64_000);
+    }
+    await this.record("agent.turn.caught_up", {
+      alias: session.alias, agent_session_id: session.agentSessionId, outcome, session_outcome: recorded,
+    });
+    await this.endPromptTurn(session, outcome, {
+      error: outcome !== "failed" ? undefined
+        : recorded === null ? "it ended while Dogwalk was not listening; outcome unknown"
+        : String(latest?.error?.message ?? "the Agent reported a failure"),
+    });
+  }
+
+  // Pending Permission Requests as the Agent holds them: new ones are presented, and ones
+  // answered meanwhile, here or by another client, are forgotten.
+  private async syncPermissions(session: ManagedSession): Promise<void> {
+    const listed = await this.agentFetch("GET", `/api/session/${encodeURIComponent(session.agentSessionId)}/permission`);
+    const requests: Array<Record<string, any>> = Array.isArray(listed.data) ? listed.data : [];
+    const pending = new Set(requests.map((item) => String(item?.id)));
+    for (const [requestId, permission] of this.permissions) {
+      if (permission.sessionId === session.id && !pending.has(requestId)) this.permissions.delete(requestId);
+    }
+    for (const request of requests) await this.receivePermission(request);
   }
 
   private async handleLiveMessage(event: MessageEvent, receivedMs = Date.now()): Promise<void> {
@@ -1622,7 +1762,7 @@ export class VoiceSession {
     const sentences = active.map((session) => {
       if (waiting.has(session.id)) return `${session.alias} needs permission.`;
       if (session.sessionState === "unavailable") return `${session.alias} is unreachable.`;
-      if (session.turnState === "in_progress" || session.turnState === "queued") {
+      if (session.turnState === "in_progress") {
         return `${session.alias} is working${session.turnStartedAt ? `, ${spokenDuration(now - session.turnStartedAt)} in` : ""}.`;
       }
       if (session.turnState === "failed") return this.theme.status.failed(session.alias);
@@ -1631,7 +1771,7 @@ export class VoiceSession {
     const followed = this.follow && this.sessions.get(this.follow.sessionId);
     if (followed) sentences.unshift(`Following ${followed.alias}.`);
     const text = sentences.length ? sentences.slice(0, 7).join(" ") : this.theme.status.none;
-    return this.acpReady ? text : `${text} ${this.theme.status.starting}`;
+    return this.agentReady ? text : `${text} ${this.theme.status.starting}`;
   }
 
   private async openMenu(): Promise<void> {
@@ -1951,7 +2091,7 @@ export class VoiceSession {
         latest: { board_id: boards.at(-1)!.id, note: boards.at(-1)!.note, status: boards.at(-1)!.status, answer: boards.at(-1)!.answer },
       } : null)(await this.state.storage.get<Board[]>("whiteboard_boards") ?? []),
       recording: Boolean(this.recording),
-      agents_ready: this.acpReady,
+      agents_ready: this.agentReady,
       sandbox_waking: this.agentConnecting,
       context_tokens: this.contextTokens,
       memory: this.memory ? { chars: this.memory.chars, limit: MAX_MEMORY_CHARS, updated_at: new Date(this.memory.ts).toISOString(),
@@ -2391,7 +2531,7 @@ export class VoiceSession {
     return {
       type: "status",
       at: Date.now(),
-      sandbox: { agent_ready: this.acpReady, call_attached: this.liveAttached },
+      sandbox: { agent_ready: this.agentReady, call_attached: this.liveAttached },
       sessions: Array.from(this.sessions.values()).slice(-30).map((session) => this.publicSession(session)),
       pending_permissions: Array.from(this.permissions.values()).map((item) => ({ alias: item.alias, title: item.title })),
     };
@@ -2643,7 +2783,7 @@ export class VoiceSession {
       }
       await this.daytona(`${path}/start`, "POST");
       await this.record(via === "voice" ? "voice.restart.started" : "menu.restart.started", {});
-      this.ensureAcp();
+      this.ensureAgent();
     } catch (error) {
       await this.record(via === "voice" ? "voice.restart.failed" : "menu.restart.failed", { message: errorMessage(error) });
       await this.orchestratorEvent(`[harness event] sandbox_restart_failed: ${JSON.stringify({ error: errorMessage(error) })}`);
@@ -3110,7 +3250,7 @@ export class VoiceSession {
     let result: unknown;
     try {
       // Fail fast rather than hang while the Sandbox starts; reads use the projection.
-      if (TOOLS_NEEDING_ACP.has(String(item.name))) this.requireAcp();
+      if (TOOLS_NEEDING_AGENT.has(String(item.name))) this.requireAgent();
       switch (item.name) {
         case "brief":
           return this.frontendAppend(item.name, args);
@@ -3127,6 +3267,12 @@ export class VoiceSession {
             throw new Error("the prompt contains a phone number; phone numbers never go to Agents, so leave it out");
           }
           result = await this.beginPromptTurn(requiredString(args, "alias"), requiredString(args, "prompt"));
+          break;
+        case "steer_prompt_turn":
+          if (await this.mentionsKnownPhone(requiredString(args, "guidance"))) {
+            throw new Error("the guidance contains a phone number; phone numbers never go to Agents, so leave it out");
+          }
+          result = await this.steerPromptTurn(requiredString(args, "alias"), requiredString(args, "guidance"), requiredString(args, "when"));
           break;
         case "inspect_managed_session":
           result = this.publicSession(this.sessionByAlias(requiredString(args, "alias")));
@@ -3366,7 +3512,7 @@ export class VoiceSession {
   }
 
   private async createManagedSession(aliasInput: string, directoryInput: string): Promise<Record<string, unknown>> {
-    if (!this.acpReady) throw new Error("ACP Agent is unavailable");
+    if (!this.agentReady) throw new Error("the Agent is unavailable");
     const alias = normalizeAlias(aliasInput);
     if (Array.from(this.sessions.values()).some((item) => item.sessionState !== "closed" && item.alias.toLowerCase() === alias.toLowerCase())) {
       throw new Error(`alias ${alias} is already in use`);
@@ -3376,34 +3522,39 @@ export class VoiceSession {
       const check = await this.sandboxExecute(`test -d ${shellQuote(cwd)}`, 15);
       if (check.exitCode !== 0) throw new Error(`directory ${relativeDirectory(cwd)} does not exist in the Workspace`);
     }
-    const result = await this.acpRequest("session/new", { cwd, mcpServers: [] });
-    const acpSessionId = String(result.sessionId ?? "");
-    if (!acpSessionId) throw new Error("ACP Agent returned no session ID");
-    const session = newManagedSession(alias, acpSessionId, cwd);
+    const created = await this.agentFetch("POST", "/api/session", { location: { directory: cwd } });
+    const agentSessionId = String(created.data?.id ?? "");
+    if (!agentSessionId) throw new Error("the Agent returned no session ID");
+    const session = newManagedSession(alias, agentSessionId, cwd);
     this.sessions.set(session.id, session);
     await this.persistSessions();
-    await this.record("acp.session.created", { alias, acp_session_id: session.acpSessionId, directory: relativeDirectory(cwd) });
+    await this.record("agent.session.created", { alias, agent_session_id: session.agentSessionId, directory: relativeDirectory(cwd) });
     this.queueEarcon("session_created");
     return { ok: true, session: this.publicSession(session) };
+  }
+
+  // Resets the projection for a Prompt Turn beginning now. Its own trace is persisted with the
+  // session, so the turn's end carries the same context under a later call or after eviction.
+  private startTurn(session: ManagedSession, assignment: string | null): TraceContext & { link: TraceContext | null } {
+    this.cancelTurnEnd(session);
+    Object.assign(session, { assignment, report: "", toolCalls: [], plan: [], unsaid: "", remark: null, failure: null, outcome: null });
+    this.thoughts.delete(session.id);
+    session.turnState = "in_progress";
+    session.turnStartedAt = Date.now();
+    session.turnEndedAt = null;
+    return session.turnTrace = { ...newRootContext(), link: this.callTrace };
   }
 
   private async beginPromptTurn(alias: string, prompt: string): Promise<Record<string, unknown>> {
     const session = this.sessionByAlias(alias);
     if (session.sessionState !== "ready") throw new Error(`${session.alias} is not ready`);
-    if (["queued", "in_progress"].includes(session.turnState)) throw new Error(`${session.alias} already has an active Prompt Turn`);
-    session.turnState = "queued";
-    session.assignment = prompt;
-    Object.assign(session, { report: "", toolCalls: [], plan: [], unsaid: "", remark: null, failure: null, stopReason: null });
-    this.thoughts.delete(session.id);
-    await this.persistSessions();
-
-    session.turnState = "in_progress";
-    const startedMs = session.turnStartedAt = Date.now();
-    session.turnEndedAt = null;
-    // Persisted with the session, so the turn's end carries the same context under a later
-    // call or after eviction. Captured locally too: completion never rereads mutable state.
-    const turnTrace = session.turnTrace = { ...newRootContext(), link: this.callTrace };
-    const turnSpan = spanFields(turnTrace);
+    if (session.turnState === "in_progress") {
+      throw new Error(`${session.alias} already has an active Prompt Turn; use steer_prompt_turn to correct or add to it`);
+    }
+    // In progress before the prompt is sent, so the execution it starts is not taken for
+    // another client's (observeTurn).
+    const turnTrace = this.startTurn(session, prompt);
+    const startedMs = session.turnStartedAt!;
     await this.persistSessions();
     // Beginning a Prompt Turn follows that session, until the caller says otherwise or sends
     // another (DOMAIN.md, Followed Session). The turn_started earcon stands in for follow_started.
@@ -3411,55 +3562,176 @@ export class VoiceSession {
     this.follow!.narrationOpen = true;
     // The Orchestrator writes the full engineering brief; it goes to the Agent unwrapped.
     this.feedPush("orchestrator", prompt, { lane: "prompt", who: session.alias });
-    void this.acpRequest("session/prompt", {
-      sessionId: session.acpSessionId,
-      prompt: [{ type: "text", text: prompt }],
-    }, 55 * 60 * 1000, turnTrace).then(async (result) => {
-      session.turnState = "stopped";
-      const stopReason = session.stopReason = String(result.stopReason ?? "unknown");
-      const endedMs = session.turnEndedAt = Date.now();
-      closeOpenToolCalls(session);
-      if (session.unsaid.trim()) this.feedPush("agent", session.unsaid.trim(), { who: session.alias, lane: "report" });
-      this.feedPush("system", `${session.alias}'s turn ended (${session.stopReason})`, { lane: "event" });
-      await this.persistSessions();
-      await this.record("acp.turn.stopped", { alias: session.alias, acp_session_id: session.acpSessionId, ...turnSpan,
-        // Lifecycle times from locals: a later turn may have replaced the session's fields by now.
-        started_ms: startedMs, ended_ms: endedMs, ms: endedMs - startedMs,
-        stop_reason: stopReason, thoughts: this.thoughts.get(session.id) ?? null });
-      // How a turn ended matters more than that it ended: each stop reason gets its own
-      // earcon and opening clause.
-      const ending = turnEnding(session.stopReason);
-      await this.noteSinceGreeting(`${session.alias} ${ending.clause}`);
-      this.queueEarcon(ending.earcon);
-      const followed = this.turnEndedWhileFollowed(session);
-      await this.orchestratorEvent(`[harness event] turn_stopped: ${JSON.stringify({
-        alias: session.alias, stop_reason: session.stopReason, followed, agent_message: session.report.slice(-3000),
-      })}`);
-    }).catch(async (error) => {
-      session.turnState = "failed";
-      session.stopReason = null;
-      const endedMs = session.turnEndedAt = Date.now();
-      session.failure = `Prompt Turn failed: ${errorMessage(error)}`;
-      closeOpenToolCalls(session);
-      await this.persistSessions();
-      await this.record("acp.turn.failed", { alias: session.alias, acp_session_id: session.acpSessionId, ...turnSpan,
-        // Lifecycle times from locals: a later turn may have replaced the session's fields by now.
-        started_ms: startedMs, ended_ms: endedMs, ms: endedMs - startedMs,
-        message: errorMessage(error), thoughts: this.thoughts.get(session.id) ?? null });
-      await this.noteSinceGreeting(`${session.alias}'s turn failed`);
-      this.queueEarcon("turn_failed");
-      const followed = this.turnEndedWhileFollowed(session);
-      const agentTermination = error instanceof AgentTerminatedError ? error.termination.reason : undefined;
-      await this.orchestratorEvent(`[harness event] turn_failed: ${JSON.stringify({ alias: session.alias, followed, error: errorMessage(error), agent_termination: agentTermination })}`);
-    });
-    await this.record("acp.turn.started", { alias: session.alias, acp_session_id: session.acpSessionId,
-      started_ms: startedMs, ...turnSpan,
+    let ambiguous = false;
+    try {
+      await this.agentFetch("POST", `/api/session/${encodeURIComponent(session.agentSessionId)}/prompt`, { text: prompt }, { parent: turnTrace });
+    } catch (error) {
+      // An answer refusing the prompt (AgentRequestError) proves it was not admitted. A timeout or
+      // lost connection does not: if the session is running now, the prompt was admitted and
+      // the turn goes on; if it is not, or that cannot be checked, it fails as not delivered.
+      ambiguous = !(error instanceof AgentRequestError)
+        && await this.agentFetch("GET", "/api/session/active").then((active) => Boolean(active.data?.[session.agentSessionId]), () => false);
+      if (!ambiguous) {
+        await this.failUndelivered(session, turnTrace, startedMs, error);
+        throw error;
+      }
+    }
+    await this.record("agent.turn.started", { alias: session.alias, agent_session_id: session.agentSessionId,
+      started_ms: startedMs, ...spanFields(turnTrace), ...(ambiguous ? { admitted_by: "active_check" } : {}),
       ...(turnTrace.link ? { link_trace_id: turnTrace.link.traceId, link_span_id: turnTrace.link.spanId } : {}) });
     this.queueEarcon("turn_started");
     return {
       ok: true, alias: session.alias, turn_state: session.turnState, following: session.alias, stopped_following: previous,
       note: "Started, not completed. A harness event arrives when it stops.",
     };
+  }
+
+  // A prompt that was never admitted, or may not have been: the tool's error says so, and no
+  // turn event follows.
+  private async failUndelivered(session: ManagedSession, turnTrace: TraceContext, startedMs: number, error: unknown): Promise<void> {
+    session.turnState = "failed";
+    session.outcome = "failed";
+    session.turnEndedAt = Date.now();
+    session.failure = `The prompt was not delivered: ${errorMessage(error)}`;
+    await this.persistSessions();
+    await this.record("agent.turn.failed", { alias: session.alias, agent_session_id: session.agentSessionId, ...spanFields(turnTrace),
+      started_ms: startedMs, ended_ms: session.turnEndedAt, ms: session.turnEndedAt - startedMs, outcome: "failed", message: errorMessage(error) });
+  }
+
+  // Steering (DOMAIN.md): guidance for a running Prompt Turn. A Steer waits for the Agent's
+  // next step boundary; a Redirect also interrupts the step under way, and the Agent resumes at
+  // once with the guidance (interrupt with resume delivers pending steering immediately).
+  // Neither starts a new Prompt Turn.
+  private async steerPromptTurn(alias: string, guidance: string, when: string): Promise<Record<string, unknown>> {
+    if (when !== "next_step" && when !== "now") throw new Error("when must be next_step or now");
+    const session = this.sessionByAlias(alias);
+    if (session.turnState !== "in_progress") {
+      throw new Error(`${session.alias} has no running Prompt Turn to steer; use begin_prompt_turn to give it new work`);
+    }
+    const path = `/api/session/${encodeURIComponent(session.agentSessionId)}`;
+    const parent = session.turnTrace ?? null;
+    // The last execution already ended and its end is waiting out RESUME_GRACE_MS. Measured on
+    // OpenCode 2.2.7 (2026-11-12): steering an idle session starts a new execution with the
+    // guidance at once; interrupt?resume=true on an idle session answers {"interrupted":false};
+    // and interrupting with resume once that steer was delivered interrupts the new execution
+    // without resuming it. So the steer itself continues this Prompt Turn: the pending end is
+    // cancelled (the execution.started that follows would cancel it too), and a Redirect sends
+    // no interrupt, which would only stop the work it just started.
+    const ended = this.turnEnds.has(session.id);
+    this.feedPush("orchestrator", guidance, { lane: "steer", who: session.alias });
+    const admitted = await this.agentFetch("POST", `${path}/prompt`, { text: guidance, delivery: "steer" }, { parent });
+    const inboxId = String(admitted.data?.id ?? "");
+    if (inboxId) this.steers.set(inboxId, { sessionId: session.id, when });
+    let delivery = when === "now" ? "the step under way was interrupted; the Agent resumes with this at once"
+      : "the Agent reads this when the step under way ends";
+    let interrupted: boolean | null = null;
+    if (ended) {
+      this.cancelTurnEnd(session);
+      delivery = "the Agent had just finished its last step, so it started on this at once";
+    } else if (when === "now") {
+      // The interrupt also ends a Permission Request the step was waiting on; forgotten first, so
+      // the permission.replied it causes is not taken for another client's answer.
+      const withdrawn = this.withdrawPermissions(session);
+      try {
+        interrupted = (await this.agentFetch("POST", `${path}/interrupt?resume=true`, undefined, { parent })).interrupted !== false;
+        if (!interrupted) delivery = "nothing was under way to interrupt; the Agent reads this at once";
+      } catch (error) {
+        // The steer was admitted: the model must not send it again. It lands at the next step.
+        this.restorePermissions(withdrawn);
+        await this.record("agent.turn.redirect_failed", { alias: session.alias, message: errorMessage(error) });
+        delivery = "the interrupt failed, so the Agent reads this when the step under way ends instead; do not send it again";
+      }
+    }
+    await this.record("agent.turn.steered", { alias: session.alias, agent_session_id: session.agentSessionId, when,
+      inbox_id: inboxId || null, after_end: ended, interrupted });
+    return {
+      ok: true, alias: session.alias, when, delivery,
+      note: "Still the same Prompt Turn; one harness event arrives when it stops.",
+    };
+  }
+
+  // A Prompt Turn another client began (DOMAIN.md, Co-presence): projected like Dogwalk's own,
+  // without an assignment of Dogwalk's or Following.
+  private async observeTurn(session: ManagedSession): Promise<void> {
+    const turnTrace = this.startTurn(session, OBSERVED_ASSIGNMENT);
+    await this.persistSessions();
+    await this.record("agent.turn.observed", { alias: session.alias, agent_session_id: session.agentSessionId,
+      started_ms: session.turnStartedAt, ...spanFields(turnTrace),
+      ...(turnTrace.link ? { link_trace_id: turnTrace.link.traceId, link_span_id: turnTrace.link.spanId } : {}) });
+    if (this.liveAttached) await this.orchestratorEvent(`[harness event] turn_started_elsewhere: ${JSON.stringify({ alias: session.alias })}`);
+  }
+
+  // A terminal execution event ends the turn only after RESUME_GRACE_MS without a new execution.
+  // The end is queued behind events already received, and a chain running late may still hold an
+  // execution.started (a Redirect's resume) that the timer could not see: the execution count
+  // taken here tells the queued end it is stale.
+  private scheduleTurnEnd(session: ManagedSession, outcome: TurnOutcome, detail: TurnEndDetail): void {
+    this.cancelTurnEnd(session);
+    const executions = this.executionStarts.get(session.id) ?? 0;
+    this.turnEnds.set(session.id, setTimeout(() => {
+      this.turnEnds.delete(session.id);
+      if (this.sessions.get(session.id) !== session) return;
+      this.agentEventChain = this.agentEventChain
+        .then(async () => {
+          if ((this.executionStarts.get(session.id) ?? 0) !== executions) {
+            await this.record("agent.turn.end_superseded", { alias: session.alias, outcome });
+            return;
+          }
+          await this.endPromptTurn(session, outcome, detail);
+        })
+        .catch((error) => this.record("agent.event.failed", { message: errorMessage(error) }));
+    }, RESUME_GRACE_MS));
+  }
+
+  private cancelTurnEnd(session: ManagedSession): void {
+    const timer = this.turnEnds.get(session.id);
+    if (timer) clearTimeout(timer);
+    this.turnEnds.delete(session.id);
+  }
+
+  // The one way a Prompt Turn ends, whether seen live, found on catching up, or cut short by an
+  // Agent Termination. How a turn ended matters more than that it ended: each outcome gets its
+  // own earcon and opening clause.
+  private async endPromptTurn(session: ManagedSession, outcome: TurnOutcome,
+    { error, interruptReason, termination }: TurnEndDetail = {}): Promise<void> {
+    if (session.turnState !== "in_progress") return;
+    this.cancelTurnEnd(session);
+    for (const [inboxId, steer] of this.steers) if (steer.sessionId === session.id) this.steers.delete(inboxId);
+    const startedMs = session.turnStartedAt ?? null;
+    const endedMs = session.turnEndedAt = Date.now();
+    session.outcome = outcome;
+    closeOpenToolCalls(session);
+    const lifecycle = {
+      alias: session.alias, agent_session_id: session.agentSessionId, ...spanFields(session.turnTrace ?? null),
+      started_ms: startedMs, ended_ms: endedMs, ms: startedMs === null ? null : endedMs - startedMs, outcome,
+      ...(interruptReason ? { interrupt_reason: interruptReason } : {}), thoughts: this.thoughts.get(session.id) ?? null,
+    };
+    if (outcome === "failed") {
+      session.turnState = "failed";
+      session.failure = `Prompt Turn failed: ${error ?? "the Agent reported a failure"}`;
+      await this.persistSessions();
+      await this.record("agent.turn.failed", { ...lifecycle, message: error ?? null });
+      await this.noteSinceGreeting(`${session.alias}'s turn failed`);
+      this.queueEarcon("turn_failed");
+      const followed = this.turnEndedWhileFollowed(session);
+      await this.orchestratorEvent(`[harness event] turn_failed: ${JSON.stringify({
+        alias: session.alias, followed, ...startedElsewhere(session), error: error ?? null, agent_termination: termination?.reason,
+      })}`);
+      return;
+    }
+    session.turnState = "stopped";
+    if (session.unsaid.trim()) this.feedPush("agent", session.unsaid.trim(), { who: session.alias, lane: "report" });
+    this.feedPush("system", `${session.alias}'s turn ended (${outcome})`, { lane: "event" });
+    await this.persistSessions();
+    await this.record("agent.turn.stopped", lifecycle);
+    const ending = turnEnding(outcome);
+    await this.noteSinceGreeting(`${session.alias} ${ending.clause}`);
+    this.queueEarcon(ending.earcon);
+    const followed = this.turnEndedWhileFollowed(session);
+    await this.orchestratorEvent(`[harness event] turn_stopped: ${JSON.stringify({
+      alias: session.alias, outcome, ...(interruptReason ? { interrupt_reason: interruptReason } : {}),
+      followed, ...startedElsewhere(session), agent_message: session.report.slice(-3000),
+    })}`);
   }
 
   private async playAudio(pathInput: string, startSeconds: number, durationSeconds: number): Promise<Record<string, unknown>> {
@@ -3855,15 +4127,15 @@ export class VoiceSession {
   }
 
   private async discoverPersistedSessions(): Promise<Record<string, unknown>> {
-    if (!this.acpReady) throw new Error("ACP Agent is unavailable");
-    // Without a cwd filter OpenCode lists sessions in every directory. The Sandbox holds only
-    // this User's sessions, and the Workspace bounds discovery.
-    const attached = new Set(Array.from(this.sessions.values(), (item) => item.acpSessionId));
+    if (!this.agentReady) throw new Error("the Agent is unavailable");
+    // The Agent lists sessions in every directory. The Sandbox holds only this User's
+    // sessions, and the Workspace bounds discovery.
+    const attached = new Set(Array.from(this.sessions.values(), (item) => item.agentSessionId));
     const found = (await this.listAgentSessions())
       .filter((item) => insideWorkspace(item.cwd) && !attached.has(item.sessionId))
       .slice(0, 12);
-    // Refs keep opaque ACP Session IDs out of model context.
-    this.persistedRefs = new Map(found.map((item, index) => [`r${index + 1}`, { acpSessionId: item.sessionId, cwd: item.cwd }]));
+    // Refs keep opaque Agent Session IDs out of model context.
+    this.persistedRefs = new Map(found.map((item, index) => [`r${index + 1}`, { agentSessionId: item.sessionId, cwd: item.cwd }]));
     return {
       ok: true,
       sessions: found.map((item, index) => ({
@@ -3876,34 +4148,37 @@ export class VoiceSession {
     const sessions: Array<{ sessionId: string; cwd: string; title: string | null; updatedAt: string | null }> = [];
     let cursor: string | null = null;
     for (let page = 0; page < MAX_SESSION_LIST_PAGES; page++) {
-      const result = await this.acpRequest("session/list", cursor ? { cursor } : {});
-      for (const item of Array.isArray(result.sessions) ? result.sessions : []) {
-        if (!item?.sessionId || typeof item.cwd !== "string") continue;
+      const result = await this.agentFetch("GET", `/api/session?limit=50&order=desc${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+      for (const item of Array.isArray(result.data) ? result.data : []) {
+        const cwd = item?.location?.directory;
+        if (!item?.id || typeof cwd !== "string") continue;
+        const updated = Number(item.time?.updated);
         sessions.push({
-          sessionId: String(item.sessionId), cwd: item.cwd, title: item.title ?? null, updatedAt: item.updatedAt ?? null,
+          sessionId: String(item.id), cwd, title: item.title ?? null, updatedAt: updated ? new Date(updated).toISOString() : null,
         });
       }
-      cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : null;
+      const next = result.cursor?.next;
+      cursor = typeof next === "string" && next ? next : null;
       if (!cursor) break;
     }
     return sessions;
   }
 
   private async loadPersistedSession(ref: string, aliasInput: string): Promise<Record<string, unknown>> {
-    if (!this.acpReady) throw new Error("ACP Agent is unavailable");
+    if (!this.agentReady) throw new Error("the Agent is unavailable");
     const persisted = this.persistedRefs.get(ref);
     if (!persisted) throw new Error(`unknown ref ${ref}; call discover_persisted_sessions first`);
-    const { acpSessionId, cwd } = persisted;
     const alias = normalizeAlias(aliasInput);
     this.assertAliasFree(alias);
-    // session/resume restores context without replaying history into this projection, and
-    // only from the directory the session was created in.
-    await this.acpRequest("session/resume", { sessionId: acpSessionId, cwd, mcpServers: [] });
-    const session = newManagedSession(alias, acpSessionId, cwd);
+    // The Agent keeps the session's history and context; attaching only confirms it still exists.
+    const found = (await this.agentFetch("GET", `/api/session/${encodeURIComponent(persisted.agentSessionId)}`)).data ?? {};
+    const cwd = typeof found.location?.directory === "string" ? found.location.directory : persisted.cwd;
+    const session = newManagedSession(alias, persisted.agentSessionId, cwd);
+    if (typeof found.title === "string" && found.title) session.title = found.title;
     this.sessions.set(session.id, session);
     this.persistedRefs.delete(ref);
     await this.persistSessions();
-    await this.record("acp.session.loaded", { alias, directory: relativeDirectory(cwd) });
+    await this.record("agent.session.loaded", { alias, directory: relativeDirectory(cwd) });
     this.queueEarcon("session_created");
     return { ok: true, session: this.publicSession(session) };
   }
@@ -3922,20 +4197,65 @@ export class VoiceSession {
     return { ok: true, previous, alias };
   }
 
+  private forgetPermissions(session: ManagedSession): void {
+    this.withdrawPermissions(session);
+  }
+
+  // Before an interrupt that ends the Permission Requests its step waits on: they are forgotten
+  // first, so the permission.replied it causes is not taken for another client's answer, and
+  // restored if the interrupt fails, since they are then still pending.
+  private withdrawPermissions(session: ManagedSession): PendingPermission[] {
+    const withdrawn = Array.from(this.permissions.values()).filter((permission) => permission.sessionId === session.id);
+    for (const permission of withdrawn) this.permissions.delete(permission.requestId);
+    return withdrawn;
+  }
+
+  private restorePermissions(withdrawn: PendingPermission[]): void {
+    for (const permission of withdrawn) this.permissions.set(permission.requestId, permission);
+  }
+
+  // A bare interrupt leaves steering parked in the inbox for the session's next execution, so
+  // what the Agent has not yet read is withdrawn first.
+  private async withdrawSteers(session: ManagedSession): Promise<void> {
+    const path = `/api/session/${encodeURIComponent(session.agentSessionId)}`;
+    const inbox = await this.agentFetch("GET", `${path}/inbox`);
+    for (const item of Array.isArray(inbox.data) ? inbox.data : []) {
+      if (item?.delivery !== "steer" || !item.id) continue;
+      this.steers.delete(String(item.id));
+      await this.agentFetch("DELETE", `${path}/inbox/${encodeURIComponent(String(item.id))}`).catch((error) => {
+        // Delivered meanwhile: nothing left to withdraw.
+        if (!(error instanceof AgentRequestError && error.status === 404)) throw error;
+      });
+    }
+  }
+
+  // Withdraws undelivered steering and pending Permission Requests, then interrupts without
+  // resume; a failed interrupt leaves the permissions presented and the turn running.
+  private async interruptTurn(session: ManagedSession): Promise<void> {
+    await this.withdrawSteers(session);
+    const withdrawn = this.withdrawPermissions(session);
+    try {
+      await this.agentFetch("POST", `/api/session/${encodeURIComponent(session.agentSessionId)}/interrupt`, undefined,
+        { parent: session.turnTrace ?? null });
+    } catch (error) {
+      this.restorePermissions(withdrawn);
+      throw error;
+    }
+  }
+
   private async closeManagedSession(aliasInput: string): Promise<Record<string, unknown>> {
     const session = this.sessionByAlias(aliasInput);
-    for (const [requestId, permission] of this.permissions) {
-      if (permission.sessionId !== session.id) continue;
-      this.sendAcp({ jsonrpc: "2.0", id: requestId, result: { outcome: { outcome: "cancelled" } } });
-      this.permissions.delete(requestId);
-    }
+    const running = session.turnState === "in_progress";
+    // Closing only once the interrupt succeeded: a failed one leaves the session as it was.
+    if (running) await this.interruptTurn(session);
     session.sessionState = "closing";
-    await this.acpRequest("session/close", { sessionId: session.acpSessionId });
-    // The ACP Session's history persists with the Agent; only this attachment ends.
+    this.forgetPermissions(session);
+    this.cancelTurnEnd(session);
+    // The Agent Session's history persists with the Agent; only this attachment ends.
     if (this.follow?.sessionId === session.id) this.stopFollowing();
     this.sessions.delete(session.id);
     await this.persistSessions();
-    await this.record("acp.session.closed", { alias: session.alias });
+    await this.record("agent.session.closed", { alias: session.alias, interrupted: running });
     this.queueEarcon("session_closed");
     return { ok: true, alias: session.alias, note: "Closed. History is kept; it can be discovered and loaded again." };
   }
@@ -3943,12 +4263,7 @@ export class VoiceSession {
   private async cancelPromptTurn(alias: string): Promise<Record<string, unknown>> {
     const session = this.sessionByAlias(alias);
     if (session.turnState !== "in_progress") throw new Error(`${session.alias} has no active Prompt Turn`);
-    for (const [requestId, permission] of this.permissions) {
-      if (permission.sessionId !== session.id) continue;
-      this.sendAcp({ jsonrpc: "2.0", id: requestId, result: { outcome: { outcome: "cancelled" } } });
-      this.permissions.delete(requestId);
-    }
-    this.sendAcp({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: session.acpSessionId } });
+    await this.interruptTurn(session);
     return { ok: true, alias: session.alias, turn_state: "in_progress", cancellation: "requested" };
   }
 
@@ -3962,107 +4277,149 @@ export class VoiceSession {
     }
     if (matches.length > 1) throw new Error(`option ID is ambiguous for ${session.alias}`);
     const permission = matches[0];
-    this.sendAcp({
-      jsonrpc: "2.0",
-      id: permission.requestId,
-      result: { outcome: { outcome: "selected", optionId } },
-    });
+    // Forgotten before the reply is sent, so the permission.replied it causes is not taken for
+    // another client's answer.
     this.permissions.delete(permission.requestId);
-    await this.record("acp.permission.resolved", { alias: session.alias, option_id: optionId });
+    try {
+      await this.agentFetch("POST", `/api/session/${encodeURIComponent(session.agentSessionId)}/permission/${encodeURIComponent(permission.requestId)}/reply`,
+        { decision: optionId });
+    } catch (error) {
+      if (error instanceof AgentRequestError && error.status === 404) {
+        throw new Error("that Permission Request is no longer pending: it was answered elsewhere or its turn ended");
+      }
+      this.permissions.set(permission.requestId, permission);
+      throw error;
+    }
+    await this.record("agent.permission.resolved", { alias: session.alias, option_id: optionId });
     return { ok: true, alias: session.alias, selected_option_id: optionId };
   }
 
-  private async handleAcpMessage(event: MessageEvent, receivedMs = Date.now(), connectionId: string | null = null): Promise<void> {
-    if (typeof event.data !== "string") return;
-    let message: JsonRpcMessage;
-    try {
-      message = JSON.parse(event.data);
-    } catch {
-      return;
-    }
-    const update = message.params?.update as { sessionUpdate?: unknown; content?: { type?: unknown; text?: unknown } } | undefined;
-    // A response names the span of the request it answers, from that request's own record.
-    const pendingAnswer = message.id !== undefined && !message.method && connectionId === this.acpConnectionId
-      ? this.pendingRpc.get(message.id) ?? null : null;
-    const answered = pendingAnswer?.trace ?? null;
-    this.timing("acp.received", {
-      rpc_id: message.id, method: message.method, agent_connection_id: connectionId,
-      ...spanFields(answered?.context ?? null, answered?.parent ?? null),
-      session_id: message.params?.sessionId,
-      update: (message.params?.update as { sessionUpdate?: unknown } | undefined)?.sessionUpdate,
-      tool_call_id: (message.params?.update as { toolCallId?: unknown } | undefined)?.toolCallId,
-      tool_status: (message.params?.update as { status?: unknown } | undefined)?.status,
-      tool_kind: (message.params?.update as { kind?: unknown } | undefined)?.kind,
-      queue_ms: Date.now() - receivedMs,
-      error: Boolean(message.error),
-      ...(message.method === "session/update" && update?.sessionUpdate === "agent_message_chunk" &&
-        update.content?.type === "text" && typeof update.content.text === "string"
-        ? { content_text: update.content.text, content_kind: "agent_report" } : {}),
-    }, receivedMs, pendingAnswer ? this.completionScope(pendingAnswer.scope) : undefined);
-    if (message.id !== undefined && !message.method) {
-      const pending = this.pendingRpc.get(message.id);
-      if (!pending) return;
-      this.pendingRpc.delete(message.id);
-      clearTimeout(pending.timer);
-      const termination = agentTermination((message.error as { data?: unknown } | undefined)?.data);
-      if (termination) pending.reject(new AgentTerminatedError(termination));
-      else if (message.error) pending.reject(new Error(`ACP error: ${JSON.stringify(message.error)}`));
-      else pending.resolve(message.result ?? {});
-      return;
-    }
-    if (message.method === "session/update") {
-      await this.applySessionUpdate(message.params ?? {});
-      return;
-    }
-    if (message.method === "session/request_permission" && message.id !== undefined) {
-      await this.receivePermission(message.id, message.params ?? {});
-      return;
-    }
-    if (message.id !== undefined) {
-      this.sendAcp({
-        jsonrpc: "2.0",
-        id: message.id,
-        error: { code: -32601, message: `Unsupported ACP Client method: ${String(message.method)}` },
-      });
-    }
-  }
-
-  private async applySessionUpdate(params: Record<string, unknown>): Promise<void> {
-    const session = this.sessionByAcpId(String(params.sessionId ?? ""));
+  // One frame of the Agent's event stream. Events for sessions Dogwalk has not attached are
+  // dropped; they belong to other clients or to history.
+  private async handleAgentEvent(event: AgentEvent, receivedMs: number, connectionId: string): Promise<void> {
+    const type = String(event.type ?? "");
+    const data: Record<string, any> = event.data ?? {};
+    const sessionId = typeof data.sessionID === "string" ? data.sessionID : undefined;
+    const tool = type.startsWith("session.tool.");
+    this.timing("agent.received", {
+      agent_event: type, session_id: sessionId, agent_connection_id: connectionId, queue_ms: Date.now() - receivedMs,
+      ...(tool ? { tool_call_id: data.id, tool_status: TOOL_EVENT_STATUS[type] } : {}),
+      ...(type === "session.tool.input.started" ? { tool_kind: toolKind(String(data.name ?? "")) } : {}),
+      ...(type === "session.text.delta" && typeof data.delta === "string" ? { content_text: data.delta, content_kind: "agent_report" } : {}),
+    }, receivedMs);
+    if (type === "permission.asked") return this.receivePermission(data);
+    if (type === "permission.replied") return this.permissionResolvedElsewhere(data);
+    if (type === "form.created") return this.elicitationWaiting(data.form ?? {});
+    const session = sessionId ? this.sessionByAgentId(sessionId) : undefined;
     if (!session) return;
-    const update = params.update as Record<string, any> | undefined;
-    if (!update) return;
-    const kind = String(update.sessionUpdate ?? "update");
-    if (kind === "agent_message_chunk" && update.content?.type === "text") {
-      const text = String(update.content.text ?? "");
-      session.report = (session.report + text).slice(-64_000);
-      session.unsaid = (session.unsaid + text).slice(-2000);
-    } else if (kind === "agent_thought_chunk" && update.content?.type === "text") {
-      const text = String(update.content.text ?? "");
-      const seen = this.thoughts.get(session.id) ?? { chunks: 0, chars: 0, tail: "" };
-      this.thoughts.set(session.id, { chunks: seen.chunks + 1, chars: seen.chars + text.length, tail: (seen.tail + text).slice(-300) });
-      return;
-    } else if (kind === "session_info_update" && update.title) {
-      session.title = String(update.title);
-    } else if (kind === "usage_update") {
-      const before = contextFill(session.usage);
-      session.usage = { used: update.used, size: update.size, cost: update.cost };
-      if (before < CONTEXT_WARNING && contextFill(session.usage) >= CONTEXT_WARNING) {
-        this.beat(session, `${session.alias} has used most of its context window.`, "progress_context_low");
+    const inProgress = session.turnState === "in_progress";
+    switch (type) {
+      case "session.execution.started":
+        this.executionStarts.set(session.id, (this.executionStarts.get(session.id) ?? 0) + 1);
+        // A Redirect's resume, or new work admitted just as the last execution ended: the same turn.
+        if (this.turnEnds.has(session.id)) this.cancelTurnEnd(session);
+        else if (!inProgress) await this.observeTurn(session);
+        return;
+      case "session.execution.succeeded":
+      case "session.execution.interrupted":
+      case "session.execution.failed": {
+        if (!inProgress) return;
+        const failure = data.error ? [data.error.type, data.error.message].filter(Boolean).join(": ") : undefined;
+        this.scheduleTurnEnd(session, type === "session.execution.succeeded" ? "completed"
+          : type === "session.execution.interrupted" ? "cancelled" : "failed",
+        { interruptReason: typeof data.reason === "string" ? data.reason : undefined, error: failure || undefined });
+        return;
       }
-    } else if (kind === "tool_call" || kind === "tool_call_update") {
-      this.applyToolCall(session, update);
-    } else if (kind === "plan") {
-      this.applyPlan(session, update);
+      case "session.inbox.delivered": {
+        const inboxId = String(data.inboxID ?? "");
+        const steer = this.steers.get(inboxId);
+        if (!steer) return;
+        this.steers.delete(inboxId);
+        await this.record("agent.turn.steer_delivered", { alias: session.alias, inbox_id: inboxId, when: steer.when });
+        this.beat(session, `${session.alias} has the correction.`, null, { weight: 3 });
+        return;
+      }
+      case "session.inbox.cancelled":
+        this.steers.delete(String(data.inboxID ?? ""));
+        return;
+      case "session.text.delta": {
+        const text = String(data.delta ?? "");
+        session.report = (session.report + text).slice(-64_000);
+        session.unsaid = (session.unsaid + text).slice(-2000);
+        // Not persisted per delta: text.ended, step, tool, and turn-end events persist the text
+        // so far, and a turn finished on catching up takes its report from the Agent's messages.
+        return;
+      }
+      case "session.text.ended":
+        // Text parts come one after another, around tool calls; keep them apart.
+        if (session.report && !/\s$/.test(session.report)) session.report += "\n\n";
+        if (session.unsaid && !/\s$/.test(session.unsaid)) session.unsaid += " ";
+        break;
+      case "session.reasoning.delta": {
+        const text = String(data.delta ?? "");
+        const seen = this.thoughts.get(session.id) ?? { chunks: 0, chars: 0, tail: "" };
+        this.thoughts.set(session.id, { chunks: seen.chunks + 1, chars: seen.chars + text.length, tail: (seen.tail + text).slice(-300) });
+        return;
+      }
+      case "session.renamed":
+        if (!data.title) return;
+        session.title = String(data.title);
+        break;
+      case "session.step.ended": {
+        // The context in use is the latest step's whole input, cached or not.
+        const tokens = data.tokens ?? {};
+        const used = Number(tokens.input ?? 0) + Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0);
+        const before = contextFill(session.usage);
+        session.usage = { ...session.usage, used, size: this.contextLimit ?? undefined };
+        if (before < CONTEXT_WARNING && contextFill(session.usage) >= CONTEXT_WARNING) {
+          this.beat(session, `${session.alias} has used most of its context window.`, "progress_context_low");
+        }
+        break;
+      }
+      case "session.usage.updated":
+        session.usage = { ...session.usage, cost: data.cost };
+        break;
+      default:
+        if (!tool) return;
+        this.applyToolEvent(session, type, data);
     }
     await this.persistSessions();
   }
 
-  private applyToolCall(session: ManagedSession, update: Record<string, any>): void {
-    const id = String(update.toolCallId ?? "");
+  // Only input.started names the tool, so later events find the call by ID. Code mode's
+  // execute runs other tools inside one call: its progress names them, and the call takes the
+  // kind and title of the latest one still running.
+  private applyToolEvent(session: ManagedSession, type: string, data: Record<string, any>): void {
+    const id = String(data.id ?? "");
     if (!id) return;
+    const name = type === "session.tool.input.started" ? String(data.name ?? "")
+      : session.toolCalls.find((item) => item.toolCallId === id)?.name ?? "";
+    switch (type) {
+      case "session.tool.input.started":
+        return this.applyToolCall(session, id, { name, kind: toolKind(name), status: "pending" });
+      case "session.tool.called": {
+        const input = data.input ?? {};
+        if ((name === "todowrite" || name === "todo") && Array.isArray(input.todos)) this.applyPlan(session, input.todos);
+        return this.applyToolCall(session, id, { status: "in_progress", ...toolInput(session.cwd, input) });
+      }
+      case "session.tool.progress": {
+        const inner = Array.isArray(data.metadata?.toolCalls) ? data.metadata.toolCalls : [];
+        const running = [...inner].reverse().find((item: any) => item?.status === "running");
+        if (!running) return;
+        return this.applyToolCall(session, id, { kind: toolKind(String(running.tool ?? "")), ...toolInput(session.cwd, running.input ?? {}) });
+      }
+      case "session.tool.success":
+        return this.applyToolCall(session, id, { status: "completed" });
+      case "session.tool.failed":
+        return this.applyToolCall(session, id, { status: "failed" });
+    }
+  }
+
+  private applyToolCall(session: ManagedSession, id: string,
+    update: Partial<Pick<ToolCallActivity, "name" | "kind" | "title" | "status" | "paths">>): void {
     let call = session.toolCalls.find((item) => item.toolCallId === id);
     const previous = call?.status ?? null;
+    const previousKind = call?.kind ?? null;
     if (!call) {
       // Agent text between tool calls is the Agent narrating its own progress.
       const remark = speakableRemark(session.unsaid);
@@ -4072,18 +4429,20 @@ export class VoiceSession {
         session.remark = remark;
         this.beat(session, `${session.alias} says: "${remark}"`, "progress_remark");
       }
-      call = { toolCallId: id, kind: "other", title: "", status: "pending", paths: [], startedAt: Date.now(), endedAt: null };
+      call = { toolCallId: id, name: "", kind: "other", title: "", status: "pending", paths: [], startedAt: Date.now(), endedAt: null };
       session.toolCalls.push(call);
       session.toolCalls = session.toolCalls.slice(-MAX_ACTIVITY);
     }
-    if (update.kind) call.kind = String(update.kind);
-    if (update.title) call.title = String(update.title);
-    if (update.status) call.status = String(update.status);
-    if (Array.isArray(update.locations) && update.locations.length) {
-      const paths = update.locations.map((location: any) => relativePath(session.cwd, String(location?.path ?? "")));
-      call.paths = [...new Set<string>(paths.filter(Boolean))].slice(0, 10);
+    if (update.name) call.name = update.name;
+    if (update.kind) call.kind = update.kind;
+    if (update.title) call.title = update.title;
+    if (update.status) call.status = update.status;
+    if (update.paths?.length) call.paths = [...new Set(update.paths.filter(Boolean))].slice(0, 10);
+    if (call.status === previous) {
+      // Code mode: another tool under way inside the same call is a new phase.
+      if (call.status === "in_progress" && call.kind !== previousKind) this.toolCallStarted(session, call);
+      return;
     }
-    if (call.status === previous) return;
     if (call.status === "completed" || call.status === "failed") {
       call.endedAt = Date.now();
       this.feedPush("agent", `${call.title || call.kind} (${call.status})`, { who: session.alias, lane: "tool" });
@@ -4149,10 +4508,10 @@ export class VoiceSession {
     }
   }
 
-  // ACP sends the whole plan each time; a beat when the current step changes.
-  private applyPlan(session: ManagedSession, update: Record<string, any>): void {
+  // A todo tool writes the whole plan each time; a beat when the current step changes.
+  private applyPlan(session: ManagedSession, entries: any[]): void {
     const before = currentStep(session.plan);
-    session.plan = (Array.isArray(update.entries) ? update.entries : []).slice(0, 20).map((entry: any) => ({
+    session.plan = entries.slice(0, 20).map((entry: any) => ({
       content: String(entry?.content ?? ""), status: String(entry?.status ?? "pending"),
     }));
     const now = currentStep(session.plan);
@@ -4276,29 +4635,29 @@ export class VoiceSession {
       && this.earconQueue.length === 0 && Date.now() - this.lastSpeechAt >= QUIET_MS;
   }
 
-  private async receivePermission(requestId: string | number, params: Record<string, unknown>): Promise<void> {
-    const session = this.sessionByAcpId(String(params.sessionId ?? ""));
-    if (!session) {
-      this.sendAcp({ jsonrpc: "2.0", id: requestId, result: { outcome: { outcome: "cancelled" } } });
-      return;
-    }
-    const toolCall = (params.toolCall ?? {}) as Record<string, unknown>;
-    const options = Array.isArray(params.options)
-      ? params.options.map((value: any) => ({
-        optionId: String(value.optionId),
-        name: String(value.name),
-        kind: value.kind ? String(value.kind) : undefined,
-      }))
-      : [];
+  // From permission.asked or catching up; each request is presented once. One for a session
+  // Dogwalk has not attached is left for other clients.
+  private async receivePermission(request: Record<string, any>): Promise<void> {
+    const requestId = String(request.id ?? "");
+    const session = this.sessionByAgentId(String(request.sessionID ?? ""));
+    if (!session || !requestId || this.permissions.has(requestId)) return;
+    // The Agent's decisions are fixed; always is offered only with patterns it would save.
+    const save = Array.isArray(request.save) ? request.save.map(String).filter(Boolean) : [];
+    const options = [
+      { optionId: "once", name: "Allow once" },
+      ...(save.length ? [{ optionId: "always", name: `Always allow ${save.join(", ")}`.slice(0, 200) }] : []),
+      { optionId: "reject", name: "Reject" },
+    ];
+    const resources = Array.isArray(request.resources) ? request.resources.map(String) : [];
     const permission: PendingPermission = {
       requestId,
       sessionId: session.id,
       alias: session.alias,
-      title: String(toolCall.title ?? "operation"),
+      title: `${String(request.action ?? "operation")}${resources.length ? `: ${resources.join(", ")}` : ""}`.slice(0, 300),
       options,
     };
     this.permissions.set(requestId, permission);
-    await this.record("acp.permission.requested", { alias: session.alias, option_count: options.length });
+    await this.record("agent.permission.requested", { alias: session.alias, option_count: options.length });
     await this.noteSinceGreeting(`${session.alias} asked for permission`);
     this.queueEarcon("permission_requested");
     await this.orchestratorEvent(`[harness event] permission_requested: ${JSON.stringify({
@@ -4306,41 +4665,28 @@ export class VoiceSession {
     })}`);
   }
 
-  // Each request is its own span, a child of `parent` (the Prompt Turn for session/prompt,
-  // otherwise the Voice Call snapshot at send time) or a new root when there is neither. The
-  // span travels in `_meta.traceparent`, since the upgrade headers cannot name each request.
-  // Responses to Agent-initiated requests and notifications carry none: they are not our spans.
-  private acpRequest(method: string, params: Record<string, unknown>, timeoutMs = 30_000,
-    parent: TraceContext | null = this.callTrace): Promise<Record<string, unknown>> {
-    const id = this.rpcId++;
-    const trace = { context: parent ? childOf(parent) : newRootContext(), parent };
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRpc.delete(id);
-        reject(new Error(`${method} timed out`));
-      }, timeoutMs);
-      this.pendingRpc.set(id, { resolve, reject, timer, trace, scope: { callSid: this.callSid, liveSessionId: this.liveSessionId } });
-      try {
-        this.sendAcp({ jsonrpc: "2.0", id, method, params: withTraceparent(params, trace.context) }, trace);
-      } catch (error) {
-        clearTimeout(timer);
-        this.pendingRpc.delete(id);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
+  // permission.replied comes for every answer; one Dogwalk sent was forgotten before sending,
+  // so a request still held here was answered by another client.
+  private async permissionResolvedElsewhere(data: Record<string, any>): Promise<void> {
+    const requestId = String(data.requestID ?? "");
+    const permission = this.permissions.get(requestId);
+    if (!permission) return;
+    this.permissions.delete(requestId);
+    const reply = typeof data.reply === "string" ? data.reply : null;
+    await this.record("agent.permission.resolved_elsewhere", { alias: permission.alias, reply });
+    await this.orchestratorEvent(`[harness event] permission_resolved: ${JSON.stringify({ alias: permission.alias, reply, elsewhere: true })}`);
   }
 
-  private sendAcp(message: unknown, trace: PendingRpc["trace"] | null = null): void {
-    if (!this.acp || this.acp.readyState !== WebSocket.OPEN) throw new Error("ACP connection is unavailable");
-    this.acp.send(JSON.stringify(message));
-    const rpc = message as JsonRpcMessage;
-    // Only ACP prompt text blocks, not arbitrary params, resources, or tool payloads.
-    const prompt = rpc.method === "session/prompt" && Array.isArray(rpc.params?.prompt)
-      ? rpc.params.prompt.filter((block: any) => block?.type === "text" && typeof block.text === "string")
-        .map((block: any) => block.text).join("\n") : undefined;
-    this.timing("acp.sent", { rpc_id: rpc.id, method: rpc.method, session_id: rpc.params?.sessionId,
-      agent_connection_id: this.acpConnectionId, ...spanFields(trace?.context ?? null, trace?.parent ?? null),
-      ...(prompt !== undefined ? { content_text: prompt, content_kind: "acp_prompt" } : {}) });
+  // Elicitations (DOMAIN.md) are not answerable by voice yet; the caller hears that one waits.
+  private async elicitationWaiting(form: Record<string, any>): Promise<void> {
+    const session = this.sessionByAgentId(String(form.sessionID ?? ""));
+    if (!session) return;
+    await this.record("agent.elicitation.unsupported", {
+      alias: session.alias, form_id: form.id ?? null, fields: Array.isArray(form.fields) ? form.fields.length : null,
+    });
+    await this.orchestratorEvent(`[harness event] elicitation_waiting: ${JSON.stringify({
+      alias: session.alias, title: String(form.title ?? "a question").slice(0, 300), note: "cannot be answered by voice yet",
+    })}`);
   }
 
   // A held append keeps the event_id it was given, so live.held and live.sent rows agree.
@@ -4417,8 +4763,8 @@ export class VoiceSession {
     return session;
   }
 
-  private sessionByAcpId(acpSessionId: string): ManagedSession | undefined {
-    return Array.from(this.sessions.values()).find((item) => item.acpSessionId === acpSessionId);
+  private sessionByAgentId(agentSessionId: string): ManagedSession | undefined {
+    return Array.from(this.sessions.values()).find((item) => item.agentSessionId === agentSessionId);
   }
 
   private publicSession(session: ManagedSession): Record<string, unknown> {
@@ -4427,7 +4773,7 @@ export class VoiceSession {
       directory: relativeDirectory(session.cwd),
       session_state: session.sessionState,
       turn_state: session.turnState,
-      stop_reason: session.stopReason,
+      outcome: session.outcome,
       followed: this.follow?.sessionId === session.id,
       title: session.title,
       assignment: session.assignment,
@@ -4448,7 +4794,7 @@ export class VoiceSession {
         directory: relativeDirectory(session.cwd),
         session_state: session.sessionState,
         turn_state: session.turnState,
-        stop_reason: session.stopReason,
+        outcome: session.outcome,
         title: session.title,
         assignment: session.assignment?.slice(0, 500) ?? null,
         recent_activity: session.toolCalls.slice(-3).map((call) => `${toolDoing(call)}: ${call.status}`),
@@ -4469,15 +4815,11 @@ export class VoiceSession {
   }
 
   private async resetSandboxProjection(): Promise<void> {
-    const acp = this.acp;
-    this.acp = null;
-    this.acpReady = false;
-    if (acp?.readyState === WebSocket.OPEN) acp.close(1000, "Sandbox replaced");
-    for (const pending of this.pendingRpc.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error("Sandbox replaced"));
-    }
-    this.pendingRpc.clear();
+    this.closeAgent("Sandbox replaced");
+    for (const timer of this.turnEnds.values()) clearTimeout(timer);
+    this.turnEnds.clear();
+    this.steers.clear();
+    this.contextLimit = null;
     this.permissions.clear();
     this.sessions.clear();
     this.follow = null;
@@ -4500,38 +4842,43 @@ export class VoiceSession {
     ).bind(this.callSid, this.phone, action).run();
   }
 
-  private async acpDisconnected(reason: string, termination: AgentTermination | null = null): Promise<void> {
-    this.acp = null;
-    this.acpReady = false;
-    for (const pending of this.pendingRpc.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(termination ? new AgentTerminatedError(termination) : new Error(`ACP connection ${reason}`));
+  private async agentDisconnected(reason: string, termination: AgentTermination | null = null,
+    socket: WebSocket | null = null): Promise<void> {
+    // Queued behind earlier events, so a reconnect may already have begun: only that socket's state is undone.
+    if (!socket || this.agentEvents === socket) {
+      this.agentEvents = null;
+      this.agentReady = false;
     }
-    this.pendingRpc.clear();
-    // Request IDs belong to the lost connection; a new one cannot answer them.
-    this.permissions.clear();
-    // The Agent may answer a turn with a bare error (OpenCode: ServerUnavailable) just before
-    // the gateway reports why it ended, so a turn that failed moments ago gets the reason too.
+    // Pending Permission Requests stay presented: they are still pending with the Agent, and
+    // catching up after reconnecting forgets those answered meanwhile (syncPermissions).
+    // Agent work outlives this connection, unless the service itself died (Agent Termination):
+    // then running turns are lost. A turn that failed moments before the gateway said why (the
+    // execution's own error comes first) gets the reason too.
     const sentence = termination ? terminationSentence(termination) : null;
     const failedTurns: string[] = [];
-    for (const session of this.sessions.values()) {
+    for (const session of [...this.sessions.values()]) {
       if (session.sessionState === "ready") session.sessionState = "unavailable";
-      if (sentence && session.turnState === "failed" && Date.now() - (session.turnEndedAt ?? 0) < 30_000 && !session.failure?.includes(sentence)) {
+      if (!termination || !sentence) continue;
+      if (session.turnState === "in_progress") {
+        failedTurns.push(session.alias);
+        await this.endPromptTurn(session, "failed", { error: sentence, termination });
+      } else if (session.turnState === "failed" && Date.now() - (session.turnEndedAt ?? 0) < 30_000 && !session.failure?.includes(sentence)) {
         session.failure = `${session.failure ?? "Prompt Turn failed."} ${sentence}`;
         failedTurns.push(session.alias);
       }
     }
     await this.persistSessions();
-    await this.record("acp.disconnected", { reason, ...(termination ? { agent_termination: termination, failed_turns: failedTurns } : {}) });
+    await this.record("agent.disconnected", { reason, ...(termination ? { agent_termination: termination, failed_turns: failedTurns } : {}) });
     if (sentence) this.feedPush("system", sentence, { lane: "event" });
-    // The call survives without its Agent Connection: reconnect in the background while someone is on
-    // the line. Between calls the object is left free to be evicted (deploy.py relies on it).
+    // The call survives without its Agent Connection: reconnect in the background while someone
+    // is on the line. Between calls the object is left free to be evicted (deploy.py relies on
+    // it); eviction no longer interrupts Agent work, and the next connection catches up on it.
     if (this.liveAttached) {
       this.agentConnecting = true;
-      await this.orchestratorEvent(`[harness event] agent_unavailable: ${JSON.stringify(sentence
-        ? { reason: `${sentence} Reconnecting.`, reconnecting: true, agent_termination: termination!.reason, failed_turns: failedTurns }
+      await this.orchestratorEvent(`[harness event] agent_unavailable: ${JSON.stringify(termination
+        ? { reason: `${sentence} Reconnecting.`, reconnecting: true, agent_termination: termination.reason, failed_turns: failedTurns }
         : { reason: `Agent Connection ${reason}; reconnecting`, reconnecting: true })}`);
-      this.ensureAcp();
+      this.ensureAgent();
     }
   }
 
@@ -4714,7 +5061,7 @@ export class VoiceSession {
            VALUES (?, ?, ?, ?, ?, ?)`,
         ).bind(
           scope.callSid, now,
-          event.startsWith("acp.") ? "acp" : event.startsWith("menu.") ? "menu" : event.startsWith("access.") ? "access" : "voice",
+          event.startsWith("agent.") ? "agent" : event.startsWith("menu.") ? "menu" : event.startsWith("access.") ? "access" : "voice",
           "internal", event, JSON.stringify(detail),
         ),
         this.env.DB.prepare("UPDATE voice_calls SET last_activity_at = ? WHERE call_sid = ?").bind(now, scope.callSid),
@@ -4986,12 +5333,80 @@ function summarizeLevels(levels: Levels): { chunks: number; non_silent_fraction:
   };
 }
 
-function newManagedSession(alias: string, acpSessionId: string, cwd: string): ManagedSession {
+function newManagedSession(alias: string, agentSessionId: string, cwd: string): ManagedSession {
   return {
-    id: crypto.randomUUID(), alias, acpSessionId, sessionState: "ready", turnState: "idle", assignment: null,
+    id: crypto.randomUUID(), alias, agentSessionId, sessionState: "ready", turnState: "idle", assignment: null,
     report: "", toolCalls: [], plan: [], unsaid: "", remark: null, failure: null,
-    stopReason: null, title: null, usage: null, cwd,
+    outcome: null, title: null, usage: null, cwd,
   };
+}
+
+// How a Prompt Turn's end is known beyond its outcome; the error is already a sentence.
+interface TurnEndDetail { error?: string; interruptReason?: string; termination?: AgentTermination }
+
+// The gateway path with identifiers folded, so telemetry groups requests by operation.
+function agentRoute(path: string): string {
+  return path.split("?")[0].replace(/\/(ses|per|msg|inb|frm)_[A-Za-z0-9]+/g, "/{id}").replace(/\/inbox\/[^/]+$/, "/inbox/{id}");
+}
+
+function gatewayHeaders(preview: GatewayPreview): Record<string, string> {
+  return { "x-daytona-preview-token": preview.token, "x-daytona-skip-preview-warning": "true" };
+}
+
+// A turn's end names a turn Dogwalk did not begin, which a later call may not have heard start.
+function startedElsewhere(session: ManagedSession): { started_elsewhere?: true } {
+  return session.assignment === OBSERVED_ASSIGNMENT ? { started_elsewhere: true } : {};
+}
+
+function parseAgentEvent(data: unknown): AgentEvent | null {
+  if (typeof data !== "string") return null;
+  try {
+    const value = JSON.parse(data);
+    return value && typeof value === "object" && typeof value.type === "string" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+// The latest Prompt Turn's text, from messages newest first: the assistant's text parts back to
+// the last user message, in order.
+function latestReport(messages: Array<Record<string, any>>): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (message?.type === "user") break;
+    if (message?.type !== "assistant" || !Array.isArray(message.content)) continue;
+    const text = message.content.filter((part: any) => part?.type === "text" && typeof part.text === "string")
+      .map((part: any) => part.text).join("\n\n");
+    if (text.trim()) parts.unshift(text.trim());
+  }
+  return parts.join("\n\n");
+}
+
+// Activity status as each tool event implies it, for telemetry.
+const TOOL_EVENT_STATUS: Record<string, string> = {
+  "session.tool.input.started": "pending", "session.tool.called": "in_progress", "session.tool.progress": "in_progress",
+  "session.tool.success": "completed", "session.tool.failed": "failed",
+};
+
+// Dogwalk's own tool kinds, from the Agent's tool names. Code mode's execute is other until
+// its progress names the tool it runs; anything unknown is other.
+function toolKind(name: string): string {
+  if (["read", "list"].includes(name)) return "read";
+  if (["glob", "grep", "search", "codesearch"].includes(name)) return "search";
+  if (["edit", "write", "patch", "apply_patch", "multiedit"].includes(name)) return "edit";
+  if (["shell", "bash"].includes(name)) return "execute";
+  if (["webfetch", "websearch", "fetch"].includes(name)) return "fetch";
+  if (["todowrite", "todo"].includes(name)) return "think";
+  return "other";
+}
+
+// A tool input's title (the command, path, pattern, URL, or query) and the file it names.
+function toolInput(cwd: string, input: Record<string, any>): { title?: string; paths?: string[] } {
+  const raw = [input.filePath, input.path].find((value) => typeof value === "string" && value);
+  const path = raw ? relativePath(cwd, raw) : null;
+  const title = [input.command, path, input.pattern, input.url, input.query]
+    .find((value) => typeof value === "string" && value.trim());
+  return { ...(title ? { title: String(title).trim().slice(0, 200) } : {}), ...(path ? { paths: [path] } : {}) };
 }
 
 function contextFill(usage: ManagedSession["usage"]): number {
@@ -4999,7 +5414,7 @@ function contextFill(usage: ManagedSession["usage"]): number {
 }
 
 function relativePath(cwd: string, path: string): string {
-  if (!path) return "";
+  if (!path || !path.startsWith("/")) return path;
   return path.startsWith(`${cwd}/`) ? path.slice(cwd.length + 1) : relativeDirectory(path);
 }
 
@@ -5013,12 +5428,12 @@ function speakableRemark(text: string): string | null {
   return sentence >= 0 ? tail.slice(sentence + 1).trim() : tail;
 }
 
-// "other" covers ACP's other kind and any unknown one: nothing about it is speakable.
+// "other" covers any unknown tool: nothing about it is speakable.
 function toolPhase(kind: string): string {
   if (["read", "search", "fetch"].includes(kind)) return "looking";
-  if (["edit", "delete", "move"].includes(kind)) return "changing";
+  if (kind === "edit") return "changing";
   if (kind === "execute") return "running";
-  if (["think", "switch_mode"].includes(kind)) return kind;
+  if (kind === "think") return kind;
   return "other";
 }
 
@@ -5047,11 +5462,8 @@ function toolDoing(call: ToolCallActivity): string {
     case "search": return "searching the code";
     case "fetch": return "looking something up on the web";
     case "edit": return `editing ${files || "files"}`;
-    case "delete": return `deleting ${files || "files"}`;
-    case "move": return `moving ${files || "files"}`;
     case "execute": return commandPhase(call.title);
     case "think": return "thinking it over";
-    case "switch_mode": return "switching modes";
     default: return "using a tool";
   }
 }
@@ -5106,30 +5518,29 @@ function currentStep(plan: PlanEntry[]): { index: number; content: string; key: 
   return { index, content: plan[index].content, key: `${index}:${plan[index].content}` };
 }
 
-// ACP stop reasons mapped to presentation: an earcon and a clause for the next opening.
-function turnEnding(stopReason: string | null): { earcon: EarconName; clause: string } {
-  switch (stopReason) {
+// A Prompt Turn's outcome as presentation: an earcon and a clause for the next opening.
+function turnEnding(outcome: TurnOutcome): { earcon: EarconName; clause: string } {
+  switch (outcome) {
     case "cancelled": return { earcon: "turn_cancelled", clause: "was cancelled" };
-    case "max_tokens":
-    case "max_turn_requests": return { earcon: "turn_truncated", clause: "ran out of room" };
-    case "refusal": return { earcon: "turn_refused", clause: "declined the work" };
+    case "failed": return { earcon: "turn_failed", clause: "failed" };
     default: return { earcon: "turn_stopped", clause: "finished" };
   }
 }
 
-// How the ACP Agent process ended, as the ACP Gateway reports it (sandbox_acp_gateway.py): in
-// the JSON-RPC error data of requests it left unanswered, and in the WebSocket close reason.
+// A non-2xx answer from the Agent's API, with OpenCode's error tag when it sent one.
+class AgentRequestError extends Error {
+  constructor(readonly status: number, readonly tag: string | null, message: string) {
+    super(tag ? `${tag}: ${message}` : message);
+  }
+}
+
+// How the Agent's service ended, as the Agent Gateway reports it (sandbox_agent_gateway.py) in
+// the event stream's close reason.
 interface AgentTermination {
   reason: "out_of_memory" | "killed" | "exited";
   signal?: string;
   exit_status?: number | null;
   limit_bytes?: number;
-}
-
-class AgentTerminatedError extends Error {
-  constructor(readonly termination: AgentTermination) {
-    super(terminationSentence(termination));
-  }
 }
 
 function agentTermination(value: unknown): AgentTermination | null {

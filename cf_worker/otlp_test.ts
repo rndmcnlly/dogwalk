@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, withTraceparent } from "./src/trace_context.ts";
+import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields } from "./src/trace_context.ts";
 import { type ActivityRow, type CallRow, logsRequest, msToNanos, openRecordedSpanIds, projectLogs, projectSpans, tracesRequest } from "./src/otlp.ts";
 
 const projectCall = async (call: CallRow, rows: ActivityRow[]) => ({ logs: await projectLogs(call, rows), spans: await projectSpans(call, rows) });
@@ -15,10 +15,10 @@ const LIVE = "rtc_fixture", CLOCK = "clock-1";
 let id = 0;
 const timing = (event: string, ms: number, detail: Record<string, unknown> = {}) => ({
   id: ++id, ts: Math.floor(ms / 1000), source: "voice", event: "voice.timing",
-  detail: JSON.stringify({ ...detail, event, ts_ms: ms, clock_id: CLOCK, seq: id, live_session_id: LIVE }),
+  detail: JSON.stringify({ clock_id: CLOCK, ...detail, event, ts_ms: ms, seq: id, live_session_id: LIVE }),
 });
 const record = (event: string, ms: number, detail: Record<string, unknown>) => ({
-  id: ++id, ts: Math.floor(ms / 1000), source: event.startsWith("acp.") ? "acp" : "voice", event,
+  id: ++id, ts: Math.floor(ms / 1000), source: event.startsWith("agent.") ? "agent" : "voice", event,
   detail: JSON.stringify({ ...detail, ts_ms: ms, live_session_id: LIVE }),
 });
 const twilio = (event: string, received: number, occurred: number | null, extra: Record<string, unknown> = {}) => ({
@@ -43,18 +43,19 @@ const rowsA = [
   timing("tool.started", T0 + 2020, { tool_call_id: "call-2", name: "say" }), // Never completes.
   timing("model.started", T0 + 3000, { request_id: "req-2" }),
   timing("model.failed", T0 + 3500, { request_id: "req-2", ms: 500 }),
-  // Same rpc_id on two Agent Connections must not cross-match.
-  timing("acp.sent", T0 + 4000, { rpc_id: 7, method: "session/prompt", session_id: "ses_1", agent_connection_id: "conn-a",
-    content_text: "do the thing", content_kind: "acp_prompt" }),
-  timing("acp.sent", T0 + 4100, { rpc_id: 7, method: "session/prompt", session_id: "ses_2", agent_connection_id: "conn-b" }),
-  timing("acp.received", T0 + 4300, { rpc_id: 7, agent_connection_id: "conn-b", error: false }),
-  timing("acp.received", T0 + 4600, { rpc_id: 7, agent_connection_id: "conn-a", error: true }),
-  // Legacy rows without connection identity stay logs.
-  timing("acp.sent", T0 + 4700, { rpc_id: 8, method: "session/cancel" }),
-  timing("acp.received", T0 + 4800, { rpc_id: 8 }),
-  timing("acp.received", T0 + 4900, { method: "session/update", session_id: "ses_1", update: "agent_message_chunk",
+  // The same agent_request_id under two object instances (clocks) must not cross-match.
+  timing("agent.sent", T0 + 4000, { agent_request_id: 7, method: "POST", route: "/api/session/{id}/prompt", session_id: "ses_1",
+    agent_connection_id: "conn-a", clock_id: "clock-a", content_text: "do the thing", content_kind: "agent_prompt" }),
+  timing("agent.sent", T0 + 4100, { agent_request_id: 7, method: "POST", route: "/api/session/{id}/prompt", session_id: "ses_2",
+    agent_connection_id: "conn-b", clock_id: "clock-b" }),
+  timing("agent.received", T0 + 4300, { agent_request_id: 7, agent_connection_id: "conn-b", clock_id: "clock-b", http_status: 200, error: false }),
+  timing("agent.received", T0 + 4600, { agent_request_id: 7, agent_connection_id: "conn-a", clock_id: "clock-a", http_status: 404, error: true }),
+  // Rows from the ACP era (rpc_id, no agent_request_id) stay logs.
+  timing("agent.sent", T0 + 4700, { rpc_id: 8, method: "session/cancel" }),
+  timing("agent.received", T0 + 4800, { rpc_id: 8 }),
+  timing("agent.received", T0 + 4900, { agent_event: "session.text.delta", session_id: "ses_1",
     content_text: "I changed three files", content_kind: "agent_report", agent_connection_id: "conn-a" }),
-  record("acp.turn.started", turnStart, { alias: "biscuit", acp_session_id: "ses_1", started_ms: turnStart }),
+  record("agent.turn.started", turnStart, { alias: "biscuit", agent_session_id: "ses_1", started_ms: turnStart }),
   record("orchestrator.failed", T0 + 9500, { message: `fetch ${SECRET} failed` }),
   { id: ++id, ts: Math.floor((T0 + 9600) / 1000), source: "voice", event: "call.connected", detail: JSON.stringify({ alias: "biscuit" }) }, // Second-only legacy.
   twilio("provider.twilio.callback.ringing", T0 + 400, null, { status: "ringing" }), // Missing occurrence.
@@ -64,8 +65,8 @@ const rowsA = [
     response_code: 200, request_duration_ms: 87 }), // Late backfill, earlier event time, later row id.
 ];
 const rowsB = [
-  record("acp.turn.stopped", turnStart + 120_000, { alias: "biscuit", acp_session_id: "ses_1", started_ms: turnStart,
-    ended_ms: turnStart + 120_000, ms: 120_000, stop_reason: "end_turn", thoughts: { chunks: 3, chars: 90, tail: "secret thought" } }),
+  record("agent.turn.stopped", turnStart + 120_000, { alias: "biscuit", agent_session_id: "ses_1", started_ms: turnStart,
+    ended_ms: turnStart + 120_000, ms: 120_000, outcome: "completed", thoughts: { chunks: 3, chars: 90, tail: "secret thought" } }),
 ];
 
 const a = await projectCall({ call_sid: CALL_A, started_at: Math.floor(T0 / 1000), ended_at: Math.floor(T0 / 1000) + 60, status: "completed" }, rowsA);
@@ -122,23 +123,23 @@ assert.match(openTool.spanId!, /^[0-9a-f]{16}$/, "an open start names its span a
 assert.ok(!a.spans.some((s) => s.spanId === openTool.spanId), "but that span is never exported");
 assert.ok(a.logs.every((l) => attr(l, "dogwalk.interval.state") === undefined), "no trace-level state on logs");
 
-// RPC roundtrips are scoped by Agent Connection.
-const rpcs = spanNamed(a, "acp session/prompt");
+// Agent request roundtrips are scoped by the object instance's clock.
+const rpcs = spanNamed(a, "agent POST /api/session/{id}/prompt");
 assert.equal(rpcs.length, 2);
 const byConn = Object.fromEntries(rpcs.map((s) => [attr(s, "dogwalk.agent_connection.id"), s]));
 assert.equal(byConn["conn-a"].endTimeUnixNano, msToNanos(T0 + 4600));
 assert.equal(byConn["conn-a"].status.code, 2);
 assert.equal(byConn["conn-b"].endTimeUnixNano, msToNanos(T0 + 4300));
-assert.equal(spanNamed(a, "acp session/cancel").length, 0, "legacy rows without connection identity stay logs");
+assert.ok(!a.spans.some((s) => s.name.includes("session/cancel")), "ACP-era rows stay logs");
 
 // Prompt Turn begun in Call A, ended in Call B: same deterministic identity, never fabricated.
-assert.equal(spanNamed(a, "acp.prompt_turn").length, 0);
+assert.equal(spanNamed(a, "agent.prompt_turn").length, 0);
 const turnStartLog = logFor(a, rowsA[17].id), turnStopLog = logFor(b, rowsB[0].id);
 assert.equal(turnStartLog.traceId, turnStopLog.traceId, "both halves of a cross-call turn name the same trace");
 assert.equal(turnStartLog.spanId, turnStopLog.spanId);
 const crossCall = await projectCall({ call_sid: CALL_A, started_at: Math.floor(T0 / 1000), ended_at: Math.floor(T0 / 1000) + 60,
   status: "completed" }, [...rowsA, ...rowsB]);
-const turn = spanNamed(crossCall, "acp.prompt_turn")[0];
+const turn = spanNamed(crossCall, "agent.prompt_turn")[0];
 assert.ok(turn && turn.traceId !== call.traceId, "Prompt Turn is its own work trace");
 assert.equal(turn.links?.[0].spanId, call.spanId, "linked to the initiating call, not parented by it");
 assert.equal(turn.status.code, 1);
@@ -154,14 +155,14 @@ for (const s of a.spans.filter((s) => s.name !== "voice_call")) {
   const ends = [attr(s, "dogwalk.journal.start_row_id"), attr(s, "dogwalk.journal.end_row_id")].map(Number);
   for (const id of ends) assert.equal(logFor(a, id).spanId, s.spanId, `${s.name} row ${id} names its span`);
 }
-// An RPC response observed under a different voice session still names its request's span.
+// A response observed under a different voice session still names its request's span.
 const crossLive = [
-  { id: 1001, ts: Math.floor(T0 / 1000), source: "voice", event: "voice.timing", detail: JSON.stringify({ event: "acp.sent",
-    rpc_id: 42, method: "session/prompt", agent_connection_id: "conn-z", ts_ms: T0, clock_id: CLOCK, live_session_id: "rtc_one" }) },
-  { id: 1002, ts: Math.floor(T0 / 1000), source: "voice", event: "voice.timing", detail: JSON.stringify({ event: "acp.received",
-    rpc_id: 42, agent_connection_id: "conn-z", ts_ms: T0 + 50, clock_id: CLOCK, live_session_id: "rtc_two" }) },
+  { id: 1001, ts: Math.floor(T0 / 1000), source: "voice", event: "voice.timing", detail: JSON.stringify({ event: "agent.sent",
+    agent_request_id: 42, method: "POST", route: "/api/session/{id}/prompt", agent_connection_id: "conn-z", ts_ms: T0, clock_id: CLOCK, live_session_id: "rtc_one" }) },
+  { id: 1002, ts: Math.floor(T0 / 1000), source: "voice", event: "voice.timing", detail: JSON.stringify({ event: "agent.received",
+    agent_request_id: 42, agent_connection_id: "conn-z", ts_ms: T0 + 50, clock_id: CLOCK, live_session_id: "rtc_two" }) },
 ];
-const rpcSpan = (await projectSpans(callA, crossLive)).find((s) => s.name === "acp session/prompt")!;
+const rpcSpan = (await projectSpans(callA, crossLive)).find((s) => s.name === "agent POST /api/session/{id}/prompt")!;
 const rpcLogs = await projectLogs(callA, crossLive);
 assert.ok(rpcSpan && rpcLogs.every((l) => l.spanId === rpcSpan.spanId && l.traceId === rpcSpan.traceId));
 // Producer identity: Resources come only from what each row recorded.
@@ -210,13 +211,6 @@ for (const bad of [null, "", `00-${"0".repeat(32)}-${root.spanId}-01`, `00-${roo
 }
 assert.deepEqual(spanFields(child, root), { trace_id: root.traceId, span_id: child.spanId, parent_span_id: root.spanId });
 assert.ok(!("parent_span_id" in spanFields(newRootContext(), root)), "a parent from another trace is a link, not a parent");
-// ACP `_meta.traceparent` (B3): merged into existing `_meta`, never tracestate or baggage.
-const metaParams = { sessionId: "s", _meta: { "vendor.example/flag": true, traceparent: "stale" } };
-assert.deepEqual(withTraceparent(metaParams, child), { sessionId: "s",
-  _meta: { "vendor.example/flag": true, traceparent: formatTraceparent(child) } });
-assert.equal(metaParams._meta.traceparent, "stale", "the caller's params are not mutated");
-assert.deepEqual(withTraceparent({ cwd: "/w" }, child), { cwd: "/w", _meta: { traceparent: formatTraceparent(child) } });
-assert.deepEqual(withTraceparent({ _meta: ["odd"] }, child), { _meta: { traceparent: formatTraceparent(child) } });
 
 // Context recorded at operation start (B1) wins over derivation, and matches by span ID.
 const callCtx = newRootContext(), modelCtx = childOf(callCtx), turnCtx = newRootContext(), promptRpc = childOf(turnCtx);
@@ -227,12 +221,13 @@ const recordedRows = [
   live(3001, "model.started", T0, { request_id: "r-live", live_session_id: "rtc_one", ...spanFields(modelCtx, callCtx) }),
   // The voice session changed mid-request: derived matching would miss this; span IDs do not.
   live(3002, "model.completed", T0 + 900, { request_id: "r-live", live_session_id: "rtc_two", ...spanFields(modelCtx, callCtx) }),
-  { id: 3003, ts: Math.floor(T0 / 1000) + 1, source: "acp", event: "acp.turn.started", detail: JSON.stringify({ acp_session_id: "ses_9",
+  { id: 3003, ts: Math.floor(T0 / 1000) + 1, source: "agent", event: "agent.turn.started", detail: JSON.stringify({ agent_session_id: "ses_9",
     started_ms: T0 + 1000, ts_ms: T0 + 1000, ...spanFields(turnCtx), link_trace_id: callCtx.traceId, link_span_id: callCtx.spanId }) },
-  live(3004, "acp.sent", T0 + 1001, { rpc_id: 5, method: "session/prompt", agent_connection_id: "conn-r", ...spanFields(promptRpc, turnCtx) }),
-  live(3005, "acp.received", T0 + 5000, { rpc_id: 5, agent_connection_id: "conn-r", ...spanFields(promptRpc, turnCtx) }),
-  { id: 3006, ts: Math.floor(T0 / 1000) + 5, source: "acp", event: "acp.turn.stopped", detail: JSON.stringify({ acp_session_id: "ses_9",
-    started_ms: T0 + 1000, ended_ms: T0 + 5001, stop_reason: "end_turn", ts_ms: T0 + 5001, ...spanFields(turnCtx) }) },
+  live(3004, "agent.sent", T0 + 1001, { agent_request_id: 5, method: "POST", route: "/api/session/{id}/prompt", agent_connection_id: "conn-r",
+    ...spanFields(promptRpc, turnCtx) }),
+  live(3005, "agent.received", T0 + 1100, { agent_request_id: 5, agent_connection_id: "conn-r", http_status: 200, ...spanFields(promptRpc, turnCtx) }),
+  { id: 3006, ts: Math.floor(T0 / 1000) + 5, source: "agent", event: "agent.turn.stopped", detail: JSON.stringify({ agent_session_id: "ses_9",
+    started_ms: T0 + 1000, ended_ms: T0 + 5001, outcome: "completed", ts_ms: T0 + 5001, ...spanFields(turnCtx) }) },
 ];
 const recSpans = await projectSpans(recordedCall, recordedRows);
 const byName = (name: string) => recSpans.find((s) => s.name === name)!;
@@ -240,11 +235,11 @@ assert.deepEqual([byName("voice_call").traceId, byName("voice_call").spanId], [c
 assert.equal(attr(byName("voice_call"), "dogwalk.context"), "recorded_at_start");
 const recModel = byName("orchestrator.model_request");
 assert.deepEqual([recModel.traceId, recModel.spanId, recModel.parentSpanId], [callCtx.traceId, modelCtx.spanId, callCtx.spanId]);
-const recTurn = byName("acp.prompt_turn");
+const recTurn = byName("agent.prompt_turn");
 assert.deepEqual([recTurn.traceId, recTurn.spanId, recTurn.parentSpanId], [turnCtx.traceId, turnCtx.spanId, undefined]);
 assert.deepEqual([recTurn.links![0].traceId, recTurn.links![0].spanId], [callCtx.traceId, callCtx.spanId], "turn links its call");
-const recRpc = byName("acp session/prompt");
-assert.deepEqual([recRpc.traceId, recRpc.parentSpanId], [turnCtx.traceId, turnCtx.spanId], "session/prompt is inside its turn");
+const recRpc = byName("agent POST /api/session/{id}/prompt");
+assert.deepEqual([recRpc.traceId, recRpc.parentSpanId], [turnCtx.traceId, turnCtx.spanId], "the prompt request is inside its turn");
 const recLogs = await projectLogs(recordedCall, recordedRows);
 assert.ok(recLogs.every((l) => l.traceId && recSpans.some((s) => s.spanId === l.spanId)), "every log names its recorded span");
 assert.ok(!JSON.stringify(recLogs).includes("parent_span_id"), "context fields are not duplicated as attributes");
@@ -261,22 +256,17 @@ assert.equal(attr(legacyModel, "dogwalk.context"), "derived");
 assert.deepEqual(await projectLogs(recordedCall, [rowsA[1]]), await projectLogs(callA, [rowsA[1]]), "older logs never change identity");
 
 // Cross-call completion: the start's call lists the open span; its end, journaled under a later
-// call, completes it once supplied. An interruption detected after eviction names it but never ends it.
+// call, completes it once supplied.
 const crossTurn = newRootContext();
-const turnA = { id: 4001, ts: Math.floor(T0 / 1000), source: "acp", event: "acp.turn.started", detail: JSON.stringify({
-  acp_session_id: "ses_x", started_ms: T0, ts_ms: T0, ...spanFields(crossTurn) }) };
-const turnB = { id: 4100, ts: Math.floor(T0 / 1000) + 300, source: "acp", event: "acp.turn.stopped", detail: JSON.stringify({
-  acp_session_id: "ses_x", started_ms: T0, ended_ms: T0 + 300_000, stop_reason: "end_turn", ts_ms: T0 + 300_000, ...spanFields(crossTurn) }) };
-const interrupted = { id: 4200, ts: Math.floor(T0 / 1000) + 400, source: "acp", event: "acp.turn.interrupted", detail: JSON.stringify({
-  acp_session_id: "ses_x", started_ms: T0, detected_ms: T0 + 400_000, ts_ms: T0 + 400_000, ...spanFields(crossTurn) }) };
+const turnA = { id: 4001, ts: Math.floor(T0 / 1000), source: "agent", event: "agent.turn.started", detail: JSON.stringify({
+  agent_session_id: "ses_x", started_ms: T0, ts_ms: T0, ...spanFields(crossTurn) }) };
+const turnB = { id: 4100, ts: Math.floor(T0 / 1000) + 300, source: "agent", event: "agent.turn.stopped", detail: JSON.stringify({
+  agent_session_id: "ses_x", started_ms: T0, ended_ms: T0 + 300_000, outcome: "completed", ts_ms: T0 + 300_000, ...spanFields(crossTurn) }) };
 assert.deepEqual(openRecordedSpanIds([turnA]), [crossTurn.spanId]);
 assert.deepEqual(openRecordedSpanIds([turnA, turnB]), []);
-assert.equal((await projectSpans(callA, [turnA])).filter((s) => s.name === "acp.prompt_turn").length, 0);
-const completed = (await projectSpans(callA, [turnA, turnB])).find((s) => s.name === "acp.prompt_turn")!;
+assert.equal((await projectSpans(callA, [turnA])).filter((s) => s.name === "agent.prompt_turn").length, 0);
+const completed = (await projectSpans(callA, [turnA, turnB])).find((s) => s.name === "agent.prompt_turn")!;
 assert.equal(completed.spanId, crossTurn.spanId);
-assert.equal((await projectSpans(callA, [turnA, interrupted])).filter((s) => s.name === "acp.prompt_turn").length, 0,
-  "detecting an interruption is not observing the turn's end");
-assert.equal((await projectLogs(callA, [interrupted]))[0].spanId, crossTurn.spanId);
 
 // Older rows stored usage verbatim: only nonnegative integer token counts are exported.
 const oddUsage = (await projectLogs(callA, [{ id: 5001, ts: Math.floor(T0 / 1000), source: "voice", event: "orchestrator.model",
@@ -285,11 +275,12 @@ assert.equal(attr(oddUsage, "gen_ai.usage.input_tokens"), undefined);
 assert.equal(attr(oddUsage, "gen_ai.usage.output_tokens"), "12");
 assert.ok(!JSON.stringify(oddUsage).includes("PRIVATE_USAGE_SENTINEL") && oddUsage.droppedAttributesCount! >= 1);
 
-// RPC rows without Agent Connection identity, and Agent-initiated requests, name no span.
+// ACP-era rows and Agent events (no request of ours) name no span.
 assert.equal(logFor(a, rowsA[14].id).spanId, undefined);
-const agentRequest = { id: 999, ts: Math.floor(T0 / 1000), source: "voice", event: "voice.timing",
-  detail: JSON.stringify({ event: "acp.received", rpc_id: 7, method: "session/request_permission", agent_connection_id: "conn-a", ts_ms: T0 }) };
-assert.equal((await projectLogs(callA, [agentRequest]))[0].spanId, undefined);
+const agentEvent = { id: 999, ts: Math.floor(T0 / 1000), source: "voice", event: "voice.timing",
+  detail: JSON.stringify({ event: "agent.received", agent_event: "permission.asked", session_id: "ses_1", agent_connection_id: "conn-a",
+    clock_id: CLOCK, ts_ms: T0 }) };
+assert.equal((await projectLogs(callA, [agentEvent]))[0].spanId, undefined);
 
 // GenAI inference conventions (B4) on model requests that recorded their endpoint and model.
 // The provider is OpenAI only when the request went to OpenAI's host; a compatible base keeps

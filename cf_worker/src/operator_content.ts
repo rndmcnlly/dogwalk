@@ -2,7 +2,7 @@ import type { Env } from "./types";
 
 export interface ContentEntry {
   id: string;
-  kind: "caller" | "voice" | "handoff" | "say" | "brief" | "instructions" | "acp_prompt" | "agent_report";
+  kind: "caller" | "voice" | "handoff" | "say" | "brief" | "instructions" | "agent_prompt" | "agent_report";
   text: string;
   source: "saved_transcript" | "orchestrator_history";
   observed_at_ms: number | null;
@@ -11,7 +11,7 @@ export interface ContentEntry {
   live_session_id?: string;
   tool_call_id?: string;
   delegation_id?: string;
-  acp_session_id?: string;
+  agent_session_id?: string;
   alias?: string;
   precision: "observed" | "provider_media_offset" | "unknown";
   truncated: boolean;
@@ -29,7 +29,7 @@ function parsed(value: unknown): Record<string, any> {
 
 // This is an operator-only projection. Its caller must check admin auth and Call SID.
 // Never share this response with a Paired Browser or turn it into a provider wire dump.
-// Reading the Durable Object does not ensure/wake a Sandbox or establish ACP.
+// Reading the Durable Object does not ensure/wake a Sandbox or connect the Agent.
 export async function operatorCallContent(env: Env, callSid: string): Promise<{ entries: ContentEntry[]; note?: string } | null> {
   const call = await env.DB.prepare(
     `SELECT u.identity_hash FROM voice_calls c
@@ -117,11 +117,12 @@ export async function operatorCallContent(env: Env, callSid: string): Promise<{ 
       if (start === 0) notes.add("A zero call mark may reflect compaction; this slice may contain only a retained tail.");
       for (let index = start; index < end; index++) {
         const item = object(context[index]);
-        if (item.type === "function_call" && ["say", "brief", "begin_prompt_turn"].includes(item.name)) {
+        if (item.type === "function_call" && ["say", "brief", "begin_prompt_turn", "steer_prompt_turn"].includes(item.name)) {
           const args = parsed(item.arguments);
-          const text = item.name === "begin_prompt_turn" ? args.prompt : args.text;
+          const toAgent = item.name === "begin_prompt_turn" || item.name === "steer_prompt_turn";
+          const text = item.name === "begin_prompt_turn" ? args.prompt : item.name === "steer_prompt_turn" ? args.guidance : args.text;
           if (typeof text !== "string") continue;
-          const entry: ContentEntry = { id: `context:${index}`, kind: item.name === "begin_prompt_turn" ? "acp_prompt" : item.name,
+          const entry: ContentEntry = { id: `context:${index}`, kind: toAgent ? "agent_prompt" : item.name,
             text, source: "orchestrator_history", observed_at_ms: null, precision: "unknown", truncated: false,
             ...(typeof item.call_id === "string" ? { tool_call_id: item.call_id } : {}),
             ...(typeof args.delegation_id === "string" ? { delegation_id: args.delegation_id } : {}),

@@ -1,12 +1,13 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["websockets==15.0.1"]
+# dependencies = ["websockets==15.0.1", "aiohttp==3.12.15"]
 # ///
-"""End-to-end local test of GPT-Live client delegation, the Session Orchestrator, and ACP."""
+"""End-to-end local test of GPT-Live client delegation, the Session Orchestrator, and the Agent."""
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -22,10 +23,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
+from aiohttp import WSMsgType, web
 from websockets.asyncio.client import connect
-from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 from http.server import BaseHTTPRequestHandler
@@ -49,6 +51,7 @@ from smoke_test import (
 )
 
 WORKER_DIR = Path(__file__).resolve().parent
+# GPT-Live's sideband and the Agent Gateway's preview URL (smoke_test.DaytonaMock) share this port.
 SOCKET_PORT = PORT_BASE + 4
 ORCHESTRATOR_MOCK_PORT = PORT_BASE + 5
 # wrangler dev's output, kept per port base and shown when the suite fails.
@@ -56,147 +59,445 @@ WRANGLER_LOG = Path(tempfile.gettempdir()) / f"dogwalk-voice-session-{PORT_BASE}
 IDENTITY_SECRET = f"local-identity-secret-{secrets.token_hex(8)}"
 OPENAI_WEBHOOK_KEY = secrets.token_bytes(32)
 OPENAI_WEBHOOK_SECRET = "whsec_" + base64.b64encode(OPENAI_WEBHOOK_KEY).decode()
+TRACEPARENT = re.compile(r"00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-01")
 
 
-def without_meta(message: dict) -> dict:
-    """A request's params apart from `_meta`, whose trace context is checked on its own."""
-    return {key: value for key, value in message["params"].items() if key != "_meta"}
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+class LiveSocket:
+    """The attached GPT-Live sideband, as the test drives it."""
+
+    def __init__(self, ws: web.WebSocketResponse) -> None:
+        self.ws = ws
+
+    async def send(self, text: str) -> None:
+        await self.ws.send_str(text)
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        await self.ws.close(code=code, message=reason.encode())
+
+
+class Envelope(dict):
+    """A whole response body, for routes whose answer has more than `data` (a page's cursor)."""
+
+
+class AgentGatewayMock:
+    """The Sandbox Agent Gateway in front of a fake OpenCode 2.2.7 (SANDBOX_AGENT_GATEWAY.md):
+    the native `/api/*` routes the adapter calls, answered as `{"data": ...}`, and `/events`,
+    one OpenCode event per text frame after `server.connected`.
+
+    Prompt Turns are scripted by prompt text (`scripts`); any other prompt starts an execution
+    and holds it open for the test to drive with `emit`, `text`, `tool`, `finish`, and
+    `close_events`. Like the real stream, events sent while no client listens are lost; the
+    snapshots (`active`, sessions, messages, permissions, inbox) are what a client catches up from.
+    """
+
+    def __init__(self) -> None:
+        self.requests: asyncio.Queue[dict] = asyncio.Queue()
+        self.seen: list[dict] = []
+        self.events: list[web.WebSocketResponse] = []
+        self.events_connected = asyncio.Event()
+        self.events_connections = 0
+        # The service answers late, so the call starts before the dogs are ready.
+        self.hello_delay = 1.5
+        # While set, /events upgrades are refused, as while the service restarts.
+        self.refuse_events = False
+        # The next prompt meets the preview proxy's 401 (an expired preview token), or loses its
+        # connection unanswered, which leaves whether OpenCode admitted it unknown.
+        self.reject_next_prompt = False
+        self.drop_next_prompt = False
+        # The next prompt is admitted, then its connection drops before the answer.
+        self.drop_admitted_prompt = False
+        # This many next interrupts fail at the proxy (502), leaving the turn running.
+        self.fail_interrupts = 0
+        # One-shot response delays by path, in seconds.
+        self.delay_next: dict[str, float] = {}
+        updated = int(datetime(2026, 11, 6, 18, 30, tzinfo=timezone.utc).timestamp() * 1000)
+        # Like OpenCode, each session belongs to the directory it was created in.
+        self.sessions: dict[str, dict] = {
+            PERSISTED_SESSION_ID: {"id": PERSISTED_SESSION_ID, "title": PERSISTED_TITLE,
+                                   "location": {"directory": "/home/daytona/parser"}, "time": {"created": updated, "updated": updated}},
+            "ses_elsewhere0outside": {"id": "ses_elsewhere0outside", "title": "Other work",
+                                      "location": {"directory": "/tmp/elsewhere"}, "time": {"created": updated - 1, "updated": updated - 1}},
+        }
+        self.active: set[str] = set()
+        self.permissions: dict[str, list[dict]] = {}
+        self.inbox: dict[str, list[dict]] = {}
+        # Newest first, as `?order=desc` lists them.
+        self.messages: dict[str, list[dict]] = {}
+        self.reports: dict[str, str] = {}
+        self.scripts: dict[str, object] = {}
+        self.created = 0
+        self.counter = 0
+        self.tasks: set[asyncio.Task] = set()
+
+    # --- What the test drives ----------------------------------------------------
+
+    async def emit(self, kind: str, created: int | None = None, **data) -> None:
+        self.counter += 1
+        frame = json.dumps({"id": f"evt_{self.counter:06d}", "type": kind, "created": created or now_ms(), "data": data})
+        for ws in list(self.events):
+            if not ws.closed:
+                await ws.send_str(frame)
+
+    async def close_events(self, code: int, reason: str) -> None:
+        sockets, self.events = self.events, []
+        self.events_connected.clear()
+        for ws in sockets:
+            await ws.close(code=code, message=reason.encode())
+
+    async def start(self, sid: str, inbox_id: str | None = None) -> None:
+        self.active.add(sid)
+        self.sessions[sid].pop("outcome", None)
+        self.reports[sid] = ""
+        await self.emit("session.execution.started", sessionID=sid)
+        if inbox_id:
+            await self.emit("session.inbox.delivered", sessionID=sid, inboxID=inbox_id)
+        await self.emit("session.step.started", sessionID=sid)
+
+    async def text(self, sid: str, text: str) -> None:
+        self.reports[sid] = self.reports.get(sid, "") + text
+        await self.emit("session.text.delta", sessionID=sid, delta=text)
+
+    async def tool(self, sid: str, tool_id: str, name: str, tool_input: dict | None = None, end: str | None = "success") -> None:
+        """input.started is the only event naming the tool; called carries its input."""
+        await self.emit("session.tool.input.started", sessionID=sid, id=tool_id, name=name)
+        if tool_input is not None:
+            await self.emit("session.tool.called", sessionID=sid, id=tool_id, input=tool_input)
+        if end:
+            await self.emit(f"session.tool.{end}", sessionID=sid, id=tool_id)
+
+    def settle(self, sid: str, outcome: str) -> None:
+        """A turn's end as the snapshots record it, whether or not anyone hears the event: the
+        session's outcome, and an idle entry after the assistant's message, both stamped."""
+        self.active.discard(sid)
+        self.permissions.pop(sid, None)
+        self.sessions[sid]["outcome"] = outcome
+        self.sessions[sid]["time"]["updated"] = now_ms()
+        self.messages.setdefault(sid, [])[:0] = [
+            {"type": "idle", "outcome": outcome, "time": {"created": now_ms()}},
+            {"type": "assistant", "content": [{"type": "text", "text": self.reports.get(sid, "")}],
+             "finish": "stop" if outcome == "succeeded" else "error", "time": {"created": now_ms()}},
+        ]
+
+    async def finish(self, sid: str, outcome: str = "succeeded", **data) -> None:
+        await self.emit("session.step.ended", sessionID=sid, tokens={"input": 1200, "output": 80, "cache": {"read": 300, "write": 0}})
+        self.settle(sid, outcome)
+        await self.emit(f"session.execution.{outcome}", sessionID=sid, **data)
+
+    async def ask_permission(self, sid: str, request_id: str, action: str, resources: list[str], save: list[str]) -> None:
+        request = {"id": request_id, "sessionID": sid, "action": action, "resources": resources, "save": save}
+        self.permissions.setdefault(sid, []).append(request)
+        await self.emit("permission.asked", **request)
+
+    def mark(self) -> None:
+        """Forget requests not yet waited for, so the next wait sees only what follows."""
+        while not self.requests.empty():
+            self.requests.get_nowait()
+
+    async def next_request(self, predicate, timeout: float = 15) -> dict:
+        return await next_matching(self.requests, predicate, timeout)
+
+    def session_for(self, directory: str) -> str:
+        return next(sid for sid, item in self.sessions.items() if item["location"]["directory"] == directory)
+
+    # --- The gateway ---------------------------------------------------------------
+
+    async def handle(self, request: web.Request) -> web.StreamResponse:
+        if request.path == "/events":
+            return await self.serve_events(request)
+        body = await request.json() if request.can_read_body else None
+        record = {"method": request.method, "path": request.path, "query": dict(request.query), "body": body,
+                  "traceparent": request.headers.get("traceparent"),
+                  "preview_token": request.headers.get("x-daytona-preview-token"), "status": None}
+        self.seen.append(record)
+        if request.path.endswith("/prompt") and (body or {}).get("delivery") != "steer":
+            if self.reject_next_prompt:
+                self.reject_next_prompt = False
+                record["status"] = 401
+                await self.requests.put(record)
+                return web.Response(status=401, text="preview token expired")
+            if self.drop_next_prompt:
+                self.drop_next_prompt = False
+                record["status"] = "dropped"
+                await self.requests.put(record)
+                request.transport.abort()
+                return web.Response(status=500)
+        if request.path in self.delay_next:
+            # Announced on arrival, so the test can act while the answer is held.
+            await self.requests.put({**record, "status": "held"})
+            await asyncio.sleep(self.delay_next.pop(request.path))
+        if request.path.endswith("/interrupt") and self.fail_interrupts:
+            self.fail_interrupts -= 1
+            record["status"] = 502
+            await self.requests.put(record)
+            return web.Response(status=502, text="bad gateway")
+        status, data = await self.route(request.method, request.path, request.query, body or {})
+        record["status"] = status
+        if request.path.endswith("/prompt") and self.drop_admitted_prompt:
+            self.drop_admitted_prompt = False
+            record["status"] = "dropped"
+            await self.requests.put(record)
+            await asyncio.sleep(0.2)  # Admitted and started; only the answer is lost.
+            request.transport.abort()
+            return web.Response(status=500)
+        await self.requests.put(record)
+        if status == 204:
+            return web.Response(status=204)
+        if status >= 400:
+            return web.json_response(data, status=status)
+        # /api/info answers at the top level, like OpenCode's (sandbox_agent_gateway.py's fake too).
+        if isinstance(data, Envelope) or request.path == "/api/info":
+            return web.json_response(dict(data), status=status)
+        return web.json_response({"data": data}, status=status)
+
+    async def route(self, method: str, path: str, query, body: dict) -> tuple[int, object]:
+        if (method, path) == ("GET", "/api/info"):
+            return 200, {"version": "2.2.7"}
+        if (method, path) == ("GET", "/api/model/default"):
+            return 200, {"id": "gpt-6.1-sol", "limit": {"context": 200_000, "output": 32_000}}
+        if (method, path) == ("GET", "/api/session/active"):
+            return 200, {sid: {"type": "running"} for sid in self.active}
+        if (method, path) == ("POST", "/api/session"):
+            directory = body["location"]["directory"]
+            self.created += 1
+            name = re.sub(r"[^a-z0-9]", "", Path(directory).name.lower()) if directory != "/home/daytona" else "home"
+            sid = f"ses_{name}{self.created}test"
+            self.sessions[sid] = {"id": sid, "title": "New session", "location": {"directory": directory},
+                                  "time": {"created": now_ms(), "updated": now_ms()}}
+            return 200, self.sessions[sid]
+        if (method, path) == ("GET", "/api/session"):
+            # Two per page, newest first, so discovery must follow cursor.next.
+            listed = sorted(self.sessions.values(), key=lambda item: -item["time"]["updated"])
+            start = int(query.get("cursor") or 0)
+            page = {"data": listed[start:start + 2]}
+            if start + 2 < len(listed):
+                page["cursor"] = {"next": str(start + 2)}
+            return 200, Envelope(page)
+        match = re.fullmatch(r"/api/session/(ses_[A-Za-z0-9]+)(/.*)?", path)
+        if not match:
+            return 404, {"_tag": "NotFound", "message": f"no route {method} {path}"}
+        sid, rest = match.group(1), match.group(2) or ""
+        if sid not in self.sessions:
+            return 404, {"_tag": "SessionNotFoundError", "message": f"Session not found: {sid}"}
+        session = self.sessions[sid]
+        if (method, rest) == ("GET", ""):
+            return 200, session
+        if (method, rest) == ("GET", "/message"):
+            return 200, self.messages.get(sid, [])[:int(query.get("limit") or 50)]
+        if (method, rest) == ("GET", "/permission"):
+            return 200, self.permissions.get(sid, [])
+        if (method, rest) == ("GET", "/inbox"):
+            return 200, self.inbox.get(sid, [])
+        if method == "DELETE" and rest.startswith("/inbox/"):
+            inbox_id = rest.removeprefix("/inbox/")
+            items = self.inbox.get(sid, [])
+            if not any(item["id"] == inbox_id for item in items):
+                return 404, {"_tag": "InboxItemNotFoundError", "message": inbox_id}
+            self.inbox[sid] = [item for item in items if item["id"] != inbox_id]
+            await self.emit("session.inbox.cancelled", sessionID=sid, inboxID=inbox_id)
+            return 204, None
+        if (method, rest) == ("POST", "/prompt"):
+            self.counter += 1
+            inbox_id = f"inb_{self.counter:06d}"
+            session["time"]["updated"] = now_ms()
+            if body.get("delivery") == "steer" and sid in self.active:
+                self.inbox.setdefault(sid, []).append({"id": inbox_id, "delivery": "steer", "text": body["text"]})
+                await self.emit("session.inbox.enqueued", sessionID=sid, inboxID=inbox_id)
+                return 200, {"id": inbox_id}
+            # As measured on 2.2.7, steering an idle session starts an execution with it at once.
+            self.messages.setdefault(sid, []).insert(0, {"type": "user", "content": [{"type": "text", "text": body["text"]}],
+                                                         "time": {"created": now_ms()}})
+            await self.emit("session.inbox.enqueued", sessionID=sid, inboxID=inbox_id)
+            script = self.scripts.get(body["text"], hold_turn) if body.get("delivery") != "steer" else continue_turn
+            task = asyncio.create_task(script(self, sid, inbox_id))
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
+            return 200, {"id": inbox_id}
+        if (method, rest) == ("POST", "/interrupt"):
+            # 2.2.7 answers {"interrupted": false} when nothing runs. An interrupt also rejects the
+            # Permission Requests the step was waiting on.
+            if sid not in self.active:
+                return 200, Envelope({"interrupted": False})
+            for item in self.permissions.pop(sid, []):
+                await self.emit("permission.replied", sessionID=sid, requestID=item["id"], reply="reject")
+            created = now_ms()
+            if query.get("resume") == "true":
+                # A Redirect: the step under way stops and the next execution starts in the
+                # same millisecond, reading the pending steering at once.
+                await self.emit("session.execution.interrupted", created=created, sessionID=sid, reason="user")
+                await self.emit("session.execution.started", created=created, sessionID=sid)
+                for item in self.inbox.pop(sid, []):
+                    await self.emit("session.inbox.delivered", sessionID=sid, inboxID=item["id"])
+            else:
+                self.settle(sid, "interrupted")
+                await self.emit("session.execution.interrupted", created=created, sessionID=sid, reason="user")
+            return 200, Envelope({"interrupted": True})
+        reply = re.fullmatch(r"/permission/(per_[A-Za-z0-9]+)/reply", rest)
+        if method == "POST" and reply:
+            pending = self.permissions.get(sid, [])
+            if not any(item["id"] == reply.group(1) for item in pending):
+                return 404, {"_tag": "PermissionNotFoundError", "message": reply.group(1)}
+            self.permissions[sid] = [item for item in pending if item["id"] != reply.group(1)]
+            await self.emit("permission.replied", sessionID=sid, requestID=reply.group(1), reply=body["decision"])
+            if body["decision"] == "reject" and sid in self.active:
+                self.settle(sid, "interrupted")
+                await self.emit("session.execution.interrupted", sessionID=sid, reason="shutdown")
+            return 204, None
+        return 404, {"_tag": "NotFound", "message": f"no route {method} {path}"}
+
+    async def serve_events(self, request: web.Request) -> web.StreamResponse:
+        if self.refuse_events:
+            return web.Response(status=503, text="agent service unavailable")
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        self.events_connections += 1
+        await asyncio.sleep(self.hello_delay)
+        if ws.closed:
+            return ws
+        await ws.send_str(json.dumps({"type": "server.connected", "properties": {}}))
+        self.events.append(ws)
+        self.events_connected.set()
+        async for _ in ws:
+            pass  # The gateway ignores inbound frames.
+        if ws in self.events:
+            self.events.remove(ws)
+        return ws
+
+
+async def hold_turn(agent: AgentGatewayMock, sid: str, inbox_id: str) -> None:
+    """Any unscripted prompt: the execution starts and waits for the test to end it."""
+    await agent.start(sid, inbox_id)
+
+
+async def continue_turn(agent: AgentGatewayMock, sid: str, inbox_id: str) -> None:
+    """Steering an idle session: a new execution starts with it, keeping the report so far."""
+    report = agent.reports.get(sid, "")
+    await agent.start(sid, inbox_id)
+    agent.reports[sid] = report
+
+
+# Beats closer together than BEAT_COALESCE_MS (1.5 s) coalesce; the margin absorbs the
+# Durable Object's own processing time.
+async def settle() -> None:
+    await asyncio.sleep(2.2)
+
+
+UNKNOWN_TOOL = "context7_lookup"
+
+
+async def bridge_turn(agent: AgentGatewayMock, sid: str, inbox_id: str) -> None:
+    """One Prompt Turn's traffic, shaped like OpenCode's: a plan, a read, the Agent narrating
+    between tool calls, then the first edit, each its own beat. Then a burst: a remark, a tool of
+    no known kind, and a command at once."""
+    await asyncio.sleep(0.2)
+    await agent.start(sid, inbox_id)
+    await settle()
+    await agent.tool(sid, "call_t0", "todowrite", {"todos": [
+        {"content": "Find the parser", "priority": "high", "status": "in_progress"},
+        {"content": "Write the artifact", "priority": "medium", "status": "pending"},
+    ]})
+    await settle()
+    await agent.tool(sid, "call_t1", "read", {"filePath": "/home/daytona/src/parser.py"})
+    await settle()
+    await agent.text(sid, "The parser lives in **src**. ")
+    await agent.tool(sid, "call_t2", "write", None, end=None)
+    await settle()
+    await agent.emit("session.tool.called", sessionID=sid, id="call_t2", input={"filePath": "/home/daytona/artifact.txt", "content": "ok\n"})
+    await agent.emit("session.tool.success", sessionID=sid, id="call_t2")
+    await settle()
+    await agent.text(sid, "I'll check the tests next, which should take about a minute. ")
+    await agent.tool(sid, "call_t3", UNKNOWN_TOOL, {})
+    await agent.tool(sid, "call_t4", "bash", {"command": "python -m pytest -q"})
+    await agent.text(sid, "Bridge report complete.")
+    await agent.finish(sid)
+
+
+FAIL_PROMPT = "Check the repository's state and summarize it."
+SHELL_COMMAND = "git status --short --branch && git log --oneline -3"
+
+
+async def failing_turn(agent: AgentGatewayMock, sid: str, inbox_id: str) -> None:
+    """A command starts and never finishes; three steps fail in a burst; then the turn fails."""
+    await agent.start(sid, inbox_id)
+    await settle()
+    await agent.tool(sid, "call_g1", "bash", {"command": SHELL_COMMAND}, end=None)
+    await settle()
+    for index in range(3):
+        await agent.tool(sid, f"call_gf{index}", "websearch", None, end="failed")
+    await asyncio.sleep(3.0)
+    await agent.finish(sid, "failed", error={"type": "ProviderError", "message": "SseError: the event stream ended"})
+
+
+OOM_PROMPT = "Install the dependencies with pnpm."
+OOM_CLOSE = {"reason": "out_of_memory", "signal": "SIGKILL", "exit_status": -9, "limit_bytes": 1073741824}
+OOM_SENTENCE = "The Agent was killed because the sandbox ran out of memory (1 GiB limit)."
+
+
+async def oom_turn(agent: AgentGatewayMock, sid: str, inbox_id: str) -> None:
+    """The service is OOM-killed mid-command: no terminal event, only the gateway's 1011 close."""
+    await agent.start(sid, inbox_id)
+    await agent.tool(sid, "call_o1", "bash", {"command": "pnpm install"}, end=None)
+    await asyncio.sleep(0.25)
+    agent.active.discard(sid)
+    await agent.close_events(1011, json.dumps(OOM_CLOSE, separators=(",", ":")))
 
 
 class SocketMocks:
+    """GPT-Live's sideband and the Agent Gateway, on one port."""
+
     def __init__(self) -> None:
-        self.live = None
+        self.live: LiveSocket | None = None
         self.live_event = 0
         # Set to have GPT-Live reject the next output fixture, naming it by event_id.
         self.reject_next_fixture = False
-        self.acp_messages: asyncio.Queue[dict] = asyncio.Queue()
         self.live_messages: asyncio.Queue[dict] = asyncio.Queue()
-        self.acp_connected = asyncio.Event()
         self.live_connected = asyncio.Event()
         self.seen: list[dict] = []
-        self.acp_seen: list[dict] = []
-        self.acp = None
-        self.acp_connections = 0
-        # The Agent answers initialize late, so the call starts before the dogs are ready.
-        self.init_delay = 1.5
-        self.advertise_resume = False
-        # Like OpenCode, the Agent reloads a session only from the directory it belongs to.
-        self.session_cwds = {
-            PERSISTED_SESSION_ID: "/home/daytona/parser",
-            "ses_elsewhere0outside": "/tmp/elsewhere",
-        }
+        self.agent = AgentGatewayMock()
+        self.agent.scripts = {AGENT_PROMPT: bridge_turn, FAIL_PROMPT: failing_turn, OOM_PROMPT: oom_turn}
 
-    def session_entries(self) -> list[dict]:
-        return [
-            {
-                "sessionId": session_id,
-                "cwd": cwd,
-                "title": PERSISTED_TITLE if session_id == PERSISTED_SESSION_ID else "Other work",
-                "updatedAt": "2026-11-06T18:30:00Z",
-            }
-            for session_id, cwd in self.session_cwds.items()
-        ]
+    @contextlib.asynccontextmanager
+    async def serving(self):
+        app = web.Application(client_max_size=4 * 1024 * 1024)
+        app.router.add_route("*", "/{tail:.*}", self.handler)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", SOCKET_PORT).start()
+        try:
+            yield self
+        finally:
+            await runner.cleanup()
 
-    async def handler(self, socket) -> None:
-        if socket.request.path == "/acp":
-            self.acp = socket
-            self.acp_connections += 1
-            self.acp_connected.set()
-            async for raw in socket:
-                message = json.loads(raw)
-                self.acp_seen.append(message)
-                await self.acp_messages.put(message)
-                request_id = message.get("id")
-                method = message.get("method")
-                if request_id is None:
-                    continue
-                params = message.get("params") or {}
-                error = None
-                if method == "initialize":
-                    await asyncio.sleep(self.init_delay)
-                    capabilities = {"sessionCapabilities": {"resume": {}}} if self.advertise_resume else {}
-                    result = {"protocolVersion": 1, "agentCapabilities": capabilities}
-                elif method == "session/new":
-                    cwd = params["cwd"]
-                    session_id = "acp-session-test" if cwd == "/home/daytona" else f"acp-session-{Path(cwd).name}"
-                    self.session_cwds[session_id] = cwd
-                    result = {"sessionId": session_id}
-                elif method in ("session/load", "session/resume"):
-                    result = {}
-                    expected = self.session_cwds.get(params["sessionId"], params["cwd"])
-                    if params["cwd"] != expected:
-                        error = {"code": -32603, "message": "persisted session belongs to another directory"}
-                elif method == "session/list":
-                    # Two entries per page, so discovery must follow nextCursor.
-                    start = int(params.get("cursor") or 0)
-                    entries = self.session_entries()
-                    result = {"sessions": entries[start:start + 2]}
-                    if start + 2 < len(entries):
-                        result["nextCursor"] = str(start + 2)
-                elif method == "session/prompt" and params["prompt"][0]["text"] == FAIL_PROMPT:
-                    for update in FAIL_UPDATES:
-                        if "pause" in update:
-                            await asyncio.sleep(update["pause"])
-                            continue
-                        await socket.send(json.dumps({
-                            "jsonrpc": "2.0",
-                            "method": "session/update",
-                            "params": {"sessionId": "acp-session-test", "update": update},
-                        }))
-                    error = {"code": -32603, "message": "SseError: the event stream ended"}
-                elif method == "session/prompt" and params["prompt"][0]["text"] == OOM_PROMPT:
-                    # As in a real call: OpenCode's server child is OOM-killed, the turn gets a
-                    # bare error, then the gateway closes with the reason.
-                    await socket.send(json.dumps({
-                        "jsonrpc": "2.0", "id": request_id,
-                        "error": {"code": -32603, "message": "ServerUnavailable"},
-                    }))
-                    await asyncio.sleep(0.25)
-                    await socket.close(1011, json.dumps(OOM_CLOSE, separators=(",", ":")))
-                    return
-                elif method == "session/prompt":
-                    await asyncio.sleep(0.2)
-                    for update in PROMPT_UPDATES:
-                        if "pause" in update:
-                            await asyncio.sleep(update["pause"])
-                            continue
-                        await socket.send(json.dumps({
-                            "jsonrpc": "2.0",
-                            "method": "session/update",
-                            "params": {"sessionId": "acp-session-test", "update": update},
-                        }))
-                    result = {"stopReason": "end_turn"}
-                else:
-                    result = {}
-                outcome = {"error": error} if error else {"result": result}
-                await socket.send(
-                    json.dumps({"jsonrpc": "2.0", "id": request_id, **outcome})
-                )
-            return
+    async def handler(self, request: web.Request) -> web.StreamResponse:
+        path = request.path
+        if not (path.startswith("/live/sessions/") and path.endswith("/attach")):
+            return await self.agent.handle(request)
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        socket = self.live = LiveSocket(ws)
+        self.live_connected.set()
+        async for raw in ws:
+            if raw.type != WSMsgType.TEXT:
+                continue
+            message = json.loads(raw.data)
+            self.seen.append(message)
+            await self.live_messages.put(message)
+            # GPT-Live accepts each output fixture, then reports when its mixer drains;
+            # appends are acknowledged on the session timeline. Each ack echoes event_id.
+            if message.get("type") == "session.output_audio.fixture.play":
+                asyncio.create_task(self.ack_fixture(socket, message.get("event_id")))
+            elif message.get("type", "").endswith(".append"):
+                self.live_event += 1
+                await socket.send(json.dumps({
+                    "type": message["type"].replace(".append", ".appended"), "event_id": f"evt-ack-{self.live_event}",
+                    "client_event_id": message.get("event_id"), "start_ms": 600, "end_ms": 800,
+                }))
+        return ws
 
-        path = socket.request.path
-        if path.startswith("/live/sessions/") and path.endswith("/attach"):
-            self.live = socket
-            self.live_connected.set()
-            async for raw in socket:
-                message = json.loads(raw)
-                self.seen.append(message)
-                await self.live_messages.put(message)
-                # GPT-Live accepts each output fixture, then reports when its mixer drains;
-                # appends are acknowledged on the session timeline. Each ack echoes event_id.
-                if message.get("type") == "session.output_audio.fixture.play":
-                    asyncio.create_task(self.ack_fixture(socket, message.get("event_id")))
-                elif message.get("type", "").endswith(".append"):
-                    self.live_event += 1
-                    await socket.send(json.dumps({
-                        "type": message["type"].replace(".append", ".appended"), "event_id": f"evt-ack-{self.live_event}",
-                        "client_event_id": message.get("event_id"), "start_ms": 600, "end_ms": 800,
-                    }))
-            return
-
-        await socket.close(1008, "unknown mock path")
-
-    async def ack_fixture(self, socket, client_event_id: str | None) -> None:
+    async def ack_fixture(self, socket: LiveSocket, client_event_id: str | None) -> None:
         self.live_event += 1
         if self.reject_next_fixture:
             self.reject_next_fixture = False
@@ -214,63 +515,9 @@ class SocketMocks:
         assert self.live is not None
         await self.live.send(json.dumps(message))
 
-
-def message_chunk(text: str) -> dict:
-    return {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}
-
-
-# Beats closer together than BEAT_COALESCE_MS (1.5 s) coalesce; the margin absorbs the
-# Durable Object's own processing time.
-SETTLE = {"pause": 2.2}
-
-# One Prompt Turn's traffic, shaped like OpenCode's: a plan, a read whose locations arrive
-# with in_progress, the Agent narrating between tool calls, then the first edit, each its own
-# beat. Then a burst: a plan as a remark, a tool of no known kind, and a command at once.
-PROMPT_UPDATES = [
-    SETTLE,
-    {"sessionUpdate": "plan", "entries": [
-        {"content": "Find the parser", "priority": "high", "status": "in_progress"},
-        {"content": "Write the artifact", "priority": "medium", "status": "pending"},
-    ]},
-    SETTLE,
-    {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "read", "kind": "read", "status": "pending"},
-    {"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "in_progress",
-     "locations": [{"path": "/home/daytona/src/parser.py"}]},
-    {"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"},
-    SETTLE,
-    message_chunk("The parser lives in **src**. "),
-    {"sessionUpdate": "tool_call", "toolCallId": "t2", "title": "write", "kind": "edit", "status": "pending"},
-    SETTLE,
-    {"sessionUpdate": "tool_call_update", "toolCallId": "t2", "status": "in_progress",
-     "locations": [{"path": "/home/daytona/artifact.txt"}]},
-    {"sessionUpdate": "tool_call_update", "toolCallId": "t2", "status": "completed"},
-    SETTLE,
-    message_chunk("I'll check the tests next, which should take about a minute. "),
-    {"sessionUpdate": "tool_call", "toolCallId": "t3", "title": "websearch", "kind": "other", "status": "in_progress"},
-    {"sessionUpdate": "tool_call_update", "toolCallId": "t3", "status": "completed"},
-    {"sessionUpdate": "tool_call", "toolCallId": "t4", "title": "bash", "kind": "execute", "status": "in_progress"},
-    {"sessionUpdate": "tool_call_update", "toolCallId": "t4", "status": "completed"},
-    message_chunk("Bridge report complete."),
-]
-
-FAIL_PROMPT = "Check the repository's state and summarize it."
-SHELL_COMMAND = "git status --short --branch && git log --oneline -3"
-# A command starts and never finishes; three steps fail in a burst; then the turn itself fails.
-FAIL_UPDATES = [
-    SETTLE,
-    {"sessionUpdate": "tool_call", "toolCallId": "g1", "title": SHELL_COMMAND, "kind": "execute", "status": "in_progress"},
-    SETTLE,
-    *({"sessionUpdate": "tool_call", "toolCallId": f"gf{index}", "title": "websearch", "kind": "fetch", "status": "failed"} for index in range(3)),
-    {"pause": 3.0},
-]
-
-OOM_PROMPT = "Install the dependencies with pnpm."
-OOM_CLOSE = {"reason": "out_of_memory", "signal": "SIGKILL", "exit_status": 1, "limit_bytes": 1073741824}
-OOM_SENTENCE = "The Agent was killed because the sandbox ran out of memory (1 GiB limit)."
-
 CALL_BRIEF = "Call started with no Managed Sessions."
 READY_BRIEF = "The sandbox is ready."
-# Every theme's lexicon in src/themes.ts: words that would show a theme leaking into ACP.
+# Every theme's lexicon in src/themes.ts: words that would show a theme leaking into an Agent prompt.
 THEME_LEXICON = [
     word
     for words in re.findall(r"lexicon: \[(.*?)\]", (Path(__file__).parent / "src" / "themes.ts").read_text())
@@ -303,6 +550,42 @@ SWITCH_SAY = "Switching themes; a new voice will pick up in a moment."
 PERSISTED_SESSION_ID = "ses_earlier0parser"
 PERSISTED_TITLE = "Earlier parser work"
 LEASH_SAY = "Rowan has gone home; Juniper is still with us."
+# Prompt Turns the Agent Gateway holds open for the test to drive (AgentGatewayMock.hold_turn).
+AWAY_PROMPT = "Tidy the honeydozer build and report what changed."
+AWAY_REPORT = "The honeydozer build is tidy."
+STEER_PROMPT = "Add a docstring to the parser's entry point."
+STEER_GUIDANCE = "Also mention the nested-quote fix in it."
+STEERED_REPORT = "Docstring written, nested quotes included."
+REDIRECT_PROMPT = "Profile the parser on the large fixture."
+REDIRECT_GUIDANCE = "Stop profiling; just time the small fixture instead."
+REDIRECTED_REPORT = "The small fixture parses in four milliseconds."
+CANCEL_PROMPT = "Rewrite the tokenizer from scratch."
+CANCEL_GUIDANCE = "Keep the old tokenizer's error messages."
+CANCEL_REPORT = "Started on the tokenizer."
+DROP_PROMPT = "Run the full parser test matrix."
+DROP_REPORT = "The matrix ran clean on every interpreter."
+RETRY_PROMPT = "Summarize the parser's open issues."
+RETRY_REPORT = "Two open issues remain."
+LOST_PROMPT = "Draft release notes for the parser."
+ELSEWHERE_REPORT = "Done from the terminal."
+STUCK_PROMPT = "Bisect the parser regression."
+STUCK_GUIDANCE = "Skip the vendored commits."
+STUCK_REPORT = "The regression came in with the lexer change."
+LATE_PROMPT = "Rename the parser's internal helpers."
+LATE_GUIDANCE = "Also rename the test helpers to match."
+LATE_REPORT = "Helpers renamed in the parser and the tests."
+ADMITTED_PROMPT = "Count the parser's public functions."
+ADMITTED_REPORT = "Seven public functions."
+RESUMED_REPORT = "Resumed after the terminal's correction."
+# Run in the Orchestrator mock's thread just before its next reply (before_reply).
+GRACE_HOOK: list = []
+
+
+def before_reply(hooks: list, output: list[dict]) -> list[dict]:
+    while hooks:
+        hooks.pop(0)()
+    return output
+FORM_TITLE = "Which search provider should I use?"
 REPLAY_SAY = "That pairing code expired; here is a fresh one."
 
 
@@ -391,6 +674,8 @@ ORCHESTRATOR_SCRIPT = [
         call("h3-say", "say", text=LEASH_SAY, delegation_id="del-3"),
         call("h3-compact", "compact_context", focus=EARLY_FOCUS),
     ]),
+    # Dozer is sent off just before hanging up; its turn ends while nobody is listening.
+    ("[handoff del-4]", lambda ctx: [call("h4-dozer", "begin_prompt_turn", alias="Dozer", prompt=AWAY_PROMPT)]),
     ("[handoff del-4]", lambda ctx: [call("h4-end", "end_call")]),
     # Second call: a turn that fails mid-command: its running command ends with it.
     ("[handoff del-f]", lambda ctx: [call("f-begin", "begin_prompt_turn", alias="Juniper", prompt=FAIL_PROMPT)]),
@@ -398,6 +683,31 @@ ORCHESTRATOR_SCRIPT = [
     # The Agent is OOM-killed mid-turn: the reason follows the bare error.
     ("[handoff del-o]", lambda ctx: [call("o-begin", "begin_prompt_turn", alias="Juniper", prompt=OOM_PROMPT)]),
     ('"agent_termination":"out_of_memory"', lambda ctx: [call("o-inspect", "inspect_managed_session", alias="Juniper")]),
+    # Steering: a Steer waits for the next step, a Redirect interrupts and resumes at once, and
+    # cancelling withdraws steering the Agent has not read.
+    ("[handoff del-s1]", lambda ctx: [call("s1-begin", "begin_prompt_turn", alias="Juniper", prompt=STEER_PROMPT)]),
+    ("[handoff del-s1]", lambda ctx: [call("s1-steer", "steer_prompt_turn", alias="Juniper", guidance=STEER_GUIDANCE, when="next_step")]),
+    ("[handoff del-s2]", lambda ctx: [call("s2-begin", "begin_prompt_turn", alias="Juniper", prompt=REDIRECT_PROMPT)]),
+    ("[handoff del-s2]", lambda ctx: [call("s2-steer", "steer_prompt_turn", alias="Juniper", guidance=REDIRECT_GUIDANCE, when="now")]),
+    # A Redirect whose interrupt fails still has its steering admitted.
+    ("[handoff del-s3]", lambda ctx: [call("s3-begin", "begin_prompt_turn", alias="Juniper", prompt=STUCK_PROMPT)]),
+    ("[handoff del-s3]", lambda ctx: [call("s3-steer", "steer_prompt_turn", alias="Juniper", guidance=STUCK_GUIDANCE, when="now")]),
+    # Steering just after the last execution ended, while its end waits out the grace period.
+    ("[handoff del-s4]", lambda ctx: [call("s4-begin", "begin_prompt_turn", alias="Juniper", prompt=LATE_PROMPT)]),
+    ("[handoff del-s4b]", lambda ctx: before_reply(GRACE_HOOK, [call("s4-steer", "steer_prompt_turn", alias="Juniper", guidance=LATE_GUIDANCE, when="now")])),
+    ("[handoff del-c]", lambda ctx: [call("c-begin", "begin_prompt_turn", alias="Juniper", prompt=CANCEL_PROMPT)]),
+    ("[handoff del-c]", lambda ctx: [call("c-steer", "steer_prompt_turn", alias="Juniper", guidance=CANCEL_GUIDANCE, when="next_step")]),
+    ("[handoff del-c]", lambda ctx: [call("c-cancel", "cancel_prompt_turn", alias="Juniper")]),
+    # The event stream drops twice under a running turn; the second time the turn ends unheard.
+    ("[handoff del-d]", lambda ctx: [call("d-begin", "begin_prompt_turn", alias="Juniper", prompt=DROP_PROMPT)]),
+    # A prompt refused by the preview proxy is retried; one whose answer is lost is not.
+    ("[handoff del-g]", lambda ctx: [call("g-begin", "begin_prompt_turn", alias="Juniper", prompt=RETRY_PROMPT)]),
+    ("[handoff del-g2]", lambda ctx: [call("g2-begin", "begin_prompt_turn", alias="Juniper", prompt=LOST_PROMPT)]),
+    ("[handoff del-g3]", lambda ctx: [call("g3-begin", "begin_prompt_turn", alias="Juniper", prompt=ADMITTED_PROMPT)]),
+    # An interrupt that fails leaves the turn running and the session open.
+    ("[handoff del-x]", lambda ctx: [call("x-cancel", "cancel_prompt_turn", alias="Juniper")]),
+    ("[handoff del-x]", lambda ctx: [call("x-close", "close_managed_session", alias="Juniper")]),
+    ("[handoff del-x]", lambda ctx: [call("x-inspect", "inspect_managed_session", alias="Juniper")]),
     # Second call: digits without a system meaning still reach the Orchestrator.
     ('"key":"7"', lambda ctx: [call("k7-say", "say", text=KEYPAD_SAY, delegation_id=None)]),
     # Invitations: the caller (invited by SEED_INVITER) invites friends, by voice alone.
@@ -502,7 +812,9 @@ STEP_IDS = [
     "ts-say", "h2-inspect", "h2-unfollow", "h2-say", "f-begin", "f-inspect", "o-begin", "o-inspect",
     "h3-discover", "h3-load", "h3-retag", "h3-close", "h3-list",
     "h3-projects", "h3-dozer", "h3-ghost", "h3-escape", "h3-say", "h3-compact",
-    "h4-end", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
+    "h4-dozer", "h4-end", "s1-begin", "s1-steer", "s2-begin", "s2-steer", "c-begin", "c-steer", "c-cancel",
+    "s3-begin", "s3-steer", "s4-begin", "s4-steer", "d-begin", "g-begin", "g2-begin", "g3-begin",
+    "x-cancel", "x-close", "x-inspect", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
     "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist",
     "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-pair", "k9-show", "k4-state", "k5-board", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5", "kB-html", "k3-say", "k3-theme",
     "k8-say", "pu-code-say", "dc-pair", "dc-say", "k2-dramaturgy", "kC-donate", "kD-practice",
@@ -910,12 +1222,13 @@ async def wait_for(condition, timeout: float = 8) -> None:
 
 async def run_protocol(identity: str) -> None:
     mocks = SocketMocks()
-    async with serve(mocks.handler, "127.0.0.1", SOCKET_PORT):
+    agent = mocks.agent
+    async with mocks.serving():
         body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST", "live-test")
         assert await asyncio.to_thread(post_webhook, body, webhook_identity, "v1,invalid") == 400
         assert not DaytonaMock.openai_requests
         assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
-        await asyncio.wait_for(mocks.acp_connected.wait(), 8)
+        await asyncio.wait_for(agent.events_connected.wait(), 8)
         await asyncio.wait_for(mocks.live_connected.wait(), 8)
         accept_path, accept_payload = next(
             item for item in DaytonaMock.openai_requests if item[0].endswith("/accept")
@@ -954,7 +1267,8 @@ async def run_protocol(identity: str) -> None:
         # Talk first: the opening is spoken before the Agent has even initialized.
         greeting = await next_matching(mocks.live_messages, of_type("session.commentary.append"))
         assert greeting["content"] == FIRST_OPENING and greeting["delegation_id"] is None
-        await next_matching(mocks.acp_messages, lambda item: item.get("method") == "initialize")
+        # Subscribed first, then caught up from snapshots.
+        await agent.next_request(lambda item: item["path"] == "/api/session/active")
         call_brief = await next_matching(mocks.live_messages, appended("thinking", CALL_BRIEF))
         assert call_brief["delegation_id"] is None
         started_event = OrchestratorMock.user_message("call_started")
@@ -984,15 +1298,12 @@ async def run_protocol(identity: str) -> None:
             "client_event_id": work_brief["event_id"]}})
         await mocks.send_live({"type": "session.usage.updated", "event_id": "evt-usage-1",
                                "usage": {"seconds": 6.0}, "context_window": {"usage_ratio": 0.0087}})
-        created = await next_matching(
-            mocks.acp_messages, lambda item: item.get("method") == "session/new"
-        )
-        assert without_meta(created) == {"cwd": "/home/daytona", "mcpServers": []}
-        prompt_request = await next_matching(
-            mocks.acp_messages, lambda item: item.get("method") == "session/prompt"
-        )
-        assert prompt_request["params"]["sessionId"] == "acp-session-test"
-        assert prompt_request["params"]["prompt"] == [{"type": "text", "text": AGENT_PROMPT}]
+        created = await agent.next_request(lambda item: (item["method"], item["path"]) == ("POST", "/api/session"))
+        assert created["body"] == {"location": {"directory": "/home/daytona"}}, created
+        juniper_id = agent.session_for("/home/daytona")
+        prompt_request = await agent.next_request(lambda item: item["path"].endswith("/prompt"))
+        assert prompt_request["path"] == f"/api/session/{juniper_id}/prompt"
+        assert prompt_request["body"] == {"text": AGENT_PROMPT}, prompt_request
         started = await next_matching(mocks.live_messages, appended("commentary", STARTED_SAY))
         assert started["delegation_id"] == "del-1"
         finished = await next_matching(mocks.live_messages, appended("commentary", FINISHED_SAY), 20)
@@ -1002,7 +1313,7 @@ async def run_protocol(identity: str) -> None:
         # The Voice spoke after the offset, so its words wait for the next handoff.
         assert "Voice: On it." not in handoff
         stopped = OrchestratorMock.user_message("turn_stopped")
-        assert '"stop_reason":"end_turn"' in stopped and "Bridge report complete." in stopped
+        assert '"outcome":"completed"' in stopped and "Bridge report complete." in stopped
         rejected = OrchestratorMock.tool_output("h1-say-url")
         assert rejected["ok"] is False and "URL" in rejected["error"]
         juniper = OrchestratorMock.tool_output("h1-create")["session"]
@@ -1012,7 +1323,7 @@ async def run_protocol(identity: str) -> None:
         assert '"followed":true' in stopped
 
         # Sending Juniper off followed it: progress beats reach the Voice Frontend as
-        # thinking, built from ACP updates without a model call.
+        # thinking, built from Agent events without a model call.
         # Beats a few seconds apart are joined into one append; beats in one burst make one beat.
         def beats() -> str:
             return "\n".join(
@@ -1029,14 +1340,11 @@ async def run_protocol(identity: str) -> None:
         await wait_for(lambda: all(fragment in beats() for fragment in expected_beats))
         # The burst made one beat: the remark outweighed the command started with it, and the
         # tool of no known kind made none, so its name never reached the Voice Frontend.
-        assert "running a command" not in beats() and "websearch" not in beats(), beats()
+        assert "running a command" not in beats() and UNKNOWN_TOOL not in beats(), beats()
         assert "using" not in beats(), beats()
         # Tool calls failing after the turn ended make no beat: the turn event already spoke.
         for index in range(3):
-            await mocks.acp.send(json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {
-                "sessionId": "acp-session-test",
-                "update": {"sessionUpdate": "tool_call", "toolCallId": f"f{index}", "title": "websearch", "kind": "fetch", "status": "failed"},
-            }}))
+            await agent.tool(juniper_id, f"call_f{index}", "websearch", None, end="failed")
         await asyncio.sleep(4)
         assert "failed for Juniper" not in beats(), beats()
 
@@ -1057,7 +1365,7 @@ async def run_protocol(identity: str) -> None:
         continued = OrchestratorMock.user_message("[continued del-2]")
         assert "Caller: And whether the tests passed." in continued and "What did it report" not in continued, continued
         inspected = OrchestratorMock.tool_output("h2-inspect")
-        assert inspected["alias"] == "Juniper" and inspected["stop_reason"] == "end_turn"
+        assert inspected["alias"] == "Juniper" and inspected["outcome"] == "completed"
         # The failed searches after the turn made its closing words the latest remark.
         assert inspected["followed"] is True and inspected["remark"] == "Bridge report complete.", inspected
         assert [(c["kind"], c["status"], c["paths"]) for c in inspected["recent_tool_calls"]] == [
@@ -1080,7 +1388,7 @@ async def run_protocol(identity: str) -> None:
         assert "PRIVATE_AUDIO_BASE64_SENTINEL" not in json.dumps(timed), "audio delta was mistaken for transcript content"
         kinds = {row["event"] for row in timed}
         assert {"live.received", "live.sent", "handoff.started", "handoff.queued", "model.started",
-                "model.headers", "model.completed", "tool.started", "tool.completed", "acp.sent", "acp.received"} <= kinds, kinds
+                "model.headers", "model.completed", "tool.started", "tool.completed", "agent.sent", "agent.received"} <= kinds, kinds
         # Sideband correlation (#29): sends carry event_ids, acks and errors are tied back to them.
         sent = [row for row in timed if row["event"] == "live.sent"]
         assert sent and all(isinstance(row.get("event_id"), str) for row in sent), sent
@@ -1097,11 +1405,11 @@ async def run_protocol(identity: str) -> None:
         assert "voice.live.error" not in events, "a rejected command is not a call error"
         # Producer identity and tool outcomes are recorded as rows are written.
         assert all(row.get("deployment_environment") == "local-test" for row in timed), "rows not stamped with their environment"
-        acp_rows = [row for row in timed if row["event"] in {"acp.sent", "acp.received"}]
-        assert acp_rows and all(isinstance(row.get("agent_connection_id"), str) for row in acp_rows), "ACP rows lack Agent Connection identity"
+        agent_rows = [row for row in timed if row["event"] in {"agent.sent", "agent.received"}]
+        assert agent_rows and all(isinstance(row.get("agent_connection_id"), str) for row in agent_rows), "Agent rows lack Agent Connection identity"
         assert all(row.get("outcome") in {"ok", "error_result", "returned"} for row in timed if row["event"] == "tool.completed")
         # Live trace context (issue #8, B1): the front door mints the Voice Call's context, and
-        # Orchestrator work, Prompt Turns, and ACP requests carry what they minted at start.
+        # Orchestrator work, Prompt Turns, and Agent requests carry what they minted at start.
         call_trace = {"trace_id": CALL_TRACE_ID, "span_id": CALL_SPAN_ID}
         orchestrated = [row for row in timed if row["event"].startswith(("model.", "tool."))]
         assert orchestrated and all(row.get("trace_id") == call_trace["trace_id"]
@@ -1110,25 +1418,26 @@ async def run_protocol(identity: str) -> None:
         for row in orchestrated:
             spans_by_request.setdefault(row.get("request_id") or row.get("tool_call_id"), set()).add(row["span_id"])
         assert all(len(spans) == 1 for spans in spans_by_request.values()), "one span per model request or tool call"
-        turns = [json.loads(row["detail"]) for row in rows if row["event"] == "acp.turn.started"]
+        turns = [json.loads(row["detail"]) for row in rows if row["event"] == "agent.turn.started"]
         assert turns and all(t.get("trace_id") != call_trace["trace_id"] and t.get("link_trace_id") == call_trace["trace_id"]
                              and t.get("link_span_id") == call_trace["span_id"] for t in turns), "turns are linked work traces"
-        prompts = [row for row in timed if row["event"] == "acp.sent" and row.get("method") == "session/prompt"]
+        prompts = [row for row in timed if row["event"] == "agent.sent" and row.get("route") == "/api/session/{id}/prompt"]
         assert prompts and all(any(p.get("trace_id") == t["trace_id"] and p.get("parent_span_id") == t["span_id"] for t in turns)
-                               for p in prompts), "session/prompt is a child of its Prompt Turn"
-        requests = {row["rpc_id"]: row for row in timed if row["event"] == "acp.sent" and row.get("method")}
-        answers = [row for row in timed if row["event"] == "acp.received" and not row.get("method") and row.get("rpc_id") in requests]
-        assert answers and all(a.get("span_id") == requests[a["rpc_id"]].get("span_id") for a in answers), "responses name their request"
-        # ACP propagation (issue #8, B3): each request carries its own journaled span as
-        # `_meta.traceparent` and nothing else in `_meta` (so session/prompt's, matching its row
-        # above, is a child of the Prompt Turn); responses and notifications carry none.
-        wire = {m["id"]: m for m in mocks.acp_seen if m.get("method") and "id" in m}
-        for rpc_id, row in requests.items():
-            meta = wire[rpc_id]["params"].get("_meta")
-            assert meta == {"traceparent": f"00-{row['trace_id']}-{row['span_id']}-01"}, (rpc_id, meta, row)
-        assert {"initialize", "session/new", "session/prompt"} <= {wire[i]["method"] for i in requests}
-        assert all("_meta" not in (m.get("params") or {}) and "_meta" not in (m.get("result") or {})
-                   for m in mocks.acp_seen if not m.get("method") or "id" not in m), "only our requests carry trace context"
+                               for p in prompts), "the prompt request is a child of its Prompt Turn"
+        assert all(p.get("content_kind") == "agent_prompt" for p in prompts), prompts
+        requests = {row["agent_request_id"]: row for row in timed if row["event"] == "agent.sent"}
+        answers = [row for row in timed if row["event"] == "agent.received" and row.get("agent_request_id") in requests]
+        assert answers and all(a.get("span_id") == requests[a["agent_request_id"]].get("span_id")
+                               and isinstance(a.get("http_status"), int) for a in answers), "responses name their request"
+        # Agent propagation (issue #8, B3): each request carries its own journaled span as a
+        # traceparent header (so the prompt's, matching its row above, is a child of the Prompt
+        # Turn); events carry none of ours.
+        wire = [item["traceparent"] for item in agent.seen]
+        assert all(TRACEPARENT.fullmatch(value or "") for value in wire), wire
+        for row in requests.values():
+            assert f"00-{row['trace_id']}-{row['span_id']}-01" in wire, row
+        assert {"/api/session", "/api/session/{id}/prompt", "/api/session/active", "/api/info"} <= {row["route"] for row in requests.values()}
+        assert all(item["preview_token"] == "local-preview-token" for item in agent.seen), "the gateway was reached without the preview token"
         # Responses propagation (issue #8, B2): each model request carries its own span as a
         # version-00 traceparent and its request_id as X-Client-Request-Id; the provider's
         # correlation metadata, never content, is journaled on the headers and completed rows.
@@ -1161,10 +1470,10 @@ async def run_protocol(identity: str) -> None:
         assert 0 <= queued["ts_ms"] - started["ts_ms"] < 300, (started, queued)
         content = await asyncio.to_thread(operator_content, "CA_VOICE_TEST")
         kinds = {entry["kind"] for entry in content["entries"]}
-        assert {"caller", "voice", "handoff", "say", "acp_prompt", "agent_report"} <= kinds, kinds
+        assert {"caller", "voice", "handoff", "say", "agent_prompt", "agent_report"} <= kinds, kinds
         assert all(entry["source"] in ("saved_transcript", "orchestrator_history") for entry in content["entries"])
         assert any(entry["observed_at_ms"] is not None for entry in content["entries"]), "known tool/handoff IDs lost timing correlation"
-        tools = [row for row in timed if row["event"] == "acp.received" and row.get("tool_call_id")]
+        tools = [row for row in timed if row["event"] == "agent.received" and row.get("tool_call_id")]
         assert tools and any(row.get("tool_status") == "completed" for row in tools), tools
 
         # Handoff 3: leash earlier work, retag it, let it go home, and list what remains.
@@ -1172,36 +1481,23 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(transcript("input", "as Birch, call it Rowan, then let it go.", 8000, 8800))
         OrchestratorMock.memory_gate.clear()
         await mocks.send_live(delegation("del-3", 8850))
-        # Discovery lists every directory (following nextCursor) and resumes from the
-        # session's own directory.
-        listed = await next_matching(
-            mocks.acp_messages, lambda item: item.get("method") == "session/list"
-        )
-        assert without_meta(listed) == {}
-        listed = await next_matching(
-            mocks.acp_messages, lambda item: item.get("method") == "session/list"
-        )
-        assert without_meta(listed) == {"cursor": "2"}
-        resumed = await next_matching(
-            mocks.acp_messages, lambda item: item.get("method") == "session/resume"
-        )
-        assert without_meta(resumed) == {
-            "sessionId": PERSISTED_SESSION_ID, "cwd": "/home/daytona/parser", "mcpServers": [],
-        }
-        closed = await next_matching(
-            mocks.acp_messages, lambda item: item.get("method") == "session/close"
-        )
-        assert without_meta(closed) == {"sessionId": PERSISTED_SESSION_ID}
+        # Discovery lists every directory (following cursor.next); loading only confirms the
+        # session still exists, and closing an idle one asks nothing of the Agent.
+        listed = await agent.next_request(lambda item: item["path"] == "/api/session" and item["method"] == "GET")
+        assert listed["query"] == {"limit": "50", "order": "desc"}, listed
+        listed = await agent.next_request(lambda item: item["path"] == "/api/session" and item["method"] == "GET")
+        assert listed["query"] == {"limit": "50", "order": "desc", "cursor": "2"}, listed
+        await agent.next_request(lambda item: item["path"] == f"/api/session/{PERSISTED_SESSION_ID}")
         leashed = await next_matching(mocks.live_messages, appended("commentary", LEASH_SAY))
         assert leashed["delegation_id"] == "del-3"
         discovered = OrchestratorMock.tool_output("h3-discover")
         assert discovered["ok"] is True
         assert discovered["sessions"] == [
-            {"ref": "r1", "title": PERSISTED_TITLE, "updated_at": "2026-11-06T18:30:00Z", "directory": "parser"}
+            {"ref": "r1", "title": PERSISTED_TITLE, "updated_at": "2026-11-06T18:30:00.000Z", "directory": "parser"}
         ]
         discovered_raw = json.dumps(discovered)
         assert "sessionId" not in discovered_raw and "ses_" not in discovered_raw
-        assert "acp-session-test" not in discovered_raw
+        assert juniper_id not in discovered_raw
         loaded = OrchestratorMock.tool_output("h3-load")
         assert loaded["ok"] is True and loaded["session"]["alias"] == "Birch"
         assert PERSISTED_SESSION_ID not in json.dumps(loaded)
@@ -1222,7 +1518,7 @@ async def run_protocol(identity: str) -> None:
         assert "ghp_" not in json.dumps(projects)
         dozer = OrchestratorMock.tool_output("h3-dozer")
         assert dozer["ok"] is True and dozer["session"]["directory"] == "honeydozer", dozer
-        news = [m["params"]["cwd"] for m in mocks.acp_seen if m.get("method") == "session/new"]
+        news = [m["body"]["location"]["directory"] for m in agent.seen if (m["method"], m["path"]) == ("POST", "/api/session")]
         assert news == ["/home/daytona", "/home/daytona/honeydozer"], news
         ghost = OrchestratorMock.tool_output("h3-ghost")
         assert ghost["ok"] is False and "does not exist" in ghost["error"], ghost
@@ -1244,12 +1540,15 @@ async def run_protocol(identity: str) -> None:
         # with no farewell of the Orchestrator's own. The delegation arrives three times: a
         # replay after an attach keeps its event_id, and a repeat under a new one is still
         # the same delegation; each is one handoff.
-        await mocks.send_live(transcript("input", "Thanks, hang up now.", 9000, 10000))
+        await mocks.send_live(transcript("input", "Have Dozer tidy its build. Thanks, hang up now.", 9000, 10000))
         await mocks.send_live({**delegation("del-4", 10050), "event_id": "evt-del-4"})
         await mocks.send_live({**delegation("del-4", 10050), "event_id": "evt-del-4"})
         await mocks.send_live({**delegation("del-4", 10050), "event_id": "evt-del-4-again"})
-        await wait_for(lambda: any(path == "/live/sessions/live-test/hangup" for path, _ in DaytonaMock.openai_requests), 4)
+        await wait_for(lambda: any(path == "/live/sessions/live-test/hangup" for path, _ in DaytonaMock.openai_requests), 8)
         await wait_for(outputs_back("h4-end"))
+        dozer_id = agent.session_for("/home/daytona/honeydozer")
+        assert OrchestratorMock.tool_output("h4-dozer")["turn_state"] == "in_progress"
+        assert agent.active == {dozer_id}, agent.active
         assert OrchestratorMock.tool_output("h4-end")["status"] == "ending call"
         assert not any(m.get("type") == "session.commentary.append" and m.get("delegation_id") == "del-4"
                        for m in mocks.seen), "end_call spoke a farewell of its own"
@@ -1269,47 +1568,40 @@ async def run_protocol(identity: str) -> None:
         # The writer finishes after the call: the next call starts with its Memory.
         OrchestratorMock.memory_gate.set()
         await wait_for(lambda: any((item.get("memory") or {}).get("text") == EARLY_MEMORY for item in conversations()), 15)
-        await mocks.acp.send(json.dumps({
-            "jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission",
-            "params": {
-                "sessionId": "acp-session-test",
-                "toolCall": {"title": "Run the test suite"},
-                "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}],
-            },
-        }))
+        await agent.ask_permission(juniper_id, "per_between1", "bash", ["python -m pytest"], ["python *"])
         await asyncio.sleep(0.5)
         # As in production, the Agent has since associated Juniper with a project directory,
-        # so resuming from the recorded home directory fails until Dogwalk repairs it.
-        mocks.session_cwds["acp-session-test"] = "/home/daytona/honeydozer"
-        await mocks.acp.close()
+        # which the next catch-up adopts.
+        agent.sessions[juniper_id]["location"]["directory"] = "/home/daytona/honeydozer"
+        # The event stream drops between calls, and nobody reconnects it; meanwhile Dozer's turn
+        # ends unheard. Its end reaches the next call through catching up, once.
+        await agent.close_events(1012, "service restarting")
         await asyncio.sleep(0.3)
+        await agent.text(dozer_id, AWAY_REPORT)
+        agent.settle(dozer_id, "succeeded")
 
-        # Second call: a returning caller with verified caller ID. The Agent now advertises
-        # resume, so the reconnect restores Juniper without replaying its history.
-        mocks.advertise_resume = True
+        # Second call: a returning caller with verified caller ID. The Agent's work never
+        # depended on the event stream, so reconnecting only catches up.
         mocks.live_connected.clear()
         body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST2", "live-test-2")
         assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
         await asyncio.wait_for(mocks.live_connected.wait(), 8)
         opening = await next_matching(mocks.live_messages, appended("commentary", RETURN_OPENING))
         assert opening["delegation_id"] is None
-        def resume_of(session_id: str):
-            return lambda item: item.get("method") == "session/resume" and item["params"]["sessionId"] == session_id
-
-        restored = await next_matching(mocks.acp_messages, resume_of("acp-session-test"))
-        assert without_meta(restored) == {"sessionId": "acp-session-test", "cwd": "/home/daytona", "mcpServers": []}
-        await next_matching(mocks.acp_messages, lambda item: item.get("method") == "session/list")
-        repaired = await next_matching(mocks.acp_messages, resume_of("acp-session-test"))
-        assert repaired["params"]["cwd"] == "/home/daytona/honeydozer", repaired
-        dozer_restored = await next_matching(mocks.acp_messages, resume_of("acp-session-honeydozer"))
-        assert without_meta(dozer_restored) == {
-            "sessionId": "acp-session-honeydozer", "cwd": "/home/daytona/honeydozer", "mcpServers": [],
-        }
-        assert not any(m.get("method") == "session/load" for m in mocks.acp_seen)
-        assert mocks.acp_connections == 2 and DaytonaMock.preview_reads == 1, (
-            "the ACP preview URL was not reused", mocks.acp_connections, DaytonaMock.preview_reads,
+        await agent.next_request(lambda item: item["path"] == f"/api/session/{dozer_id}/message", 10)
+        assert agent.events_connections == 2 and DaytonaMock.preview_reads == 1, (
+            "the Agent Gateway preview URL was not reused", agent.events_connections, DaytonaMock.preview_reads,
         )
         await wait_for(lambda: latest_user_text().count("[harness event] agent_connected") >= 2, 10)
+        # Dozer's unheard end was finished from the snapshot and reached the Orchestrator.
+        dozer_marker = 'turn_stopped: {"alias":"Dozer","outcome":"completed"'
+        await wait_for(lambda: dozer_marker in latest_user_text(), 10)
+        assert AWAY_REPORT in OrchestratorMock.user_message(dozer_marker)
+        second_rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")
+        caught_up = [json.loads(row["detail"]) for row in second_rows if row["event"] == "agent.turn.caught_up"]
+        assert [(item["alias"], item["outcome"], item["session_outcome"]) for item in caught_up] == [("Dozer", "completed", "succeeded")], caught_up
+        repaired = [json.loads(row["detail"]) for row in second_rows if row["event"] == "agent.session.directory_repaired"]
+        assert [(item["alias"], item["from"], item["to"]) for item in repaired] == [("Juniper", ".", "honeydozer")], repaired
         second_start = next(
             str(item["content"]) for item in OrchestratorMock.requests[-1][1]["input"]
             if item.get("role") == "user" and RETURN_OPENING in str(item["content"])
@@ -1323,7 +1615,9 @@ async def run_protocol(identity: str) -> None:
         # Keypad conventions, all handled without the Orchestrator.
         await mocks.send_live(dtmf("1"))
         status = await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append" and "Juniper" in item.get("content", ""))
-        assert status["content"].startswith("Juniper is resting") and status["delegation_id"] is None, status
+        # The Permission Request asked between calls is still pending with the Agent, so catching
+        # up kept it.
+        assert status["content"].startswith("Juniper needs permission. Dozer is resting") and status["delegation_id"] is None, status
         # GPT-Live rejects the silence fixture by its event_id: the held instruction goes out
         # at once, well inside the 2.1 s unconfirmed-playback fallback.
         mocks.reject_next_fixture = True
@@ -1369,11 +1663,13 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(transcript("input", "Have Juniper install the dependencies.", 23500, 24100))
         await mocks.send_live(delegation("del-o", 24150))
         await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "o-inspect" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-        unavailable = OrchestratorMock.user_message('"agent_termination":"out_of_memory"')
-        assert OOM_SENTENCE in unavailable and '"failed_turns":["Juniper"]' in unavailable, unavailable
+        unavailable = OrchestratorMock.user_message('"failed_turns":["Juniper"]')
+        assert OOM_SENTENCE in unavailable and '"agent_termination":"out_of_memory"' in unavailable, unavailable
+        assert '"agent_termination":"out_of_memory"' in OrchestratorMock.user_message("turn_failed: {\"alias\":\"Juniper\",\"followed\":true,\"error\":\"The Agent was killed")
         killed = OrchestratorMock.tool_output("o-inspect")
-        assert "ServerUnavailable" in killed["failure"] and OOM_SENTENCE in killed["failure"], killed
+        assert killed["turn_state"] == "failed" and killed["failure"] == f"Prompt Turn failed: {OOM_SENTENCE}", killed
         await wait_for(lambda: latest_user_text().count("[harness event] agent_connected") >= 3, 15)
+        await run_turn_control(mocks, juniper_id, beats)
 
         # Star opens the System Menu: muted input, a prompt clip, star goes back. Status and
         # sound style are no longer in it.
@@ -1821,24 +2117,22 @@ async def run_protocol(identity: str) -> None:
             assert pages < 30, "operator timing pagination did not terminate"
         assert observed and len({row["id"] for row in observed}) == len(observed)
         assert [row["id"] for row in observed] == sorted(row["id"] for row in observed)
-        turn = next(row for row in observed if row["event"] == "acp.turn.stopped")
-        assert turn["detail"]["acp_session_id"] and turn["detail"]["ms"] >= 0
+        turn = next(row for row in observed if row["event"] == "agent.turn.stopped")
+        assert turn["detail"]["agent_session_id"] and turn["detail"]["ms"] >= 0
         for expected in ("menu.opened", "menu.closed", "menu.restart.requested", "menu.recovery", "voice.keypad.stop", "voice.keypad.status",
                          "voice.earcons", "voice.theme", "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted", "pairing.page_stale"):
             assert expected in events, (expected, events)
         handoff_rows = OrchestratorMock.user_message('"key":"7"')
         assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows
 
-        # Themes and phone numbers stay above ACP: no Agent prompt uses the theme's words or
+        # Themes and phone numbers stay above the Agent: no Agent prompt uses the theme's words or
         # any number Access Control knows.
-        prompts = [m for m in mocks.acp_seen if m.get("method") == "session/prompt"]
-        assert prompts
-        for message in prompts:
-            for block in message["params"]["prompt"]:
-                text = block.get("text", "").lower()
-                assert not any(word in text for word in THEME_LEXICON), text
-                digits = re.sub(r"\D", "", text)
-                assert not any(number[-10:] in digits for number in TEST_NUMBERS), text
+        prompts = [m["body"]["text"] for m in mocks.agent.seen if m["path"].endswith("/prompt")]
+        assert len(prompts) > 10, prompts
+        for text in map(str.lower, prompts):
+            assert not any(word in text for word in THEME_LEXICON), text
+            digits = re.sub(r"\D", "", text)
+            assert not any(number[-10:] in digits for number in TEST_NUMBERS), text
 
         # Nothing with a URL reached the caller-facing lane.
         spoken = [m for m in mocks.seen if m.get("type") == "session.commentary.append"]
@@ -2133,16 +2427,295 @@ async def run_invitations(mocks: SocketMocks) -> str:
     return bound_handle
 
 
+def harness_count(*fragments: str) -> int:
+    """Harness event lines in the Orchestrator's latest context containing every fragment: a
+    turn's end delivered twice shows up as two lines."""
+    if not OrchestratorMock.requests:
+        return 0
+    return sum(all(fragment in line for fragment in fragments)
+               for item in OrchestratorMock.requests[-1][1]["input"] if item.get("role") == "user"
+               for line in str(item["content"]).splitlines())
+
+
+def requested(agent: AgentGatewayMock, method: str, path: str) -> list[int]:
+    """Positions of the Agent requests with this method and path, in arrival order."""
+    return [index for index, item in enumerate(agent.seen) if (item["method"], item["path"]) == (method, path)]
+
+
+async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
+    """Steering, cancelling, a dropped event stream, Co-presence, an Elicitation, and prompt
+    delivery through the gateway, against OpenCode's native API. Juniper is idle and followed."""
+    agent = mocks.agent
+    stopped = 'turn_stopped: {"alias":"Juniper"'
+    failed_before = harness_count('turn_failed: {"alias":"Juniper"')
+
+    # A Steer waits for the step under way: the Agent reads it at the next step boundary
+    # (inbox.delivered), which is a beat, and the turn ends once, completed.
+    agent.mark()
+    await mocks.send_live(transcript("input", "Have Juniper document the parser's entry point.", 24500, 25100))
+    await mocks.send_live(delegation("del-s1", 25150))
+    steer = await agent.next_request(lambda item: (item["body"] or {}).get("text") == STEER_GUIDANCE)
+    assert (steer["path"], steer["body"]) == (f"/api/session/{sid}/prompt", {"text": STEER_GUIDANCE, "delivery": "steer"}), steer
+    await wait_for(outputs_back("s1-steer"), 10)
+    assert OrchestratorMock.tool_output("s1-steer")["when"] == "next_step"
+    assert not requested(agent, "POST", f"/api/session/{sid}/interrupt"), "a Steer interrupted the step under way"
+    [pending] = agent.inbox.pop(sid)
+    await agent.emit("session.step.ended", sessionID=sid, tokens={"input": 900, "output": 40})
+    await agent.emit("session.inbox.delivered", sessionID=sid, inboxID=pending["id"])
+    await agent.emit("session.step.started", sessionID=sid)
+    await wait_for(lambda: "Juniper has the correction." in beats(), 10)
+    await agent.text(sid, STEERED_REPORT)
+    await agent.finish(sid)
+    await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', STEERED_REPORT) == 1, 10)
+    rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")
+    delivered = [json.loads(row["detail"]) for row in rows if row["event"] == "agent.turn.steer_delivered"]
+    assert [(item["inbox_id"], item["when"]) for item in delivered] == [(pending["id"], "next_step")], delivered
+
+    # A Redirect interrupts with resume: the interrupted execution and the resumed one share a
+    # millisecond, which does not end the turn; the later success does, once.
+    ended = harness_count(stopped)
+    agent.mark()
+    await mocks.send_live(transcript("input", "Have Juniper profile the parser.", 25500, 26100))
+    await mocks.send_live(delegation("del-s2", 26150))
+    # The step under way waits on a Permission Request, which the Redirect's interrupt rejects:
+    # Dogwalk caused that answer, so it is not reported as answered elsewhere.
+    await agent.next_request(lambda item: item["body"] == {"text": REDIRECT_PROMPT})
+    await agent.ask_permission(sid, "per_profile1", "bash", ["py-spy record"], [])
+    redirect = await agent.next_request(lambda item: item["path"] == f"/api/session/{sid}/interrupt")
+    assert redirect["query"] == {"resume": "true"}, redirect
+    [guided] = [index for index, item in enumerate(agent.seen) if (item["body"] or {}).get("text") == REDIRECT_GUIDANCE]
+    assert guided < agent.seen.index(redirect), "the Redirect interrupted before its steering was queued"
+    await wait_for(lambda: beats().count("Juniper has the correction.") == 2, 10)
+    await asyncio.sleep(2.0)  # Twice RESUME_GRACE_MS.
+    assert sid in agent.active and harness_count(stopped) == ended, "the Redirect ended the turn"
+    await agent.text(sid, REDIRECTED_REPORT)
+    await agent.finish(sid)
+    await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', REDIRECTED_REPORT) == 1, 10)
+    assert OrchestratorMock.tool_output("s2-steer")["when"] == "now"
+    assert harness_count("permission_requested:", "py-spy record") == 1
+    assert harness_count("permission_resolved:") == 0, "the Redirect's own rejection was reported as another client's"
+
+    # A Redirect whose interrupt fails: the steering was admitted, so the tool says so rather
+    # than failing (the model would send it again), and it lands at the next step.
+    agent.fail_interrupts = 1
+    agent.mark()
+    await mocks.send_live(transcript("input", "Have Juniper bisect the regression.", 26200, 26400))
+    await mocks.send_live(delegation("del-s3", 26450))
+    await wait_for(outputs_back("s3-steer"), 15)
+    stuck = OrchestratorMock.tool_output("s3-steer")
+    assert stuck["ok"] is True and "do not send it again" in stuck["delivery"], stuck
+    assert [item["status"] for item in agent.seen if item["path"] == f"/api/session/{sid}/interrupt"][-1] == 502
+    [pending] = agent.inbox.pop(sid)
+    await agent.emit("session.inbox.delivered", sessionID=sid, inboxID=pending["id"])
+    await agent.text(sid, STUCK_REPORT)
+    await agent.finish(sid)
+    await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', STUCK_REPORT) == 1, 10)
+
+    # Steering just after the last execution ended, while that end waits out the grace period:
+    # the steer starts a new execution in the same turn (measured on 2.2.7), so no interrupt is
+    # sent, which would stop that very execution, and the turn ends once, later.
+    agent.mark()
+    await mocks.send_live(transcript("input", "Have Juniper rename the parser helpers.", 26500, 26700))
+    await mocks.send_live(delegation("del-s4", 26750))
+    await agent.next_request(lambda item: item["body"] == {"text": LATE_PROMPT})
+    await wait_for(outputs_back("s4-begin"), 10)
+    loop = asyncio.get_running_loop()
+
+    def finish_first() -> None:
+        asyncio.run_coroutine_threadsafe(agent.finish(sid), loop).result(5)
+        time.sleep(0.3)  # The Durable Object handles the end before the steer arrives.
+
+    GRACE_HOOK.append(finish_first)
+    ended = harness_count(stopped)
+    agent.mark()
+    await mocks.send_live(transcript("input", "And the test helpers too.", 26800, 27000))
+    await mocks.send_live(delegation("del-s4b", 27050))
+    await wait_for(outputs_back("s4-steer"), 15)
+    late = OrchestratorMock.tool_output("s4-steer")
+    assert late["ok"] is True and "started on this at once" in late["delivery"], late
+    [steered] = [index for index, item in enumerate(agent.seen) if (item["body"] or {}).get("text") == LATE_GUIDANCE]
+    assert not [item for item in agent.seen[steered:] if item["path"] == f"/api/session/{sid}/interrupt"], "the steer's new execution was interrupted"
+    await asyncio.sleep(1.5)
+    assert sid in agent.active and harness_count(stopped) == ended, "the turn ended under the steer"
+    await agent.text(sid, LATE_REPORT)
+    await agent.finish(sid)
+    await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', LATE_REPORT) == 1, 10)
+
+    # Cancelling withdraws steering the Agent has not read, then interrupts without resume.
+    agent.mark()
+    await mocks.send_live(transcript("input", "Have Juniper rewrite the tokenizer.", 26500, 27100))
+    await mocks.send_live(delegation("del-c", 27150))
+    await agent.next_request(lambda item: item["body"] == {"text": CANCEL_PROMPT})
+    await agent.text(sid, CANCEL_REPORT)
+    interrupt = await agent.next_request(lambda item: item["path"] == f"/api/session/{sid}/interrupt")
+    assert interrupt["query"] == {}, interrupt
+    [steered] = [index for index, item in enumerate(agent.seen) if (item["body"] or {}).get("text") == CANCEL_GUIDANCE]
+    withdrawn = [index for index, item in enumerate(agent.seen)
+                 if item["method"] == "DELETE" and item["path"].startswith(f"/api/session/{sid}/inbox/")]
+    listed = requested(agent, "GET", f"/api/session/{sid}/inbox")
+    assert len(withdrawn) == 1 and listed and steered < listed[-1] < withdrawn[0] < agent.seen.index(interrupt), (steered, listed, withdrawn)
+    assert agent.seen[withdrawn[0]]["status"] == 204 and not agent.inbox.get(sid), agent.inbox
+    await wait_for(lambda: harness_count(stopped, '"outcome":"cancelled"', CANCEL_REPORT) == 1, 10)
+    assert OrchestratorMock.tool_output("c-cancel")["cancellation"] == "requested"
+
+    # A plain close (1012) is not an Agent Termination: the running turn survives the reconnect.
+    agent.mark()
+    await mocks.send_live(transcript("input", "Have Juniper run the whole test matrix.", 27500, 28100))
+    await mocks.send_live(delegation("del-d", 28150))
+    await agent.next_request(lambda item: item["body"] == {"text": DROP_PROMPT})
+    await wait_for(outputs_back("d-begin"), 10)
+    await agent.ask_permission(sid, "per_matrix1", "bash", ["tox -e all"], [])
+    await wait_for(lambda: harness_count("permission_requested:", "tox -e all") == 1, 10)
+    connected = latest_user_text().count("[harness event] agent_connected")
+    await agent.close_events(1012, "service restarting")
+    await wait_for(lambda: latest_user_text().count("[harness event] agent_connected") > connected, 15)
+    assert sid in agent.active and harness_count(stopped, DROP_REPORT) == 0
+    # Still pending with the Agent, and presented once: the reconnect does not ask again.
+    assert harness_count("permission_requested:", "tox -e all") == 1, "a reconnect presented a pending Permission Request again"
+    assert harness_count('turn_failed: {"alias":"Juniper"') == failed_before, "a reconnect failed the turn"
+    await agent.text(sid, "Halfway through the matrix. ")
+    # Down again, and refused while the turn ends unheard: catching up finishes it, once.
+    connected = latest_user_text().count("[harness event] agent_connected")
+    agent.refuse_events = True
+    await agent.close_events(1012, "service restarting")
+    await asyncio.sleep(0.5)
+    await agent.text(sid, DROP_REPORT)
+    agent.settle(sid, "succeeded")
+    await asyncio.sleep(2.0)
+    agent.refuse_events = False
+    await wait_for(lambda: latest_user_text().count("[harness event] agent_connected") > connected, 20)
+    await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', DROP_REPORT) == 1, 10)
+    assert harness_count('turn_failed: {"alias":"Juniper"') == failed_before
+    rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")
+    caught_up = [json.loads(row["detail"])["alias"] for row in rows if row["event"] == "agent.turn.caught_up"]
+    assert caught_up == ["Dozer", "Juniper"], caught_up
+
+    # Co-presence: a turn another client began is observed, and ends like any other.
+    agent.reports[sid] = ""
+    await agent.start(sid)
+    await wait_for(lambda: harness_count('turn_started_elsewhere: {"alias":"Juniper"}') == 1, 10)
+    await agent.text(sid, ELSEWHERE_REPORT)
+    await agent.finish(sid)
+    await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', '"started_elsewhere":true', ELSEWHERE_REPORT) == 1, 10)
+    # A Permission Request answered in that other client stops being presented here.
+    await agent.ask_permission(sid, "per_elsewhere1", "edit", ["src/parser.py"], [])
+    await wait_for(lambda: harness_count('permission_requested: {"alias":"Juniper"', "edit: src/parser.py") == 1, 10)
+    agent.permissions[sid] = [item for item in agent.permissions[sid] if item["id"] != "per_elsewhere1"]
+    for _ in range(2):  # Once forgotten, a repeat is nothing new.
+        await agent.emit("permission.replied", sessionID=sid, requestID="per_elsewhere1", reply="once")
+    await wait_for(lambda: harness_count('permission_resolved: {"alias":"Juniper","reply":"once","elsewhere":true}') >= 1, 10)
+    await asyncio.sleep(1.0)
+    assert harness_count("permission_resolved:") == 1, harness_count("permission_resolved:")
+
+    # A Redirect made in that other client, whose resume is handled after the grace timer fired
+    # (the event chain held up by catching up after a reconnect): the queued end is stale and must
+    # not end the resumed turn.
+    observed = harness_count("turn_started_elsewhere:")
+    agent.reports[sid] = ""
+    await agent.start(sid)
+    await wait_for(lambda: harness_count("turn_started_elsewhere:") == observed + 1, 10)
+    ended = harness_count(stopped)
+    agent.mark()
+    agent.hello_delay = 0
+    agent.delay_next["/api/session/active"] = 2.5
+    await agent.emit("session.execution.interrupted", sessionID=sid, reason="user")
+    await agent.close_events(1012, "service restarting")
+    await agent.next_request(lambda item: item["path"] == "/api/session/active" and item["status"] == "held", 10)
+    await agent.emit("session.execution.started", sessionID=sid)
+    async with asyncio.timeout(15):
+        while not any(row["event"] == "agent.turn.end_superseded" for row in await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")):
+            await asyncio.sleep(0.3)
+    await asyncio.sleep(1.0)
+    assert harness_count(stopped) == ended, "a stale end closed the resumed turn"
+    await agent.text(sid, RESUMED_REPORT)
+    await agent.finish(sid)
+    await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', '"started_elsewhere":true', RESUMED_REPORT) == 1, 10)
+    agent.hello_delay = 1.5
+
+    # A turn that left no ending (lost with the service) is not passed off as completed by an
+    # earlier turn's outcome: catching up fails it as unknown.
+    await agent.start(sid)
+    await wait_for(lambda: harness_count("turn_started_elsewhere:") == observed + 2, 10)
+    agent.refuse_events = True
+    await agent.close_events(1012, "service restarting")
+    agent.active.discard(sid)
+    await asyncio.sleep(1.0)
+    agent.refuse_events = False
+    await wait_for(lambda: harness_count('turn_failed: {"alias":"Juniper"', '"started_elsewhere":true', "outcome unknown") == 1, 20)
+    failed_before += 1
+
+    # An Elicitation cannot be answered by voice yet; the caller hears that one waits.
+    await agent.emit("form.created", form={"id": "frm_000001", "sessionID": sid, "title": FORM_TITLE, "fields": [{"type": "select"}]})
+    await wait_for(lambda: harness_count('elicitation_waiting: {"alias":"Juniper"', FORM_TITLE) == 1, 10)
+
+    # A prompt the preview proxy refuses (an expired preview token) never reached OpenCode, so
+    # it is sent again through a fresh preview URL: admitted once.
+    reads = DaytonaMock.preview_reads
+    agent.reject_next_prompt = True
+    agent.mark()
+    await mocks.send_live(transcript("input", "Have Juniper list the open issues.", 28500, 29100))
+    await mocks.send_live(delegation("del-g", 29150))
+    await wait_for(outputs_back("g-begin"), 15)
+    attempts = [item["status"] for item in agent.seen if item["body"] == {"text": RETRY_PROMPT}]
+    assert attempts == [401, 200] and DaytonaMock.preview_reads == reads + 1, (attempts, DaytonaMock.preview_reads, reads)
+    assert OrchestratorMock.tool_output("g-begin")["ok"] is True
+    await agent.text(sid, RETRY_REPORT)
+    await agent.finish(sid)
+    await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', RETRY_REPORT) == 1, 10)
+    # A prompt whose answer is lost may have been admitted, so it is never sent again.
+    agent.drop_next_prompt = True
+    agent.mark()
+    await mocks.send_live(transcript("input", "Have Juniper draft the release notes.", 29500, 30100))
+    await mocks.send_live(delegation("del-g2", 30150))
+    await wait_for(outputs_back("g2-begin"), 15)
+    await asyncio.sleep(1.0)
+    attempts = [item["status"] for item in agent.seen if item["body"] == {"text": LOST_PROMPT}]
+    assert attempts == ["dropped"], attempts
+    assert OrchestratorMock.tool_output("g2-begin")["ok"] is False, OrchestratorMock.tool_output("g2-begin")
+
+    assert requested(agent, "GET", "/api/session/active")[-1] > agent.seen.index(next(
+        item for item in agent.seen if item["body"] == {"text": LOST_PROMPT})), "the lost answer was not checked against the running sessions"
+    # A prompt whose answer is lost after it was admitted: the session is running, so the turn goes on.
+    agent.drop_admitted_prompt = True
+    agent.mark()
+    await mocks.send_live(transcript("input", "Have Juniper count the public functions.", 30500, 31100))
+    await mocks.send_live(delegation("del-g3", 31150))
+    await wait_for(outputs_back("g3-begin"), 15)
+    admitted = OrchestratorMock.tool_output("g3-begin")
+    assert admitted["ok"] is True and admitted["turn_state"] == "in_progress", admitted
+    assert [item["status"] for item in agent.seen if item["body"] == {"text": ADMITTED_PROMPT}] == ["dropped"]
+    rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")
+    assert any(json.loads(row["detail"]).get("admitted_by") == "active_check" for row in rows if row["event"] == "agent.turn.started")
+
+    # Cancelling and closing whose interrupts fail: the turn keeps running and the session stays open.
+    agent.fail_interrupts = 2
+    agent.mark()
+    await mocks.send_live(transcript("input", "Stop Juniper and close it.", 31500, 32100))
+    await mocks.send_live(delegation("del-x", 32150))
+    await wait_for(outputs_back("x-inspect"), 15)
+    assert OrchestratorMock.tool_output("x-cancel")["ok"] is False and OrchestratorMock.tool_output("x-close")["ok"] is False
+    kept = OrchestratorMock.tool_output("x-inspect")
+    assert (kept["session_state"], kept["turn_state"]) == ("ready", "in_progress"), kept
+    await agent.text(sid, ADMITTED_REPORT)
+    await agent.finish(sid)
+    await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', ADMITTED_REPORT) == 1, 10)
+
+    # Every turn above ended exactly once, and only the lost one failed.
+    for report in (STEERED_REPORT, REDIRECTED_REPORT, STUCK_REPORT, LATE_REPORT, CANCEL_REPORT, DROP_REPORT, ELSEWHERE_REPORT,
+                   RESUMED_REPORT, RETRY_REPORT, ADMITTED_REPORT):
+        assert harness_count(stopped, report) == 1, (report, harness_count(stopped, report))
+    assert harness_count('turn_failed: {"alias":"Juniper"') == failed_before
+
+
 async def run_unobserved_end(restart) -> None:
     """The Durable Object resets mid-call: the saved transcript survives and is filed at call end."""
     mocks = SocketMocks()
-    mocks.advertise_resume = True
     spoken = ["Is the brake noise worth worrying about?", "Let me think that over."]
     # Since the last call, a reap took an old Sandbox out of service (and its deletion is done):
     # this Opening says so, once, in place of the welcome written about the old Sandbox.
     await asyncio.to_thread(d1, f"""INSERT INTO sandbox_deletions (provider_id, user_id, reaped_at, next_attempt_at, deleted_at)
         SELECT 'mock-reaped-old', id, unixepoch() - 60, unixepoch(), unixepoch() FROM users WHERE home_phone = '{TEST_PHONE}'""")
-    async with serve(mocks.handler, "127.0.0.1", SOCKET_PORT):
+    async with mocks.serving():
         body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST3", "live-test-4")
         assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
         await asyncio.wait_for(mocks.live_connected.wait(), 8)
@@ -2158,7 +2731,7 @@ async def run_unobserved_end(restart) -> None:
                 await asyncio.sleep(0.2)
         # Restarting wrangler resets the object with the sideband still open: no cleanup runs.
         # The mock sockets then drop without a close frame, which is expected here.
-        logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
+        logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
         await asyncio.to_thread(restart)
     state = (await asyncio.to_thread(conversations))[0]
     assert state["current_transcript"]["call_sid"] == "CA_VOICE_TEST3", state["current_transcript"]

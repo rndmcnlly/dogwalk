@@ -21,10 +21,10 @@ export const OPERATOR_TIMING_HTML = String.raw`<!doctype html>
 <section class="legend">
 <p><b>Evidence:</b> ● observed event; → observed control-message direction; vertical colored bar = matched start/end identifiers; dashed vertical tail = start observed, end not observed; dotted connector = same delegation identifier, not a causal claim. Unmatched endpoints remain individual events.</p>
 <p>Time flows down. Axis: milliseconds since Worker call start (fixed anchor with second precision), with Δ between visible observations. Negative positions precede that anchor. Minimum row spacing separates simultaneous events; this is not a proportional waveform. Long gaps are explicitly labeled when compressed. Old second-only records are marked “±1s precision”; cross-clock differences are wall-clock observations, not latency measurements. Twilio uses occurrence time when known, otherwise receipt time. Numeric millisecond units do not imply millisecond accuracy. Received-minus-occurred is reporting lag plus clock skew, not network latency.</p>
-<p>Background bands group tracks by where they run in the current deployment, not by who observed the event. OpenAI reasoning API spans are measured at the Worker and include network/application overhead, not just model compute. The Orchestrator itself runs on Cloudflare; sessions and Agent tools run in the Daytona Sandbox. Internal model calls inside ACP Agents are not exposed by this trace.</p>
-<p>Transcript receipt and provider media offsets are not phone playout timestamps. Media start_ms/end_ms/offset_ms remain metadata, never Unix time. Orchestrator tools are not ACP Agent tools. ACP roundtrips require an exact scoped RPC identifier match. Provider root/parent leg metadata and same-leg grouping are relationships, not exact send/receive matches or causal arrows.</p>
-<p>Observed text bursts fuse same-stream deltas using a cadence EMA (750–2000ms inactivity threshold), not fixed time buckets or audio VAD. A burst mark stays at its first receipt; the inspector retains every delta ID, receipt time, media offset, split reason, and threshold. Caller, voice, and ACP Session streams are separate. Provider media gaps are used only with explicit matching media/provider clock and session identifiers; offsets are never added to Unix time. Idle means inactivity at the latest server sample, not detected silence or a guaranteed speech-turn end.</p>
-<p id="nested">nested ACP sessions: not observed</p></section>
+<p>Background bands group tracks by where they run in the current deployment, not by who observed the event. OpenAI reasoning API spans are measured at the Worker and include network/application overhead, not just model compute. The Orchestrator itself runs on Cloudflare; sessions and Agent tools run in the Daytona Sandbox. Internal model calls inside Agents are not exposed by this trace.</p>
+<p>Transcript receipt and provider media offsets are not phone playout timestamps. Media start_ms/end_ms/offset_ms remain metadata, never Unix time. Orchestrator tools are not Agent tools. Agent request roundtrips require an exact scoped request identifier match. Provider root/parent leg metadata and same-leg grouping are relationships, not exact send/receive matches or causal arrows.</p>
+<p>Observed text bursts fuse same-stream deltas using a cadence EMA (750–2000ms inactivity threshold), not fixed time buckets or audio VAD. A burst mark stays at its first receipt; the inspector retains every delta ID, receipt time, media offset, split reason, and threshold. Caller, voice, and Agent Session streams are separate. Provider media gaps are used only with explicit matching media/provider clock and session identifiers; offsets are never added to Unix time. Idle means inactivity at the latest server sample, not detected silence or a guaranteed speech-turn end.</p>
+<p id="nested">nested Agent Sessions: not observed</p></section>
 </main><script>
 (() => {
 'use strict';
@@ -78,7 +78,7 @@ function drawContent() {
     if (!entries.length) target.append(node('p','No content available in this section.','mut'));
     if (entries.length>LIMIT) target.prepend(node('p','Showing latest ' + LIMIT + ' entries.','mut'));
   }
-  render($('observedContent'),observed.map(e=>({id:String(e.id),kind:e.d.content_kind||e.activity||'message',text:e.contentText??e.d.content_text,precision:'observed',observed_at_ms:e.t,truncated:Boolean(e.burst?.truncated||e.d.content_truncated),burst:e.burst,live_session_id:e.d.live_session_id,tool_call_id:e.d.tool_call_id,delegation_id:e.d.delegation_id,acp_session_id:agentSession(e)||undefined})));
+  render($('observedContent'),observed.map(e=>({id:String(e.id),kind:e.d.content_kind||e.activity||'message',text:e.contentText??e.d.content_text,precision:'observed',observed_at_ms:e.t,truncated:Boolean(e.burst?.truncated||e.d.content_truncated),burst:e.burst,live_session_id:e.d.live_session_id,tool_call_id:e.d.tool_call_id,delegation_id:e.d.delegation_id,agent_session_id:agentSession(e)||undefined})));
   render($('savedContent'),savedContent);
 }
 function stopContent() { clearTimeout(contentTimer); contentTimer=null; contentGeneration++; contentController?.abort(); }
@@ -127,20 +127,20 @@ function normalize(e) {
 function activityKind(e) {
   if (providerEvent(e)) return '';
   const type=String(e.d.type || e.name);
-  if (e.d.update === 'agent_message_chunk') return 'Agent progress';
+  if (e.d.agent_event === 'session.text.delta') return 'Agent progress';
   if (/transcript.*delta/i.test(type)) return /input/i.test(type)?'input transcript':'output transcript';
   if (/audio.*(?:delta|packet)|session\.usage\.updated/i.test(type)) return 'hidden';
   return '';
 }
-function correlationEndpoint(e) { return ['delegation_id','request_id','tool_call_id','rpc_id'].some(k=>ident(e.d[k])) || /^(model|tool|acp\.turn)\./.test(e.name); }
-function agentSession(e) { return e.d.acp_session_id || e.d.session_id || ''; }
-function agentTool(e) { return e.name === 'acp.received' && ident(e.d.tool_call_id) && ident(agentSession(e)); }
+function correlationEndpoint(e) { return ['delegation_id','request_id','tool_call_id','agent_request_id'].some(k=>ident(e.d[k])) || /^(model|tool|agent\.turn)\./.test(e.name); }
+function agentSession(e) { return e.d.agent_session_id || e.d.session_id || ''; }
+function agentTool(e) { return e.name === 'agent.received' && ident(e.d.tool_call_id) && ident(agentSession(e)); }
 function laneOf(e) {
   if (providerEvent(e)) return 'twilio:' + (e.d.leg === 'sip' ? 'sip' : 'pstn');
   if (agentTool(e)) return 'tools:' + agentSession(e);
   if (e.name.startsWith('model.') || e.name === 'orchestrator.model') return 'reasoning';
   if (e.name.startsWith('model.') || e.name.startsWith('tool.') || e.name.startsWith('orchestrator.') || e.name.startsWith('handoff.')) return 'orchestrator';
-  if (e.name.startsWith('acp.')) return agentSession(e) ? 'agent:' + agentSession(e) : 'transport';
+  if (e.name.startsWith('agent.')) return agentSession(e) ? 'agent:' + agentSession(e) : 'transport';
   if (e.name.startsWith('call.')) return 'transport';
   if (e.name.startsWith('live.') || e.name.startsWith('voice.') || e.source === 'voice') return 'voice';
   return 'transport';
@@ -164,7 +164,7 @@ function inspect(e) {
   $('copy').disabled = !e || (!raw && !$('content').checked);
   $('download').disabled = !events.size || !raw;
   if (!e) { $('related').textContent = ''; return; }
-  const ids = ['delegation_id','request_id','tool_call_id','rpc_id'];
+  const ids = ['delegation_id','request_id','tool_call_id','agent_request_id'];
   if (providerEvent(e)) {
     const related=Array.from(events.values()).filter(other=>other.id!==e.id && providerEvent(other) && ident(e.d.provider_call_sid) && e.d.provider_call_sid===other.d.provider_call_sid);
     $('related').textContent='Related same leg (exact provider_call_sid, not causality): ' + (related.length?related.slice(0,30).map(x=>'#' + x.id).join(', '):'none observed') + (e.d.parent_call_sid ? '. Observed parent-leg metadata: ' + e.d.parent_call_sid + '; no exact message match inferred.' : '');
@@ -194,13 +194,13 @@ function compact(all,forContent=false) {
   }
   for (const e of all) {
     const voiceEnd=/^(?:voice\.)?live\.(?:closed|ended|disconnected|detached)$/.test(e.name);
-    const acpEnd=/^acp\.turn\.(?:stopped|failed|cancelled)$/.test(e.name);
+    const agentEnd=/^agent\.turn\.(?:stopped|failed)$/.test(e.name);
     const transcriptEnd=/transcript.*(?:done|completed)$/.test(String(e.d.type||''));
-    if (voiceEnd || acpEnd || transcriptEnd) {
+    if (voiceEnd || agentEnd || transcriptEnd) {
       for (const s of streams.values()) {
         const sameVoice=s.live===String(e.d.live_session_id||'');
         if ((voiceEnd && sameVoice && s.role!=='agent_report') ||
-            (acpEnd && s.role==='agent_report' && s.session===String(agentSession(e))) ||
+            (agentEnd && s.role==='agent_report' && s.session===String(agentSession(e))) ||
             (transcriptEnd && sameVoice && s.role===(/input/.test(e.d.type)?'caller':'voice'))) close(s,'explicit '+e.name+(transcriptEnd?' / '+e.d.type:''),e);
       }
     }
@@ -228,7 +228,7 @@ function compact(all,forContent=false) {
     row.collapsed++; row.chars+=finite(e.d.chars)?e.d.chars:(e.d.content_text||'').length;
     b.count=row.collapsed; b.chars=row.chars; b.last_received_at_ms=e.received; b.last_media=media;
     b.threshold_ms=threshold(s); b.gap_basis=s.basis; b.truncated=Boolean(b.truncated||e.d.content_truncated);
-    b.observations.push({id:e.id,received_at_ms:e.received,media,live_session_id:e.d.live_session_id,clock_id:e.d.clock_id,acp_session_id:agentSession(e)||undefined,tool_call_id:e.d.tool_call_id,delegation_id:e.d.delegation_id});
+    b.observations.push({id:e.id,received_at_ms:e.received,media,live_session_id:e.d.live_session_id,clock_id:e.d.clock_id,agent_session_id:agentSession(e)||undefined,tool_call_id:e.d.tool_call_id,delegation_id:e.d.delegation_id});
     s.last=e; s.lastMedia=media;
   }
   for (const s of streams.values()) {
@@ -242,7 +242,7 @@ function compact(all,forContent=false) {
 function draw() {
   const all = Array.from(events.values()).filter(e => Number.isFinite(e.t)).sort((a,b) => a.t-b.t || a.id-b.id);
   const rows = compact(all), end = Math.min(rows.length, pageEnd), start = Math.max(0,end-LIMIT), visible = rows.slice(start,end);
-  const lanes = [{id:'voice',title:'Voice Frontend',sub:'Provider sideband observations'}, {id:'reasoning',title:'Reasoning API',sub:'Worker-measured request spans'}, {id:'orchestrator',title:'Session Orchestrator',sub:'Worker control logic + tools'}, {id:'transport',title:'Dogwalk transport',sub:'ACP boundary: one Agent connection can host multiple sessions'}];
+  const lanes = [{id:'voice',title:'Voice Frontend',sub:'Provider sideband observations'}, {id:'reasoning',title:'Reasoning API',sub:'Worker-measured request spans'}, {id:'orchestrator',title:'Session Orchestrator',sub:'Worker control logic + tools'}, {id:'transport',title:'Dogwalk transport',sub:'Agent boundary: one Agent Connection can host multiple sessions'}];
   const laneIds = new Set(lanes.map(l => l.id));
   const addLane = (id,title,sub) => { if (!laneIds.has(id)) { laneIds.add(id); lanes.push({id,title,sub}); } };
   const aliases = new Map(), retained = new Map();
@@ -250,13 +250,13 @@ function draw() {
     if (agentSession(e) && e.d.alias) aliases.set(String(agentSession(e)),String(e.d.alias));
     if (e.name === 'voice.live.attached' && Array.isArray(e.d.managed_sessions)) {
       for (const s of e.d.managed_sessions) {
-        if (!s || !s.acp_session_id) continue;
-        const id=String(s.acp_session_id); retained.set(id,s);
+        if (!s || !s.agent_session_id) continue;
+        const id=String(s.agent_session_id); retained.set(id,s);
         if (s.alias) aliases.set(id,String(s.alias));
       }
     }
   }
-  const sessionTitle = id => aliases.has(String(id)) ? 'Managed Session · ' + aliases.get(String(id)) : 'ACP Session · ' + String(id).slice(0,18);
+  const sessionTitle = id => aliases.has(String(id)) ? 'Managed Session · ' + aliases.get(String(id)) : 'Agent Session · ' + String(id).slice(0,18);
   for (const [id,s] of retained) addLane('agent:' + id,sessionTitle(id),id + ' · retained at attach · ' + (s.turn_state||s.session_state||'state unknown'));
   let nested = 0;
   for (const e of all) {
@@ -277,7 +277,7 @@ function draw() {
   const orderOf = id => ({'twilio:pstn':0,'twilio:sip':1,voice:0,reasoning:1,orchestrator:0,transport:1}[id]
     ?? (sessionOrder.indexOf(id.slice(id.indexOf(':')+1))*2 + (id.startsWith('tools:')?1:0)));
   lanes.sort((a,b)=>Object.keys(domains).indexOf(domainOf(a.id))-Object.keys(domains).indexOf(domainOf(b.id)) || orderOf(a.id)-orderOf(b.id));
-  $('nested').textContent = nested ? 'Nested ACP session metadata: ' + nested + ' observation(s); parent relationships are metadata, not inferred calls.' : 'nested ACP sessions: not observed';
+  $('nested').textContent = nested ? 'Nested Agent Session metadata: ' + nested + ' observation(s); parent relationships are metadata, not inferred calls.' : 'nested Agent Sessions: not observed';
   const hidden = all.filter(e=>activityKind(e)==='hidden' && !correlationEndpoint(e)).length;
   const aggregated = rows.filter(e=>e.collapsed).reduce((n,e)=>n+e.collapsed,0);
   $('counts').textContent = events.size + ' loaded · ' + rows.length + ' display rows · ' + hidden + ' packet/usage events hidden · ' + aggregated + ' deltas in observed text bursts' + (catchingUp ? ' · catching up' : '');
@@ -318,23 +318,23 @@ function draw() {
   const interactive = (group,e,label) => { group.setAttribute('class','event'); group.setAttribute('tabindex','0'); group.setAttribute('role','button'); group.setAttribute('aria-label',label); group.append(svg('title',{},label)); group.addEventListener('click',() => inspect(e)); group.addEventListener('keydown',ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); inspect(e); } }); };
   // Correlation only joins exact identifiers within the emitting live-session and clock.
   // It never pairs by adjacency, alias, event order, or provider media offsets.
-  const pending = new Map(), rpcs = new Map(), delegations = new Map(), endpointMs = new Map();
+  const pending = new Map(), requests = new Map(), delegations = new Map(), endpointMs = new Map();
   for (const e of all) {
     if (providerEvent(e)) continue; // Provider metadata never supplies Worker span or message endpoints.
     const d = e.d; let kind = '', id, begin = false, finish = false;
     if (e.name.startsWith('model.')) { kind='model'; id=d.request_id; begin=e.name==='model.started'; finish=['model.completed','model.failed'].includes(e.name); }
     if (e.name.startsWith('tool.')) { kind='orchestrator-tool'; id=d.tool_call_id; begin=e.name==='tool.started'; finish=['tool.completed','tool.failed'].includes(e.name); }
-    if (e.name.startsWith('acp.turn.') && agentSession(e)) { kind='Prompt Turn'; id=agentSession(e); begin=e.name==='acp.turn.started'; finish=['acp.turn.stopped','acp.turn.failed'].includes(e.name); }
+    if (e.name.startsWith('agent.turn.') && agentSession(e)) { kind='Prompt Turn'; id=agentSession(e); begin=['agent.turn.started','agent.turn.observed'].includes(e.name); finish=['agent.turn.stopped','agent.turn.failed'].includes(e.name); }
     if (agentTool(e)) { kind='agent-tool:' + agentSession(e); id=d.tool_call_id; begin=['pending','in_progress'].includes(d.tool_status); finish=['completed','failed','cancelled'].includes(d.tool_status); }
     if (kind && ident(id)) {
       const k = key(e,kind,id);
       if (begin && !pending.has(k)) pending.set(k,e);
       if (finish && pending.has(k)) { const a = pending.get(k); pending.delete(k); const label=agentTool(e)?'Agent tool ' + (d.tool_kind || a.d.tool_kind || 'unknown') + ' #' + String(id).slice(-7):kind; span(a,e,laneOf(a),label); }
     }
-    if (e.name === 'acp.sent' && ident(d.rpc_id) && d.method) rpcs.set(key(e,'rpc',d.rpc_id),e);
-    if (e.name === 'acp.received' && ident(d.rpc_id) && !d.method) {
-      const k=key(e,'rpc',d.rpc_id), a=rpcs.get(k);
-      if (a) { rpcs.delete(k); const target=agentSession(a) ? 'agent:' + agentSession(a) : 'transport'; span(a,e,'transport','ACP roundtrip'); if (target !== 'transport' && positions.has(e.id)) arrow(e,target,'transport','matched RPC response'); }
+    if (e.name === 'agent.sent' && ident(d.agent_request_id)) requests.set(key(e,'request',d.agent_request_id),e);
+    if (e.name === 'agent.received' && ident(d.agent_request_id)) {
+      const k=key(e,'request',d.agent_request_id), a=requests.get(k);
+      if (a) { requests.delete(k); const target=agentSession(a) ? 'agent:' + agentSession(a) : 'transport'; span(a,e,'transport','Agent request ' + (a.d.method || '') + ' ' + (a.d.route || '')); if (target !== 'transport' && positions.has(e.id)) arrow(e,target,'transport','matched request response'); }
     }
     if (ident(d.delegation_id)) {
       const k=key(e,'delegation',d.delegation_id), a=delegations.get(k);
@@ -371,15 +371,15 @@ function draw() {
     const yy=positions.get(e.id), lane=laneOf(e), xx=x(lane), d=e.d;
     if (e.name==='live.sent') arrow(e,'transport','voice','Observed live control send');
     if (e.name==='live.received') arrow(e,'voice','transport','Observed live control receipt, not phone playout');
-    if (e.name==='acp.sent' && agentSession(e)) arrow(e,'transport','agent:' + agentSession(e),'Observed ACP send');
-    if (e.name==='acp.received' && d.method && agentSession(e)) arrow(e,'agent:' + agentSession(e),'transport','Observed ACP notification/request receipt');
+    if (e.name==='agent.sent' && agentSession(e)) arrow(e,'transport','agent:' + agentSession(e),'Observed Agent request');
+    if (e.name==='agent.received' && d.agent_event && agentSession(e)) arrow(e,'agent:' + agentSession(e),'transport','Observed Agent event receipt');
     const g=svg('g');
     g.append(svg('rect',{x:0,y:yy-15,width,height:31,fill:selected?.id===e.id?'#b9f36b15':'transparent',class:'hit'}));
     const delta=previous===null?'': ' Δ' + (e.t-previous).toFixed(0);
     g.append(svg('text',{x:8,y:yy-3,class:'axis'},(Number.isFinite(origin)?(e.t-origin).toFixed(0):'?') + 'ms'),svg('text',{x:8,y:yy+10,class:'axis'},delta + (providerEvent(e)?e.d.timestamp_precision_ms===1000?' 1s precision':' precision ?':!e.precise?' ±1s precision':'')));
     g.append(svg('circle',{cx:xx,cy:yy,r:3.5,fill:e.name.includes('failed')?'#ff796d':'#f3b85c'}));
-    const friendly={'model.started':'Model request started','model.completed':'Model completed','model.failed':'Model failed','model.headers':'Model headers received','tool.started':'Tool started','tool.completed':'Tool completed','tool.failed':'Tool failed','acp.turn.started':'Prompt Turn started','acp.turn.stopped':'Prompt Turn stopped','acp.turn.failed':'Prompt Turn failed'};
-    let label=(friendly[e.name]||e.name) + (d.type?' · ' + d.type:'') + (d.name && e.name.startsWith('tool.')?' · ' + d.name:'') + (d.update?' · ' + String(d.update):'') + (d.tool_status?' · ' + d.tool_status:'');
+    const friendly={'model.started':'Model request started','model.completed':'Model completed','model.failed':'Model failed','model.headers':'Model headers received','tool.started':'Tool started','tool.completed':'Tool completed','tool.failed':'Tool failed','agent.turn.started':'Prompt Turn started','agent.turn.observed':'Prompt Turn observed','agent.turn.stopped':'Prompt Turn stopped','agent.turn.failed':'Prompt Turn failed'};
+    let label=(friendly[e.name]||e.name) + (d.type?' · ' + d.type:'') + (d.name && e.name.startsWith('tool.')?' · ' + d.name:'') + (d.agent_event?' · ' + String(d.agent_event):'') + (d.tool_status?' · ' + d.tool_status:'');
     if (agentTool(e)) label=(d.tool_kind || 'Agent tool') + ' #' + String(d.tool_call_id).slice(-7) + ' · ' + (d.tool_status || 'update');
     if (e.collapsed) label='observed text burst · ' + e.activity + ' · ' + e.collapsed + ' deltas / ' + e.chars + ' chars · ' + e.burst.state;
     const matched=endpointMs.get(e.id);

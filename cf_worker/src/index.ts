@@ -1,7 +1,7 @@
 /**
  * Dogwalk Cloudflare Worker
  *
- * TwiML registration, Daytona sandbox lifecycle, Durable Object voice/ACP
+ * TwiML registration, Daytona sandbox lifecycle, Durable Object voice/Agent
  * coordination, and the Access-protected read-only Diagnostics surface.
  * See PSTN_CLOUDFLARE.md for the deployed architecture.
  */
@@ -2152,14 +2152,14 @@ async function audit(
 }
 
 function activityMetadata(event: string): {
-  source: "voice" | "access" | "hosting" | "menu" | "acp";
+  source: "voice" | "access" | "hosting" | "menu" | "agent";
   direction: "inbound" | "outbound" | "internal";
 } {
   const source = event.startsWith("sandbox.") ? "hosting"
     : event.startsWith("menu.") ? "menu"
     : event.startsWith("registration.") || event.startsWith("caller.") || event.startsWith("claim.") || event.startsWith("confirm.")
       || event.startsWith("identity.") || event.startsWith("reenrollment.") ? "access"
-    : event.startsWith("acp.") ? "acp"
+    : event.startsWith("agent.") ? "agent"
     : "voice";
   const direction = event.endsWith(".speech") || event === "call.entered" || event.startsWith("call.")
     ? "inbound"
