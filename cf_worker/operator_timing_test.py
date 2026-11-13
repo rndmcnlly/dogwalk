@@ -45,7 +45,7 @@ def main():
     add("voice.timing", 1100, event="model.completed", request_id="req", clock_id="clock", ms=1000)
     add("agent.turn.started", 1200, agent_session_id="ses_test", alias="Example", started_ms=T0 * 1000 + 1000)
     for index in range(2):
-        for status, delta in (("in_progress", 0), ("completed", 50)):
+        for status, delta in (("in_progress", 0), ("completed" if index == 0 else "interrupted", 50)):
             add("voice.timing", 1300 + index * 100 + delta, event="agent.received",
                 session_id="ses_test", agent_event="session.tool.called", tool_call_id=f"tool{index}",
                 tool_kind="execute", tool_status=status, clock_id="clock")
@@ -118,6 +118,7 @@ def main():
         assert page.locator('#plot rect[data-domain="openai"]').count() == 1
         assert page.locator('#plot rect[data-domain="cloudflare"]').count() == 1
         assert page.locator("#plot text").filter(has_text="1000ms").count(), "model duration not drawn"
+        assert page.locator("#plot text").filter(has_text="Agent tool execute").count() == 2, "an interrupted Agent tool left its span open"
         assert page.locator("#plot text").filter(has_text="Prompt Turn 104000ms").count(), "Prompt Turn span used audit-write time instead of lifecycle time"
         assert page.evaluate("window.__injected === undefined"), "untrusted metadata ran as HTML"
         assert page.locator("#heads img").count() == 0

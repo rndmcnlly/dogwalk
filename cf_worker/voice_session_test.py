@@ -140,6 +140,13 @@ class AgentGatewayMock:
     # --- What the test drives ----------------------------------------------------
 
     async def emit(self, kind: str, created: int | None = None, **data) -> None:
+        sid = data.get("sessionID")
+        if kind == "session.tool.input.started":
+            self.open_tools.setdefault(sid, []).append(data["id"])
+        elif kind in ("session.tool.success", "session.tool.failed"):
+            self.open_tools[sid] = [item for item in self.open_tools.get(sid, []) if item != data["id"]]
+        elif kind.startswith("session.execution.") and kind != "session.execution.started":
+            self.open_tools.pop(sid, None)
         self.counter += 1
         frame = json.dumps({"id": f"evt_{self.counter:06d}", "type": kind, "created": created or now_ms(), "data": data})
         if self.held is not None:
@@ -165,6 +172,8 @@ class AgentGatewayMock:
         await self.emit("session.inbox.enqueued", sessionID=sid, inboxID=inbox_id, item=item)
 
     async def close_events(self, code: int, reason: str) -> None:
+        if code == 1011:  # an Agent Termination: the service and its tools are gone
+            self.open_tools.clear()
         sockets, self.events = self.events, []
         self.events_connected.clear()
         for ws in sockets:
@@ -190,8 +199,6 @@ class AgentGatewayMock:
             await self.emit("session.tool.called", sessionID=sid, id=tool_id, input=tool_input)
         if end:
             await self.emit(f"session.tool.{end}", sessionID=sid, id=tool_id)
-        else:
-            self.open_tools.setdefault(sid, []).append(tool_id)
 
     def settle(self, sid: str, outcome: str) -> None:
         """A turn's end as the snapshots record it, whether or not anyone hears the event: the
@@ -2560,7 +2567,8 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     assert "failed" not in beats()[redirected_at:], beats()[redirected_at:]
     timed = [json.loads(row["detail"]) for row in await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2", True)
              if row["event"] == "voice.timing"]
-    assert [row["tool_status"] for row in timed if row.get("tool_call_id") == "call_profile1"][-1] == "interrupted"
+    # The Redirect aborted only the step under way.
+    assert [row["tool_call_id"] for row in timed if row.get("tool_status") == "interrupted"] == ["call_profile1"], timed
     await agent.text(sid, REDIRECTED_REPORT)
     await agent.finish(sid)
     await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', REDIRECTED_REPORT) == 1, 10)

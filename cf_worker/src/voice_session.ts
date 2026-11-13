@@ -1001,6 +1001,8 @@ export class VoiceSession {
   // recorded into the next call at attach, with its setup requests' timing rows (bounded).
   private agentConnectedEarly: Record<string, unknown> | null = null;
   private agentConnectStartedMs: number | null = null;
+  // Set once attach has taken the early connection: liveSessionId is set before attach finishes.
+  private agentConnectionReported = false;
   private earlyTimingRows: Record<string, unknown>[] = [];
   private timingTimer: ReturnType<typeof setTimeout> | null = null;
   private timingSequence = 0;
@@ -1438,7 +1440,7 @@ export class VoiceSession {
     this.agentReady = true;
     const connected = { session_count: this.sessions.size, agent_version: info?.data?.version ?? info?.version ?? null,
       agent_connection_id: connectionId, started_ms: startedMs, connected_ms: Date.now(), ms: Date.now() - startedMs, attempts };
-    if (this.liveSessionId) return this.record("agent.connected", connected);
+    if (this.agentConnectionReported) return this.record("agent.connected", connected);
     this.agentConnectedEarly = connected;
   }
 
@@ -1448,6 +1450,7 @@ export class VoiceSession {
     const connected = this.agentConnectedEarly;
     const rows = this.earlyTimingRows.splice(0);
     this.agentConnectedEarly = null;
+    this.agentConnectionReported = true;
     const since = connected ? Number(connected.started_ms) : this.agentConnectAttempt ? this.agentConnectStartedMs : null;
     if (since === null) return;
     for (const row of rows) {
@@ -5023,6 +5026,7 @@ export class VoiceSession {
     this.live = null;
     this.liveAttached = false;
     this.liveSessionId = null;
+    this.agentConnectionReported = false;
     if (pendingCodeHash) this.state.waitUntil(
       this.env.DB.prepare("DELETE FROM pairing_codes WHERE code_hash = ?").bind(pendingCodeHash).run()
         .catch(() => { console.warn("pairing code cleanup failed; in-memory attempt is already invalid"); }),
@@ -5051,6 +5055,7 @@ export class VoiceSession {
   private resetCallState(sessionId: string): void {
     this.liveSessionId = sessionId;
     this.liveAttached = false;
+    this.agentConnectionReported = false;
     this.agentConnecting = false;
     this.firstCall = false;
     this.endMenu();
