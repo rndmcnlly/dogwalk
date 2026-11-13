@@ -205,7 +205,7 @@ cannot talk to a migrated Sandbox either), so do steps 2–5 in one sitting:
    restores every file and the old binary from the `.dogwalk-backup-<stamp>` copies.
    Success labels the Sandbox `dogwalk.dev/agent-api=native`, and the refresh stops it
    so the next start boots the shim. The Workspace, `~/.local/share/opencode` (session
-   history), Takeover Terminal state, and the Sandbox's Daytona identity all survive.
+   history), Terminal state, and the Sandbox's Daytona identity all survive.
    It keeps the old image's other packages, which matched this snapshot at the cut-over.
 
    Recreation is the fallback when a migration fails twice: delete the Sandbox in
@@ -913,55 +913,50 @@ and a D1 cleanup failure against the actual Voice Session methods.
 
 Credentials are `<identity>.<secret>`: the identity half routes to the
 sandbox-keyed Durable Object (and must have a Sandbox Assignment), and only the
-secret's hash is stored there, in `paired_browsers` (at most one; an hour idle,
-twelve hours in all; cleared on Sandbox replacement). The browser keeps it in
-`sessionStorage` and opens `wss://dogwalk.tools/pair/ws?for=<identity>`,
-authenticating in its first message. The socket uses the Hibernation API, so a
-paired tab never keeps the object or its Agent Connection in memory. It receives
-the `publicSession` projection on connect and (throttled) on changes, and can
-list and read files under `/home/daytona` through the Daytona toolbox (512 KiB
-shown, binary refused).
+secret's hash is stored there, in `paired_browsers` with the Display the browser
+joined (an hour idle, twelve hours in all; cleared on Sandbox replacement). The
+browser keeps it in `sessionStorage` and opens
+`wss://dogwalk.tools/pair/ws?for=<identity>`, authenticating in its first
+message. The socket uses the Hibernation API, so a paired tab never keeps the
+object or its Agent Connection in memory.
 
-The page also streams raw Workspace files for its viewers from
-`GET /pair/file?path=` (the credential as a bearer header; served sandboxed and
-`nosniff`, 50 MB cap). Reads resolve symlinks in the Sandbox (`realpath`) and
-refuse anything that leads outside `/home/daytona`. `&as=image`, or any `.png`,
-`.jpg`, `.gif`, `.webp`, or `.svg`, reads the file as an image: at most 8 MB
-actually downloaded, typed by sniffing the bytes (a name that disagrees is
-refused), and SVG served with
-`default-src 'none'; style-src 'unsafe-inline'; img-src data:`.
+Several browsers may be paired, each to a named Display (`../DOMAIN.md`,
+Display). `pair_browser({display?})` names it (default `main`, then `second`,
+...); a browser paired to a Display that has one mirrors it, and accepting a
+browser never unpairs another. A Display ends with its last browser (expiry,
+unpairing on the page, or `unpair_display`), deleting its boards and revoking its
+Access Grants; `rename_display` renames one. The Orchestrator gets
+`browser_connected` and `browser_disconnected` per Display (`displays_open` in
+storage) and `displays` in its call-start snapshot and `inspect_call_state`.
 
-Whiteboard images are Board Assets, captured when `draw_on_whiteboard` runs
-through the same image checks (at most 1.5 MB each, 6 MB and 8 images per board,
-25 MB stored per identity). Each is stored once in Durable Object storage under
-`board_asset:<sha-256>` (`{type, bytes}`), indexed in `board_assets`, and the
-board keeps a manifest `images: {path: {hash, type, bytes} | {error}}`. The page
-fetches `GET /pair/asset/<hash>` (bearer credential, `private, no-store`,
-`nosniff`, the image CSP), which serves only hashes a retained board refers to
-and never touches the Sandbox. Assets no retained board refers to are deleted
-when a draw evicts boards, and all of them on Sandbox replacement. The page
-shows every image through an `<img>` from a blob URL, one per hash, revoked when
-the last board using it leaves. When the page reads an `.html` file, each
-`<img src>` naming a Workspace image (absolute, or relative to the report) is
-rewritten with `HTMLRewriter` into a `data:` URI (1.5 MB each, 6 MB and 24
-images per document); others keep their tag, with the reason in `alt`. It also shows a live feed of the call (`feed` messages:
-caller and Voice Frontend speech, Orchestrator briefs, says, and Agent prompts,
-Agent remarks, tool calls and Reports, harness events, keypad presses).
-
-One Paired Browser at a time: accepting a new one unpairs the old (its takeovers
-are revoked, its page closes with 4003). The Orchestrator gets
-`browser_connected` and `browser_disconnected` harness events and
-`paired_browser` in its call-start snapshot, and `show_in_browser` sends the
-page `{type: "show", uri, note}` for `dogwalk:file/<path>`, `dogwalk:dir/<path>`,
-`dogwalk:session/<Alias>`, `dogwalk:timeline`, `dogwalk:whiteboard`, `dogwalk:memory`, `dogwalk:terminal`,
-`dogwalk:desktop`, or an http(s) address. Files and views open directly;
-takeovers and web pages show a banner the User clicks. HTML renders in an
+The page is whiteboard-only: no file browser, session view, timeline, or live
+feed. On connect it gets `hello` (with its `display`) and its Display's `boards`.
+It sends `ping`, `board_answer`, `board_error`, `unpair`, `open` (an Access
+Element) and `read` (a Document's text). Files reach it only through boards:
+`GET /pair/file?path=<as written>&board=<id>` (bearer credential, served
+sandboxed, `nosniff`, `private, no-store`) serves a path only if a board on the
+requester's Display names it (Image with `&as=image`, Document, or Download with
+`&download=1` and a live grant), and only while Daytona reports the Sandbox
+`started` (checked without waking it, cached 15 s); otherwise `503 {asleep:
+true}`. Reads resolve symlinks in the Sandbox (`realpath`) and refuse anything
+that leads outside `/home/daytona`. `as=image` reads at most 1.5 MB, typed by
+sniffing the bytes (a name that disagrees is refused), and serves SVG with
+`default-src 'none'; style-src 'unsafe-inline'; img-src data:`. Dogwalk keeps
+no copy of a board's files (the retired Board Assets did): a page left open
+keeps what it loaded. When the page reads an `.html` Document, each `<img src>`
+naming a Workspace image (absolute, or relative to the report) is rewritten with
+`HTMLRewriter` into a `data:` URI (1.5 MB each, 6 MB and 24 images per
+document); others keep their tag, with the reason in `alt`. HTML renders in an
 `<iframe sandbox="allow-scripts">` from `srcdoc` with a prepended CSP of
 `default-src 'none'` (inline scripts, styles, and data: images only).
 
 ### Whiteboard
 
 #### Image follow-up decisions (#3)
+
+These decisions predate named Displays, which retired Board Assets: the 1.5 MB
+cap below now bounds each board image's read rather than storage, and a board's
+images are read live rather than captured.
 
 - **Large images:** retain the 1.5 MB stored-asset limit rather than add R2 or a
   Sandbox image-processing dependency to the call path. There is now a small,
@@ -1013,33 +1008,54 @@ the gateway's checks passed. The full voice integration suite, including the new
 passed end to end when this was committed (two earlier attempts had timed out
 before reaching the image checks). No production deploy or live-call test was done.
 
-`draw_on_whiteboard(program, note)` puts an openui-lang board on the paired
-page (the Hands tab, or a tab of its own): diagrams, tables, charts, forms, or
-per-item decisions such as before/after edit review. The page parses and renders
-it (`src/pair_page.ts`; the dialect and examples are in
-`voice_agent_skills/whiteboard.md`) and answers with `board_answer`, accepted
-once per board, which reaches the Orchestrator as a `whiteboard_answer` harness
-event, plays the `whiteboard_answer` earcon, and appears in the timeline. A
-board the page cannot render returns `whiteboard_error`. The last five boards
-are kept in `whiteboard_boards`; answers are caller input, never authorization.
+`draw_on_whiteboard(program, display?, note?, access_minutes?)` puts an
+openui-lang board on a Display: diagrams, tables, charts, forms, per-item
+decisions such as before/after edit review, Workspace images and Documents, and
+Access Elements. The page parses and renders it (`src/pair_page.ts`; the dialect
+and examples are in `voice_agent_skills/whiteboard.md`) and answers with
+`board_answer`, accepted once per board, which reaches the Orchestrator as a
+`whiteboard_answer` harness event and plays the `whiteboard_answer` earcon. A
+board the page cannot render returns `whiteboard_error`. The last five boards per
+Display are kept in `whiteboard_boards`, each with its `display`, the files that
+failed their draw-time check (`failed`), and its grants (`access`); answers are
+caller input, never authorization. `boardElements` (`src/board_images.ts`) finds
+the files and Access Elements a program names, keyed `<kind>:<target>` the same
+way the page keys them.
 
-### Human Takeover
+### Access Grants and Human Takeover
 
-The page's Hands tab launches a terminal or a desktop in a new full-screen tab
-(`../DOMAIN.md`, Human Takeover). `launch` with `kind: "terminal"` returns
-`/pair/terminal#t=<identity>.<ticket>`: a single-use ticket (60 s) in the
-fragment. The terminal page (`src/terminal_page.ts`, vendored xterm.js under
-`vendor/xterm/`) strips it, opens `/pair/terminal/ws?for=<identity>`, and
-authenticates in its first message; the `TerminalRelay` Durable Object (its own
-class, so `VoiceSession` keeps hibernating) has `VoiceSession` redeem the ticket
-for a reconnect token, creates or reuses the toolbox PTY `human`, hands a new
-one to `tmux new-session -A -s human`, and relays bytes both ways (binary
-frames; JSON `resize`, `ping`, `exit`, `notice`). `kind: "desktop"` starts
-Daytona computer use and returns a signed noVNC URL for port 6080
-(`vnc.html?autoconnect=1&resize=scale&path=websockify`), valid at most an hour
-and never beyond the pairing. Unpairing, pairing expiry, or Sandbox
-replacement revoke both: terminals close with 4003, desktop links are expired,
-and computer use stops once no link remains.
+Access Elements (`../DOMAIN.md`, Access Grant) are `Terminal(name?)`,
+`Desktop()`, `Preview(port)`, `SshAccess()`, and `Download(path)`. Drawing one
+while a call is live grants it on that board's Display for `access_minutes`
+(60 by default, at most 720); the board stores only the grant. A click sends
+`open {board_id, key}`; if the grant is live and the Sandbox is running (nothing
+on a board wakes it), the Durable Object mints a credential for that browser and
+records it under `<board id>:<key>`:
+
+- Terminal: a single-use ticket (60 s) in `terminal_tickets`, returned as
+  `/pair/terminal#t=<identity>.<ticket>`. The terminal page
+  (`src/terminal_page.ts`, vendored xterm.js under `vendor/xterm/`) strips it,
+  opens `/pair/terminal/ws?for=<identity>`, and authenticates in its first
+  message; the `TerminalRelay` Durable Object (its own class, so `VoiceSession`
+  keeps hibernating) has `VoiceSession` redeem the ticket for a reconnect token
+  bounded by the grant (`terminal_tokens`), creates or reuses the toolbox PTY
+  (`human` for the main terminal, `human-<name>` otherwise), hands a new one to
+  `tmux new-session -A -s <pty>`, relays bytes both ways (binary frames; JSON
+  `resize`, `ping`, `exit`, `notice`), and closes it when the grant expires.
+- Desktop: starts Daytona computer use and returns a signed noVNC URL for port
+  6080 (`vnc.html?autoconnect=1&resize=scale&path=websockify`).
+- Preview: a Daytona signed preview URL for the port (never 8765, the Agent
+  Gateway). Desktop and Preview links last until the grant expires (at most 24 h)
+  and are kept in `signed_links`.
+- SSH Access: `POST /sandbox/{id}/ssh-access?expiresInMinutes=` within the
+  grant; the page shows the returned `sshCommand`, kept in `ssh_tokens`.
+- Download: no credential; `/pair/file?...&download=1` checks the grant.
+
+`revoke_access`, a Display ending, a board evicted from its Display's five, or
+Sandbox replacement revoke the grants' credentials: terminals close with 4003,
+signed links are expired, SSH tokens are deleted, and computer use stops once no
+desktop link remains. An open Access Element is not yet made to keep the Sandbox
+awake beyond the traffic it carries.
 
 The desktop needs the snapshot's desktop packages (Xvfb, xfce4, x11vnc, noVNC,
 Chromium with `--no-sandbox`); a Sandbox from an older snapshot answers

@@ -63,7 +63,7 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 - Speaks a deterministic Opening and runs the keypad conventions and the in-call
   System Menu (restart and recovery only) without a model.
 - Allocates a fresh spoken number-word-word Pairing Code on request, takes the caller's independent keypad acceptance, and
-  serves Paired Browsers read-only over hibernatable WebSockets.
+  serves Paired Browsers (whiteboard-only, several named Displays) over hibernatable WebSockets.
 - Runs the Session Orchestrator: answers each GPT-Live client delegation from
   the call transcript, with neutral Managed Session and Prompt Turn tools, and
   persists its context across calls.
@@ -88,7 +88,7 @@ OpenCode service running (starting `opencode serve --service` when none answers,
 restarting it after an abnormal exit), proxies `/api/*` to it with the service's
 credentials, and relays its `/api/event` stream to each `/events` WebSocket. Client
 disconnects never stop the service, so Agent work outlives the connection, and a
-TUI in a Takeover Terminal attaches to the same service. It does not implement
+TUI in a Terminal opened from a Whiteboard attaches to the same service. It does not implement
 session semantics (`SANDBOX_AGENT_GATEWAY.md`).
 
 ## Persistence

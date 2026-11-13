@@ -18,7 +18,7 @@ import { availableHandles, HANDLE_OPTIONS_PER_SPIN, HANDLE_QUARANTINE_SECONDS, H
 import { PAIR_BUILD } from "./pair_page";
 import { producerFields } from "./otlp";
 import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, type TraceContext } from "./trace_context";
-import { boardImagePaths, checkRasterSize } from "./board_images";
+import { ACCESS_COMPONENTS, type AccessKind, type BoardElement, boardElements, checkRasterSize } from "./board_images";
 import { hostSpeaker } from "./voice_verify";
 
 const GATEWAY_PORT = 8765;
@@ -260,6 +260,7 @@ interface SystemMenu {
 interface PairingAttempt {
   codeHash: string;
   expiresAt: number;
+  display: string;  // the Display the accepted browser joins
   // Fires pairing_unclaimed when the code expires without a claim.
   unclaimedTimer: ReturnType<typeof setTimeout> | null;
   claim: {
@@ -272,52 +273,51 @@ interface PairingAttempt {
   } | null;
 }
 
-// Human Takeover (DOMAIN.md): a terminal or desktop launched from a Paired Browser, ended
-// with it. A launch ticket is single-use and short-lived; a terminal token lets the takeover
-// tab reconnect; a desktop link is a signed noVNC URL, expired on revocation.
-interface TakeoverTicket { hash: string; browserHash: string; expiresAt: number }
-interface TakeoverToken { hash: string; browserHash: string; createdAt: number }
-interface DesktopLink { token: string; browserHash: string; expiresAt: number }
-const TAKEOVER_TICKET_MS = 60_000;
-const DESKTOP_LINK_MAX_SECONDS = 3600;
+// Access Grant (DOMAIN.md): the authority behind an Access Element, created when a board
+// carrying it is drawn in a call, scoped to that board's Display and the element's target.
+// Opening one mints a credential for that browser alone, each bounded by the grant:
+// a Terminal gets a single-use launch ticket, exchanged by the TerminalRelay for a reconnect
+// token; a Desktop or Preview gets a provider-signed link; SSH Access a Daytona SSH token.
+// Each credential records its grant ("<board id>:<key>") so revocation finds it.
+interface AccessGrant { kind: AccessKind; target: string; expires_at: number; revoked?: true }
+interface TerminalTicket { hash: string; grant: string; session: string; expiresAt: number }
+interface TerminalToken { hash: string; grant: string; session: string; expiresAt: number }
+interface SignedLink { token: string; grant: string; port: number; expiresAt: number }
+interface SshToken { token: string; grant: string; expiresAt: number }
+const TERMINAL_TICKET_MS = 60_000;
 const DESKTOP_PORT = 6080;
+const GRANT_DEFAULT_MINUTES = 60;
+const GRANT_MAX_MINUTES = 12 * 60;
 
-// Whiteboard (DOMAIN.md): an openui-lang board the Session Orchestrator draws on the paired page;
-// its answers come back as caller input, never as authorization.
+// Whiteboard (DOMAIN.md): an openui-lang board the Session Orchestrator draws on a Display; its
+// answers come back as caller input, never as authorization. Dogwalk keeps the program, never
+// copies of the files it shows: a browser reads them from the Sandbox while it runs.
 interface Board {
   id: string;
   at: number;
+  display: string;
   program: string;
   note: string;
   status: "open" | "answered";
   answer: Record<string, unknown> | null;
-  // Its images, captured when drawn: Workspace path -> a Board Asset, or why it was not captured.
-  images?: Record<string, BoardImage>;
+  // Files the board names (as written) that failed the draw-time check, and why.
+  failed?: Record<string, string>;
+  // Access Grants by key ("<kind>:<target>").
+  access?: Record<string, AccessGrant>;
 }
-type BoardImage = { hash: string; type: string; bytes: number } | { error: string };
 const MAX_BOARDS = 5;
 const MAX_BOARD_PROGRAM = 20_000;
-
-// Board Assets: image bytes captured at draw time, stored once by content hash under
-// "board_asset:<sha-256>" ({ type, bytes }) and indexed in "board_assets" (hash -> type and size).
-// One lives exactly as long as a retained board refers to it, so viewing a board never reads the
-// Sandbox. Each stays under the storage per-value limit.
-interface StoredAsset { type: string; bytes: Uint8Array<ArrayBuffer> }
-type AssetIndex = Record<string, { type: string; bytes: number }>;
-const MAX_ASSET_BYTES = 1_500_000;
-const MAX_BOARD_ASSET_BYTES = 6_000_000;
-const MAX_STORED_ASSET_BYTES = 25_000_000;
-const MAX_BOARD_IMAGES = 8;
+const MAX_BOARD_FILES = 12;
+const MAX_BOARD_IMAGE_BYTES = 1_500_000;
 // An HTML report's Workspace images become data: URIs when the page reads it, within these caps.
 const MAX_REPORT_IMAGES = 24;
 const MAX_REPORT_IMAGE_BYTES = 6_000_000;
 
-// What the paired page reported showing, so the Voice Agent can sense it (inspect_call_state).
-interface BrowserView { at: number; browserHash: string; view: string; path?: string; kind?: string }
-const MAX_BROWSER_VIEWS = 30;
-
+// A browser accepted by keypad, joined to one Display (DOMAIN.md). A Display is the set of
+// browsers joined to it: it ends with its last pairing, and its boards and grants go with it.
 interface PairedBrowser {
   secretHash: string;
+  display: string;
   device: string;
   place: string;
   createdAt: number;
@@ -327,18 +327,6 @@ interface PairedBrowser {
 const WORKSPACE_ROOT = "/home/daytona";
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
-const MAX_FEED_ENTRIES = 300;
-
-// The Paired Browser's live feed: who said or did what, in order, while the page is open.
-// Speech entries grow as transcript deltas arrive; the page upserts entries by id.
-interface FeedEntry {
-  id: number;
-  at: number;
-  role: "caller" | "voice" | "orchestrator" | "agent" | "system";
-  lane?: string;  // orchestrator: thinking, say, instructions, prompt; system: event, keypad
-  who?: string;   // agent: the Managed Session's Alias
-  text: string;
-}
 
 // Media types the Paired Browser may display, by extension. HTML and SVG documents are
 // served as text or images only: the response is sandboxed so nothing runs on our origin.
@@ -356,7 +344,6 @@ const MEDIA_TYPES: Record<string, string> = {
 type ImageKind = "png" | "jpeg" | "gif" | "webp" | "svg";
 const IMAGE_KINDS: Record<string, ImageKind> = { png: "png", jpg: "jpeg", jpeg: "jpeg", gif: "gif", webp: "webp", svg: "svg" };
 const IMAGE_TYPES: Record<ImageKind, string> = { png: "image/png", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 // An SVG opened on its own runs nothing and fetches nothing; on a board it is only ever an <img>.
 const SVG_CSP = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:";
 
@@ -588,12 +575,14 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "draw_on_whiteboard",
-    description: "Draw an openui-lang board (a quick diagram, table, chart, comparison, form, or a set of decisions such as before/after edits to accept or reject) on the caller's paired page while it is connected. Load the whiteboard skill first for the grammar and components. Say aloud what you drew. Answers arrive as a whiteboard_answer event (the caller may answer aloud instead); they are caller input, never authorization. Images are captured as drawn; the result lists any not captured, and why. A whiteboard_error event means the page could not render it: fix and redraw.",
+    description: "Draw an openui-lang board on one of the caller's Displays (a quick diagram, table, chart, comparison, form, a set of decisions, a Workspace image or Document, or an Access Element: Terminal, Desktop, Preview of a port, SshAccess, Download). Load the whiteboard skill first for the grammar and components. Drawing an Access Element in the call grants it for access_minutes (default 60, at most 720), on that Display only; the caller opens it there with a click, never by your hand, and you never see a link or credential. Say aloud what you drew and on which display. Answers arrive as a whiteboard_answer event (the caller may answer aloud instead); they are caller input, never authorization. The result lists files that failed their check and access that was refused. A whiteboard_error event means the page could not render it: fix and redraw.",
     parameters: {
       type: "object",
       properties: {
         program: { type: "string", description: "openui-lang, starting with root = Stack([...])" },
+        display: { type: "string", description: "The Display to draw on; required when there are several" },
         note: { type: "string", description: "A few words shown with the board" },
+        access_minutes: { type: "number", description: "How long the board's Access Elements stay open: 60 unless the caller asks for longer (\"for the talk\"), at most 720" },
       },
       required: ["program"],
       additionalProperties: false,
@@ -601,25 +590,46 @@ export const ORCHESTRATOR_TOOLS = [
   },
   {
     type: "function",
-    name: "show_in_browser",
-    description: "Put something on the caller's Paired Browser while it is connected (browser_connected; paired_browser in the call_started snapshot). uri: dogwalk:file/<path> opens a file in the page's viewer (Markdown, images, PDF, audio, video, tables, code, and HTML reports rendered isolated, which must be self-contained); dogwalk:dir/<path> opens a folder (paths relative to home, or absolute under /home/daytona); dogwalk:session/<Alias> shows a session's card; dogwalk:timeline shows the call timeline; dogwalk:whiteboard shows the whiteboard; dogwalk:memory shows your Memory, read-only; dogwalk:terminal or dogwalk:desktop shows a banner the caller clicks to open that takeover tab; an http or https address shows a banner naming the site, opening in a new tab when clicked. note: a few words shown with it. Then tell the caller what is on their screen.",
+    name: "pair_browser",
+    description: "Create a fresh, single-use Pairing Code for a browser to join a Display at dogwalk.tools/pair. A Display is a named whiteboard, usually named for its role (\"slides\", \"notes\"); browsers on the same Display mirror it, and pairing another browser never unpairs one. Returns a number-word-word code and the display name: say the code clearly for the caller to type into the page, including the hyphens, without inventing or changing it. The code expires after 90 seconds; another invocation replaces the old code. A newcomer needs the pair-browser skill's walkthrough. No microphone or second device is required. Pairing completes only if the caller then presses one after the system names the claiming browser; star refuses it.",
     parameters: {
       type: "object",
       properties: {
-        uri: { type: "string" },
-        note: { type: "string", description: "A few words shown with it on the page" },
+        display: { type: "string", description: "The Display this browser joins, a word or two; leave out for a default (main, second, ...). An existing name mirrors that Display" },
       },
-      required: ["uri"],
       additionalProperties: false,
     },
   },
   {
     type: "function",
-    name: "pair_browser",
-    description: "Create a fresh, single-use Pairing Code for a read-only companion browser at dogwalk.tools/pair (session status and Workspace files). Returns a number-word-word code: say the returned code clearly for the caller to type into the page, including the hyphens, without inventing or changing it. The code expires after 90 seconds; another invocation replaces the old code. A newcomer needs the pair-browser skill's walkthrough. No microphone or second device is required. Pairing completes only if the caller then presses one after the system names the claiming browser; star refuses it.",
+    name: "rename_display",
+    description: "Rename one of the caller's Displays; its browsers, boards, and access stay with it.",
     parameters: {
       type: "object",
-      properties: {},
+      properties: { display: { type: "string" }, new_name: { type: "string" } },
+      required: ["display", "new_name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "unpair_display",
+    description: "Unpair every browser on a Display. The Display ends, with its boards and any access it granted. Confirm aloud first.",
+    parameters: {
+      type: "object",
+      properties: { display: { type: "string" } },
+      required: ["display"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "revoke_access",
+    description: "End every live Access Grant on a Display now (terminals close, desktop and preview links expire, SSH access is revoked). The boards stay, their elements marked revoked.",
+    parameters: {
+      type: "object",
+      properties: { display: { type: "string" } },
+      required: ["display"],
       additionalProperties: false,
     },
   },
@@ -652,7 +662,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "inspect_call_state",
-    description: "Read-only: the settings and surfaces you can change, as they are now. theme (what set_theme last chose); earcon_style (what set_earcon_style last chose); whiteboard (the latest board, whether it was answered, and the answer); paired_browser (whether a browser is paired, its device and place, whether its page is open, what it shows now and showed recently, whether a terminal or desktop was launched); followed_session; recording; agents_ready and sandbox_waking; context_tokens (the size of your context at your last step) and memory (the size of your Memory and when you last rewrote it). Changes nothing; use it before changing a setting, when the caller asks what is set or on their screen, or to decide whether to compact.",
+    description: "Read-only: the settings and surfaces you can change, as they are now. theme (what set_theme last chose); earcon_style (what set_earcon_style last chose); displays (each Display: its browsers, whether a page is open or stale, when it expires, its latest board and answer, and its live Access Grants); followed_session; recording; agents_ready and sandbox_waking; context_tokens (the size of your context at your last step) and memory (the size of your Memory and when you last rewrote it). Changes nothing; use it before changing a setting, when the caller asks what is set or on their screen, or to decide whether to compact.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -862,7 +872,7 @@ Rules:
 - Following: beginning a Prompt Turn follows that session, replacing any other. The Voice Frontend then hears its progress directly and narrates it in quiet moments without you. Use follow_managed_session when the caller wants to keep up with a session, and stop_following when they want to let it work unobserved; both are cheap. Following observes; it never directs the Agent. A bid event, or a turn or permission event with followed false, is a session you are not following asking for attention: mention it and offer to follow it, and do not call follow_managed_session unless the caller agrees.
 - call_started includes opening: the exact words already spoken to the caller at connection (a caller-ID verification clause, any Roaming as the caller from other phones since their last call from home, then a reorienting welcome written from your context at the end of the last call, plus anything that happened since). Do not repeat or paraphrase it. caller_id (the STIR/SHAKEN result), identity, and since_last_call are context; identity is how the caller got in through the voice check before you answered: via home or roaming, outcome and the level they already heard (or enrolled_now when they just enrolled their voice; mode name means a home caller who called recently only said their name, a short sample with no level spoken; mode sentence means they repeated a sentence), and would_have, what an enforcing check would have done. shadow true means the check only reports and never kept anyone out. admitted true means the caller named their Handle from a phone that is not their home and passed three voice checks: they have their full access, and their home number is unchanged. Never recite it, a score, or a level; mention it only if the caller asks how the voice check went, and say plainly what it reported; brief the Voice Frontend with what it needs from them and wait for the caller. Say something unprompted only when the opening missed something the caller needs now. since_last_call.sandbox_reaped true means the sandbox was cleared after a long stretch without calls and this call has a fresh one: the old files, clones, and sessions are no longer reachable even where your Memory mentions them, while what your Memory knows about the caller still holds; when the caller asks for earlier work, say it was cleared and offer to set it up again. Use inspect_call_activity when the caller asks what happened to a call or connection; explain plainly what is known and what is not.
 - call_started with first_call true is the caller's first call after registering, and their sandbox is still being set up: load the first-call-tour skill and follow it.
-- agent_connecting means the sandbox is still starting, so session tools fail fast until agent_connected arrives (with the session count). Keep conversing meanwhile. If the caller asks for work, tell them briefly that the sandbox is still starting and that you will start as soon as it is ready, then do it when agent_connected arrives without asking again. Inspection and listing answer from the last known state throughout. agent_unavailable means the sandbox could not be reached; say so plainly and offer open_recovery_menu. sandbox_restart_requested means the caller restarted the sandbox from the keypad menu: running work stopped, and agent_connected follows when it is back. pair_browser returns a fresh number-word-word code: call say after receiving the result and speak that exact code clearly, including the hyphens, for the caller to type into dogwalk.tools/pair. Never invent a code or put one in Memory. browser_pairing reports a Paired Browser outcome (see the pair-browser skill); the system already spoke it, so mention it again only if asked. pairing_unclaimed means the code expired after ninety seconds without a claim: say so promptly and offer a fresh code, not the expired one. browser_connected and browser_disconnected say whether the caller's paired page is open; call_started's paired_browser (and inspect_call_state at any time) says what it shows and recently showed, so a caller who was just reading something there and calls back for help can be met with it. browser_page_stale means the open page was loaded before an update and lacks newer features: with reloads_itself true it reloads on its own once idle; otherwise, or while paired_browser.page_stale stays true, ask the caller to reload the page before drawing on it. While the page is open, offer to put things on their screen with show_in_browser when reading them aloud would be clumsy (a report, a diff, an image, a table); otherwise, if the caller wants to see something, offer to pair a browser.
+- agent_connecting means the sandbox is still starting, so session tools fail fast until agent_connected arrives (with the session count). Keep conversing meanwhile. If the caller asks for work, tell them briefly that the sandbox is still starting and that you will start as soon as it is ready, then do it when agent_connected arrives without asking again. Inspection and listing answer from the last known state throughout. agent_unavailable means the sandbox could not be reached; say so plainly and offer open_recovery_menu. sandbox_restart_requested means the caller restarted the sandbox from the keypad menu: running work stopped, and agent_connected follows when it is back. pair_browser returns a fresh number-word-word code and the Display the browser will join: call say after receiving the result and speak that exact code clearly, including the hyphens, for the caller to type into dogwalk.tools/pair. Never invent a code or put one in Memory. browser_pairing reports a pairing outcome (see the pair-browser skill); the system already spoke it, so mention it again only if asked. pairing_unclaimed means the code expired after ninety seconds without a claim: say so promptly and offer a fresh code, not the expired one. The caller may have several Displays, named whiteboards for different roles (slides on a projector, notes on a laptop); each paired browser joins one, and browsers on the same Display mirror it. The paired page shows only Whiteboards: anything the caller should see, you draw (draw_on_whiteboard), naming the Display when there are several. browser_connected and browser_disconnected say whether a Display has a page open; call_started's displays (and inspect_call_state at any time) says what each shows and what access it holds, so a caller who calls back about something on a screen can be met with it. browser_page_stale means an open page was loaded before an update and lacks newer features: with reloads_itself true it reloads on its own once idle; otherwise, or while that Display's page_stale stays true, ask the caller to reload the page before drawing on it. When reading something aloud would be clumsy (a report, a diff, an image, a table) and a Display is open, offer to put it there; when the caller wants hands-on access (a terminal, the desktop, a site an Agent is serving, SSH, a file to download), draw the matching Access Element; for anything an Agent serves (a dev server, a file browser such as dufs), have the Agent start it on a port, then draw a Preview of that port. Nothing on a board wakes a sleeping Sandbox. Otherwise, if the caller wants to see something, offer to pair a browser.
 - agent_termination on turn_failed or agent_unavailable says why the Agent process ended (failed_turns names turns it cut short). For out_of_memory, tell the caller plainly that the Agent was killed because the sandbox ran out of memory (give the limit), that a large install or build was likely running, and that work since its last report may be incomplete; offer to retry in smaller steps (fewer packages at once, less build parallelism) or note that a bigger sandbox is an operator change.
 - When the caller wants to hang up, call end_call alone: the Voice Frontend says its own goodbye before handing off, and the call ends at once. Before open_recovery_menu, call say with an explanation of what comes next in the same response.
 - Voice Donation: when the caller asks to donate voice samples for research, call say with a few words and start_voice_donation together in the same response. The donation flow explains what it records, asks for consent itself, and ends the call when it finishes, so do not describe or promise its terms. It records nothing for the caller's sessions and is not part of their account.
@@ -918,12 +928,10 @@ export class VoiceSession {
   // The Worker's routing key for this object, which Paired Browser credentials carry.
   private identityHash: string | null = null;
   private pairing: PairingAttempt | null = null;
-  private pairedStatusTimer: ReturnType<typeof setTimeout> | null = null;
-  private feed: FeedEntry[] = [];
-  private feedSeq = 0;
-  private feedDirty = new Set<number>();
-  private feedTimer: ReturnType<typeof setTimeout> | null = null;
   private boardDraws: Promise<void> = Promise.resolve();
+  // Whether the Sandbox was running at the last check, so a page reading files does not ask
+  // Daytona on every request. Checking never wakes it.
+  private sandboxRunningCheck: { at: number; running: boolean } | null = null;
   private agentRequestId = 1;
   // Agent Connection identity for telemetry: request IDs restart with each object instance.
   private agentConnectionId: string | null = null;
@@ -1034,6 +1042,16 @@ export class VoiceSession {
       const storedTheme = await state.storage.get<string>("theme_preference");
       this.theme = THEMES.find((item) => item.id === storedTheme) ?? DEFAULT_THEME;
       this.identityHash = await state.storage.get<string>("identity_hash") ?? null;
+      // One-time back-patch for Displays (2026-11-12; delete once deployed and every object has
+      // run it): pairings without a Display, boards without one, Board Assets, the page's view
+      // log, and Takeover credentials are dropped. Browsers pair again.
+      if (await state.storage.get("board_assets") !== undefined || await state.storage.get("browser_views") !== undefined
+        || (await state.storage.get<Array<{ display?: string }>>("paired_browsers") ?? []).some((item) => !item.display)) {
+        const assets = [...(await state.storage.list({ prefix: "board_asset:" })).keys()];
+        for (let at = 0; at < assets.length; at += 100) await state.storage.delete(assets.slice(at, at + 100));
+        await state.storage.delete(["board_assets", "browser_views", "browser_connected", "paired_browsers", "whiteboard_boards",
+          "takeover_tickets", "takeover_tokens", "desktop_links"]);
+      }
     });
   }
 
@@ -1169,7 +1187,7 @@ export class VoiceSession {
     const events = [`[harness event] call_started: ${JSON.stringify({
       ...this.voiceContextSnapshot(),
       since_last_call: sinceLastCall,
-      paired_browser: await this.pairedBrowserState().catch(() => ({ paired: false })),
+      displays: await this.displaysState().catch(() => []),
       caller_id: callerId,
       ...(admission ? { identity: admission } : {}),
       ...(returned ? { returned_from: returned } : {}),
@@ -1744,7 +1762,6 @@ export class VoiceSession {
 
   private async receiveKeypad(key: string): Promise<void> {
     await this.record("voice.keypad", { key });
-    this.feedPush("system", `keypad ${key}`, { lane: "keypad" });
     if (this.recording) {
       if (key === "#") return this.finishRecording(true, "pound key");
       if (key === "*") return this.finishRecording(false, "star key");
@@ -1913,17 +1930,27 @@ export class VoiceSession {
     return { ok: true, theme: theme.id, bouncing: true, status: "switching; the new voice answers in a few seconds" };
   }
 
-  // --- Paired Browser ----------------------------------------------------------------
+  // --- Paired Browsers and Displays ----------------------------------------------------
   //
-  // The Orchestrator speaks a fresh Pairing Code; the caller types it into /pair, which claims
-  // it at /pair/claim; the Voice Frontend names the browser and where it is; the caller presses one
-  // (or star). An accepted browser gets a credential once and then reads this object's
-  // projection and the Workspace through a hibernatable WebSocket. Read-only by design.
+  // The Orchestrator speaks a fresh Pairing Code for a named Display; the caller types it into
+  // /pair, which claims it at /pair/claim; the Voice Frontend names the browser and where it is;
+  // the caller presses one (or star). An accepted browser joins that Display, gets a credential
+  // once, and then shows the Display's Whiteboards through a hibernatable WebSocket. Several may
+  // be paired, each by its own press. The page has no views of its own and opens nothing
+  // without an Access Grant drawn in a call.
 
   // Knowing the spoken code authorizes nothing; only the caller's press of one does.
-  private async createPairingCode(): Promise<Record<string, unknown>> {
+  private async createPairingCode(displayInput: unknown): Promise<Record<string, unknown>> {
     if (!this.identityHash) throw new Error("pairing is not available on this call");
     if (this.recording) throw new Error("a recording is in progress; finish it first");
+    const browsers = await this.pairedBrowsers();
+    const names = displayNames(browsers);
+    let display: string;
+    if (typeof displayInput === "string" && displayInput.trim()) {
+      display = normalizeDisplayName(displayInput);
+    } else {
+      display = DEFAULT_DISPLAY_NAMES.find((name) => !names.includes(name)) ?? `display ${names.length + 1}`;
+    }
     this.endPairingTimers();
     this.pairing = null;
     await this.env.DB.prepare("DELETE FROM pairing_codes WHERE identity_hash = ? OR expires_at <= unixepoch()")
@@ -1937,17 +1964,19 @@ export class VoiceSession {
       const inserted = await this.env.DB.prepare("INSERT OR IGNORE INTO pairing_codes (code_hash, nameplate, identity_hash, expires_at, attempts) VALUES (?, ?, ?, ?, 0)")
         .bind(codeHash, code.nameplate, this.identityHash, Math.ceil(expiresAt / 1000)).run();
       if (!inserted.meta.changes) continue;
-      const attempt: PairingAttempt = { codeHash, expiresAt, unclaimedTimer: null, claim: null };
+      const attempt: PairingAttempt = { codeHash, expiresAt, display, unclaimedTimer: null, claim: null };
       this.pairing = attempt;
       if (this.liveAttached) {
         attempt.unclaimedTimer = setTimeout(() => void this.pairingUnclaimed(attempt), Math.max(0, expiresAt - Date.now()));
       }
-      await this.record("pairing.started", {});
+      await this.record("pairing.started", { display, joins_existing: names.includes(display) });
       return {
         ok: true,
         code: code.code,
+        display,
+        joins_existing_display: names.includes(display),
         expires_in_seconds: PAIRING_CODE_TTL_MS / 1000,
-        next: "Say this exact code clearly, including the hyphens, for the caller to type into dogwalk.tools/pair. The system names the claiming browser and asks the caller to press one to accept or star to refuse. If the code expires unclaimed, pairing_unclaimed follows: offer a fresh code.",
+        next: "Say this exact code clearly, including the hyphens, for the caller to type into dogwalk.tools/pair, and the display name the browser will join. The system names the claiming browser and asks the caller to press one to accept or star to refuse. If the code expires unclaimed, pairing_unclaimed follows: offer a fresh code.",
       };
     }
     throw new Error("pairing codes are busy; try again shortly");
@@ -1959,7 +1988,7 @@ export class VoiceSession {
     if (this.pairing !== attempt || attempt.claim || !this.liveAttached) return;
     await this.record("pairing.unclaimed", { expired: true });
     await this.orchestratorEvent(`[harness event] pairing_unclaimed: ${JSON.stringify({
-      expired: true, lifetime_seconds: PAIRING_CODE_TTL_MS / 1000,
+      expired: true, lifetime_seconds: PAIRING_CODE_TTL_MS / 1000, display: attempt.display,
     })}`);
   }
 
@@ -1994,7 +2023,7 @@ export class VoiceSession {
       this.sendLive({
         type: "session.commentary.append",
         delegation_id: null,
-        content: `A browser just submitted the pairing code: ${device}, ${place}. Tell the caller exactly that, then ask them to press one to pair it, or star to refuse.`,
+        content: `A browser just submitted the pairing code: ${device}, ${place}. Tell the caller exactly that, then ask them to press one to pair it as the display "${attempt.display}", or star to refuse.`,
       });
       return Response.json({ ticket: `${this.identityHash}.${secret}` });
     }
@@ -2008,8 +2037,7 @@ export class VoiceSession {
       return Response.json(token ? { state: claim.state, token } : { state: claim.state });
     }
     if (path === "/pair/file" && request.method === "GET") return this.pairedFile(request, new URL(request.url));
-    if (path.startsWith("/pair/asset/") && request.method === "GET") return this.pairedAsset(request, path.slice("/pair/asset/".length));
-    if (path === "/pair/takeover/redeem" && request.method === "POST") return this.redeemTakeover(request);
+    if (path === "/pair/takeover/redeem" && request.method === "POST") return this.redeemTerminal(request);
     if (path === "/pair/ws") {
       const pair = new WebSocketPair();
       this.state.acceptWebSocket(pair[1], ["browser"]);
@@ -2025,39 +2053,38 @@ export class VoiceSession {
     claim.timer = null;
     claim.state = outcome;
     this.pairing.codeHash = "";  // spent either way
-    await this.record(`pairing.${outcome}`, { device: claim.device });
-    let replaced: PairedBrowser[] = [];
+    const display = this.pairing.display;
+    await this.record(`pairing.${outcome}`, { device: claim.device, display });
+    let mirrors = false;
     if (outcome === "accepted") {
-      // One Paired Browser at a time: the new one replaces any other, ending what it launched.
-      replaced = await this.pairedBrowsers();
-      if (replaced.length) await this.unpairBrowsers(replaced.map((item) => item.secretHash));
+      // Accepting a browser never unpairs another: it joins its Display, mirroring any browser there.
+      const browsers = await this.pairedBrowsers();
+      mirrors = browsers.some((item) => item.display === display);
       const secret = newBrowserSecret();
       const now = Date.now();
-      const browser = { secretHash: await sha256Hex(secret), device: claim.device, place: claim.place, createdAt: now, lastSeen: now };
-      await this.state.storage.put("paired_browsers", [browser]);
+      browsers.push({ secretHash: await sha256Hex(secret), display, device: claim.device, place: claim.place, createdAt: now, lastSeen: now });
+      await this.state.storage.put("paired_browsers", browsers);
       claim.token = `${this.identityHash}.${secret}`;
     }
     this.sendLive({
       type: "session.commentary.append",
       delegation_id: null,
       content: {
-        accepted: replaced.length
-          ? `The caller pressed one: the browser is paired, replacing ${replaced[0].device} ${replaced[0].place}, which is no longer paired. Say so in a few words.`
-          : "The caller pressed one: the browser is paired. Say so in a few words.",
+        accepted: `The caller pressed one: the browser is paired as the display "${display}"${mirrors ? ", mirroring the browser already showing it" : ""}. Say so in a few words.`,
         refused: "The caller pressed star: the browser was not paired. Say so in a few words.",
         expired: "Nobody pressed one in time, so the browser was not paired. Say so in a few words.",
       }[outcome],
     });
-    await this.orchestratorEvent(`[harness event] browser_pairing: ${JSON.stringify({ outcome, device: claim.device, place: claim.place })}`);
+    await this.orchestratorEvent(`[harness event] browser_pairing: ${JSON.stringify({ outcome, display, device: claim.device, place: claim.place })}`);
   }
 
-  // Drop these browsers' pairings, end what they launched, and close their pages.
+  // Drop these browsers' pairings and close their pages. A Display left with no browser ends.
   private async unpairBrowsers(secretHashes: string[]): Promise<void> {
-    const browsers = await this.state.storage.get<PairedBrowser[]>("paired_browsers") ?? [];
-    await this.state.storage.put("paired_browsers", browsers.filter((item) => !secretHashes.includes(item.secretHash)));
-    await this.revokeTakeovers(secretHashes);
+    const before = await this.state.storage.get<PairedBrowser[]>("paired_browsers") ?? [];
+    const after = before.filter((item) => !secretHashes.includes(item.secretHash));
+    await this.state.storage.put("paired_browsers", after);
     for (const ws of this.state.getWebSockets("browser")) {
-      const hash = (ws.deserializeAttachment() as { secretHash?: string } | null)?.secretHash;
+      const hash = attachedHash(ws);
       if (!hash || !secretHashes.includes(hash)) continue;
       ws.serializeAttachment({});
       try {
@@ -2067,55 +2094,67 @@ export class VoiceSession {
         // already closing
       }
     }
+    await this.endDisplays(endedDisplays(before, after));
     await this.browserPresenceChanged();
+  }
+
+  // A Display's boards and Access Grants go with it.
+  private async endDisplays(names: string[]): Promise<void> {
+    if (!names.length) return;
+    const boards = await this.boards();
+    const ending = boards.filter((item) => names.includes(item.display));
+    await this.state.storage.put("whiteboard_boards", boards.filter((item) => !names.includes(item.display)));
+    await this.revokeGrants(grantIds(ending));
+    await this.record("display.ended", { displays: names.length, boards: ending.length });
   }
 
   // Authenticated paired pages currently open.
   private connectedBrowsers(except?: WebSocket): WebSocket[] {
-    return this.state.getWebSockets("browser").filter((ws) => ws !== except
-      && Boolean((ws.deserializeAttachment() as { secretHash?: string } | null)?.secretHash));
+    return this.state.getWebSockets("browser").filter((ws) => ws !== except && Boolean(attachedHash(ws)));
   }
 
-  // The Session Orchestrator hears when the paired page opens or closes, so it knows whether it
-  // can show the caller something (show_in_browser).
+  // The Session Orchestrator hears when a Display's page opens or closes, so it knows whether
+  // the caller can see what it draws there.
   private async browserPresenceChanged(closing?: WebSocket): Promise<void> {
-    const connected = this.connectedBrowsers(closing).length > 0;
-    const was = await this.state.storage.get<boolean>("browser_connected") ?? false;
-    if (connected === was) return;
-    await this.state.storage.put("browser_connected", connected);
-    const browser = (await this.pairedBrowsers())[0];
-    await this.orchestratorEvent(`[harness event] ${connected ? "browser_connected" : "browser_disconnected"}: ${JSON.stringify(
-      browser ? { device: browser.device, place: browser.place } : {},
-    )}`);
+    const browsers = await this.pairedBrowsers();
+    const open = displayNames(browsers.filter((browser) => this.connectedBrowsers(closing)
+      .some((ws) => attachedHash(ws) === browser.secretHash)));
+    const was = await this.state.storage.get<string[]>("displays_open") ?? [];
+    const opened = open.filter((name) => !was.includes(name));
+    const closed = was.filter((name) => !open.includes(name));
+    if (!opened.length && !closed.length) return;
+    await this.state.storage.put("displays_open", open);
+    for (const display of opened) await this.orchestratorEvent(`[harness event] browser_connected: ${JSON.stringify({ display })}`);
+    for (const display of closed) await this.orchestratorEvent(`[harness event] browser_disconnected: ${JSON.stringify({ display })}`);
   }
 
-  // The Paired Browser as the Voice Agent can sense it without changing it: whether one is
-  // paired and open, what its page shows now and showed recently, and what it launched.
-  private async pairedBrowserState(): Promise<Record<string, unknown>> {
-    const browser = (await this.pairedBrowsers())[0];
-    if (!browser) return { paired: false };
+  // Every Display as the Voice Agent can sense it without changing it: who is joined, whether a
+  // page is open, what it shows, and its live Access Grants.
+  private async displaysState(): Promise<Array<Record<string, unknown>>> {
+    const browsers = await this.pairedBrowsers();
+    const boards = await this.boards();
+    const sockets = this.connectedBrowsers();
     const now = Date.now();
-    const minutesAgo = (at: number) => Math.round((now - at) / 60_000);
-    const connected = this.connectedBrowsers().length > 0;
-    const stale = this.connectedBrowsers().some((ws) => this.stalePage(ws));
-    const views = (await this.state.storage.get<BrowserView[]>("browser_views") ?? []).filter((item) => item.browserHash === browser.secretHash);
-    const tokens = (await this.state.storage.get<TakeoverToken[]>("takeover_tokens") ?? []).filter((item) => item.browserHash === browser.secretHash);
-    const links = (await this.state.storage.get<DesktopLink[]>("desktop_links") ?? []).filter((item) => item.browserHash === browser.secretHash && item.expiresAt > now);
-    const latest = views.at(-1);
-    return {
-      paired: true,
-      device: browser.device,
-      place: browser.place,
-      page_open: connected,
-      // Loaded before a deploy: newer whiteboard components fail until the caller reloads it.
-      page_stale: stale,
-      last_seen_minutes_ago: minutesAgo(browser.lastSeen),
-      expires_in_minutes: Math.max(0, Math.round((Math.min(browser.createdAt + PAIRED_MAX_MS, browser.lastSeen + PAIRED_IDLE_MS) - now) / 60_000)),
-      showing_now: connected && latest ? { view: latest.view, path: latest.path ?? null } : null,
-      recent_views: views.slice(-8).map((item) => ({ minutes_ago: minutesAgo(item.at), view: item.view, path: item.path ?? null })),
-      terminal_launched: tokens.length > 0,
-      desktop_link_active: links.length > 0,
-    };
+    const minutes = (ms: number) => Math.max(0, Math.round(ms / 60_000));
+    return displayNames(browsers).map((name) => {
+      const members = browsers.filter((item) => item.display === name);
+      const open = sockets.filter((ws) => members.some((item) => item.secretHash === attachedHash(ws)));
+      const shown = boards.filter((item) => item.display === name);
+      const latest = shown.at(-1);
+      return {
+        name,
+        browsers: members.map((item) => ({ device: item.device, place: item.place })),
+        page_open: open.length > 0,
+        // Loaded before a deploy: newer whiteboard components fail until the caller reloads it.
+        page_stale: open.some((ws) => this.stalePage(ws)),
+        expires_in_minutes: minutes(Math.max(...members.map(browserExpiresAt)) - now),
+        boards: shown.length,
+        latest: latest ? { board_id: latest.id, note: latest.note, status: latest.status, answer: latest.answer } : null,
+        access: shown.flatMap((board) => Object.values(board.access ?? {})
+          .filter((grant) => !grant.revoked && grant.expires_at > now)
+          .map((grant) => ({ board_id: board.id, kind: grant.kind, target: grant.target, expires_in_minutes: minutes(grant.expires_at - now) }))),
+      };
+    });
   }
 
   // The inspect_call_state tool: every setting and surface the Voice Agent can change, read
@@ -2125,12 +2164,8 @@ export class VoiceSession {
     return {
       theme: this.theme.id,
       earcon_style: this.earconPreference,
-      paired_browser: await this.pairedBrowserState(),
+      displays: await this.displaysState(),
       followed_session: followed,
-      whiteboard: ((boards) => boards.length ? {
-        boards: boards.length,
-        latest: { board_id: boards.at(-1)!.id, note: boards.at(-1)!.note, status: boards.at(-1)!.status, answer: boards.at(-1)!.answer },
-      } : null)(await this.state.storage.get<Board[]>("whiteboard_boards") ?? []),
       recording: Boolean(this.recording),
       agents_ready: this.agentReady,
       sandbox_waking: this.agentConnecting,
@@ -2140,195 +2175,217 @@ export class VoiceSession {
     };
   }
 
+  private async boards(): Promise<Board[]> {
+    return await this.state.storage.get<Board[]>("whiteboard_boards") ?? [];
+  }
+
+  // The Display a tool names, or the only one when there is one.
+  private async targetDisplay(input: unknown): Promise<string> {
+    const names = displayNames(await this.pairedBrowsers());
+    if (!names.length) throw new Error("no browser is paired; offer to pair one (pair-browser skill)");
+    if (typeof input === "string" && input.trim()) {
+      const name = normalizeDisplayName(input);
+      if (!names.includes(name)) throw new Error(`there is no display called "${name}"; the displays are: ${names.join(", ")}`);
+      return name;
+    }
+    if (names.length > 1) throw new Error(`name the display; there are several: ${names.join(", ")}`);
+    return names[0];
+  }
+
   // The draw_on_whiteboard tool. The page parses and renders the openui-lang program; a
   // program it cannot render comes back as a whiteboard_error event for the Orchestrator to fix.
-  private async drawOnWhiteboard(programInput: string, noteInput: unknown): Promise<Record<string, unknown>> {
-    if (!this.connectedBrowsers().length) {
-      throw new Error("no paired browser is connected; offer to pair one (pair-browser skill)");
-    }
+  // Files the board names are checked now, not copied; Access Elements get their grants now.
+  private async drawOnWhiteboard(programInput: string, noteInput: unknown, displayInput: unknown, minutesInput: unknown): Promise<Record<string, unknown>> {
+    const display = await this.targetDisplay(displayInput);
     const program = programInput.trim();
     if (!/^root\s*=/.test(program)) throw new Error("an openui-lang program starts with root = ...; see the whiteboard skill");
     if (program.length > MAX_BOARD_PROGRAM) throw new Error(`the program is too long (${program.length} characters; at most ${MAX_BOARD_PROGRAM})`);
-    // Draws take turns, so one draw's new assets are never collected by another's cleanup.
+    const minutes = minutesInput === undefined ? GRANT_DEFAULT_MINUTES : Number(minutesInput);
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > GRANT_MAX_MINUTES) {
+      throw new Error(`access_minutes is 1 to ${GRANT_MAX_MINUTES}; leave it out for an hour`);
+    }
+    // Draws take turns, so two draws never retain boards from the same stale read.
     const previous = this.boardDraws;
     let done!: () => void;
     this.boardDraws = new Promise<void>((resolve) => { done = resolve; });
     await previous;
     try {
-      const images = await this.captureBoardImages(program);
+      const elements = boardElements(program);
+      const failed = await this.checkBoardFiles(elements);
+      const { access, refused } = this.grantAccess(elements, Math.round(minutes));
       const board: Board = {
-        id: `b${toHexId(4)}`, at: Date.now(), program,
+        id: `b${toHexId(4)}`, at: Date.now(), display, program,
         note: typeof noteInput === "string" ? noteInput.slice(0, 200) : "", status: "open", answer: null,
-        ...(Object.keys(images).length ? { images } : {}),
+        ...(Object.keys(failed).length ? { failed } : {}),
+        ...(Object.keys(access).length ? { access } : {}),
       };
-      // Read after capturing, so an answer that arrived meanwhile is kept.
-      const boards = await this.state.storage.get<Board[]>("whiteboard_boards") ?? [];
-      boards.push(board);
-      const retained = boards.slice(-MAX_BOARDS);
-      await this.state.storage.put("whiteboard_boards", retained);
-      await this.collectBoardAssets(retained);
-      this.broadcastBrowsers({ type: "board", board });
-      this.feedPush("system", `drew on the whiteboard${board.note ? `: ${board.note}` : ""}`, { lane: "event" });
-      const failed = Object.entries(images).flatMap(([path, item]) => "error" in item ? [{ path, error: item.error }] : []);
-      await this.record("whiteboard.drawn", { board_id: board.id, characters: program.length, images: Object.keys(images).length, images_failed: failed.length });
-      const stale = this.connectedBrowsers().some((ws) => this.stalePage(ws));
+      // Read after checking, so an answer that arrived meanwhile is kept.
+      const boards = await this.boards();
+      const others = boards.filter((item) => item.display !== display);
+      const mine = [...boards.filter((item) => item.display === display), board];
+      const dropped = mine.slice(0, -MAX_BOARDS);
+      await this.state.storage.put("whiteboard_boards", [...others, ...mine.slice(-MAX_BOARDS)]);
+      await this.revokeGrants(grantIds(dropped));
+      await this.broadcastDisplay(display, { type: "board", board });
+      const pages = await this.displayPages(display);
+      await this.record("whiteboard.drawn", {
+        board_id: board.id, characters: program.length, files_failed: Object.keys(failed).length, grants: Object.keys(access).length,
+      });
       return {
-        ok: true, board_id: board.id, shown_on: this.connectedBrowsers().length, answers: "arrive as a whiteboard_answer event; the caller may also answer aloud",
-        ...(failed.length ? { images_not_captured: failed, images_note: "these show their alt text and the reason instead; the rest of the board is drawn" } : {}),
-        ...(stale ? { page_stale: "the paired page is out of date and may not render newer components; ask the caller to reload it" } : {}),
+        ok: true, board_id: board.id, display, page_open: pages.length > 0,
+        answers: "arrive as a whiteboard_answer event; the caller may also answer aloud",
+        ...(pages.length ? {} : { not_seen: "no page on this display is open now; the board waits there. Say so rather than implying the caller can see it" }),
+        ...(Object.keys(failed).length ? { files_failed: failed, files_note: "these show their description and the reason instead; the rest of the board is drawn" } : {}),
+        ...(Object.keys(access).length ? { access: Object.values(access).map((grant) => ({ kind: grant.kind, target: grant.target, minutes: Math.round(minutes) })) } : {}),
+        ...(refused.length ? { access_refused: refused } : {}),
+        ...(pages.some((ws) => this.stalePage(ws)) ? { page_stale: "the page is out of date and may not render newer components; ask the caller to reload it" } : {}),
       };
     } finally {
       done();
     }
   }
 
-  // Each Image path in the program, read from the Sandbox now and kept as a Board Asset, so the
-  // board shows it as it was when drawn. A path that cannot be captured records why; the rest of
-  // the board is drawn as usual.
-  private async captureBoardImages(program: string): Promise<Record<string, BoardImage>> {
-    const images: Record<string, BoardImage> = {};
-    const paths = new Set<string>();
-    for (const raw of boardImagePaths(program)) {
-      try {
-        const path = this.workspacePath(raw);
-        if (IMAGE_NAME.test(path)) paths.add(path);
-      } catch {
-        // the page refuses it with its own error
-      }
-    }
-    if (!paths.size) return images;
-    const index = await this.state.storage.get<AssetIndex>("board_assets") ?? {};
-    // What stays stored after this draw: the assets of the boards it keeps, and its own.
-    const boards = await this.state.storage.get<Board[]>("whiteboard_boards") ?? [];
-    const kept = new Set(boards.slice(-(MAX_BOARDS - 1)).flatMap(boardAssetHashes));
-    let stored = [...kept].reduce((sum, hash) => sum + (index[hash]?.bytes ?? 0), 0);
-    const mine = new Set<string>();
-    let boardBytes = 0;
-    for (const path of paths) {
-      if (Object.keys(images).length >= MAX_BOARD_IMAGES) {
-        images[path] = { error: `a board shows at most ${MAX_BOARD_IMAGES} images` };
+  // Each file a board names, checked now so the Orchestrator learns at once which will not show.
+  // Nothing is kept: the page reads the file when it shows it, while the Sandbox runs.
+  private async checkBoardFiles(elements: BoardElement[]): Promise<Record<string, string>> {
+    const failed: Record<string, string> = {};
+    const files = elements.filter((item) => item.component === "Image" || item.component === "Document" || item.component === "Download");
+    const seen = new Set<string>();
+    for (const { component, target } of files) {
+      if (seen.has(target)) continue;
+      seen.add(target);
+      if (seen.size > MAX_BOARD_FILES) {
+        failed[target] = `a board names at most ${MAX_BOARD_FILES} files`;
         continue;
       }
       try {
-        const { bytes, kind } = await this.readWorkspaceImage(path, MAX_ASSET_BYTES);
-        const hash = toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
-        if (!mine.has(hash)) {
-          if (boardBytes + bytes.length > MAX_BOARD_ASSET_BYTES) {
-            throw new Error(`this board's images would pass ${megabytes(MAX_BOARD_ASSET_BYTES)} together; show fewer or smaller ones`);
-          }
-          if (!kept.has(hash) && stored + bytes.length > MAX_STORED_ASSET_BYTES) {
-            throw new Error(`whiteboard image storage is full (${megabytes(MAX_STORED_ASSET_BYTES)}); boards with fewer or smaller images free it as older boards go`);
-          }
-          mine.add(hash);
-          boardBytes += bytes.length;
-          if (!kept.has(hash)) stored += bytes.length;
-          kept.add(hash);
-          if (!index[hash]) {
-            await this.state.storage.put(`board_asset:${hash}`, { type: IMAGE_TYPES[kind], bytes } satisfies StoredAsset);
-            index[hash] = { type: IMAGE_TYPES[kind], bytes: bytes.length };
-          }
-        }
-        images[path] = { hash, type: IMAGE_TYPES[kind], bytes: bytes.length };
+        if (!target) throw new Error("it names no file");
+        if (component === "Image") await this.readWorkspaceImage(target, MAX_BOARD_IMAGE_BYTES);
+        else await this.workspaceFileInfo(target);
       } catch (error) {
-        images[path] = {
-          error: error instanceof WorkspaceFileError && error.status === 413
-            ? `it is too large for a whiteboard (at most ${megabytes(MAX_ASSET_BYTES)}); ask a session for a web-sized rendition, such as a WebP or a smaller PNG`
-            : errorMessage(error),
-        };
+        failed[target] = error instanceof WorkspaceFileError && error.status === 413 && component === "Image"
+          ? `it is too large for a whiteboard (at most ${megabytes(MAX_BOARD_IMAGE_BYTES)}); ask a session for a web-sized rendition, such as a WebP or a smaller PNG`
+          : errorMessage(error);
       }
     }
-    await this.state.storage.put("board_assets", index);
-    return images;
+    return failed;
   }
 
-  // Board Assets that no retained board refers to are deleted.
-  private async collectBoardAssets(retained: Board[]): Promise<void> {
-    const index = await this.state.storage.get<AssetIndex>("board_assets") ?? {};
-    const live = new Set(retained.flatMap(boardAssetHashes));
-    const dead = Object.keys(index).filter((hash) => !live.has(hash));
-    if (!dead.length) return;
-    for (const hash of dead) delete index[hash];
-    for (let at = 0; at < dead.length; at += 100) {
-      await this.state.storage.delete(dead.slice(at, at + 100).map((hash) => `board_asset:${hash}`));
+  // Drawing in a call is the authorization (DOMAIN.md: Access Grant). Outside a call, or for a
+  // target that cannot be granted, the element shows as not available.
+  private grantAccess(elements: BoardElement[], minutes: number): { access: Record<string, AccessGrant>; refused: Array<{ key: string; reason: string }> } {
+    const access: Record<string, AccessGrant> = {};
+    const refused: Array<{ key: string; reason: string }> = [];
+    const expires_at = Date.now() + minutes * 60_000;
+    for (const { component, target } of elements) {
+      const kind = ACCESS_COMPONENTS[component];
+      if (!kind) continue;
+      const key = `${kind}:${target}`;
+      if (access[key]) continue;
+      try {
+        if (!this.liveAttached) throw new Error("access is granted only while drawing in a call");
+        if (kind === "preview") {
+          const port = Number(target);
+          if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Preview takes a port number");
+          if (port === GATEWAY_PORT) throw new Error("that port serves the Agent Gateway and is never previewed");
+        }
+        if (kind === "terminal" && !/^[a-z0-9-]{0,24}$/.test(target)) throw new Error("a terminal name is up to 24 lowercase letters, digits, and hyphens");
+        if (kind === "download") this.workspacePath(target);
+        access[key] = { kind, target, expires_at };
+      } catch (error) {
+        refused.push({ key, reason: errorMessage(error) });
+      }
     }
-    await this.state.storage.put("board_assets", index);
-    await this.record("whiteboard.assets_collected", { assets: dead.length });
+    return { access, refused };
   }
 
   // A board answers once. It is caller input for the Session Orchestrator, like keypad digits.
-  private async receiveBoardAnswer(id: string, answerInput: unknown): Promise<void> {
-    const boards = await this.state.storage.get<Board[]>("whiteboard_boards") ?? [];
-    const board = boards.find((item) => item.id === id);
+  private async receiveBoardAnswer(browser: PairedBrowser, id: string, answerInput: unknown): Promise<void> {
+    const boards = await this.boards();
+    const board = boards.find((item) => item.id === id && item.display === browser.display);
     if (!board || board.status !== "open" || typeof answerInput !== "object" || !answerInput) return;
     const serialized = JSON.stringify(answerInput);
     board.answer = serialized.length > 8000 ? { truncated: serialized.slice(0, 8000) } : answerInput as Record<string, unknown>;
     board.status = "answered";
     await this.state.storage.put("whiteboard_boards", boards);
-    this.broadcastBrowsers({ type: "board", board });
+    await this.broadcastDisplay(board.display, { type: "board", board });
     // The call confirms, in sound, that the Voice Agent has the answer.
     this.queueEarcon("whiteboard_answer");
-    this.feedPush("caller", `answered on the whiteboard: ${serialized.slice(0, 600)}`, { lane: "board" });
     await this.record("whiteboard.answered", { board_id: id });
-    await this.orchestratorEvent(`[harness event] whiteboard_answer: ${JSON.stringify({ board_id: id, note: board.note, answer: board.answer })}`);
+    await this.orchestratorEvent(`[harness event] whiteboard_answer: ${JSON.stringify({ board_id: id, display: board.display, note: board.note, answer: board.answer })}`);
   }
 
   // An error from a page older than the deploy is most likely the page's age, not the program.
-  private async receiveBoardError(id: string, error: string, stale: boolean): Promise<void> {
-    const boards = await this.state.storage.get<Board[]>("whiteboard_boards") ?? [];
-    if (!boards.some((item) => item.id === id)) return;
+  private async receiveBoardError(browser: PairedBrowser, id: string, error: string, stale: boolean): Promise<void> {
+    const boards = await this.boards();
+    if (!boards.some((item) => item.id === id && item.display === browser.display)) return;
     await this.record("whiteboard.error", { board_id: id, page_stale: stale });
     const reason = stale
-      ? `The paired page is out of date (loaded before an update), so it may not know newer components; ask the caller to reload the page, then draw again. The page said: ${error.slice(0, 400)}`
+      ? `The page is out of date (loaded before an update), so it may not know newer components; ask the caller to reload the page, then draw again. The page said: ${error.slice(0, 400)}`
       : error.slice(0, 500);
-    await this.orchestratorEvent(`[harness event] whiteboard_error: ${JSON.stringify({ board_id: id, ...(stale ? { page_stale: true } : {}), error: reason })}`);
+    await this.orchestratorEvent(`[harness event] whiteboard_error: ${JSON.stringify({ board_id: id, display: browser.display, ...(stale ? { page_stale: true } : {}), error: reason })}`);
   }
 
   private stalePage(ws: WebSocket): boolean {
     return Boolean((ws.deserializeAttachment() as { stale?: boolean } | null)?.stale);
   }
 
-  // The show_in_browser tool: put a file, folder, session, the timeline, or a takeover launcher
-  // on the caller's paired page. Terminal and desktop arrive as a banner the caller clicks,
-  // since browsers open new tabs only from a click.
-  private async showInBrowser(uriInput: string, noteInput: unknown): Promise<Record<string, unknown>> {
-    if (!this.connectedBrowsers().length) {
-      throw new Error("no paired browser is connected; offer to pair one (pair-browser skill)");
-    }
-    const note = typeof noteInput === "string" ? noteInput.slice(0, 200) : "";
-    // An ordinary web page arrives as a banner naming its host; the caller's click opens it.
-    if (/^https?:\/\//i.test(uriInput.trim())) {
-      let web: URL;
-      try {
-        web = new URL(uriInput.trim());
-      } catch {
-        throw new Error("that web address is not valid");
-      }
-      this.broadcastBrowsers({ type: "show", uri: web.href, note });
-      this.feedPush("system", `offered on the paired browser: ${web.host}${note ? ` (${note})` : ""}`, { lane: "event" });
-      await this.record("pairing.show", { kind: "web" });
-      return { ok: true, uri: web.href, shown_on: this.connectedBrowsers().length, opens: "after the caller clicks the banner" };
-    }
-    const match = /^dogwalk:(file|dir|session|timeline|whiteboard|memory|terminal|desktop)(?:\/(.*))?$/.exec(uriInput.trim());
-    if (!match) throw new Error("uri must be dogwalk:file/<path>, dogwalk:dir/<path>, dogwalk:session/<alias>, dogwalk:timeline, dogwalk:whiteboard, dogwalk:memory, dogwalk:terminal, dogwalk:desktop, or an http(s) address");
-    const [, kind, rest = ""] = match;
-    let uri = `dogwalk:${kind}`;
-    if (kind === "file" || kind === "dir") uri += `/${this.workspacePath(rest || ".")}`;
-    if (kind === "session") uri += `/${this.sessionByAlias(rest).alias}`;
-    this.broadcastBrowsers({ type: "show", uri, note });
-    this.feedPush("system", `shown on the paired browser: ${uri}${note ? ` (${note})` : ""}`, { lane: "event" });
-    await this.record("pairing.show", { kind });
-    return { ok: true, uri, shown_on: this.connectedBrowsers().length };
+  // The rename_display tool. Its browsers stay paired and its boards and grants stay with it.
+  private async renameDisplay(fromInput: string, toInput: string): Promise<Record<string, unknown>> {
+    const from = await this.targetDisplay(fromInput);
+    const to = normalizeDisplayName(toInput);
+    const browsers = await this.pairedBrowsers();
+    if (from === to) return { ok: true, display: to };
+    if (displayNames(browsers).includes(to)) throw new Error(`there is already a display called "${to}"`);
+    for (const browser of browsers) if (browser.display === from) browser.display = to;
+    const boards = await this.boards();
+    for (const board of boards) if (board.display === from) board.display = to;
+    await this.state.storage.put({ paired_browsers: browsers, whiteboard_boards: boards });
+    const open = await this.state.storage.get<string[]>("displays_open") ?? [];
+    await this.state.storage.put("displays_open", open.map((name) => name === from ? to : name));
+    await this.broadcastDisplay(to, { type: "display", name: to });
+    await this.record("display.renamed", {});
+    return { ok: true, display: to };
   }
 
-  // Accepted browsers that have not expired (idle or absolute); expired ones are dropped.
+  // The unpair_display tool: every browser on it is unpaired; its boards and grants end.
+  private async unpairDisplay(input: string): Promise<Record<string, unknown>> {
+    const display = await this.targetDisplay(input);
+    const members = (await this.pairedBrowsers()).filter((item) => item.display === display);
+    await this.unpairBrowsers(members.map((item) => item.secretHash));
+    return { ok: true, display, browsers_unpaired: members.length };
+  }
+
+  // The revoke_access tool: every live grant on a Display ends now; its elements show revoked.
+  private async revokeAccess(input: string): Promise<Record<string, unknown>> {
+    const display = await this.targetDisplay(input);
+    const boards = await this.boards();
+    const now = Date.now();
+    const revoked: string[] = [];
+    for (const board of boards.filter((item) => item.display === display)) {
+      let changed = false;
+      for (const [key, grant] of Object.entries(board.access ?? {})) {
+        if (grant.revoked || grant.expires_at <= now) continue;
+        grant.revoked = true;
+        revoked.push(`${board.id}:${key}`);
+        changed = true;
+      }
+      if (changed) await this.broadcastDisplay(display, { type: "board", board });
+    }
+    await this.state.storage.put("whiteboard_boards", boards);
+    await this.revokeGrants(revoked);
+    return { ok: true, display, grants_revoked: revoked.length };
+  }
+
+  // Accepted browsers that have not expired (idle or absolute); expired ones are dropped, and a
+  // Display left without a browser ends.
   private async pairedBrowsers(): Promise<PairedBrowser[]> {
     const now = Date.now();
     const all = await this.state.storage.get<PairedBrowser[]>("paired_browsers") ?? [];
-    const live = all.filter((item) => now - item.lastSeen < PAIRED_IDLE_MS && now - item.createdAt < PAIRED_MAX_MS);
+    const live = all.filter((item) => browserExpiresAt(item) > now);
     if (live.length !== all.length) {
       await this.state.storage.put("paired_browsers", live);
-      const expired = all.filter((item) => !live.includes(item)).map((item) => item.secretHash);
-      void this.revokeTakeovers(expired).catch((error) => console.error("takeover revocation failed", errorMessage(error)));
+      void this.endDisplays(endedDisplays(all, live)).catch((error) => console.error("display end failed", errorMessage(error)));
     }
     return live;
   }
@@ -2348,7 +2405,7 @@ export class VoiceSession {
       ws.close(code, error.slice(0, 120));
     };
     const browsers = await this.pairedBrowsers();
-    const attached = (ws.deserializeAttachment() as { secretHash?: string } | null)?.secretHash;
+    const attached = attachedHash(ws);
     if (!attached) {
       const [identity, secret] = message.type === "auth" && typeof message.token === "string" ? message.token.split(".") : [];
       const secretHash = secret ? await sha256Hex(secret) : "";
@@ -2362,17 +2419,14 @@ export class VoiceSession {
       await this.touchBrowser(browser, browsers, true);
       await this.browserPresenceChanged();
       send({
-        type: "hello", device: browser.device, place: browser.place, build: PAIR_BUILD, stale,
+        type: "hello", display: browser.display, device: browser.device, place: browser.place, build: PAIR_BUILD, stale,
         expires_at: browser.createdAt + PAIRED_MAX_MS, idle_expires_at: browser.lastSeen + PAIRED_IDLE_MS,
       });
       if (stale) {
         await this.record("pairing.page_stale", { reloads_itself: Boolean(build) });
-        await this.orchestratorEvent(`[harness event] browser_page_stale: ${JSON.stringify({ reloads_itself: Boolean(build) })}`);
+        await this.orchestratorEvent(`[harness event] browser_page_stale: ${JSON.stringify({ display: browser.display, reloads_itself: Boolean(build) })}`);
       }
-      send(this.pairedStatus());
-      send({ type: "feed", entries: this.feed.slice(-150), snapshot: true });
-      send({ type: "boards", boards: await this.state.storage.get<Board[]>("whiteboard_boards") ?? [] });
-      send({ type: "memory", memory: this.memory });
+      send({ type: "boards", boards: (await this.boards()).filter((item) => item.display === browser.display) });
       return;
     }
     const browser = browsers.find((item) => item.secretHash === attached);
@@ -2384,30 +2438,21 @@ export class VoiceSession {
         case "ping":
           return send({ type: "pong", idle_expires_at: browser.lastSeen + PAIRED_IDLE_MS });
         case "board_answer":
-          return this.receiveBoardAnswer(String(message.id ?? ""), message.answer);
+          return this.receiveBoardAnswer(browser, String(message.id ?? ""), message.answer);
         case "board_error":
-          return this.receiveBoardError(String(message.id ?? ""), String(message.error ?? ""), this.stalePage(ws));
-        case "viewing": {
-          const views = await this.state.storage.get<BrowserView[]>("browser_views") ?? [];
-          const path = typeof message.path === "string" && message.path.startsWith(`${WORKSPACE_ROOT}/`) ? message.path.slice(0, 500) : undefined;
-          views.push({
-            at: Date.now(), browserHash: browser.secretHash, view: String(message.view ?? "").slice(0, 20),
-            ...(path ? { path } : {}), ...(typeof message.kind === "string" ? { kind: message.kind.slice(0, 10) } : {}),
-          });
-          await this.state.storage.put("browser_views", views.slice(-MAX_BROWSER_VIEWS));
-          return;
-        }
+          return this.receiveBoardError(browser, String(message.id ?? ""), String(message.error ?? ""), this.stalePage(ws));
         case "unpair":
           return this.unpairBrowsers([browser.secretHash]);
-        case "launch":
-          return send({ type: "launch", id, url: await this.launchTakeover(String(message.kind ?? ""), browser) });
-        case "list":
-          return send({ type: "list", id, ...(await this.workspaceList(String(message.path ?? ""))) });
-        case "read":
-          return send({ type: "file", id, ...(await this.workspaceRead(String(message.path ?? ""))) });
+        case "open":
+          return send({ type: "opened", id, ...(await this.openAccess(browser, String(message.board_id ?? ""), String(message.key ?? ""))) });
+        case "read": {
+          const path = String(message.path ?? "");
+          await this.boardFile(browser, String(message.board_id ?? ""), path, ["Document"]);
+          return send({ type: "file", id, ...(await this.workspaceRead(path)) });
+        }
       }
     } catch (error) {
-      send({ type: "error", id, error: errorMessage(error) });
+      send({ type: "error", id, error: errorMessage(error), ...(error instanceof SandboxAsleepError ? { asleep: true } : {}) });
     }
   }
 
@@ -2432,44 +2477,15 @@ export class VoiceSession {
     await this.state.storage.put("paired_browsers", browsers);
   }
 
-  private feedPush(role: FeedEntry["role"], text: string, extra: Partial<FeedEntry> = {}): void {
-    if (!text.trim()) return;
-    const entry: FeedEntry = { id: ++this.feedSeq, at: Date.now(), role, text: text.slice(0, 4000), ...extra };
-    this.feed.push(entry);
-    if (this.feed.length > MAX_FEED_ENTRIES) this.feed = this.feed.slice(-MAX_FEED_ENTRIES);
-    this.feedChanged(entry.id);
+  // Open pages joined to a Display.
+  private async displayPages(display: string): Promise<WebSocket[]> {
+    const members = new Set((await this.pairedBrowsers()).filter((item) => item.display === display).map((item) => item.secretHash));
+    return this.connectedBrowsers().filter((ws) => members.has(attachedHash(ws) ?? ""));
   }
 
-  // Transcript deltas grow the latest entry while the same party keeps talking.
-  private feedSpeech(role: "caller" | "voice", delta: string): void {
-    const last = this.feed.at(-1);
-    if (last && last.role === role && !last.lane) {
-      last.text = (last.text + delta).slice(-4000);
-      this.feedChanged(last.id);
-    } else {
-      this.feedPush(role, delta);
-    }
-  }
-
-  private feedChanged(id: number): void {
-    this.feedDirty.add(id);
-    if (this.feedTimer) return;
-    if (!this.state.getWebSockets("browser").length) {
-      this.feedDirty.clear();  // nobody to tell; a page that connects later gets a snapshot
-      return;
-    }
-    this.feedTimer = setTimeout(() => {
-      this.feedTimer = null;
-      const entries = this.feed.filter((entry) => this.feedDirty.has(entry.id));
-      this.feedDirty.clear();
-      if (entries.length) this.broadcastBrowsers({ type: "feed", entries });
-    }, 300);
-  }
-
-  private broadcastBrowsers(value: unknown): void {
+  private async broadcastDisplay(display: string, value: unknown): Promise<void> {
     const message = JSON.stringify(value);
-    for (const ws of this.state.getWebSockets("browser")) {
-      if (!(ws.deserializeAttachment() as { secretHash?: string } | null)?.secretHash) continue;
+    for (const ws of await this.displayPages(display)) {
       try {
         ws.send(message);
       } catch {
@@ -2478,68 +2494,92 @@ export class VoiceSession {
     }
   }
 
-  private async pairedRequest(request: Request): Promise<boolean> {
+  private async pairedRequest(request: Request): Promise<PairedBrowser | undefined> {
     const secretHash = await sha256Hex(request.headers.get("x-dogwalk-secret") ?? "");
-    return (await this.pairedBrowsers()).some((item) => item.secretHash === secretHash);
+    return (await this.pairedBrowsers()).find((item) => item.secretHash === secretHash);
   }
 
-  // A file's bytes for the page's media viewers, streamed from the toolbox. The credential arrives
-  // in a header (the page fetches into a blob URL), never in the URL. as=image, or a name with an
-  // image extension, reads the file as an image: capped, sniffed, and served with the type its
-  // bytes prove. Whiteboard images come from /pair/asset instead, never from here.
+  // Whether the Sandbox is running, asked of Daytona (briefly cached) without waking it.
+  private async sandboxRunning(): Promise<boolean> {
+    const sandboxId = this.sandboxId ?? this.attachedSandboxId;
+    if (!sandboxId) return false;
+    const cached = this.sandboxRunningCheck;
+    if (cached && Date.now() - cached.at < 15_000) return cached.running;
+    const sandbox = await this.daytona<{ state?: string }>(`/sandbox/${encodeURIComponent(sandboxId)}`).catch(() => null);
+    const running = sandbox?.state === "started";
+    this.sandboxRunningCheck = { at: Date.now(), running };
+    return running;
+  }
+
+  private async requireRunningSandbox(): Promise<void> {
+    if (!(await this.sandboxRunning())) throw new SandboxAsleepError();
+  }
+
+  // A browser reads only files a board on its own Display names, and only while the Sandbox runs.
+  private async boardFile(browser: PairedBrowser, boardId: string, path: string, components: string[]): Promise<Board> {
+    const board = (await this.boards()).find((item) => item.id === boardId && item.display === browser.display);
+    if (!board || !boardElements(board.program).some((item) => components.includes(item.component) && item.target === path)) {
+      throw new WorkspaceFileError(404, "no board on this display shows that file");
+    }
+    if (board.failed?.[path]) throw new WorkspaceFileError(404, board.failed[path]);
+    await this.requireRunningSandbox();
+    return board;
+  }
+
+  // A file's bytes for a board's images, Documents, and Downloads, streamed from the toolbox.
+  // The credential arrives in a header (the page fetches into a blob URL), never in the URL.
+  // as=image reads the file as an image: capped, sniffed, and served with the type its bytes
+  // prove. download=1 needs the board's live Download grant.
   private async pairedFile(request: Request, url: URL): Promise<Response> {
-    if (!(await this.pairedRequest(request))) return Response.json({ error: "this pairing has expired" }, { status: 401 });
+    const browser = await this.pairedRequest(request);
+    if (!browser) return Response.json({ error: "this pairing has expired" }, { status: 401 });
     try {
       const requested = (url.searchParams.get("path") ?? "").trim();
+      const download = url.searchParams.get("download") === "1";
+      const asImage = url.searchParams.get("as") === "image";
+      const board = await this.boardFile(browser, url.searchParams.get("board") ?? "",
+        requested, download ? ["Download"] : asImage ? ["Image"] : ["Document"]);
+      if (download) liveGrant(board, `download:${requested}`);
       const name = requested.split("/").pop() || "file";
       const common = {
-        "content-disposition": `inline; filename="${name.replace(/[^\w.\- ]/g, "_")}"`,
+        "content-disposition": `${download ? "attachment" : "inline"}; filename="${name.replace(/[^\w.\- ]/g, "_")}"`,
         "x-content-type-options": "nosniff",
         "cache-control": "private, no-store",
       };
-      if (url.searchParams.get("as") === "image" || IMAGE_NAME.test(requested)) {
-        const { bytes, kind } = await this.readWorkspaceImage(requested, MAX_IMAGE_BYTES);
+      if (asImage) {
+        const { bytes, kind } = await this.readWorkspaceImage(requested, MAX_BOARD_IMAGE_BYTES);
         return new Response(bytes, { headers: { ...common, ...imageHeaders(kind, bytes.length) } });
       }
-      const extension = requested.split("/").pop()?.split(".").slice(1).pop()?.toLowerCase() ?? "";
+      const extension = name.split(".").slice(1).pop()?.toLowerCase() ?? "";
       const { toolbox, headers } = await this.workspaceToolbox();
-      const path = await this.realWorkspacePath(this.workspacePath(requested));
-      const info = await fetch(`${toolbox}/files/info?path=${encodeURIComponent(path)}`, { headers, signal: AbortSignal.timeout(15_000) });
-      if (!info.ok) return Response.json({ error: sandboxFileError(info.status, "find that file") }, { status: info.status === 404 ? 404 : 502 });
-      const stat = await info.json<{ isDir?: boolean; size?: number }>();
-      if (stat.isDir) return Response.json({ error: "that is a directory" }, { status: 400 });
-      if ((stat.size ?? 0) > MAX_MEDIA_BYTES) return Response.json({ error: `that file is too large to show (${stat.size} bytes; at most ${MAX_MEDIA_BYTES})` }, { status: 413 });
-      const download = await fetch(`${toolbox}/files/download?path=${encodeURIComponent(path)}`, { headers });
-      if (!download.ok || !download.body) return Response.json({ error: sandboxFileError(download.status, "read that file") }, { status: 502 });
-      return new Response(download.body, {
+      const { path, size } = await this.workspaceFileInfo(requested);
+      if (!download && size > MAX_MEDIA_BYTES) return Response.json({ error: `that file is too large to show (${size} bytes; at most ${MAX_MEDIA_BYTES})` }, { status: 413 });
+      const body = await fetch(`${toolbox}/files/download?path=${encodeURIComponent(path)}`, { headers });
+      if (!body.ok || !body.body) return Response.json({ error: sandboxFileError(body.status, "read that file") }, { status: 502 });
+      return new Response(body.body, {
         headers: {
           ...common,
-          "content-type": MEDIA_TYPES[extension] ?? "application/octet-stream",
-          ...(stat.size ? { "content-length": String(stat.size) } : {}),
+          "content-type": download ? "application/octet-stream" : MEDIA_TYPES[extension] ?? "application/octet-stream",
+          ...(size ? { "content-length": String(size) } : {}),
           "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'",
         },
       });
     } catch (error) {
+      if (error instanceof SandboxAsleepError) return Response.json({ error: error.message, asleep: true }, { status: 503 });
       return Response.json({ error: errorMessage(error) }, { status: error instanceof WorkspaceFileError ? error.status : 400 });
     }
   }
 
-  // A Board Asset's bytes for the page's Whiteboard images, from storage alone, so a board shows
-  // its images while the Sandbox sleeps. Only a hash some retained board refers to is served,
-  // so the route tells nobody whether other bytes exist. no-store, although the bytes never
-  // change: the page holds each as a blob URL while a board shows it, and a cached copy would
-  // outlive an unpairing on a shared device.
-  private async pairedAsset(request: Request, hash: string): Promise<Response> {
-    if (!(await this.pairedRequest(request))) return Response.json({ error: "this pairing has expired" }, { status: 401 });
-    const boards = await this.state.storage.get<Board[]>("whiteboard_boards") ?? [];
-    const asset = /^[0-9a-f]{64}$/.test(hash) && boards.some((board) => boardAssetHashes(board).includes(hash))
-      ? await this.state.storage.get<StoredAsset>(`board_asset:${hash}`)
-      : undefined;
-    if (!asset) return Response.json({ error: "no board shows that image" }, { status: 404 });
-    const kind = (Object.keys(IMAGE_TYPES) as ImageKind[]).find((item) => IMAGE_TYPES[item] === asset.type) ?? "png";
-    return new Response(asset.bytes, {
-      headers: { "x-content-type-options": "nosniff", "cache-control": "private, no-store", ...imageHeaders(kind, asset.bytes.length) },
-    });
+  // A Workspace file's real path and size: present, inside the Workspace, and not a directory.
+  private async workspaceFileInfo(requested: string): Promise<{ path: string; size: number }> {
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(requested)) throw new WorkspaceFileError(400, "a file is a Workspace path, never a URL");
+    const { toolbox, headers } = await this.workspaceToolbox();
+    const path = await this.realWorkspacePath(this.workspacePath(requested));
+    const info = await fetch(`${toolbox}/files/info?path=${encodeURIComponent(path)}`, { headers, signal: AbortSignal.timeout(15_000) });
+    if (!info.ok) throw new WorkspaceFileError(info.status === 404 ? 404 : 502, sandboxFileError(info.status, "find that file"));
+    const stat = await info.json<{ isDir?: boolean; size?: number }>();
+    if (stat.isDir) throw new WorkspaceFileError(400, "that is a directory");
+    return { path, size: stat.size ?? 0 };
   }
 
   // A Workspace image's bytes through every check: never a URL, a real path inside the Workspace,
@@ -2550,12 +2590,8 @@ export class VoiceSession {
     const extension = requested.split("/").pop()?.split(".").slice(1).pop()?.toLowerCase() ?? "";
     const named = Object.hasOwn(IMAGE_KINDS, extension) ? IMAGE_KINDS[extension] : null;
     const { toolbox, headers } = await this.workspaceToolbox();
-    const path = await this.realWorkspacePath(this.workspacePath(requested));
-    const info = await fetch(`${toolbox}/files/info?path=${encodeURIComponent(path)}`, { headers, signal: AbortSignal.timeout(15_000) });
-    if (!info.ok) throw new WorkspaceFileError(info.status === 404 ? 404 : 502, sandboxFileError(info.status, "find that file"));
-    const stat = await info.json<{ isDir?: boolean; size?: number }>();
-    if (stat.isDir) throw new WorkspaceFileError(400, "that is a directory");
-    if ((stat.size ?? 0) > cap) throw new WorkspaceFileError(413, `that image is too large (${stat.size} bytes; at most ${cap})`);
+    const { path, size } = await this.workspaceFileInfo(requested);
+    if (size > cap) throw new WorkspaceFileError(413, `that image is too large (${size} bytes; at most ${cap})`);
     const download = await fetch(`${toolbox}/files/download?path=${encodeURIComponent(path)}`, { headers, signal: AbortSignal.timeout(30_000) });
     if (!download.ok || !download.body) throw new WorkspaceFileError(502, sandboxFileError(download.status, "read that file"));
     const bytes = await readCapped(download.body, cap);
@@ -2568,129 +2604,146 @@ export class VoiceSession {
     return { bytes, kind };
   }
 
-  private pairedStatus(): Record<string, unknown> {
-    return {
-      type: "status",
-      at: Date.now(),
-      sandbox: { agent_ready: this.agentReady, call_attached: this.liveAttached },
-      sessions: Array.from(this.sessions.values()).slice(-30).map((session) => this.publicSession(session)),
-      pending_permissions: Array.from(this.permissions.values()).map((item) => ({ alias: item.alias, title: item.title })),
-    };
-  }
-
-  // Throttled push of the projection to authenticated browsers; free when none are connected.
-  private schedulePairedStatus(): void {
-    if (this.pairedStatusTimer || !this.state.getWebSockets("browser").length) return;
-    this.pairedStatusTimer = setTimeout(() => {
-      this.pairedStatusTimer = null;
-      this.broadcastBrowsers(this.pairedStatus());
-    }, 500);
-  }
-
-  // A terminal gets a one-time ticket for its new tab (the fragment of the URL, so it never
-  // reaches a server log); a desktop starts computer use and gets a signed noVNC URL whose
-  // lifetime caps the session, since Daytona closes its sockets about a minute after expiry.
-  private async launchTakeover(kind: string, browser: PairedBrowser): Promise<string> {
-    if (!this.identityHash) throw new Error("this pairing cannot launch anything");
-    if (kind === "terminal") {
+  // Opening an Access Element: a credential for this browser alone, bounded by the grant, and
+  // only while the Sandbox runs (nothing on a Whiteboard wakes it).
+  private async openAccess(browser: PairedBrowser, boardId: string, key: string): Promise<Record<string, unknown>> {
+    if (!this.identityHash) throw new Error("this pairing cannot open anything");
+    const board = (await this.boards()).find((item) => item.id === boardId && item.display === browser.display);
+    if (!board) throw new Error("that board is no longer on this display");
+    const grant = liveGrant(board, key);
+    await this.requireRunningSandbox();
+    const sandboxId = (this.sandboxId ?? this.attachedSandboxId)!;
+    const grantId = `${board.id}:${key}`;
+    const remainingSeconds = Math.floor((grant.expires_at - Date.now()) / 1000);
+    await this.record("access.opened", { kind: grant.kind, device: browser.device, display: browser.display });
+    if (grant.kind === "terminal") {
       const secret = newBrowserSecret();
-      const tickets = (await this.state.storage.get<TakeoverTicket[]>("takeover_tickets") ?? []).filter((item) => item.expiresAt > Date.now());
-      tickets.push({ hash: await sha256Hex(secret), browserHash: browser.secretHash, expiresAt: Date.now() + TAKEOVER_TICKET_MS });
-      await this.state.storage.put("takeover_tickets", tickets.slice(-10));
-      await this.record("takeover.terminal.launched", { device: browser.device });
-      return `${this.env.PUBLIC_ORIGIN ?? "https://dogwalk.tools"}/pair/terminal#t=${this.identityHash}.${secret}`;
+      const tickets = (await this.state.storage.get<TerminalTicket[]>("terminal_tickets") ?? []).filter((item) => item.expiresAt > Date.now());
+      tickets.push({ hash: await sha256Hex(secret), grant: grantId, session: grant.target || "main", expiresAt: Date.now() + TERMINAL_TICKET_MS });
+      await this.state.storage.put("terminal_tickets", tickets.slice(-20));
+      return { url: `${this.env.PUBLIC_ORIGIN ?? "https://dogwalk.tools"}/pair/terminal#t=${this.identityHash}.${secret}` };
     }
-    if (kind === "desktop") {
-      const { toolbox, headers } = await this.workspaceToolbox();
-      const started = await fetch(`${toolbox}/computeruse/start`, { method: "POST", headers, signal: AbortSignal.timeout(30_000) })
-        .catch((error) => { throw new Error(`the desktop did not start (${errorMessage(error)})`); });
-      if (!started.ok) {
-        throw new Error(started.status === 503 ? "the desktop is not installed on this sandbox yet" : `the desktop did not start (${started.status})`);
+    if (grant.kind === "desktop" || grant.kind === "preview") {
+      const port = grant.kind === "desktop" ? DESKTOP_PORT : Number(grant.target);
+      if (grant.kind === "desktop") {
+        const { toolbox, headers } = await this.workspaceToolbox();
+        const started = await fetch(`${toolbox}/computeruse/start`, { method: "POST", headers, signal: AbortSignal.timeout(30_000) })
+          .catch((error) => { throw new Error(`the desktop did not start (${errorMessage(error)})`); });
+        if (!started.ok) {
+          throw new Error(started.status === 503 ? "the desktop is not installed on this sandbox yet" : `the desktop did not start (${started.status})`);
+        }
       }
-      const seconds = Math.max(60, Math.min(DESKTOP_LINK_MAX_SECONDS, Math.floor((browser.createdAt + PAIRED_MAX_MS - Date.now()) / 1000)));
+      // Daytona closes a signed link's sockets about a minute after it expires.
+      const seconds = Math.max(60, Math.min(remainingSeconds, 24 * 3600));
       const signed = await this.daytona<{ url: string; token: string }>(
-        `/sandbox/${encodeURIComponent(this.sandboxId!)}/ports/${DESKTOP_PORT}/signed-preview-url?expiresInSeconds=${seconds}`,
+        `/sandbox/${encodeURIComponent(sandboxId)}/ports/${port}/signed-preview-url?expiresInSeconds=${seconds}`,
       );
-      const links = (await this.state.storage.get<DesktopLink[]>("desktop_links") ?? []).filter((item) => item.expiresAt > Date.now());
-      links.push({ token: signed.token, browserHash: browser.secretHash, expiresAt: Date.now() + seconds * 1000 });
-      await this.state.storage.put("desktop_links", links);
-      await this.record("takeover.desktop.launched", { device: browser.device, seconds });
-      return `${signed.url.replace(/\/$/, "")}/vnc.html?autoconnect=1&resize=scale&path=websockify`;
+      const links = (await this.state.storage.get<SignedLink[]>("signed_links") ?? []).filter((item) => item.expiresAt > Date.now());
+      links.push({ token: signed.token, grant: grantId, port, expiresAt: Date.now() + seconds * 1000 });
+      await this.state.storage.put("signed_links", links);
+      const base = signed.url.replace(/\/$/, "");
+      return { url: grant.kind === "desktop" ? `${base}/vnc.html?autoconnect=1&resize=scale&path=websockify` : base };
     }
-    throw new Error(`unknown takeover ${kind}; choose terminal or desktop`);
+    if (grant.kind === "ssh") {
+      const minutes = Math.max(1, Math.floor(remainingSeconds / 60));
+      const access = await this.daytona<{ token: string; sshCommand: string }>(
+        `/sandbox/${encodeURIComponent(sandboxId)}/ssh-access?expiresInMinutes=${minutes}`, "POST",
+      );
+      const tokens = (await this.state.storage.get<SshToken[]>("ssh_tokens") ?? []).filter((item) => item.expiresAt > Date.now());
+      tokens.push({ token: access.token, grant: grantId, expiresAt: Date.now() + minutes * 60_000 });
+      await this.state.storage.put("ssh_tokens", tokens);
+      return { ssh: { command: access.sshCommand, expires_at: Date.now() + minutes * 60_000 } };
+    }
+    throw new Error("a download opens from its button");
   }
 
-  // The TerminalRelay's check: a ticket (once) or a terminal token, from a browser still paired.
-  private async redeemTakeover(request: Request): Promise<Response> {
+  // The TerminalRelay's check: a ticket (once) or a terminal token, under a grant still live.
+  private async redeemTerminal(request: Request): Promise<Response> {
     const body = await request.json<{ ticket?: string | null; token?: string | null }>().catch(() => ({ ticket: null, token: null }));
-    const browsers = await this.pairedBrowsers();
     const secretOf = (credential: string | null | undefined) => {
       const [identity, secret] = String(credential ?? "").split(".");
       return identity === this.identityHash && secret ? secret : null;
     };
-    let browserHash: string | null = null;
+    let found: TerminalToken | null = null;
     let token: string | null = null;
     const ticketSecret = secretOf(body.ticket);
     const tokenSecret = secretOf(body.token);
     if (ticketSecret) {
       const hash = await sha256Hex(ticketSecret);
-      const tickets = await this.state.storage.get<TakeoverTicket[]>("takeover_tickets") ?? [];
+      const tickets = await this.state.storage.get<TerminalTicket[]>("terminal_tickets") ?? [];
       const ticket = tickets.find((item) => item.hash === hash && item.expiresAt > Date.now());
-      await this.state.storage.put("takeover_tickets", tickets.filter((item) => item !== ticket && item.expiresAt > Date.now()));
+      await this.state.storage.put("terminal_tickets", tickets.filter((item) => item !== ticket && item.expiresAt > Date.now()));
       if (ticket) {
         const secret = newBrowserSecret();
-        const tokens = await this.state.storage.get<TakeoverToken[]>("takeover_tokens") ?? [];
-        tokens.push({ hash: await sha256Hex(secret), browserHash: ticket.browserHash, createdAt: Date.now() });
-        await this.state.storage.put("takeover_tokens", tokens.slice(-20));
-        browserHash = ticket.browserHash;
-        token = `${this.identityHash}.${secret}`;
+        const grant = this.grantById(await this.boards(), ticket.grant);
+        if (grant) {
+          found = { hash: await sha256Hex(secret), grant: ticket.grant, session: ticket.session, expiresAt: grant.expires_at };
+          const tokens = (await this.state.storage.get<TerminalToken[]>("terminal_tokens") ?? []).filter((item) => item.expiresAt > Date.now());
+          tokens.push(found);
+          await this.state.storage.put("terminal_tokens", tokens.slice(-20));
+          token = `${this.identityHash}.${secret}`;
+        }
       }
     } else if (tokenSecret) {
       const hash = await sha256Hex(tokenSecret);
-      const found = (await this.state.storage.get<TakeoverToken[]>("takeover_tokens") ?? []).find((item) => item.hash === hash);
-      if (found) {
-        browserHash = found.browserHash;
-        token = body.token ?? null;
-      }
+      found = (await this.state.storage.get<TerminalToken[]>("terminal_tokens") ?? []).find((item) => item.hash === hash) ?? null;
+      token = found ? body.token ?? null : null;
     }
-    const browser = browsers.find((item) => item.secretHash === browserHash);
+    const live = found ? this.grantById(await this.boards(), found.grant) : null;
     const sandboxId = this.sandboxId ?? this.attachedSandboxId;
-    if (!browser || !token || !sandboxId) return Response.json({ error: "this terminal link has expired" }, { status: 401 });
-    return Response.json({ token, browserHash, sandboxId, expiresAt: browser.createdAt + PAIRED_MAX_MS });
+    if (!found || !live || !token || !sandboxId) return Response.json({ error: "this terminal link has expired" }, { status: 401 });
+    return Response.json({ token, grant: found.grant, session: found.session, sandboxId, expiresAt: live.expires_at });
   }
 
-  // End everything these browsers launched: terminals close now, desktop links are expired,
-  // and computer use stops once no link remains.
-  private async revokeTakeovers(browserHashes: string[]): Promise<void> {
-    if (!browserHashes.length) return;
-    const gone = (item: { browserHash: string }) => browserHashes.includes(item.browserHash);
-    const tickets = await this.state.storage.get<TakeoverTicket[]>("takeover_tickets") ?? [];
-    const tokens = await this.state.storage.get<TakeoverToken[]>("takeover_tokens") ?? [];
-    const links = await this.state.storage.get<DesktopLink[]>("desktop_links") ?? [];
+  // A grant by "<board id>:<key>", if it is still live.
+  private grantById(boards: Board[], id: string): AccessGrant | null {
+    const split = id.indexOf(":");
+    const board = boards.find((item) => item.id === id.slice(0, split));
+    const grant = board?.access?.[id.slice(split + 1)];
+    return grant && !grant.revoked && grant.expires_at > Date.now() ? grant : null;
+  }
+
+  // End every credential minted under these grants: terminals close now, signed links are
+  // expired, SSH tokens revoked, and computer use stops once no desktop link remains.
+  private async revokeGrants(ids: string[]): Promise<void> {
+    if (!ids.length) return;
+    const gone = (item: { grant: string }) => ids.includes(item.grant);
+    const now = Date.now();
+    const tickets = await this.state.storage.get<TerminalTicket[]>("terminal_tickets") ?? [];
+    const tokens = await this.state.storage.get<TerminalToken[]>("terminal_tokens") ?? [];
+    const links = await this.state.storage.get<SignedLink[]>("signed_links") ?? [];
+    const ssh = await this.state.storage.get<SshToken[]>("ssh_tokens") ?? [];
     await this.state.storage.put({
-      takeover_tickets: tickets.filter((item) => !gone(item)),
-      takeover_tokens: tokens.filter((item) => !gone(item)),
-      desktop_links: links.filter((item) => !gone(item) && item.expiresAt > Date.now()),
+      terminal_tickets: tickets.filter((item) => !gone(item) && item.expiresAt > now),
+      terminal_tokens: tokens.filter((item) => !gone(item) && item.expiresAt > now),
+      signed_links: links.filter((item) => !gone(item) && item.expiresAt > now),
+      ssh_tokens: ssh.filter((item) => !gone(item) && item.expiresAt > now),
     });
-    if (this.identityHash) {
+    if (this.identityHash && tokens.some(gone)) {
       const relay = this.env.TERMINAL_RELAYS.get(this.env.TERMINAL_RELAYS.idFromName(this.identityHash));
       await relay.fetch("https://terminal-relay/revoke", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ browserHashes }),
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grants: ids }),
       }).catch(() => undefined);
     }
-    const revoked = links.filter(gone);
     const sandboxId = this.sandboxId ?? this.attachedSandboxId;
-    if (!revoked.length || !sandboxId) return;
-    for (const link of revoked) {
-      await this.daytona(`/sandbox/${encodeURIComponent(sandboxId)}/ports/${DESKTOP_PORT}/signed-preview-url/${encodeURIComponent(link.token)}/expire`, "POST")
-        .catch(() => undefined);
+    const revokedLinks = links.filter((item) => gone(item) && item.expiresAt > now);
+    const revokedSsh = ssh.filter((item) => gone(item) && item.expiresAt > now);
+    if (sandboxId) {
+      const sandbox = encodeURIComponent(sandboxId);
+      for (const link of revokedLinks) {
+        await this.daytona(`/sandbox/${sandbox}/ports/${link.port}/signed-preview-url/${encodeURIComponent(link.token)}/expire`, "POST").catch(() => undefined);
+      }
+      for (const item of revokedSsh) {
+        await this.daytona(`/sandbox/${sandbox}/ssh-access?token=${encodeURIComponent(item.token)}`, "DELETE").catch(() => undefined);
+      }
+      // Expiry closes Daytona's sockets only on a best-effort basis; stopping the desktop is certain.
+      if (revokedLinks.some((item) => item.port === DESKTOP_PORT)
+        && !links.some((item) => !gone(item) && item.port === DESKTOP_PORT && item.expiresAt > now)) {
+        const { toolbox, headers } = await this.workspaceToolbox().catch(() => ({ toolbox: "", headers: {} }));
+        if (toolbox) await fetch(`${toolbox}/computeruse/stop`, { method: "POST", headers }).catch(() => undefined);
+      }
     }
-    // Expiry closes Daytona's sockets only on a best-effort basis; stopping the desktop is certain.
-    if (!links.some((item) => !gone(item) && item.expiresAt > Date.now())) {
-      const { toolbox, headers } = await this.workspaceToolbox().catch(() => ({ toolbox: "", headers: {} }));
-      if (toolbox) await fetch(`${toolbox}/computeruse/stop`, { method: "POST", headers }).catch(() => undefined);
-    }
-    await this.record("takeover.revoked", { browsers: browserHashes.length, desktop_links: revoked.length });
+    await this.record("access.revoked", { grants: ids.length, links: revokedLinks.length, ssh: revokedSsh.length });
   }
 
   // Paths resolve under the Workspace root; ".." cannot climb out of it.
@@ -2724,20 +2777,6 @@ export class VoiceSession {
     } catch (error) {
       throw new Error(`the sandbox is unavailable (${errorMessage(error)})`);
     }
-  }
-
-  private async workspaceList(input: string): Promise<Record<string, unknown>> {
-    const path = this.workspacePath(input || WORKSPACE_ROOT);
-    const { toolbox, headers } = await this.workspaceToolbox();
-    const response = await fetch(`${toolbox}/files?path=${encodeURIComponent(path)}`, { headers, signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) throw new Error(sandboxFileError(response.status, "list that directory"));
-    const files = await response.json<Array<{ name: string; isDir?: boolean; size?: number; modTime?: string }>>();
-    const entries = files
-      .filter((file) => file.name !== "." && file.name !== "..")
-      .map((file) => ({ name: file.name, dir: Boolean(file.isDir), size: file.size ?? 0, modified: file.modTime ?? "" }))
-      .sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name))
-      .slice(0, 500);
-    return { path, entries };
   }
 
   private async workspaceRead(input: string): Promise<Record<string, unknown>> {
@@ -2778,13 +2817,13 @@ export class VoiceSession {
           } catch {
             // kept as written
           }
-          const { bytes, kind } = await this.readWorkspaceImage(name.startsWith("/") ? name : `${directory}/${name}`, MAX_ASSET_BYTES);
+          const { bytes, kind } = await this.readWorkspaceImage(name.startsWith("/") ? name : `${directory}/${name}`, MAX_BOARD_IMAGE_BYTES);
           total += bytes.length;
           if (total > MAX_REPORT_IMAGE_BYTES) throw new Error(`the report's images pass ${megabytes(MAX_REPORT_IMAGE_BYTES)} together`);
           element.setAttribute("src", `data:${IMAGE_TYPES[kind]};base64,${bytesToBase64(bytes)}`);
           element.removeAttribute("srcset");
         } catch (error) {
-          const reason = error instanceof WorkspaceFileError && error.status === 413 ? `larger than ${megabytes(MAX_ASSET_BYTES)}` : errorMessage(error);
+          const reason = error instanceof WorkspaceFileError && error.status === 413 ? `larger than ${megabytes(MAX_BOARD_IMAGE_BYTES)}` : errorMessage(error);
           const alt = element.getAttribute("alt");
           element.setAttribute("alt", `${alt ? `${alt} ` : ""}(image not shown: ${reason})`);
         }
@@ -2852,7 +2891,6 @@ export class VoiceSession {
   private appendTranscript(role: TranscriptEntry["role"], message: Record<string, any>): void {
     const delta = String(message.delta ?? "");
     if (!delta) return;
-    this.feedSpeech(role, delta);
     const startMs = Number(message.start_ms ?? 0);
     this.heard.push({ role, text: delta, startMs, taken: false });
     if (this.heard.length > 1000) this.heard = this.heard.slice(-1000);
@@ -2961,7 +2999,6 @@ export class VoiceSession {
   }
 
   private async orchestratorEvent(text: string): Promise<void> {
-    this.feedPush("system", text.replace(/^\[harness event\] /, ""), { lane: "event" });
     this.orchestratorQueue.push(text);
     this.timing("orchestrator.queued", { queued_events: this.orchestratorQueue.length, chars: text.length });
     await this.state.storage.put("orchestrator_queue", this.orchestratorQueue);
@@ -3181,7 +3218,6 @@ export class VoiceSession {
     versions.push(version);
     this.memory = version;
     await this.state.storage.put({ orchestrator_memory: version, orchestrator_memory_versions: versions.slice(-MAX_MEMORY_VERSIONS) });
-    this.broadcastBrowsers({ type: "memory", memory: version });
     return version;
   }
 
@@ -3353,13 +3389,19 @@ export class VoiceSession {
           result = await this.startRecording(Number(args.max_seconds ?? 300));
           break;
         case "draw_on_whiteboard":
-          result = await this.drawOnWhiteboard(requiredString(args, "program"), args.note);
-          break;
-        case "show_in_browser":
-          result = await this.showInBrowser(requiredString(args, "uri"), args.note);
+          result = await this.drawOnWhiteboard(requiredString(args, "program"), args.note, args.display, args.access_minutes);
           break;
         case "pair_browser":
-          result = await this.createPairingCode();
+          result = await this.createPairingCode(args.display);
+          break;
+        case "rename_display":
+          result = await this.renameDisplay(requiredString(args, "display"), requiredString(args, "new_name"));
+          break;
+        case "unpair_display":
+          result = await this.unpairDisplay(requiredString(args, "display"));
+          break;
+        case "revoke_access":
+          result = await this.revokeAccess(requiredString(args, "display"));
           break;
         case "restart_sandbox":
           if (!this.sandboxId) throw new Error("no sandbox is assigned to this call");
@@ -3602,7 +3644,6 @@ export class VoiceSession {
     const previous = this.followSession(session);
     this.follow!.narrationOpen = true;
     // The Orchestrator writes the full engineering brief; it goes to the Agent unwrapped.
-    this.feedPush("orchestrator", prompt, { lane: "prompt", who: session.alias });
     let ambiguous = false;
     try {
       await this.agentFetch("POST", `/api/session/${encodeURIComponent(session.agentSessionId)}/prompt`, { text: prompt }, { parent: turnTrace });
@@ -3661,7 +3702,6 @@ export class VoiceSession {
     // Prompt Turn (its execution.started makes the check stale), and a Redirect sends no
     // interrupt, which would only stop the work it just started.
     const ended = this.endedExecutions.has(session.id);
-    this.feedPush("orchestrator", guidance, { lane: "steer", who: session.alias });
     const steer: Steer = { sessionId: session.id, when, guidance, inboxId: null };
     this.steers.push(steer);
     let admitted: Record<string, any>;
@@ -3791,8 +3831,6 @@ export class VoiceSession {
       return;
     }
     session.turnState = "stopped";
-    if (session.unsaid.trim()) this.feedPush("agent", session.unsaid.trim(), { who: session.alias, lane: "report" });
-    this.feedPush("system", `${session.alias}'s turn ended (${outcome})`, { lane: "event" });
     await this.persistSessions();
     await this.record("agent.turn.stopped", lifecycle);
     const ending = turnEnding(outcome);
@@ -4518,7 +4556,6 @@ export class VoiceSession {
       const remark = speakableRemark(session.unsaid);
       session.unsaid = "";
       if (remark) {
-        this.feedPush("agent", remark, { who: session.alias });
         session.remark = remark;
         this.beat(session, `${session.alias} says: "${remark}"`, "progress_remark");
       }
@@ -4538,7 +4575,6 @@ export class VoiceSession {
     }
     if (call.status === "completed" || call.status === "failed" || call.status === "interrupted") {
       call.endedAt = Date.now();
-      this.feedPush("agent", `${call.title || call.kind} (${call.status})`, { who: session.alias, lane: "tool" });
     }
     if (call.status === "in_progress") this.toolCallStarted(session, call);
     if (call.status === "failed") this.toolCallFailed(session);
@@ -4800,9 +4836,6 @@ export class VoiceSession {
     const lane = /^session\.(thinking|commentary|instructions)\.append$/.exec(String(outgoing.type ?? ""))?.[1];
     const content = lane && typeof outgoing.content === "string"
       ? { content_text: outgoing.content, content_kind: lane === "commentary" ? "say" : lane === "thinking" ? "brief" : "instructions" } : {};
-    if (lane && typeof outgoing.content === "string") {
-      this.feedPush("orchestrator", outgoing.content, { lane: lane === "commentary" ? "say" : lane });
-    }
     // Appends wait out a playing clip and the keypad menu, so speech never talks over either.
     if ((this.fixture || this.menu) && String((message as { type?: string }).type ?? "").endsWith(".append")) {
       this.timing("live.held", { type: outgoing.type, event_id: eventId, fixture: Boolean(this.fixture), menu: Boolean(this.menu),
@@ -4904,7 +4937,6 @@ export class VoiceSession {
 
   private async persistSessions(): Promise<void> {
     await this.state.storage.put("managed_sessions", Array.from(this.sessions.values()));
-    this.schedulePairedStatus();
   }
 
   private async resetSandboxProjection(): Promise<void> {
@@ -4918,10 +4950,9 @@ export class VoiceSession {
     this.follow = null;
     this.orchestratorQueue = [];
     this.orchestratorContext = [];
-    const browsers = await this.state.storage.get<PairedBrowser[]>("paired_browsers") ?? [];
-    await this.revokeTakeovers(browsers.map((item) => item.secretHash)).catch(() => undefined);
-    await this.collectBoardAssets([]);
-    await this.state.storage.delete(["managed_sessions", "orchestrator_queue", "orchestrator_context", "paired_browsers", "whiteboard_boards", "board_assets", "browser_views"]);
+    await this.revokeGrants(grantIds(await this.boards())).catch(() => undefined);
+    await this.state.storage.delete(["managed_sessions", "orchestrator_queue", "orchestrator_context", "paired_browsers",
+      "whiteboard_boards", "displays_open", "terminal_tickets", "terminal_tokens", "signed_links", "ssh_tokens"]);
     // A replaced Sandbox is a different Workspace: browsers paired to the old one are revoked.
     for (const ws of this.state.getWebSockets("browser")) ws.close(4001, "sandbox replaced");
   }
@@ -4962,7 +4993,6 @@ export class VoiceSession {
     }
     await this.persistSessions();
     await this.record("agent.disconnected", { reason, ...(termination ? { agent_termination: termination, failed_turns: failedTurns } : {}) });
-    if (sentence) this.feedPush("system", sentence, { lane: "event" });
     // The call survives without its Agent Connection: reconnect in the background while someone
     // is on the line. Between calls the object is left free to be evicted (deploy.py relies on
     // it); eviction no longer interrupts Agent work, and the next connection catches up on it.
@@ -5086,7 +5116,7 @@ export class VoiceSession {
     }
   }
 
-  private async daytona<T>(path: string, method: "GET" | "POST" = "GET"): Promise<T> {
+  private async daytona<T>(path: string, method: "GET" | "POST" | "DELETE" = "GET"): Promise<T> {
     const base = (this.env.DAYTONA_API_BASE ?? "https://app.daytona.io/api").replace(/\/$/, "");
     const response = await fetch(`${base}${path}`, {
       method,
@@ -5094,7 +5124,8 @@ export class VoiceSession {
       signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) throw new Error(`Daytona ${response.status}: ${(await response.text()).slice(0, 200)}`);
-    return response.json<T>();
+    const text = await response.text();
+    return (text ? JSON.parse(text) : undefined) as T;
   }
 
   /**
@@ -5153,7 +5184,6 @@ export class VoiceSession {
   private async record(event: string, detail: Record<string, unknown>,
     scope = { callSid: this.callSid, liveSessionId: this.liveSessionId }): Promise<void> {
     // Most changes a paired browser shows (call, Agent Connection, permissions) are recorded.
-    this.schedulePairedStatus();
     if (!scope.callSid || !this.phone) return;
     const tsMs = Date.now();
     const now = Math.floor(tsMs / 1000);
@@ -5216,7 +5246,6 @@ async function readCapped(body: ReadableStream<Uint8Array>, cap: number): Promis
   return bytes;
 }
 
-const IMAGE_NAME = /\.(?:png|jpe?g|gif|webp|svg)$/i;
 
 // Image bytes served on our origin: an SVG opened alone runs nothing and loads nothing.
 function imageHeaders(kind: ImageKind, length: number): Record<string, string> {
@@ -5227,8 +5256,51 @@ function imageHeaders(kind: ImageKind, length: number): Record<string, string> {
   };
 }
 
-function boardAssetHashes(board: Board): string[] {
-  return Object.values(board.images ?? {}).flatMap((item) => "hash" in item ? [item.hash] : []);
+// Displays (DOMAIN.md): named by role, pronounceable; a default comes from this list.
+const DEFAULT_DISPLAY_NAMES = ["main", "second", "third", "fourth", "fifth"];
+
+function normalizeDisplayName(input: string): string {
+  const name = input.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 24).trim();
+  if (!name) throw new Error("a display name is a word or two, letters and digits");
+  return name;
+}
+
+function displayNames(browsers: PairedBrowser[]): string[] {
+  return [...new Set(browsers.map((item) => item.display))];
+}
+
+// Displays that had a browser before and have none after.
+function endedDisplays(before: PairedBrowser[], after: PairedBrowser[]): string[] {
+  const left = displayNames(after);
+  return displayNames(before).filter((name) => !left.includes(name));
+}
+
+function browserExpiresAt(browser: PairedBrowser): number {
+  return Math.min(browser.createdAt + PAIRED_MAX_MS, browser.lastSeen + PAIRED_IDLE_MS);
+}
+
+function attachedHash(ws: WebSocket): string | undefined {
+  return (ws.deserializeAttachment() as { secretHash?: string } | null)?.secretHash;
+}
+
+function grantIds(boards: Board[]): string[] {
+  return boards.flatMap((board) => Object.keys(board.access ?? {}).map((key) => `${board.id}:${key}`));
+}
+
+// A board's grant for key, or why it cannot be opened.
+function liveGrant(board: Board, key: string): AccessGrant {
+  const grant = board.access?.[key];
+  if (!grant) throw new Error("this was not granted; ask on the call");
+  if (grant.revoked) throw new Error("this access was revoked; ask on the call to draw it again");
+  if (grant.expires_at <= Date.now()) throw new Error("this access has expired; ask on the call to draw it again");
+  return grant;
+}
+
+// Nothing on a Whiteboard wakes the Sandbox; a call does.
+class SandboxAsleepError extends Error {
+  constructor() {
+    super("The sandbox is asleep; a call wakes it.");
+  }
 }
 
 function megabytes(bytes: number): string {

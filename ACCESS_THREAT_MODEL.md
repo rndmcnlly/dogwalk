@@ -157,17 +157,21 @@ Re-verify these before relying on them; they describe the code at commit
 
 | Path | Triggered by | Lifetime | Outlives the call |
 | --- | --- | --- | --- |
-| Paired Browser | Voice tool plus keypad press (no model can complete it) | 1 h idle, 12 h total | Yes |
-| Human Takeover terminal | Click on the paired page | As long as the pairing; full shell with `sudo` | Yes |
-| Human Takeover desktop | Click on the paired page | Up to 1 h, within the pairing | Yes |
+| Paired Browser (any number, each on a named Display) | Voice tool plus keypad press (no model can complete it) | 1 h idle, 12 h total; shows boards, opens nothing by itself | Yes |
+| Access Grant: Terminal, Desktop, Preview, SSH Access, Download | Drawn on a board during a call; opened by a click on that Display while the Sandbox runs | 1 h default, up to 12 h on request; ends with its Display or `revoke_access`; Terminal and SSH give a full shell with `sudo` | Yes |
 | Invitation | `create_invitation` voice tool | 24 h, single use; `revoke_invitation` exists | Yes |
 | Handle rename | `offer_handles`, `set_handle` | Permanent; old Handle quarantined 90 days | Yes |
 | Re-enrollment | `start_reenrollment`, own enforced check | Permanent | Yes |
 | Anything the Agent writes | An Agent with shell and `sudo` (SSH keys, tokens, tunnels) | Until the Sandbox is replaced | Yes |
 
-The Paired Browser is the largest gap: for up to twelve hours after the call it
-reaches a `sudo` shell, and no voice tool unpairs it. Only the keypad press
-separates it from the model, and anyone holding the handset can press one.
+Access Grants are the largest gap: for up to twelve hours after a call, an
+Access Element drawn during it reaches a `sudo` shell (a Terminal, or SSH Access,
+which works outside any browser and is accepted without a spoken confirmation).
+A grant needs the Voice Agent to draw it, so a model can create one, but only on a
+Display a keypad press admitted, and anyone holding the handset can press one.
+Narrowing it from the previous design: a grant is scoped to one Display and one
+target, has its own expiry, can be revoked by voice (`revoke_access`,
+`unpair_display`), and nothing on a board wakes a sleeping Sandbox.
 
 ### Hangup
 
@@ -180,7 +184,7 @@ separates it from the model, and anyone holding the handset can press one.
 - The Session Orchestrator does not act without a live caller, apart from writing
   the next Opening line (no tools) and finishing a Compaction already in progress.
 - Hangup cannot undo disclosed information, deployments, or other external effects,
-  and does not revoke a Paired Browser, an Invitation, or anything an Agent wrote.
+  and does not revoke a Paired Browser, an Access Grant, an Invitation, or anything an Agent wrote.
 - There is no spoken way to end the group's access short of hanging up, and
   Dogwalk cannot tell that the User left the car while the call stayed connected.
 
@@ -206,7 +210,7 @@ Accepted for one operator-managed deployment whose only Users are invited:
   Roaming. Mitigation is the narrow credential portfolio, not the ceremony.
 - A spoofed Home number admits while Home stays in shadow mode.
 - Anyone admitted to a call, and anyone who can press a key on the handset, can
-  create durable access through the Paired Browser.
+  create durable access through a Paired Browser and the Access Grants drawn on it.
 - An Agent with `sudo` can create durable access, spend the inference budget, and
   likely self-approve Permission Requests. The Sandbox is the trust boundary, and
   everything inside it is trusted equally.
@@ -248,10 +252,10 @@ These are mirrored briefly under Open Questions in `DOMAIN.md`.
 3. What does first-call enrollment establish, and how do Re-enrollment and
    re-invitation avoid becoming weaker side doors?
 4. Which durable-access operations can be separated from ordinary Sandbox work?
-   Candidates: a voice tool to unpair, pairing allowed only on a call whose
-   Identity Check matched, the Paired Browser losing its terminal when the call
-   that created it ends, and the OpenCode service password moved out of the
-   Agent's reach.
+   Candidates: pairing or granting access only on a call whose Identity Check
+   matched, Access Grants ending when the call that drew them ends, and the
+   OpenCode service password moved out of the Agent's reach. (Voice unpairing
+   and revocation exist: `unpair_display`, `revoke_access`.)
 5. What exactly ends on hangup, and should the User have a spoken "end everyone's
    access" short of hanging up?
 6. How does Dogwalk explain connected powers and residual risk by voice, concretely

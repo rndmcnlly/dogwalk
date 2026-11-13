@@ -55,27 +55,59 @@ export function checkRasterSize(bytes: Uint8Array, kind: string): void {
   }
 }
 
-// Tokenize enough of the board grammar to ignore comments and quoted prose. Image
-// Paths can be string literals or references to string-valued statements.
-export function boardImagePaths(program: string): string[] {
-  const tokens = Array.from(program.matchAll(/\/\/[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[A-Za-z_]\w*|[^\s]/g), (match) => match[0])
+// Board elements that name something in the Sandbox: files a board shows (Image, Document) and
+// Access Elements (DOMAIN.md: Access Grant). The kind names the element; the target is its first
+// argument as written (a number as its decimal string, "" when absent), which the page derives the
+// same way, so `${kind}:${target}` keys an Access Grant on both sides.
+export type AccessKind = "terminal" | "desktop" | "preview" | "ssh" | "download";
+export const ACCESS_COMPONENTS: Record<string, AccessKind> = {
+  Terminal: "terminal", Desktop: "desktop", Preview: "preview", SshAccess: "ssh", Download: "download",
+};
+const FILE_COMPONENTS = new Set(["Image", "Document", "Download"]);
+// Desktop and SSH Access have no target: their first argument, if any, is a label.
+const UNTARGETED = new Set(["Desktop", "SshAccess"]);
+
+export interface BoardElement { component: string; target: string }
+
+// Tokenize enough of the board grammar to ignore comments and quoted prose. A target can be a
+// string or number literal, or a reference to a statement holding one.
+export function boardElements(program: string): BoardElement[] {
+  const tokens = Array.from(program.matchAll(/\/\/[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\d+(?:\.\d+)?|[A-Za-z_]\w*|[^\s]/g), (match) => match[0])
     .filter((token) => !token.startsWith("//"));
-  const paths: string[] = [];
+  const elements: BoardElement[] = [];
   const bindings = new Map<string, string>();
   for (let i = 0; i < tokens.length - 2; i++) {
     if (/^[A-Za-z_]\w*$/.test(tokens[i]) && tokens[i + 1] === "=") {
       bindings.set(tokens[i], tokens[i + 3] === "(" ? "" : tokens[i + 2]);
     }
   }
-  for (let i = 0; i < tokens.length - 2; i++) {
-    if (tokens[i] !== "Image" || tokens[i + 1] !== "(") continue;
-    let raw = tokens[i + 2];
+  for (let i = 0; i < tokens.length - 1; i++) {
+    const component = tokens[i];
+    if (tokens[i + 1] !== "(" || !(FILE_COMPONENTS.has(component) || component in ACCESS_COMPONENTS)) continue;
+    if (UNTARGETED.has(component)) {
+      elements.push({ component, target: "" });
+      continue;
+    }
+    let raw = tokens[i + 2] ?? ")";
     const seen = new Set<string>();
     while (bindings.has(raw) && !seen.has(raw)) { seen.add(raw); raw = bindings.get(raw)!; }
-    if (!/^["']/.test(raw)) continue;
-    paths.push(raw.slice(1, -1).replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, escape: string) => escape.length === 5
-      ? String.fromCharCode(parseInt(escape.slice(1), 16))
-      : escape === "n" ? "\n" : escape === "t" ? "\t" : escape === "r" ? "" : escape).trim());
+    if (/^\d/.test(raw)) {
+      elements.push({ component, target: String(Number(raw)) });
+    } else if (/^["']/.test(raw)) {
+      elements.push({ component, target: unquote(raw) });
+    } else if (raw === ")" || raw === ",") {
+      elements.push({ component, target: "" });
+    }
   }
-  return paths;
+  return elements;
+}
+
+function unquote(raw: string): string {
+  return raw.slice(1, -1).replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, escape: string) => escape.length === 5
+    ? String.fromCharCode(parseInt(escape.slice(1), 16))
+    : escape === "n" ? "\n" : escape === "t" ? "\t" : escape === "r" ? "" : escape).trim();
+}
+
+export function boardImagePaths(program: string): string[] {
+  return boardElements(program).filter((item) => item.component === "Image" && item.target).map((item) => item.target);
 }

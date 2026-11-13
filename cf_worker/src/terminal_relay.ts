@@ -1,15 +1,16 @@
-// Human Takeover terminal (DOMAIN.md): relays a full-screen browser terminal to a Daytona PTY.
+// Terminal Access Element (DOMAIN.md: Access Grant, Human Takeover): relays a full-screen
+// browser terminal to a Daytona PTY.
 //
 // One object per Sandbox Assignment identity, separate from VoiceSession: an open terminal
 // holds an outbound WebSocket, which keeps an object in memory, and the VoiceSession should
 // keep hibernating meanwhile. The browser authenticates with a one-time launch ticket (or, on
 // reload, the terminal token it was given), which VoiceSession redeems; no Daytona credential
-// ever reaches the browser. The PTY runs `tmux new -A -s human`, so reconnecting redraws the
-// screen and a TUI such as OpenCode survives a closed tab.
+// ever reaches the browser. Each named terminal has its own PTY running `tmux new -A -s <id>`
+// ("human" for main, "human-<name>" otherwise), so reconnecting redraws the screen and a TUI
+// such as OpenCode survives a closed tab. A terminal closes when its grant expires or is revoked.
 
 import type { Env } from "./types";
 
-const PTY_ID = "human";
 // Close codes the terminal page understands: expired credential, unpaired, sandbox asleep.
 const CLOSE_EXPIRED = 4001;
 const CLOSE_ASLEEP = 4004;
@@ -18,7 +19,9 @@ class SandboxAsleep extends Error {}
 const PTY_PROTOCOL = "X-Daytona-Pty-Exit-Control";
 
 interface Relay {
-  browserHash: string | null;
+  grant: string | null;
+  ptyId: string;
+  expiry: ReturnType<typeof setTimeout> | null;
   upstream: WebSocket | null;
   toolbox: string | null;
   // Diagnostics for Workers Logs: when it attached and how much flowed each way.
@@ -51,7 +54,7 @@ export class TerminalRelay {
       const browser = pair[1];
       browser.accept();
       this.relays.set(browser, {
-        browserHash: null, upstream: null, toolbox: null, attachedAt: 0, bytesOut: 0, bytesIn: 0,
+        grant: null, ptyId: "human", expiry: null, upstream: null, toolbox: null, attachedAt: 0, bytesOut: 0, bytesIn: 0,
         toBrowser: Promise.resolve(), toTerminal: Promise.resolve(),
       });
       browser.addEventListener("message", (event) => {
@@ -62,12 +65,12 @@ export class TerminalRelay {
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
     if (url.pathname === "/revoke" && request.method === "POST") {
-      // VoiceSession: these browsers were unpaired or expired; end their terminals now.
-      const { browserHashes } = await request.json<{ browserHashes: string[] }>();
+      // VoiceSession: these grants were revoked or their Display ended; end their terminals now.
+      const { grants } = await request.json<{ grants: string[] }>();
       for (const [browser, relay] of this.relays) {
-        if (relay.browserHash && browserHashes.includes(relay.browserHash)) {
-          browser.close(4003, "pairing ended");
-          this.drop(browser, "pairing ended");
+        if (relay.grant && grants.includes(relay.grant)) {
+          browser.close(4003, "access revoked");
+          this.drop(browser, "access revoked");
         }
       }
       return new Response(null, { status: 204 });
@@ -89,12 +92,12 @@ export class TerminalRelay {
       return;
     }
     const message = JSON.parse(data) as Record<string, unknown>;
-    if (!relay.browserHash) {
+    if (!relay.grant) {
       if (message.type !== "auth") return this.refuse(browser, "authenticate first");
       return this.authenticate(browser, relay, identity, message);
     }
     if (message.type === "resize" && relay.toolbox) {
-      await this.resize(relay.toolbox, Number(message.cols), Number(message.rows));
+      await this.resize(relay.toolbox, relay.ptyId, Number(message.cols), Number(message.rows));
     } else if (message.type === "ping") {
       browser.send(JSON.stringify({ type: "pong" }));
     }
@@ -111,8 +114,13 @@ export class TerminalRelay {
       console.log("terminal: credential refused", { ticket: Boolean(message.ticket) });
       return this.refuse(browser, "this terminal link has expired");
     }
-    const grant = await redeemed.json<{ token: string; browserHash: string; sandboxId: string; expiresAt: number }>();
-    relay.browserHash = grant.browserHash;
+    const grant = await redeemed.json<{ token: string; grant: string; session: string; sandboxId: string; expiresAt: number }>();
+    relay.grant = grant.grant;
+    relay.ptyId = grant.session === "main" ? "human" : `human-${grant.session}`;
+    relay.expiry = setTimeout(() => {
+      browser.close(CLOSE_EXPIRED, "access expired");
+      this.drop(browser, "access expired");
+    }, Math.max(0, grant.expiresAt - Date.now()));
     browser.send(JSON.stringify({ type: "ready", token: grant.token, expires_at: grant.expiresAt }));
     const cols = clamp(Number(message.cols), 20, 400, 120);
     const rows = clamp(Number(message.rows), 5, 200, 32);
@@ -125,27 +133,27 @@ export class TerminalRelay {
       browser.close(CLOSE_ASLEEP, "sandbox asleep");
       return this.drop(browser, "sandbox asleep");
     }
-    let created = await this.ensurePty(relay.toolbox, cols, rows);
+    let created = await this.ensurePty(relay.toolbox, relay.ptyId, cols, rows);
     try {
       relay.upstream = await this.connect(browser, relay, relay.toolbox);
     } catch (error) {
       if (created) throw error;
       // The listed PTY would not take a connection: replace it.
       console.log("terminal: existing PTY refused a connection; recreating", { message: String((error as Error).message) });
-      await fetch(`${relay.toolbox}/process/pty/${PTY_ID}`, { method: "DELETE", headers: this.auth() });
-      created = await this.ensurePty(relay.toolbox, cols, rows);
+      await fetch(`${relay.toolbox}/process/pty/${relay.ptyId}`, { method: "DELETE", headers: this.auth() });
+      created = await this.ensurePty(relay.toolbox, relay.ptyId, cols, rows);
       relay.upstream = await this.connect(browser, relay, relay.toolbox);
     }
     relay.attachedAt = Date.now();
     console.log("terminal: attached", { created, cols, rows });
     if (created) {
       // A fresh PTY starts a plain shell; hand it to tmux so later connections reattach.
-      relay.upstream.send(new TextEncoder().encode(" command -v tmux >/dev/null && exec tmux new-session -A -s human\r"));
+      relay.upstream.send(new TextEncoder().encode(` command -v tmux >/dev/null && exec tmux new-session -A -s ${relay.ptyId}\r`));
     } else {
       // An existing tmux repaints only on a window change, and the new tab may have the same
       // size as the last one: change it by a row and back, so the screen is redrawn.
-      await this.resize(relay.toolbox, cols, rows - 1);
-      await this.resize(relay.toolbox, cols, rows);
+      await this.resize(relay.toolbox, relay.ptyId, cols, rows - 1);
+      await this.resize(relay.toolbox, relay.ptyId, cols, rows);
     }
   }
 
@@ -163,12 +171,12 @@ export class TerminalRelay {
   // Reuse the PTY when there is one; returns whether a new one was created. Daytona reports a
   // PTY with no client connected as active: false even though its processes (and tmux) live
   // on, so inactive is not dead: deleting it would kill the session a closed tab left behind.
-  private async ensurePty(toolbox: string, cols: number, rows: number): Promise<boolean> {
+  private async ensurePty(toolbox: string, ptyId: string, cols: number, rows: number): Promise<boolean> {
     const listed = await fetch(`${toolbox}/process/pty`, { headers: this.auth(), signal: AbortSignal.timeout(10_000) });
     if (listed.ok) {
       const body = await listed.json<unknown>();
       const sessions = (Array.isArray(body) ? body : (body as { sessions?: unknown[] }).sessions ?? []) as Array<{ id?: string; active?: boolean }>;
-      const existing = sessions.find((item) => item.id === PTY_ID);
+      const existing = sessions.find((item) => item.id === ptyId);
       if (existing) {
         console.log("terminal: reusing PTY", { active: existing.active ?? null });
         return false;
@@ -178,7 +186,7 @@ export class TerminalRelay {
       method: "POST",
       headers: { ...this.auth(), "content-type": "application/json" },
       body: JSON.stringify({
-        id: PTY_ID, cwd: "/home/daytona", cols, rows, lazyStart: false,
+        id: ptyId, cwd: "/home/daytona", cols, rows, lazyStart: false,
         envs: { TERM: "xterm-256color", COLORTERM: "truecolor", LANG: "C.UTF-8" },
       }),
       signal: AbortSignal.timeout(15_000),
@@ -188,7 +196,7 @@ export class TerminalRelay {
   }
 
   private async connect(browser: WebSocket, relay: Relay, toolbox: string): Promise<WebSocket> {
-    const response = await fetch(`${toolbox}/process/pty/${PTY_ID}/connect`, {
+    const response = await fetch(`${toolbox}/process/pty/${relay.ptyId}/connect`, {
       headers: { ...this.auth(), Upgrade: "websocket", "Sec-WebSocket-Protocol": PTY_PROTOCOL },
     });
     if (!response.webSocket) throw new Error(`the terminal could not connect (${response.status})`);
@@ -235,9 +243,9 @@ export class TerminalRelay {
     return upstream;
   }
 
-  private async resize(toolbox: string, cols: number, rows: number): Promise<void> {
+  private async resize(toolbox: string, ptyId: string, cols: number, rows: number): Promise<void> {
     if (!Number.isFinite(cols) || !Number.isFinite(rows)) return;
-    await fetch(`${toolbox}/process/pty/${PTY_ID}/resize`, {
+    await fetch(`${toolbox}/process/pty/${ptyId}/resize`, {
       method: "POST",
       headers: { ...this.auth(), "content-type": "application/json" },
       body: JSON.stringify({ cols: clamp(cols, 20, 400, 120), rows: clamp(rows, 5, 200, 32) }),
@@ -267,6 +275,7 @@ export class TerminalRelay {
     const relay = this.relays.get(browser);
     if (!relay) return;
     this.relays.delete(browser);
+    if (relay.expiry) clearTimeout(relay.expiry);
     console.log("terminal: dropped", {
       why, seconds: relay.attachedAt ? Math.round((Date.now() - relay.attachedAt) / 1000) : null,
       bytesOut: relay.bytesOut, bytesIn: relay.bytesIn,
