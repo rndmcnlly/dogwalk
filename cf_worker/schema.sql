@@ -43,7 +43,12 @@ CREATE TABLE IF NOT EXISTS invitations (
   hidden_at INTEGER,
   redeemed_by_user_id INTEGER UNIQUE REFERENCES users(id),
   redeemed_from TEXT,
-  redeemed_at INTEGER
+  redeemed_at INTEGER,
+  -- How the invitee's Registration went, for the inviter's next call (invitations.ts, inviteeNews).
+  onboarding_call_sid TEXT,
+  enrollment_answers INTEGER NOT NULL DEFAULT 0,
+  enrollment_outcome TEXT,
+  onboarding_noticed TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_invitations_inviter ON invitations(inviter_user_id);

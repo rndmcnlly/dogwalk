@@ -406,13 +406,35 @@ what enforcement would have done.
   90 days are pruned when an attempt starts.
 - **Enrollment** (`path=enroll` on a Home call from a User without a Voice
   Reference; `path=register` at the end of Registration, when the confirm webhook
-  carries an `AccountSid` and `SPEAKER` is bound): an explanation, then five
+  carries an `AccountSid` and `SPEAKER` is bound): the shape first (`enroll`:
+  "One step first, about a minute: 5 short sentences ..."; `register`, before
+  the Handle: "Two steps left, about two minutes: your Dogwalk name, then 5
+  short sentences ..."), an explanation, then five
   matched answers embedded with `SPEAKER.embed` (no level spoken; under 1.5 s of
   speech earns another phrase), kept as transient `challenge_rounds.embedding`
-  until the end. The Voice Reference is the mean of the L2-normalized embeddings,
+  until the end. "Two more." and "Last one." (`enrollmentMark`, also used by
+  Re-enrollment) follow the third and fourth collected answers, never a round.
+  The Voice Reference is the mean of the L2-normalized embeddings,
   re-normalized, in the embedding space most answers share; fewer than three
   stores nothing, and `ON CONFLICT DO NOTHING` never replaces an existing one.
   Stop skips it until the next call.
+- **Invitee onboarding** (`src/invitations.ts`): when a readback matches an
+  Invitation, `invitations.onboarding_call_sid` records that call (and the
+  redemption rebinds it to the call that registered); Registration's
+  enrollment updates `enrollment_answers` per collected answer and
+  `enrollment_outcome` when the check concludes (`unavailable` when it cannot
+  start, `error` for a verifier or webhook error; a hangup leaves it NULL). Once that call has a terminal status, or the
+  invitee has a Voice Reference, the inviter's next VoiceSession attach puts one
+  sentence per invitee in `call_started.invitees` (`handle`,
+  `invited_days_ago`, `how_it_went`; Invitations from the last 14 days, not
+  revoked or hidden) and sets `onboarding_noticed` to that sentence once a model
+  step that read that `call_started` succeeds (`runOrchestrator`), so each change
+  is told once and a failed step leaves it for the next call. Apply
+  `migrations/2026-11-16-invitee-onboarding.sql` remotely before deploying
+  this (`npx wrangler d1 execute dogwalk --remote --file
+  migrations/2026-11-16-invitee-onboarding.sql`): the readback writes the new
+  columns, and a failed write is only logged, so an unmigrated database still
+  registers callers but tells inviters nothing.
 
 Without `SPEAKER` or an `AccountSid` (local dev, most tests), `/voice` records
 `identity` as `unavailable` and connects at once. An exception in an identity
@@ -536,8 +558,9 @@ created before `migrations/2026-11-11-call-handoff-donation.sql`,
 `migrations/2026-11-12-speculative-scoring.sql`,
 `migrations/2026-11-12-spoken-pairing.sql`,
 `migrations/2026-11-13-identity-check.sql`,
-`migrations/2026-11-14-reenrollment.sql`, or
-`migrations/2026-11-14-roaming-admission.sql` needs those files applied with
+`migrations/2026-11-14-reenrollment.sql`,
+`migrations/2026-11-14-roaming-admission.sql`, or
+`migrations/2026-11-16-invitee-onboarding.sql` needs those files applied with
 `--local` once, since `schema.sql` only creates missing tables.
 
 The smoke test runs `wrangler dev -c wrangler.toml -c speaker_mock.toml`, so the

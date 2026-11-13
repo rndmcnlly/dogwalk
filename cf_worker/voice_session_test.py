@@ -1392,7 +1392,7 @@ async def run_protocol(identity: str) -> None:
         # Other digits still reach the Orchestrator with their conversational context.
         await mocks.send_live(dtmf("7"))
         await next_matching(mocks.live_messages, appended("commentary", KEYPAD_SAY))
-        await run_invitations(mocks)
+        bound_invitee = await run_invitations(mocks)
 
         # Sound style is a voice tool: it stores the preference and previews the opening sound.
         await mocks.send_live(dtmf("6"))
@@ -1780,6 +1780,16 @@ async def run_protocol(identity: str) -> None:
         assert await return_from("practice", "live-test-4") == {"flow": "practice", "outcome": "unavailable", "reason": "no_voice_reference"}
         assert await return_from("reenrollment", "live-test-5") == {"flow": "reenrollment", "outcome": "unavailable", "reason": "no_voice_reference"}
         assert await asyncio.to_thread(d1, "SELECT returned_from FROM voice_calls WHERE call_sid = 'CA_VOICE_TEST2'") == [{"returned_from": None}]
+        # The inviter hears how the bound invitee's Registration went (run_invitations) once: in
+        # the first call_started after the invitee's call ended, by Handle, never a number or the words.
+        told = {str(item["content"]) for _, payload in OrchestratorMock.requests for item in payload["input"]
+                if '"invitees":' in str(item.get("content"))}
+        assert len(told) == 1, told
+        invitees = json.loads(next(iter(told)).split("call_started: ", 1)[1].split("\n", 1)[0])["invitees"]
+        assert invitees == [{"handle": bound_invitee, "invited_days_ago": 0, "how_it_went":
+            "registered, but voice enrollment could not run; "
+            "their next call from their home phone offers voice enrollment again"}], invitees
+        assert await asyncio.to_thread(d1, "SELECT COUNT(*) AS n FROM invitations WHERE onboarding_noticed IS NOT NULL") == [{"n": 1}]
         # Seeded as Re-enrollment writes a replacement (smoke_test.py drives the real ritual): a
         # third reconnect reports it, as the caller in CAa3722805 needed.
         await asyncio.to_thread(d1, """UPDATE voice_calls SET returned_from = '{"flow":"reenrollment","outcome":"reenrolled"}' WHERE call_sid = 'CA_VOICE_TEST2'""")
@@ -1968,7 +1978,7 @@ def outputs_back(*call_ids: str):
     }
 
 
-async def run_invitations(mocks: SocketMocks) -> None:
+async def run_invitations(mocks: SocketMocks) -> str:
     """Invitations end to end: tools on the inviter's call, redemption through the ritual."""
     await mocks.send_live(transcript("input", "Invite my friend; he's listening.", 30000, 31500))
     await mocks.send_live(delegation("del-i1", 31600))
@@ -2114,6 +2124,13 @@ async def run_invitations(mocks: SocketMocks) -> None:
     renamed_state = await asyncio.to_thread(operator_access_state, True)
     assert all(v["inviter_handle"] != CALLER_HANDLE for v in renamed_state["invitations"])
     assert any(v["inviter_handle"] == renamed for v in renamed_state["invitations"])
+
+    # The bound invitee's call ends (the ritual here sends no AccountSid, so its enrollment could
+    # not run): news for the inviter's next call_started, settled only once that call has ended.
+    status, _ = await asyncio.to_thread(post, DEFAULT_LOCAL, "/voice/status", {
+        "From": BOUND_PHONE, "CallSid": "CA_INV_4", "CallStatus": "completed", "CallDuration": "40"}, LOCAL_TOKEN)
+    assert status == 204, status
+    return bound_handle
 
 
 async def run_unobserved_end(restart) -> None:

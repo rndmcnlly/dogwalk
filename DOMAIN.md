@@ -263,7 +263,10 @@ new User a Handle, makes the calling number their Home, and ends with enrollment
 the new User repeats a few phrases like Identity Challenges, and their Voice
 Reference is computed from them (see Voice Reference, first-call enrollment). A
 caller who skips it, or whose line yields too little speech, enrolls on their
-next Home call instead. It records which Invite Code authorized it
+next Home call instead. Right after the caller confirms their invite words,
+before their Handle, they hear the shape of what is left (their name, then
+five short sentences, about two minutes), because an invitee is often alone on
+the line without the inviter there to say it. It records which Invite Code authorized it
 and when, but contains no personal name, sandbox identity, or hosting policy.
 When the Invite Code belongs to an Invitation, the Registration is the durable
 inviter -> Invitation -> invitee edge, and the invitee can ask the Voice Agent
@@ -329,10 +332,14 @@ move their Voice Reference there.
 
 A User without a Voice Reference (registered before enrollment existed, or who
 skipped it) gets **first-call enrollment** on their next Home call in place of
-the Identity Challenge: a short spoken explanation (Dogwalk keeps a voice
+the Identity Challenge: its shape first (five short sentences, about a minute),
+a short spoken explanation (Dogwalk keeps a voice
 profile, never a recording, to recognize them from any phone; it never learns
 from calls; they can redo it later), then five phrases in the Identity
-Challenge's shape with no level spoken. Each matched answer is embedded, the
+Challenge's shape with no level spoken. Progress is marked only near the end
+("Two more.", "Last one."), counting collected answers, so a wrong phrase or
+too little speech never moves it; Re-enrollment's phrases are marked the same
+way. Each matched answer is embedded, the
 Voice Reference is the mean of the answers' normalized embeddings with enough
 speech, in one embedding space, and fewer than three such answers stores
 nothing, so enrollment is offered again on the next call. Saying stop skips it.
@@ -564,7 +571,22 @@ bound number in one transaction: a failed claim consumes nothing and records no
 edge. Removing an Invitation from the User's list revokes it if still active
 and hides it; nothing is deleted, so provenance and the Registration it
 produced survive. The inviter hears each Invitation's status, when it was
-redeemed, and by which Handle; the invitee may hear the inviter's Handle. The
+redeemed, and by which Handle; the invitee may hear the inviter's Handle.
+
+The invitee's own call records on the Invitation how far their Registration
+got: the words read back, registered, how many enrollment answers were
+collected, and how enrollment ended (enrolled, said stop, went quiet, too
+little speech, could not run because of an error, or a hangup). Once that call has ended, or the
+invitee has a Voice Reference, the inviter's next Voice Call tells the
+Session Orchestrator in one sentence per invitee (for example, registered,
+then hung up partway through voice enrollment, two of five sentences done),
+named by Handle or by how many days ago the Invitation was made, never by
+number or invite words, so the inviter can follow up in person. Each distinct
+sentence is told once, marked only after the Session Orchestrator has read it
+(a model step that read it succeeded), since the Orchestrator, not the Opening,
+says it; a later change, such as enrolling on their first Home
+call, is told again. Only Invitations from the last 14 days, not revoked or
+removed from the list, are told. The
 operator-wide graph is visible only on the Diagnostics Surface or in D1. Its
 read-only Access Control projection includes hidden Invitations, distinguishes
 intended recipients from registered invitees, and links each Invitation to its

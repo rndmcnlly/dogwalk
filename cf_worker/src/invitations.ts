@@ -272,7 +272,7 @@ export const USABLE_FOR_PHONE_SQL = `(i.expires_at IS NULL OR i.expires_at > ?)
 // code only one finds it below its uses; the other inserts nothing and records nothing.
 // Results: [registration, displacement, home, redemption].
 export function redemptionStatements(
-  db: D1Database, phone: string, codeWords: string, now: number, handle: string, identityHash: string,
+  db: D1Database, phone: string, callSid: string, codeWords: string, now: number, handle: string, identityHash: string,
 ): D1PreparedStatement[] {
   return [
     db.prepare(
@@ -289,9 +289,100 @@ export function redemptionStatements(
     db.prepare("UPDATE users SET home_phone = ?, home_used_at = ? WHERE identity_hash = ?").bind(phone, now, identityHash),
     db.prepare(
       `UPDATE invitations
-          SET redeemed_by_user_id = (SELECT id FROM users WHERE identity_hash = ?), redeemed_from = ?, redeemed_at = ?
+          SET redeemed_by_user_id = (SELECT id FROM users WHERE identity_hash = ?), redeemed_from = ?, redeemed_at = ?,
+              onboarding_call_sid = ?
         WHERE code_words = ? AND redeemed_by_user_id IS NULL
           AND EXISTS (SELECT 1 FROM users WHERE identity_hash = ?)`,
-    ).bind(identityHash, phone, now, codeWords, identityHash),
+    ).bind(identityHash, phone, now, callSid, codeWords, identityHash),
   ];
+}
+
+// --- Onboarding: how an invitee's Registration went, for the inviter -------
+
+// The invitee's own call records how far it got; the inviter's next call hears it once per
+// change (voice_session.ts, call_started invitees). Never a number, the words, or a score.
+/** Invitations created within this long have their invitee's progress told to the inviter (configuration). */
+const ONBOARDING_NEWS_SECONDS = 14 * 86400;
+
+/** The invitee's words were read back on this call: the start of their Registration. */
+export async function noteInviteHeard(db: D1Database, codeWords: string, callSid: string): Promise<void> {
+  await db.prepare("UPDATE invitations SET onboarding_call_sid = ? WHERE code_words = ? AND redeemed_at IS NULL")
+    .bind(callSid, codeWords).run();
+}
+
+/** Registration's enrollment collected another answer from the invitee. */
+export async function noteEnrollmentAnswers(db: D1Database, invitee: number, answers: number): Promise<void> {
+  await db.prepare("UPDATE invitations SET enrollment_answers = ? WHERE redeemed_by_user_id = ?").bind(answers, invitee).run();
+}
+
+/** How Registration's enrollment ended (the Identity Check's outcome); a hangup records nothing. */
+export async function noteEnrollmentOutcome(db: D1Database, invitee: number, outcome: string): Promise<void> {
+  await db.prepare("UPDATE invitations SET enrollment_outcome = ? WHERE redeemed_by_user_id = ? AND enrollment_outcome IS NULL")
+    .bind(outcome, invitee).run();
+}
+
+interface OnboardingRow {
+  code_words: string;
+  minted_at: number;
+  redeemed_at: number | null;
+  handle: string | null;
+  enrolled: number;
+  answers: number;
+  outcome: string | null;
+  noticed: string | null;
+  ended: number;
+}
+
+/** One invitee's news for the inviter, and the Invitation it is about (for marking it told). */
+export interface InviteeNews {
+  words: string;
+  told: string;
+  item: { handle: string | null; invited_days_ago: number; how_it_went: string };
+}
+
+/** What to tell the inviter about one invitee, or null while their call is still going. */
+function howItWent(row: OnboardingRow, enrollAnswers: number): string | null {
+  if (row.enrolled) return "registered and enrolled their voice";
+  // Settled only once the invitee's call has ended: the inviter may be calling beside them.
+  if (!row.ended) return null;
+  if (!row.redeemed_at) return "said their invite words but hung up before confirming them, so they are not registered";
+  const done = `${row.answers} of ${enrollAnswers} sentences done`;
+  const ended = row.outcome === null
+    ? (row.answers ? `then hung up partway through voice enrollment (${done})` : "then hung up before the first sentence of voice enrollment")
+    : row.outcome === "stopped" ? `then said stop to skip voice enrollment (${done})`
+    : row.outcome === "silent" ? `then went quiet during voice enrollment (${done})`
+    : row.outcome === "enrollment_failed" ? "but the line was too unclear for voice enrollment"
+    : "but voice enrollment could not run";
+  return `registered, ${ended}; their next call from their home phone offers voice enrollment again`;
+}
+
+/** The inviter's recent invitees whose progress changed since the inviter was last told. */
+export async function inviteeNews(db: D1Database, inviter: number, enrollAnswers: number): Promise<InviteeNews[]> {
+  const now = Math.floor(Date.now() / 1000);
+  const { results } = await db.prepare(
+    `SELECT v.code_words, i.minted_at, v.redeemed_at, invitee.handle,
+            EXISTS (SELECT 1 FROM voice_references r WHERE r.user_id = v.redeemed_by_user_id) AS enrolled,
+            v.enrollment_answers AS answers, v.enrollment_outcome AS outcome, v.onboarding_noticed AS noticed,
+            c.ended_at IS NOT NULL AS ended
+       FROM invitations v JOIN invite_codes i ON i.code_words = v.code_words
+       LEFT JOIN users invitee ON invitee.id = v.redeemed_by_user_id
+       LEFT JOIN voice_calls c ON c.call_sid = v.onboarding_call_sid
+      WHERE v.inviter_user_id = ? AND v.onboarding_call_sid IS NOT NULL AND v.revoked_at IS NULL AND v.hidden_at IS NULL
+        AND i.minted_at > ? AND (v.redeemed_by_user_id IS NULL OR invitee.reaped_at IS NULL)
+      ORDER BY i.minted_at`,
+  ).bind(inviter, now - ONBOARDING_NEWS_SECONDS).all<OnboardingRow>();
+  return (results ?? []).flatMap((row) => {
+    const told = howItWent(row, enrollAnswers);
+    if (!told || told === row.noticed) return [];
+    return [{ words: row.code_words, told,
+      item: { handle: row.handle, invited_days_ago: Math.floor((now - row.minted_at) / 86400), how_it_went: told } }];
+  });
+}
+
+/** The inviter heard this news: each sentence is told once. */
+export async function markInviteeNewsNoticed(db: D1Database, inviter: number, news: InviteeNews[]): Promise<void> {
+  if (!news.length) return;
+  await db.batch(news.map(({ words, told }) => db.prepare(
+    "UPDATE invitations SET onboarding_noticed = ? WHERE code_words = ? AND inviter_user_id = ?",
+  ).bind(told, words, inviter)));
 }

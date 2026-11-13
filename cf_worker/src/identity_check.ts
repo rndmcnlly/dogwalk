@@ -17,8 +17,10 @@
 //   caller as that User (the Home unchanged), the first unmatched voice ends the attempt, and
 //   failed attempts pause Roaming per Handle and per calling number (roaming_attempts).
 // - enroll: a User without a Voice Reference repeats ENROLL_ANSWERS phrases instead, and their
-//   Voice Reference is computed from the answers' embeddings; then the call connects.
-// - register: the same enrollment at the end of Registration; then the call ends.
+//   Voice Reference is computed from the answers' embeddings; then the call connects. The
+//   steps' shape comes first, and collected answers (never rounds) mark progress near the end.
+// - register: the same enrollment at the end of Registration; then the call ends. How far it
+//   got is kept on the Invitation for the inviter's next call (invitations.ts, inviteeNews).
 //
 // Each answer's transcript is classified deterministically: the phrase, a Handle (switch to
 // that User), an Invite Code or a mention of an invite (Registration), a mention of donating
@@ -30,7 +32,7 @@ import {
   openRound, readRound, receivedCuePlay, type Ritual, scoreDetail, scoreTiming, skipRound, stopTake, takeTwiml,
 } from "./challenge_rounds";
 import { HANDLE_WORDS } from "./handles";
-import { EVEN_WORDS, ODD_WORDS } from "./invitations";
+import { EVEN_WORDS, noteEnrollmentAnswers, noteEnrollmentOutcome, ODD_WORDS } from "./invitations";
 import type { Env } from "./types";
 
 // Configuration, not domain rules.
@@ -125,6 +127,12 @@ const outOfRounds = (round: number, progress: Progress) => round - progress.star
 async function conclude(env: Env, callSid: string, log: Log, identity: Record<string, unknown>, shadow = true): Promise<void> {
   const record = { ...identity, shadow };
   await env.DB.prepare("UPDATE voice_calls SET identity = ? WHERE call_sid = ?").bind(JSON.stringify(record), callSid).run();
+  // Registration's enrollment ending is news for the inviter's next call (invitations.ts). A
+  // verifier error is not unclear speech: the inviter hears that enrollment could not run.
+  if (identity.path === "register" && typeof identity.user_id === "number") {
+    await noteEnrollmentOutcome(env.DB, identity.user_id, identity.error ? "error" : String(identity.outcome))
+      .catch((error) => console.error("invitee onboarding note failed", error));
+  }
   await clearRounds(env, callSid);
   await log("identity.result", record);
 }
@@ -243,26 +251,39 @@ export async function startHomeCheck(
     await roundTwiml(env, ctx, url, callSid, account, 1, progress, subject);
 }
 
-/** The end of Registration: the new User enrolls their Voice Reference, then the call ends. Null when it cannot run. */
+/**
+ * The end of Registration: the new User enrolls their Voice Reference, then the call ends. Null
+ * when it cannot run. `named` tells the new User their Handle, after the steps' shape.
+ */
 export async function startRegistrationEnrollment(
-  env: Env, ctx: ExecutionContext, url: URL, form: FormData, userId: number, log: Log, spoken: string,
+  env: Env, ctx: ExecutionContext, url: URL, form: FormData, userId: number, log: Log, named: string,
 ): Promise<string | null> {
   const callSid = String(form.get("CallSid") ?? "");
   const account = String(form.get("AccountSid") ?? "");
   const subject = await subjectOf(env, userId);
   if (!CALL_SID.test(callSid) || !subject || subject.enrolled || !env.SPEAKER || !isAccountSid(account)) return null;
   await clearRounds(env, callSid);
-  return startEnrollment(env, ctx, url, callSid, account, subject, "register", log, spoken);
+  return startEnrollment(env, ctx, url, callSid, account, subject, "register", log, "Registered.", `${named} Now your voice.`);
 }
+
+// A caller alone on the line hears the shape before the work: how many steps, and how long
+// (Registration took about two minutes from here, first-call enrollment takes about one).
+const enrollmentShape = (path: "enroll" | "register") => path === "register"
+  ? `Two steps left, about two minutes: your Dogwalk name, then ${ENROLL_ANSWERS} short sentences so Dogwalk can recognize your voice from any phone.`
+  : `One step first, about a minute: ${ENROLL_ANSWERS} short sentences so Dogwalk can recognize your voice from any phone.`;
+
+/** A progress mark after a collected answer, only near the end: wrong phrases and thin speech never advance it. */
+export const enrollmentMark = (collected: number) =>
+  ENROLL_ANSWERS - collected === 2 ? "Two more." : ENROLL_ANSWERS - collected === 1 ? "Last one." : "";
 
 async function startEnrollment(
   env: Env, ctx: ExecutionContext, url: URL, callSid: string, account: string, subject: Subject, path: "enroll" | "register",
-  log: Log, lead: string,
+  log: Log, lead: string, between = "",
 ): Promise<string> {
   await log("identity.started", { path, user_id: subject.id });
-  return Say(`${lead} So Dogwalk can recognize your voice from any phone, I'll learn it now. ` +
+  return Say(`${lead} ${enrollmentShape(path)} ${between ? `${between} ` : ""}` +
     "I keep a voice profile, never a recording, and it never changes from your calls; you can redo it later. " +
-    `After each tone, repeat the sentence once in your normal voice. ${ENROLL_ANSWERS} sentences. Say stop to skip.`) +
+    "After each tone, repeat the sentence once in your normal voice. Say stop to skip.") +
     await roundTwiml(env, ctx, url, callSid, account, 1, fresh(path, subject.id), subject);
 }
 
@@ -530,8 +551,11 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
   }
   if (verdict.outcome === "not_enough_speech") return next(ritual === "enrollment" ? "I didn't get enough of that one. Here's another." : "Not enough to judge. Here's another.");
   if (verdict.outcome === "collected") {
+    if (progress.path === "register") {
+      await noteEnrollmentAnswers(env.DB, subject.id, progress.judged + 1).catch((error) => console.error("invitee onboarding note failed", error));
+    }
     if (progress.judged + 1 >= ENROLL_ANSWERS) return finishEnrollment(env, callSid, log, { ...progress, judged: progress.judged + 1 }, "");
-    return next("", progress.judged + 1);
+    return next(enrollmentMark(progress.judged + 1), progress.judged + 1);
   }
   const passed = progress.passed + (verdict.outcome === "no_match" ? 0 : 1);
   if (progress.path === "home") {

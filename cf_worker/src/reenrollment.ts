@@ -23,7 +23,7 @@ import {
   answerOf, awaitScore, CALL_SID, clearRounds, judge, markScoring, MATCH_COSINE, nextTake, noteReturn, openRound, readRound, receivedCuePlay,
   type Ritual, scoreDetail, scoreTiming, skipRound, stopTake, takeTwiml,
 } from "./challenge_rounds";
-import { collectedAnswers, ENROLL_ANSWERS, meanEmbedding, MIN_ENROLL_ANSWERS, ROAMING_CHALLENGES } from "./identity_check";
+import { collectedAnswers, ENROLL_ANSWERS, enrollmentMark, meanEmbedding, MIN_ENROLL_ANSWERS, ROAMING_CHALLENGES } from "./identity_check";
 import type { Env } from "./types";
 
 // Configuration, not domain rules. Rounds, judged or not, before a phase gives up: wrong phrases
@@ -236,7 +236,7 @@ export async function handleReenrollmentResult(env: Env, ctx: ExecutionContext, 
   }
   if (verdict.outcome === "collected") {
     if (progress.judged + 1 >= ENROLL_ANSWERS) return finish(env, callSid, log, subject, "");
-    return next("", progress.judged + 1);
+    return next(enrollmentMark(progress.judged + 1), progress.judged + 1);
   }
   // The check: one miss ends it, so every judged round has matched.
   if (verdict.outcome === "no_match") {
