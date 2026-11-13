@@ -183,7 +183,16 @@ const WALK_SVG = String.raw`
 <path id="l-juniper-hit" class="hit" data-tip="leash"/><path id="l-pepper-hit" class="hit" data-tip="leash"/><path id="l-biscuit-hit" class="hit" data-tip="leash"/>
 <g id="walker" data-tip="walker">
   <g data-leg="walker" data-ph="3.1"><rect x="-8" y="-100" width="16" height="54" rx="8" fill="#1d3344"/><g data-knee="3.1"><rect x="-7.5" y="-56" width="15" height="52" rx="7.5" fill="#1d3344"/><ellipse cx="7" cy="-5" rx="14" ry="6.5" fill="#1b2a24"/></g></g>
-  <g id="walker-arm"><path d="M-8 -170 Q-14 -146 -10 -122" stroke="#a84b2a" stroke-width="12" stroke-linecap="round" fill="none"/><circle cx="-10" cy="-119" r="5.5" fill="#7a4d32"/></g>
+  <g id="arm-up" data-tip="voice">
+    <circle class="pad" cx="-8" cy="-106" r="16"/>
+    <path d="M-8 -170 L-8 -140" stroke="#a84b2a" stroke-width="12" stroke-linecap="round"/>
+    <g id="arm-fore">
+      <path d="M-8 -140 L-8 -107" stroke="#a84b2a" stroke-width="11" stroke-linecap="round"/>
+      <rect id="phone" x="-13" y="-113" width="10" height="18" rx="2.5" fill="#1b2a24"/>
+      <rect id="phone-screen" x="-11.2" y="-111" width="6.4" height="13" rx="1" fill="#9fd6b8" opacity="0"/>
+      <circle cx="-8" cy="-106" r="5.5" fill="#7a4d32"/>
+    </g>
+  </g>
   <g data-leg="walker" data-ph="0"><rect x="-8" y="-100" width="16" height="54" rx="8" fill="#27485f"/><g data-knee="0"><rect x="-7.5" y="-56" width="15" height="52" rx="7.5" fill="#27485f"/><ellipse cx="7" cy="-5" rx="14" ry="6.5" fill="#1b2a24"/></g></g>
   <path d="M-21 -96 L-25 -164 Q-24 -182 -8 -188 L8 -188 Q24 -182 23 -164 L21 -96 Z" fill="#d0643b"/>
   <rect x="-5" y="-197" width="10" height="13" fill="#8d5a3b"/>
@@ -196,16 +205,6 @@ const WALK_SVG = String.raw`
   <g id="walker-leash">
     <path d="M12 -170 Q42 -150 64 -138" stroke="#e2733f" stroke-width="12" stroke-linecap="round" fill="none"/>
     <circle cx="66" cy="-136" r="6" fill="#8d5a3b"/>
-  </g>
-  <g id="arm-up" data-tip="voice">
-    <circle class="pad" cx="14" cy="-112" r="16"/>
-    <path d="M14 -176 L14 -146" stroke="#e2733f" stroke-width="12" stroke-linecap="round"/>
-    <g id="arm-fore">
-      <path d="M14 -146 L14 -113" stroke="#e2733f" stroke-width="11" stroke-linecap="round"/>
-      <rect id="phone" x="9" y="-119" width="10" height="18" rx="2.5" fill="#1b2a24"/>
-      <rect id="phone-screen" x="10.8" y="-117" width="6.4" height="13" rx="1" fill="#9fd6b8" opacity="0"/>
-      <circle cx="14" cy="-112" r="5.5" fill="#8d5a3b"/>
-    </g>
   </g>
   <path id="voice" d="M44 -210 Q48 -204 44 -198 M49 -214 Q55 -204 49 -194" stroke="#2f5d4a" stroke-width="2" stroke-linecap="round" fill="none" opacity="0"/>
 </g>
@@ -646,12 +645,12 @@ const WALK_SCRIPT = String.raw`
       k.n.setAttribute("transform", "rotate(" + (34 * Math.max(0, -Math.cos(f(68) * t + k.ph))).toFixed(2) + " 0 -52)");
     });
     var wy = WY - Math.abs(Math.sin(f(68) * t)) * 3;
-    rot("walker-arm", 18 * Math.sin(f(68) * t), -8, -170);
     $("walker").setAttribute("transform", "translate(" + WX + " " + wy.toFixed(1) + ")");
     shadow("sh-walker", WX + 2, WY + 1, WY - wy);
     var up = level(t, RAISE, LOWER, .6), buzz = within(t, 9.0, RAISE);
-    rot("arm-up", lerp(-4 + 7 * Math.sin(f(68) * t + 3.1), -35, up), 14, -176);
-    rot("arm-fore", lerp(-8, -138.5, up) + (buzz ? 6 * Math.sin(t * 90) : 0), 14, -146);
+    // The far arm swings with the stride, then rises forward, elbow in front, to hold the phone before the face.
+    rot("arm-up", lerp(18 * Math.sin(f(68) * t), -60.5, up), -8, -170);
+    rot("arm-fore", lerp(-8, -89, up) + (buzz ? 6 * Math.sin(t * 90) : 0), -8, -140);
     $("phone").setAttribute("opacity", up > .02 || buzz ? 1 : 0);
     if (buzz) $("phone-screen").setAttribute("opacity", .9);
     else if (!within(t, RAISE, LOWER)) $("phone-screen").setAttribute("opacity", 0);
