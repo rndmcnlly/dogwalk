@@ -44,10 +44,6 @@ const PHASE_EARCONS: Record<string, EarconName> = {
 const AGENT_CONNECT_WINDOW_MS = 3 * 60 * 1000;
 // The event stream's first frame is server.connected; a gateway that never sends it is down.
 const AGENT_HELLO_MS = 15_000;
-// A terminal execution event waits this long before it ends the Prompt Turn: a Redirect
-// interrupts the step under way and resumes in a new execution within the same millisecond,
-// and an execution that starts meanwhile continues the same turn.
-const RESUME_GRACE_MS = 1000;
 // The assignment of a Prompt Turn another client began (Co-presence).
 const OBSERVED_ASSIGNMENT = "(from another client)";
 const MENU_TIMEOUT_MS = 15_000;
@@ -140,6 +136,13 @@ interface PendingPermission {
   alias: string;
   title: string;
   options: Array<{ optionId: string; name: string; kind?: string }>;
+}
+
+interface Steer {
+  sessionId: string;
+  when: string;
+  guidance: string;
+  inboxId: string | null;
 }
 
 // One frame of the Agent's event stream: an OpenCode event, as the Agent Gateway relays it.
@@ -851,7 +854,7 @@ Rules:
 - When the caller asks for research or diagnosis a session could verify (facts, specs, procedures), prefer beginning a Prompt Turn over answering from your own knowledge. When you do answer from your own knowledge, say so plainly ("from what I know, unverified").
 - Never say or brief that a session will do, plans to do, or is doing something unless its Prompt Turn is already running or you begin it in the same response. When the caller asks for work a session should do, begin the turn now (after any consent it needs); if you have not, say plainly that you have not started it.
 - A started Prompt Turn is not a completed one. Report completion only from a turn event or inspection. Outcome completed means the Agent stopped normally, not that the work is correct; say what was verified versus merely claimed. Cancelled means it was interrupted, by a cancel, another client, or a rejected Permission Request.
-- To correct or add to a running turn, steer it with steer_prompt_turn rather than cancelling and beginning again, which throws away the work under way. Choose when: next_step for additions and corrections that can wait for the step under way, now when the caller wants it to stop what it is doing and do something else. Steering goes to the Agent, so write the guidance as you would a prompt. Cancelling discards steering the Agent has not yet read.
+- To correct or add to a running turn, steer it with steer_prompt_turn rather than cancelling and beginning again, which throws away the work under way. Choose when: next_step for additions and corrections that can wait for the step under way, now when the caller wants it to stop what it is doing and do something else. Steering goes to the Agent, so write the guidance as you would a prompt. Cancelling discards steering the Agent has not yet read. turn_started_by_steer means your steering reached the session just after its turn stopped: the Agent began a new turn with that guidance, whose end arrives like any other.
 - Cancelling a Prompt Turn is not closing a session, and closing is not deleting history.
 - Other clients, such as a terminal the caller opened, can work in the same sessions. turn_started_elsewhere means a session began a turn you did not start; its end arrives like any other, with started_elsewhere true (also when it began between calls, unannounced). permission_resolved with elsewhere true means a Permission Request was answered elsewhere: stop presenting it. elicitation_waiting means a session asked the caller a question that cannot be answered by voice yet: say so plainly.
 - Permission Requests: describe the supplied choices plainly, and resolve only with an option_id the application supplied, after the caller chooses.
@@ -937,12 +940,18 @@ export class VoiceSession {
   private gatewayPreview: (GatewayPreview & { sandboxId: string }) | null = null;
   // The default model's context window, for the context-low beat; fetched once per connection.
   private contextLimit: number | null = null;
-  // Terminal execution events waiting out RESUME_GRACE_MS, by Managed Session ID.
-  private turnEnds = new Map<string, ReturnType<typeof setTimeout>>();
-  // execution.started events handled per Managed Session ID, for telling a queued turn end it is stale.
+  // Inbox items no execution has read yet (inbox ID -> text), by Managed Session ID: kept from
+  // every client's inbox events and repaired on catching up (settleTurn).
+  private undelivered = new Map<string, Map<string, string>>();
+  // Managed Session IDs whose last execution ended while their Prompt Turn may still go on.
+  private endedExecutions = new Set<string>();
+  // execution.started events handled per Managed Session ID, and executions found running on
+  // catching up: the fence that tells a turn-end check it is stale.
   private executionStarts = new Map<string, number>();
-  // Steering sent and not yet read by the Agent, by inbox ID, for the delivery beat.
-  private steers = new Map<string, { sessionId: string; when: string }>();
+  // Steering of ours the Agent has not read yet, for the delivery beat and for recognising the
+  // execution a steer starts after its turn ended. inboxId is null until the admission answers
+  // or its inbox.enqueued arrives (matched by text), whichever is first.
+  private steers: Steer[] = [];
   private agentConnecting = false;
   private menu: SystemMenu | null = null;
   private firstCall = false;
@@ -1451,9 +1460,12 @@ export class VoiceSession {
       if (typeof snapshot.title === "string" && snapshot.title) session.title = snapshot.title;
       const running = Boolean(active[session.agentSessionId]);
       const inProgress = session.turnState === "in_progress";
-      // A pending turn end whose resume this connection missed: the server says it runs.
-      if (running) this.cancelTurnEnd(session);
-      if (inProgress && !running && !this.turnEnds.has(session.id)) await this.finishFromSnapshot(session, snapshot);
+      // An execution whose start this connection may have missed: a turn-end check in flight is stale.
+      if (running) this.executionStarts.set(session.id, (this.executionStarts.get(session.id) ?? 0) + 1);
+      const inbox = await this.agentFetch("GET", `/api/session/${encodeURIComponent(session.agentSessionId)}/inbox`);
+      this.undelivered.set(session.id, new Map((Array.isArray(inbox.data) ? inbox.data : [])
+        .filter((item: any) => item?.id).map((item: any) => [String(item.id), String(item.payload?.text ?? "")])));
+      if (inProgress && !running) await this.finishFromSnapshot(session, snapshot);
       else if (!inProgress && running) await this.observeTurn(session);
       await this.syncPermissions(session);
     }
@@ -3536,7 +3548,7 @@ export class VoiceSession {
   // Resets the projection for a Prompt Turn beginning now. Its own trace is persisted with the
   // session, so the turn's end carries the same context under a later call or after eviction.
   private startTurn(session: ManagedSession, assignment: string | null): TraceContext & { link: TraceContext | null } {
-    this.cancelTurnEnd(session);
+    this.endedExecutions.delete(session.id);
     Object.assign(session, { assignment, report: "", toolCalls: [], plan: [], unsaid: "", remark: null, failure: null, outcome: null });
     this.thoughts.delete(session.id);
     session.turnState = "in_progress";
@@ -3601,7 +3613,10 @@ export class VoiceSession {
   // Steering (DOMAIN.md): guidance for a running Prompt Turn. A Steer waits for the Agent's
   // next step boundary; a Redirect also interrupts the step under way, and the Agent resumes at
   // once with the guidance (interrupt with resume delivers pending steering immediately).
-  // Neither starts a new Prompt Turn.
+  // Neither starts a new Prompt Turn, except steering that reaches the session just after its
+  // turn ended (turnFromSteer). Steering a turn that has already ended here fails instead: the
+  // Orchestrator has heard turn_stopped, and guidance written as a correction to work under way
+  // is a poor assignment, so it is told to begin a turn with a proper brief.
   private async steerPromptTurn(alias: string, guidance: string, when: string): Promise<Record<string, unknown>> {
     if (when !== "next_step" && when !== "now") throw new Error("when must be next_step or now");
     const session = this.sessionByAlias(alias);
@@ -3610,23 +3625,29 @@ export class VoiceSession {
     }
     const path = `/api/session/${encodeURIComponent(session.agentSessionId)}`;
     const parent = session.turnTrace ?? null;
-    // The last execution already ended and its end is waiting out RESUME_GRACE_MS. Measured on
-    // OpenCode 2.2.7 (2026-11-12): steering an idle session starts a new execution with the
-    // guidance at once; interrupt?resume=true on an idle session answers {"interrupted":false};
-    // and interrupting with resume once that steer was delivered interrupts the new execution
-    // without resuming it. So the steer itself continues this Prompt Turn: the pending end is
-    // cancelled (the execution.started that follows would cancel it too), and a Redirect sends
-    // no interrupt, which would only stop the work it just started.
-    const ended = this.turnEnds.has(session.id);
+    // The last execution already ended and the turn's end is being checked (settleTurn).
+    // Measured on OpenCode 2.2.7 (2026-11-12): steering an idle session starts a new execution
+    // with the guidance at once, and interrupting with resume once that steer was delivered
+    // interrupts the new execution without resuming it. So the steer itself continues this
+    // Prompt Turn (its execution.started makes the check stale), and a Redirect sends no
+    // interrupt, which would only stop the work it just started.
+    const ended = this.endedExecutions.has(session.id);
     this.feedPush("orchestrator", guidance, { lane: "steer", who: session.alias });
-    const admitted = await this.agentFetch("POST", `${path}/prompt`, { text: guidance, delivery: "steer" }, { parent });
+    const steer: Steer = { sessionId: session.id, when, guidance, inboxId: null };
+    this.steers.push(steer);
+    let admitted: Record<string, any>;
+    try {
+      admitted = await this.agentFetch("POST", `${path}/prompt`, { text: guidance, delivery: "steer" }, { parent });
+    } catch (error) {
+      if (!steer.inboxId) this.steers = this.steers.filter((item) => item !== steer);
+      throw error;
+    }
     const inboxId = String(admitted.data?.id ?? "");
-    if (inboxId) this.steers.set(inboxId, { sessionId: session.id, when });
+    steer.inboxId ??= inboxId || null;
     let delivery = when === "now" ? "the step under way was interrupted; the Agent resumes with this at once"
       : "the Agent reads this when the step under way ends";
     let interrupted: boolean | null = null;
     if (ended) {
-      this.cancelTurnEnd(session);
       delivery = "the Agent had just finished its last step, so it started on this at once";
     } else if (when === "now") {
       // The interrupt also ends a Permission Request the step was waiting on; forgotten first, so
@@ -3661,32 +3682,50 @@ export class VoiceSession {
     if (this.liveAttached) await this.orchestratorEvent(`[harness event] turn_started_elsewhere: ${JSON.stringify({ alias: session.alias })}`);
   }
 
-  // A terminal execution event ends the turn only after RESUME_GRACE_MS without a new execution.
-  // The end is queued behind events already received, and a chain running late may still hold an
-  // execution.started (a Redirect's resume) that the timer could not see: the execution count
-  // taken here tells the queued end it is stale.
-  private scheduleTurnEnd(session: ManagedSession, outcome: TurnOutcome, detail: TurnEndDetail): void {
-    this.cancelTurnEnd(session);
-    const executions = this.executionStarts.get(session.id) ?? 0;
-    this.turnEnds.set(session.id, setTimeout(() => {
-      this.turnEnds.delete(session.id);
-      if (this.sessions.get(session.id) !== session) return;
-      this.agentEventChain = this.agentEventChain
-        .then(async () => {
-          if ((this.executionStarts.get(session.id) ?? 0) !== executions) {
-            await this.record("agent.turn.end_superseded", { alias: session.alias, outcome });
-            return;
-          }
-          await this.endPromptTurn(session, outcome, detail);
-        })
-        .catch((error) => this.record("agent.event.failed", { message: errorMessage(error) }));
-    }, RESUME_GRACE_MS));
+  // Steering of ours that reached the session just after its turn ended here: OpenCode starts a
+  // new execution with it, which is a new Prompt Turn whose assignment is the guidance, not
+  // another client's. The Orchestrator heard the last turn stop, so it hears this one begin.
+  private async turnFromSteer(session: ManagedSession, steer: Steer): Promise<void> {
+    // An assignment now, not a correction: no delivery beat.
+    this.steers = this.steers.filter((item) => item !== steer);
+    const turnTrace = this.startTurn(session, steer.guidance);
+    await this.persistSessions();
+    await this.record("agent.turn.started", { alias: session.alias, agent_session_id: session.agentSessionId,
+      started_ms: session.turnStartedAt, ...spanFields(turnTrace), admitted_by: "steer", inbox_id: steer.inboxId,
+      ...(turnTrace.link ? { link_trace_id: turnTrace.link.traceId, link_span_id: turnTrace.link.spanId } : {}) });
+    this.queueEarcon("turn_started");
+    await this.orchestratorEvent(`[harness event] turn_started_by_steer: ${JSON.stringify({ alias: session.alias, guidance: steer.guidance })}`);
   }
 
-  private cancelTurnEnd(session: ManagedSession): void {
-    const timer = this.turnEnds.get(session.id);
-    if (timer) clearTimeout(timer);
-    this.turnEnds.delete(session.id);
+  // A terminal execution event ends the Prompt Turn unless the Agent goes on, decided by events
+  // and at most one question, never a timer. Measured on OpenCode 2.2.7 (2026-11-12): steering
+  // admitted during the last step is read inside that execution, so a success or failure with
+  // nothing undelivered is final. An interrupt may be a Redirect, whose resumed execution starts
+  // within a millisecond, and undelivered steering may start one: then GET /api/session/active,
+  // sent off the event chain so the execution.started it races is handled meanwhile. A
+  // Redirect's session already shows as running when execution.interrupted is emitted, so the
+  // check cannot fall in the gap. The fence (executions started, and the turn's own start) tells the answer it is stale.
+  private async settleTurn(session: ManagedSession, outcome: TurnOutcome, detail: TurnEndDetail): Promise<void> {
+    this.endedExecutions.add(session.id);
+    if (outcome !== "cancelled" && !this.undelivered.get(session.id)?.size) return this.endPromptTurn(session, outcome, detail);
+    const executions = this.executionStarts.get(session.id) ?? 0;
+    const turnStartedAt = session.turnStartedAt;
+    // An unanswerable check ends the turn: the terminal event was real, and an execution that
+    // did start is then observed, or recognised as our steer's, when its event arrives.
+    void this.agentFetch("GET", "/api/session/active")
+      .then((active) => Boolean(active.data?.[session.agentSessionId]), () => false)
+      .then((running) => {
+        this.agentEventChain = this.agentEventChain
+          .then(async () => {
+            if (this.sessions.get(session.id) !== session || session.turnStartedAt !== turnStartedAt) return;
+            if (running || (this.executionStarts.get(session.id) ?? 0) !== executions) {
+              await this.record("agent.turn.end_superseded", { alias: session.alias, outcome, running });
+              return;
+            }
+            await this.endPromptTurn(session, outcome, detail);
+          })
+          .catch((error) => this.record("agent.event.failed", { message: errorMessage(error) }));
+      });
   }
 
   // The one way a Prompt Turn ends, whether seen live, found on catching up, or cut short by an
@@ -3695,8 +3734,11 @@ export class VoiceSession {
   private async endPromptTurn(session: ManagedSession, outcome: TurnOutcome,
     { error, interruptReason, termination }: TurnEndDetail = {}): Promise<void> {
     if (session.turnState !== "in_progress") return;
-    this.cancelTurnEnd(session);
-    for (const [inboxId, steer] of this.steers) if (steer.sessionId === session.id) this.steers.delete(inboxId);
+    this.endedExecutions.delete(session.id);
+    // Steering parked when the turn ended is moot for it. Steering not yet enqueued, or enqueued
+    // after this end, may start the next execution (turnFromSteer).
+    const parked = this.undelivered.get(session.id);
+    this.steers = this.steers.filter((steer) => steer.sessionId !== session.id || !steer.inboxId || !parked?.has(steer.inboxId));
     const startedMs = session.turnStartedAt ?? null;
     const endedMs = session.turnEndedAt = Date.now();
     session.outcome = outcome;
@@ -4221,7 +4263,7 @@ export class VoiceSession {
     const inbox = await this.agentFetch("GET", `${path}/inbox`);
     for (const item of Array.isArray(inbox.data) ? inbox.data : []) {
       if (item?.delivery !== "steer" || !item.id) continue;
-      this.steers.delete(String(item.id));
+      this.steers = this.steers.filter((steer) => steer.inboxId !== String(item.id));
       await this.agentFetch("DELETE", `${path}/inbox/${encodeURIComponent(String(item.id))}`).catch((error) => {
         // Delivered meanwhile: nothing left to withdraw.
         if (!(error instanceof AgentRequestError && error.status === 404)) throw error;
@@ -4250,7 +4292,9 @@ export class VoiceSession {
     if (running) await this.interruptTurn(session);
     session.sessionState = "closing";
     this.forgetPermissions(session);
-    this.cancelTurnEnd(session);
+    this.endedExecutions.delete(session.id);
+    this.undelivered.delete(session.id);
+    this.steers = this.steers.filter((steer) => steer.sessionId !== session.id);
     // The Agent Session's history persists with the Agent; only this attachment ends.
     if (this.follow?.sessionId === session.id) this.stopFollowing();
     this.sessions.delete(session.id);
@@ -4314,34 +4358,54 @@ export class VoiceSession {
     if (!session) return;
     const inProgress = session.turnState === "in_progress";
     switch (type) {
-      case "session.execution.started":
+      case "session.execution.started": {
         this.executionStarts.set(session.id, (this.executionStarts.get(session.id) ?? 0) + 1);
-        // A Redirect's resume, or new work admitted just as the last execution ended: the same turn.
-        if (this.turnEnds.has(session.id)) this.cancelTurnEnd(session);
-        else if (!inProgress) await this.observeTurn(session);
+        this.endedExecutions.delete(session.id);
+        // A Redirect's resume, steering read on, or our own prompt: the same turn.
+        if (inProgress) return;
+        // inbox.delivered follows execution.started, so the item it reads is still undelivered here.
+        const parked = this.undelivered.get(session.id);
+        const steer = this.steers.find((item) => item.sessionId === session.id && item.inboxId && parked?.has(item.inboxId));
+        if (steer) await this.turnFromSteer(session, steer);
+        else await this.observeTurn(session);
         return;
+      }
       case "session.execution.succeeded":
       case "session.execution.interrupted":
       case "session.execution.failed": {
         if (!inProgress) return;
         const failure = data.error ? [data.error.type, data.error.message].filter(Boolean).join(": ") : undefined;
-        this.scheduleTurnEnd(session, type === "session.execution.succeeded" ? "completed"
+        await this.settleTurn(session, type === "session.execution.succeeded" ? "completed"
           : type === "session.execution.interrupted" ? "cancelled" : "failed",
         { interruptReason: typeof data.reason === "string" ? data.reason : undefined, error: failure || undefined });
         return;
       }
+      case "session.inbox.enqueued": {
+        const inboxId = String(data.inboxID ?? "");
+        const text = String(data.item?.payload?.text ?? "");
+        if (!this.undelivered.has(session.id)) this.undelivered.set(session.id, new Map());
+        this.undelivered.get(session.id)!.set(inboxId, text);
+        // Our steering, enqueued before its admission answered.
+        const steer = this.steers.find((item) => item.sessionId === session.id && !item.inboxId && item.guidance === text);
+        if (steer) steer.inboxId = inboxId;
+        return;
+      }
       case "session.inbox.delivered": {
         const inboxId = String(data.inboxID ?? "");
-        const steer = this.steers.get(inboxId);
+        this.undelivered.get(session.id)?.delete(inboxId);
+        const steer = this.steers.find((item) => item.inboxId === inboxId);
         if (!steer) return;
-        this.steers.delete(inboxId);
+        this.steers = this.steers.filter((item) => item !== steer);
         await this.record("agent.turn.steer_delivered", { alias: session.alias, inbox_id: inboxId, when: steer.when });
         this.beat(session, `${session.alias} has the correction.`, null, { weight: 3 });
         return;
       }
-      case "session.inbox.cancelled":
-        this.steers.delete(String(data.inboxID ?? ""));
+      case "session.inbox.cancelled": {
+        const inboxId = String(data.inboxID ?? "");
+        this.undelivered.get(session.id)?.delete(inboxId);
+        this.steers = this.steers.filter((item) => item.inboxId !== inboxId);
         return;
+      }
       case "session.text.delta": {
         const text = String(data.delta ?? "");
         session.report = (session.report + text).slice(-64_000);
@@ -4816,9 +4880,9 @@ export class VoiceSession {
 
   private async resetSandboxProjection(): Promise<void> {
     this.closeAgent("Sandbox replaced");
-    for (const timer of this.turnEnds.values()) clearTimeout(timer);
-    this.turnEnds.clear();
-    this.steers.clear();
+    this.endedExecutions.clear();
+    this.undelivered.clear();
+    this.steers = [];
     this.contextLimit = null;
     this.permissions.clear();
     this.sessions.clear();

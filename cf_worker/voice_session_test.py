@@ -114,6 +114,8 @@ class AgentGatewayMock:
         self.fail_interrupts = 0
         # One-shot response delays by path, in seconds.
         self.delay_next: dict[str, float] = {}
+        # While a list, events are held back here instead of sent (release sends them).
+        self.held: list[str] | None = None
         updated = int(datetime(2026, 11, 6, 18, 30, tzinfo=timezone.utc).timestamp() * 1000)
         # Like OpenCode, each session belongs to the directory it was created in.
         self.sessions: dict[str, dict] = {
@@ -138,9 +140,27 @@ class AgentGatewayMock:
     async def emit(self, kind: str, created: int | None = None, **data) -> None:
         self.counter += 1
         frame = json.dumps({"id": f"evt_{self.counter:06d}", "type": kind, "created": created or now_ms(), "data": data})
+        if self.held is not None:
+            self.held.append(frame)
+            return
+        await self.send_frame(frame)
+
+    async def send_frame(self, frame: str) -> None:
         for ws in list(self.events):
             if not ws.closed:
                 await ws.send_str(frame)
+
+    async def release(self) -> None:
+        """Sends the events held back, in order, as one late burst."""
+        held, self.held = self.held or [], None
+        for frame in held:
+            await self.send_frame(frame)
+
+    async def enqueue(self, sid: str, inbox_id: str, text: str) -> None:
+        """An inbox item, as OpenCode 2.2.7 lists it and announces it."""
+        item = {"type": "user", "payload": {"text": text}, "delivery": "steer"}
+        self.inbox.setdefault(sid, []).append({"id": inbox_id, **item})
+        await self.emit("session.inbox.enqueued", sessionID=sid, inboxID=inbox_id, item=item)
 
     async def close_events(self, code: int, reason: str) -> None:
         sockets, self.events = self.events, []
@@ -304,13 +324,13 @@ class AgentGatewayMock:
             inbox_id = f"inb_{self.counter:06d}"
             session["time"]["updated"] = now_ms()
             if body.get("delivery") == "steer" and sid in self.active:
-                self.inbox.setdefault(sid, []).append({"id": inbox_id, "delivery": "steer", "text": body["text"]})
-                await self.emit("session.inbox.enqueued", sessionID=sid, inboxID=inbox_id)
+                await self.enqueue(sid, inbox_id, body["text"])
                 return 200, {"id": inbox_id}
             # As measured on 2.2.7, steering an idle session starts an execution with it at once.
             self.messages.setdefault(sid, []).insert(0, {"type": "user", "content": [{"type": "text", "text": body["text"]}],
                                                          "time": {"created": now_ms()}})
-            await self.emit("session.inbox.enqueued", sessionID=sid, inboxID=inbox_id)
+            await self.emit("session.inbox.enqueued", sessionID=sid, inboxID=inbox_id,
+                            item={"type": "user", "payload": {"text": body["text"]}, "delivery": body.get("delivery", "steer")})
             script = self.scripts.get(body["text"], hold_turn) if body.get("delivery") != "steer" else continue_turn
             task = asyncio.create_task(script(self, sid, inbox_id))
             self.tasks.add(task)
@@ -573,12 +593,14 @@ STUCK_GUIDANCE = "Skip the vendored commits."
 STUCK_REPORT = "The regression came in with the lexer change."
 LATE_PROMPT = "Rename the parser's internal helpers."
 LATE_GUIDANCE = "Also rename the test helpers to match."
+LATE_PROMPT_REPORT = "Parser helpers renamed."
 LATE_REPORT = "Helpers renamed in the parser and the tests."
 ADMITTED_PROMPT = "Count the parser's public functions."
 ADMITTED_REPORT = "Seven public functions."
 RESUMED_REPORT = "Resumed after the terminal's correction."
+PARKED_REPORT = "Stopped from the terminal."
 # Run in the Orchestrator mock's thread just before its next reply (before_reply).
-GRACE_HOOK: list = []
+LATE_HOOK: list = []
 
 
 def before_reply(hooks: list, output: list[dict]) -> list[dict]:
@@ -692,9 +714,9 @@ ORCHESTRATOR_SCRIPT = [
     # A Redirect whose interrupt fails still has its steering admitted.
     ("[handoff del-s3]", lambda ctx: [call("s3-begin", "begin_prompt_turn", alias="Juniper", prompt=STUCK_PROMPT)]),
     ("[handoff del-s3]", lambda ctx: [call("s3-steer", "steer_prompt_turn", alias="Juniper", guidance=STUCK_GUIDANCE, when="now")]),
-    # Steering just after the last execution ended, while its end waits out the grace period.
+    # Steering sent as the last execution ends, which the Durable Object has not heard yet.
     ("[handoff del-s4]", lambda ctx: [call("s4-begin", "begin_prompt_turn", alias="Juniper", prompt=LATE_PROMPT)]),
-    ("[handoff del-s4b]", lambda ctx: before_reply(GRACE_HOOK, [call("s4-steer", "steer_prompt_turn", alias="Juniper", guidance=LATE_GUIDANCE, when="now")])),
+    ("[handoff del-s4b]", lambda ctx: before_reply(LATE_HOOK, [call("s4-steer", "steer_prompt_turn", alias="Juniper", guidance=LATE_GUIDANCE, when="next_step")])),
     ("[handoff del-c]", lambda ctx: [call("c-begin", "begin_prompt_turn", alias="Juniper", prompt=CANCEL_PROMPT)]),
     ("[handoff del-c]", lambda ctx: [call("c-steer", "steer_prompt_turn", alias="Juniper", guidance=CANCEL_GUIDANCE, when="next_step")]),
     ("[handoff del-c]", lambda ctx: [call("c-cancel", "cancel_prompt_turn", alias="Juniper")]),
@@ -2437,6 +2459,16 @@ def harness_count(*fragments: str) -> int:
                for line in str(item["content"]).splitlines())
 
 
+async def activity_count(event: str) -> int:
+    return sum(row["event"] == event for row in await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2"))
+
+
+async def wait_for_activity(event: str, count: int, timeout: float = 10) -> None:
+    async with asyncio.timeout(timeout):
+        while await activity_count(event) < count:
+            await asyncio.sleep(0.2)
+
+
 def requested(agent: AgentGatewayMock, method: str, path: str) -> list[int]:
     """Positions of the Agent requests with this method and path, in arrival order."""
     return [index for index, item in enumerate(agent.seen) if (item["method"], item["path"]) == (method, path)]
@@ -2465,15 +2497,20 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     await agent.emit("session.step.started", sessionID=sid)
     await wait_for(lambda: "Juniper has the correction." in beats(), 10)
     await agent.text(sid, STEERED_REPORT)
+    checks = len(requested(agent, "GET", "/api/session/active"))
     await agent.finish(sid)
     await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', STEERED_REPORT) == 1, 10)
+    # A success with nothing undelivered is final: it ends the turn at once, without a check.
+    assert len(requested(agent, "GET", "/api/session/active")) == checks, "a plain success was checked"
     rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")
     delivered = [json.loads(row["detail"]) for row in rows if row["event"] == "agent.turn.steer_delivered"]
     assert [(item["inbox_id"], item["when"]) for item in delivered] == [(pending["id"], "next_step")], delivered
 
     # A Redirect interrupts with resume: the interrupted execution and the resumed one share a
-    # millisecond, which does not end the turn; the later success does, once.
+    # millisecond, and the check the interrupt asks for finds the session running, which does not
+    # end the turn; the later success does, once.
     ended = harness_count(stopped)
+    superseded = await activity_count("agent.turn.end_superseded")
     agent.mark()
     await mocks.send_live(transcript("input", "Have Juniper profile the parser.", 25500, 26100))
     await mocks.send_live(delegation("del-s2", 26150))
@@ -2486,7 +2523,7 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     [guided] = [index for index, item in enumerate(agent.seen) if (item["body"] or {}).get("text") == REDIRECT_GUIDANCE]
     assert guided < agent.seen.index(redirect), "the Redirect interrupted before its steering was queued"
     await wait_for(lambda: beats().count("Juniper has the correction.") == 2, 10)
-    await asyncio.sleep(2.0)  # Twice RESUME_GRACE_MS.
+    await wait_for_activity("agent.turn.end_superseded", superseded + 1)
     assert sid in agent.active and harness_count(stopped) == ended, "the Redirect ended the turn"
     await agent.text(sid, REDIRECTED_REPORT)
     await agent.finish(sid)
@@ -2511,35 +2548,42 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     await agent.finish(sid)
     await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', STUCK_REPORT) == 1, 10)
 
-    # Steering just after the last execution ended, while that end waits out the grace period:
-    # the steer starts a new execution in the same turn (measured on 2.2.7), so no interrupt is
-    # sent, which would stop that very execution, and the turn ends once, later.
+    # Steering sent as the last execution ends: OpenCode has finished (succeeded, then the steer
+    # enqueued and a new execution started with it, as measured on 2.2.7), but the Durable Object
+    # hears it all only after the steer is sent. The old turn ends at once, and the steer's
+    # execution is a new Prompt Turn whose assignment is the guidance, not another client's.
     agent.mark()
     await mocks.send_live(transcript("input", "Have Juniper rename the parser helpers.", 26500, 26700))
     await mocks.send_live(delegation("del-s4", 26750))
     await agent.next_request(lambda item: item["body"] == {"text": LATE_PROMPT})
     await wait_for(outputs_back("s4-begin"), 10)
+    await agent.text(sid, LATE_PROMPT_REPORT)
     loop = asyncio.get_running_loop()
 
-    def finish_first() -> None:
+    def finish_unheard() -> None:
+        agent.held = []
         asyncio.run_coroutine_threadsafe(agent.finish(sid), loop).result(5)
-        time.sleep(0.3)  # The Durable Object handles the end before the steer arrives.
 
-    GRACE_HOOK.append(finish_first)
+    LATE_HOOK.append(finish_unheard)
     ended = harness_count(stopped)
+    observed = harness_count("turn_started_elsewhere:")
     agent.mark()
     await mocks.send_live(transcript("input", "And the test helpers too.", 26800, 27000))
     await mocks.send_live(delegation("del-s4b", 27050))
-    await wait_for(outputs_back("s4-steer"), 15)
-    late = OrchestratorMock.tool_output("s4-steer")
-    assert late["ok"] is True and "started on this at once" in late["delivery"], late
-    [steered] = [index for index, item in enumerate(agent.seen) if (item["body"] or {}).get("text") == LATE_GUIDANCE]
-    assert not [item for item in agent.seen[steered:] if item["path"] == f"/api/session/{sid}/interrupt"], "the steer's new execution was interrupted"
-    await asyncio.sleep(1.5)
-    assert sid in agent.active and harness_count(stopped) == ended, "the turn ended under the steer"
+    await agent.next_request(lambda item: (item["body"] or {}).get("text") == LATE_GUIDANCE)
+    await wait_for(lambda: sid in agent.active, 10)
+    await agent.release()
+    await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', LATE_PROMPT_REPORT) == 1, 10)
+    await wait_for(lambda: harness_count('turn_started_by_steer: {"alias":"Juniper"', LATE_GUIDANCE) == 1, 10)
+    assert OrchestratorMock.tool_output("s4-steer")["ok"] is True
+    assert harness_count("turn_started_elsewhere:") == observed, "the steer's execution was taken for another client's"
     await agent.text(sid, LATE_REPORT)
     await agent.finish(sid)
     await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', LATE_REPORT) == 1, 10)
+    rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")
+    assert not [row for row in rows if row["event"] == "agent.turn.steer_delivered" and json.loads(row["detail"])["when"] == "next_step"][1:], \
+        "the steer's assignment was reported as a correction"
+    assert [json.loads(row["detail"]).get("admitted_by") for row in rows if row["event"] == "agent.turn.started"].count("steer") == 1
 
     # Cancelling withdraws steering the Agent has not read, then interrupts without resume.
     agent.mark()
@@ -2607,35 +2651,46 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     await asyncio.sleep(1.0)
     assert harness_count("permission_resolved:") == 1, harness_count("permission_resolved:")
 
-    # A Redirect made in that other client, whose resume is handled after the grace timer fired
-    # (the event chain held up by catching up after a reconnect): the queued end is stale and must
-    # not end the resumed turn.
+    # A Redirect made in that other client, whose interrupt is checked against a running list
+    # taken before the resume: the check is sent off the event chain, so the resumed
+    # execution.started is handled while it waits, and the execution count tells the answer it
+    # is stale. The resumed turn goes on.
     observed = harness_count("turn_started_elsewhere:")
     agent.reports[sid] = ""
     await agent.start(sid)
     await wait_for(lambda: harness_count("turn_started_elsewhere:") == observed + 1, 10)
     ended = harness_count(stopped)
+    superseded = await activity_count("agent.turn.end_superseded")
     agent.mark()
-    agent.hello_delay = 0
-    agent.delay_next["/api/session/active"] = 2.5
+    agent.active.discard(sid)
+    agent.delay_next["/api/session/active"] = 1.0
     await agent.emit("session.execution.interrupted", sessionID=sid, reason="user")
-    await agent.close_events(1012, "service restarting")
     await agent.next_request(lambda item: item["path"] == "/api/session/active" and item["status"] == "held", 10)
     await agent.emit("session.execution.started", sessionID=sid)
-    async with asyncio.timeout(15):
-        while not any(row["event"] == "agent.turn.end_superseded" for row in await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")):
-            await asyncio.sleep(0.3)
-    await asyncio.sleep(1.0)
-    assert harness_count(stopped) == ended, "a stale end closed the resumed turn"
+    await wait_for_activity("agent.turn.end_superseded", superseded + 1)
+    assert harness_count(stopped) == ended, "a stale check closed the resumed turn"
+    agent.active.add(sid)
     await agent.text(sid, RESUMED_REPORT)
     await agent.finish(sid)
     await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', '"started_elsewhere":true', RESUMED_REPORT) == 1, 10)
-    agent.hello_delay = 1.5
+
+    # A bare interrupt in that other client leaves its steering parked: the check finds the
+    # session idle, so the turn ends cancelled, and the parked item does not hold it open.
+    agent.reports[sid] = ""
+    await agent.start(sid)
+    await wait_for(lambda: harness_count("turn_started_elsewhere:") == observed + 2, 10)
+    await agent.enqueue(sid, "inb_parked1", "Use the slower algorithm.")
+    await agent.text(sid, PARKED_REPORT)
+    agent.settle(sid, "interrupted")
+    await agent.emit("session.execution.interrupted", sessionID=sid, reason="user")
+    await wait_for(lambda: harness_count(stopped, '"outcome":"cancelled"', '"started_elsewhere":true', PARKED_REPORT) == 1, 10)
+    agent.inbox.pop(sid)  # Withdrawn by that client.
+    await agent.emit("session.inbox.cancelled", sessionID=sid, inboxID="inb_parked1")
 
     # A turn that left no ending (lost with the service) is not passed off as completed by an
     # earlier turn's outcome: catching up fails it as unknown.
     await agent.start(sid)
-    await wait_for(lambda: harness_count("turn_started_elsewhere:") == observed + 2, 10)
+    await wait_for(lambda: harness_count("turn_started_elsewhere:") == observed + 3, 10)
     agent.refuse_events = True
     await agent.close_events(1012, "service restarting")
     agent.active.discard(sid)
@@ -2701,8 +2756,8 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', ADMITTED_REPORT) == 1, 10)
 
     # Every turn above ended exactly once, and only the lost one failed.
-    for report in (STEERED_REPORT, REDIRECTED_REPORT, STUCK_REPORT, LATE_REPORT, CANCEL_REPORT, DROP_REPORT, ELSEWHERE_REPORT,
-                   RESUMED_REPORT, RETRY_REPORT, ADMITTED_REPORT):
+    for report in (STEERED_REPORT, REDIRECTED_REPORT, STUCK_REPORT, LATE_PROMPT_REPORT, LATE_REPORT, CANCEL_REPORT, DROP_REPORT,
+                   ELSEWHERE_REPORT, RESUMED_REPORT, PARKED_REPORT, RETRY_REPORT, ADMITTED_REPORT):
         assert harness_count(stopped, report) == 1, (report, harness_count(stopped, report))
     assert harness_count('turn_failed: {"alias":"Juniper"') == failed_before
 

@@ -48,7 +48,6 @@ from openai import AsyncOpenAI
 
 DIM, BOLD, CYAN, YELLOW, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[33m", "\033[0m"
 T0 = time.monotonic()
-RESUME_GRACE_S = 1.0   # a terminal execution event ends the turn only if no execution starts within this
 
 
 def log(lane: str, text: str, style: str = "") -> None:
@@ -156,7 +155,9 @@ class ManagedSession:
     turns: list[PromptTurn] = field(default_factory=list)
     permissions: dict[str, dict] = field(default_factory=dict)  # local id -> {request_id, title, options}
     tools: dict[str, str] = field(default_factory=dict)         # tool call id -> name
-    turn_end: asyncio.TimerHandle | None = None
+    undelivered: dict[str, str] = field(default_factory=dict)  # inbox id -> text, from every client's inbox events
+    executions: int = 0                  # executions started, or found running on catch-up: a turn-end check's fence
+    execution_ended: bool = False        # the last execution ended while the turn may still go on
 
     @property
     def current(self) -> PromptTurn | None:
@@ -174,7 +175,9 @@ class SessionManager:
         self.by_id: dict[str, ManagedSession] = {}
         self.agent = AgentConnection(self._on_event, self.catch_up)
         self.permission_ids = itertools.count(1)
-        self.steers: dict[str, tuple[str, str]] = {}     # inbox id -> (session id, when)
+        # Steering of ours not yet read: {session_id, when, guidance, inbox_id}; inbox_id is None until
+        # the admission answers or its inbox.enqueued arrives (matched by text), whichever is first.
+        self.steers: list[dict] = []
 
     async def start(self, server: str | None) -> None:
         await self.agent.start(self.workspace, server)
@@ -220,16 +223,22 @@ class SessionManager:
         session = self._get(alias)
         if not session.running:
             return {"error": f"{alias} has no running Prompt Turn to steer; use begin_prompt_turn to give it new work"}
-        # In the grace window the last execution already ended: the steer starts the next one at once
-        # (OpenCode 2.2.7), and an interrupt would only stop it unresumed. See the Worker's steerPromptTurn.
-        ended = session.turn_end is not None
-        admitted = await self.agent.request("POST", f"{self._path(session)}/prompt", {"text": guidance, "delivery": "steer"})
-        if inbox_id := admitted.get("data", {}).get("id"):
-            self.steers[inbox_id] = (session.session_id, when)
+        # The last execution already ended and the turn's end is being checked: the steer starts the
+        # next one at once (OpenCode 2.2.7), and an interrupt would only stop it unresumed. See the
+        # Worker's steerPromptTurn, also for why steering an ended turn fails rather than beginning one.
+        ended = session.execution_ended
+        steer = {"session_id": session.session_id, "when": when, "guidance": guidance, "inbox_id": None}
+        self.steers.append(steer)
+        try:
+            admitted = await self.agent.request("POST", f"{self._path(session)}/prompt", {"text": guidance, "delivery": "steer"})
+        except Exception:
+            if not steer["inbox_id"]:
+                self.steers.remove(steer)
+            raise
+        steer["inbox_id"] = steer["inbox_id"] or admitted.get("data", {}).get("id")
         delivery = ("the step under way was interrupted; the Agent resumes with this at once" if when == "now"
                     else "the Agent reads this when the step under way ends")
         if ended:
-            self._cancel_turn_end(session)
             delivery = "the Agent had just finished its last step, so it started on this at once"
         elif when == "now":
             withdrawn = self._withdraw_permissions(session)   # the interrupt ends them too
@@ -268,7 +277,7 @@ class SessionManager:
         for item in inbox.get("data") or []:
             if item.get("delivery") != "steer" or not item.get("id"):
                 continue
-            self.steers.pop(item["id"], None)
+            self.steers = [st for st in self.steers if st["inbox_id"] != item["id"]]
             try:
                 await self.agent.request("DELETE", f"{self._path(s)}/inbox/{item['id']}")
             except AgentRequestError as exc:
@@ -315,9 +324,11 @@ class SessionManager:
                     s.permissions.clear()
                     continue
                 running = bool(active.get(s.session_id))
-                if running:   # a pending end whose resume was missed: it runs
-                    self._cancel_turn_end(s)
-                if s.running and not running and not s.turn_end:
+                if running:   # an execution whose start may have been missed: a turn-end check in flight is stale
+                    s.executions += 1
+                inbox = (await self.agent.request("GET", f"{self._path(s)}/inbox")).get("data") or []
+                s.undelivered = {i["id"]: str((i.get("payload") or {}).get("text", "")) for i in inbox if i.get("id")}
+                if s.running and not running:
                     self._finish_from_snapshot(s, snapshot, await self.agent.request(
                         "GET", f"{self._path(s)}/message?order=desc&limit=10"))
                 elif running and not s.running:
@@ -374,25 +385,40 @@ class SessionManager:
         return f"/api/session/{session.session_id}"
 
     def _start_turn(self, session: ManagedSession) -> PromptTurn:
-        self._cancel_turn_end(session)
+        session.execution_ended = False
         turn = PromptTurn(len(session.turns) + 1)
         session.turns.append(turn)
         session.tools.clear()
         return turn
 
-    def _cancel_turn_end(self, session: ManagedSession) -> None:
-        if session.turn_end:
-            session.turn_end.cancel()
-            session.turn_end = None
+    def _settle_turn(self, session: ManagedSession, outcome: str, error: str | None, reason: str | None) -> None:
+        """A terminal execution event ends the turn unless the Agent goes on, with no timer (see the
+        Worker's settleTurn): at once after a success or failure with nothing undelivered; otherwise
+        after one check of the active sessions, fenced by the executions started meanwhile."""
+        session.execution_ended = True
+        if outcome != "cancelled" and not session.undelivered:
+            return self._end_turn(session, outcome, error, reason)
+        executions, turn = session.executions, session.current
+
+        async def check() -> None:
+            running = await self._active(session)   # unanswerable: the terminal event stands
+            if session.current is not turn:
+                return
+            if running or session.executions != executions:
+                log("agent", f"{session.alias} goes on after its execution ended ({outcome})", DIM)
+                return
+            self._end_turn(session, outcome, error, reason)
+
+        asyncio.get_running_loop().create_task(check())
 
     def _end_turn(self, session: ManagedSession, outcome: str, error: str | None, reason: str | None) -> None:
-        session.turn_end = None
         turn = session.current
         if not session.running:
             return
-        for inbox_id, (session_id, _) in list(self.steers.items()):   # steering for this turn is moot now
-            if session_id == session.session_id:
-                del self.steers[inbox_id]
+        session.execution_ended = False
+        # Steering parked when the turn ended is moot; steering not yet enqueued may start the next turn.
+        self.steers = [st for st in self.steers if st["session_id"] != session.session_id
+                       or not st["inbox_id"] or st["inbox_id"] not in session.undelivered]
         turn.outcome = outcome
         turn.state = "failed" if outcome == "failed" else "stopped"
         log("agent", f"{session.alias} turn {turn.number} {turn.state} ({outcome})", DIM)
@@ -415,12 +441,35 @@ class SessionManager:
             return   # another client's session, or history
         turn = session.current
         if kind == "session.execution.started":
-            # A Redirect's resume, or new work admitted just as the last execution ended: the same turn.
-            if session.turn_end:
-                self._cancel_turn_end(session)
-            elif not session.running:   # Co-presence: another client began a turn here
-                self._start_turn(session)
+            session.executions += 1
+            session.execution_ended = False
+            if session.running:   # a Redirect's resume, steering read on, or our own prompt: the same turn
+                return
+            # inbox.delivered follows execution.started, so the item it reads is still undelivered here.
+            steer = next((st for st in self.steers if st["session_id"] == session.session_id
+                          and st["inbox_id"] in session.undelivered), None)
+            self._start_turn(session)
+            if steer:   # our steering reached the session just after its turn ended: a new turn with it
+                self.steers.remove(steer)
+                self.events.put_nowait({"kind": "turn_started_by_steer", "alias": session.alias, "guidance": steer["guidance"]})
+            else:   # Co-presence: another client began a turn here
                 self.events.put_nowait({"kind": "turn_started_elsewhere", "alias": session.alias})
+            return
+        if kind == "session.inbox.enqueued":
+            inbox_id, text = data.get("inboxID"), str(((data.get("item") or {}).get("payload") or {}).get("text", ""))
+            session.undelivered[inbox_id] = text
+            if steer := next((st for st in self.steers if st["session_id"] == session.session_id
+                              and not st["inbox_id"] and st["guidance"] == text), None):
+                steer["inbox_id"] = inbox_id   # enqueued before its admission answered
+            return
+        if kind in ("session.inbox.delivered", "session.inbox.cancelled"):
+            session.undelivered.pop(data.get("inboxID"), None)
+            steer = next((st for st in self.steers if st["inbox_id"] == data.get("inboxID")), None)
+            if steer:
+                self.steers.remove(steer)
+            if steer and kind == "session.inbox.delivered" and turn and session.running:
+                turn.activity.append(f"steering delivered ({steer['when']})")
+                log("agent", f"{session.alias} has the steering ({steer['when']})", DIM)
             return
         if not (turn and session.running):
             return
@@ -429,13 +478,7 @@ class SessionManager:
                        "session.execution.interrupted": "cancelled"}.get(kind, "failed")
             error = data.get("error") or {}
             error = ": ".join(filter(None, [error.get("type"), error.get("message")])) or None
-            self._cancel_turn_end(session)
-            session.turn_end = asyncio.get_running_loop().call_later(
-                RESUME_GRACE_S, self._end_turn, session, outcome, error, data.get("reason"))
-        elif kind == "session.inbox.delivered" and (steer := self.steers.pop(data.get("inboxID"), None)):
-            when = steer[1]
-            turn.activity.append(f"steering delivered ({when})")
-            log("agent", f"{session.alias} has the steering ({when})", DIM)
+            self._settle_turn(session, outcome, error, data.get("reason"))
         elif kind == "session.text.delta":
             turn.message += data.get("delta", "")
         elif kind == "session.text.ended" and turn.message and not turn.message[-1].isspace():
@@ -538,7 +581,8 @@ say what was verified versus merely claimed.
 beginning again, which throws away the work under way. Choose when: next_step for additions and \
 corrections that can wait for the step under way, now when the User wants it to stop what it is \
 doing and do something else. Steering goes to the Agent, so write the guidance as you would a \
-prompt. Cancelling discards steering the Agent has not yet read.
+prompt. Cancelling discards steering the Agent has not yet read. turn_started_by_steer means your \
+steering reached the session just after its turn stopped: the Agent began a new turn with it.
 - Cancelling a Prompt Turn is not closing a session or deleting history.
 - Permission Requests: read the User the supplied options in plain words and resolve only with \
 an option_id the application supplied, after the User chooses.
