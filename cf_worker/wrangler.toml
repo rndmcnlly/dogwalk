@@ -36,7 +36,7 @@ ORCHESTRATOR_MODEL = "gpt-6.1-sol"
 ORCHESTRATOR_REASONING_EFFORT = "low"
 PUBLIC_ORIGIN = "https://dogwalk.tools"
 # Name of a pre-built Daytona snapshot containing OpenCode and the Agent Gateway.
-DAYTONA_SNAPSHOT = "dogwalk-acp-20261108-v2"
+DAYTONA_SNAPSHOT = "dogwalk-agent-20261112-v1"
 # Name of the org Daytona Secret mapped to OPENAI_API_KEY for sandbox Agents.
 DAYTONA_AGENT_SECRET = "dogwalk-openai"
 # Stamped on every observation. The integration tests override it; so should a manual `wrangler dev`.
