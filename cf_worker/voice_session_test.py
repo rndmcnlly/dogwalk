@@ -1981,7 +1981,7 @@ async def run_protocol(identity: str) -> None:
         assert main_display["boards"] == 0 and main_display["latest"] is None and main_display["access"] == [], main_display
         assert 55 <= main_display["expires_in_minutes"] <= 60, main_display
         assert state["earcon_style"] == "tonal", state
-        assert state["context_tokens"] == 1 and state["memory"]["chars"] == len(EARLY_MEMORY) and "compacting" not in state["memory"], state
+        assert state["context_tokens"] == MOCK_USAGE["input_tokens"] and state["memory"]["chars"] == len(EARLY_MEMORY) and "compacting" not in state["memory"], state
         # The Orchestrator draws a board; the caller answers it on the page; it hears the answer.
         await mocks.send_live(dtmf("5"))
         board = (await recv_type(browser, "board", 15))["board"]
