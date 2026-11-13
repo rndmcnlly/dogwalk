@@ -419,15 +419,17 @@ what enforcement would have done.
   stores nothing, and `ON CONFLICT DO NOTHING` never replaces an existing one.
   Stop skips it until the next call.
 - **Invitee onboarding** (`src/invitations.ts`): when a readback matches an
-  Invitation, `invitations.onboarding_call_sid` records that call; Registration's
+  Invitation, `invitations.onboarding_call_sid` records that call (and the
+  redemption rebinds it to the call that registered); Registration's
   enrollment updates `enrollment_answers` per collected answer and
-  `enrollment_outcome` when the check concludes (or `unavailable` when it cannot
-  start; a hangup leaves it NULL). Once that call has a terminal status, or the
+  `enrollment_outcome` when the check concludes (`unavailable` when it cannot
+  start, `error` for a verifier or webhook error; a hangup leaves it NULL). Once that call has a terminal status, or the
   invitee has a Voice Reference, the inviter's next VoiceSession attach puts one
   sentence per invitee in `call_started.invitees` (`handle`,
   `invited_days_ago`, `how_it_went`; Invitations from the last 14 days, not
-  revoked or hidden) and sets `onboarding_noticed` to that sentence once the
-  Opening is sent, so each change is told once. Apply
+  revoked or hidden) and sets `onboarding_noticed` to that sentence once a model
+  step that read that `call_started` succeeds (`runOrchestrator`), so each change
+  is told once and a failed step leaves it for the next call. Apply
   `migrations/2026-11-16-invitee-onboarding.sql` remotely before deploying
   this (`npx wrangler d1 execute dogwalk --remote --file
   migrations/2026-11-16-invitee-onboarding.sql`): the readback writes the new

@@ -576,14 +576,15 @@ redeemed, and by which Handle; the invitee may hear the inviter's Handle.
 The invitee's own call records on the Invitation how far their Registration
 got: the words read back, registered, how many enrollment answers were
 collected, and how enrollment ended (enrolled, said stop, went quiet, too
-little speech, could not run, or a hangup). Once that call has ended, or the
+little speech, could not run because of an error, or a hangup). Once that call has ended, or the
 invitee has a Voice Reference, the inviter's next Voice Call tells the
 Session Orchestrator in one sentence per invitee (for example, registered,
 then hung up partway through voice enrollment, two of five sentences done),
 named by Handle or by how many days ago the Invitation was made, never by
 number or invite words, so the inviter can follow up in person. Each distinct
-sentence is told once, marked only when the Opening is actually sent, as with
-the Roaming notice; a later change, such as enrolling on their first Home
+sentence is told once, marked only after the Session Orchestrator has read it
+(a model step that read it succeeded), since the Orchestrator, not the Opening,
+says it; a later change, such as enrolling on their first Home
 call, is told again. Only Invitations from the last 14 days, not revoked or
 removed from the list, are told. The
 operator-wide graph is visible only on the Diagnostics Surface or in D1. Its

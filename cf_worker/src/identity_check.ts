@@ -127,9 +127,10 @@ const outOfRounds = (round: number, progress: Progress) => round - progress.star
 async function conclude(env: Env, callSid: string, log: Log, identity: Record<string, unknown>, shadow = true): Promise<void> {
   const record = { ...identity, shadow };
   await env.DB.prepare("UPDATE voice_calls SET identity = ? WHERE call_sid = ?").bind(JSON.stringify(record), callSid).run();
-  // Registration's enrollment ending is news for the inviter's next call (invitations.ts).
+  // Registration's enrollment ending is news for the inviter's next call (invitations.ts). A
+  // verifier error is not unclear speech: the inviter hears that enrollment could not run.
   if (identity.path === "register" && typeof identity.user_id === "number") {
-    await noteEnrollmentOutcome(env.DB, identity.user_id, String(identity.outcome))
+    await noteEnrollmentOutcome(env.DB, identity.user_id, identity.error ? "error" : String(identity.outcome))
       .catch((error) => console.error("invitee onboarding note failed", error));
   }
   await clearRounds(env, callSid);

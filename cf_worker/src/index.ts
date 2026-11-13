@@ -1805,6 +1805,11 @@ async function handleIdentity(req: Request, env: Env, ctx: ExecutionContext, url
     const stop = url.pathname === "/voice/identity/heard" ? identityStreamStop(url) : "";
     await endIdentity(env, callSid).catch(() => {});
     const path = url.searchParams.get("path");
+    // The inviter hears that Registration's enrollment could not finish, not that the invitee hung up.
+    const user = Number(url.searchParams.get("user"));
+    if (path === "register" && Number.isSafeInteger(user) && user > 0) {
+      await noteEnrollmentOutcome(env.DB, user, "error").catch(() => {});
+    }
     if (path === "roaming" || path === "register" || url.pathname === "/voice/identity/who") {
       return twiml(stop + Say("The voice check stopped because of an error. Goodbye.") + Hangup());
     }
@@ -2062,7 +2067,7 @@ async function bindClaim(
     [handle] = await availableHandles(env.DB, 1);
     try {
       results = await env.DB.batch([
-        ...redemptionStatements(env.DB, from, codeWords, now, handle, newIdentityHash()),
+        ...redemptionStatements(env.DB, from, callSid, codeWords, now, handle, newIdentityHash()),
         clearPendingStatement,
       ]);
     } catch (error) {

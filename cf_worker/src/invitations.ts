@@ -272,7 +272,7 @@ export const USABLE_FOR_PHONE_SQL = `(i.expires_at IS NULL OR i.expires_at > ?)
 // code only one finds it below its uses; the other inserts nothing and records nothing.
 // Results: [registration, displacement, home, redemption].
 export function redemptionStatements(
-  db: D1Database, phone: string, codeWords: string, now: number, handle: string, identityHash: string,
+  db: D1Database, phone: string, callSid: string, codeWords: string, now: number, handle: string, identityHash: string,
 ): D1PreparedStatement[] {
   return [
     db.prepare(
@@ -289,10 +289,11 @@ export function redemptionStatements(
     db.prepare("UPDATE users SET home_phone = ?, home_used_at = ? WHERE identity_hash = ?").bind(phone, now, identityHash),
     db.prepare(
       `UPDATE invitations
-          SET redeemed_by_user_id = (SELECT id FROM users WHERE identity_hash = ?), redeemed_from = ?, redeemed_at = ?
+          SET redeemed_by_user_id = (SELECT id FROM users WHERE identity_hash = ?), redeemed_from = ?, redeemed_at = ?,
+              onboarding_call_sid = ?
         WHERE code_words = ? AND redeemed_by_user_id IS NULL
           AND EXISTS (SELECT 1 FROM users WHERE identity_hash = ?)`,
-    ).bind(identityHash, phone, now, codeWords, identityHash),
+    ).bind(identityHash, phone, now, callSid, codeWords, identityHash),
   ];
 }
 
