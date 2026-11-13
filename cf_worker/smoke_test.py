@@ -57,6 +57,8 @@ class DaytonaMock(BaseHTTPRequestHandler):
     create_count = 0
     last_create_payload: dict = {}
     openai_requests: list[tuple[str, dict]] = []
+    # Seconds GPT-Live takes to accept a call, so a test can finish work before the attach.
+    live_accept_delay = 0.0
     # A provider state to report instead of the normal creating-then-started sequence.
     force_state: str | None = None
     start_count = 0
@@ -140,6 +142,8 @@ class DaytonaMock(BaseHTTPRequestHandler):
         )
         if self.path.startswith("/live/sessions/"):
             DaytonaMock.openai_requests.append((self.path, payload))
+            if self.path.endswith("/accept"):
+                time.sleep(DaytonaMock.live_accept_delay)
             self.reply({})
             return
         if self.path == "/api/sandbox":

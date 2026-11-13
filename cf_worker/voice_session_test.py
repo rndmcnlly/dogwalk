@@ -127,6 +127,8 @@ class AgentGatewayMock:
         self.active: set[str] = set()
         self.permissions: dict[str, list[dict]] = {}
         self.inbox: dict[str, list[dict]] = {}
+        # Tool calls still running, which an interrupt aborts.
+        self.open_tools: dict[str, list[str]] = {}
         # Newest first, as `?order=desc` lists them.
         self.messages: dict[str, list[dict]] = {}
         self.reports: dict[str, str] = {}
@@ -188,6 +190,8 @@ class AgentGatewayMock:
             await self.emit("session.tool.called", sessionID=sid, id=tool_id, input=tool_input)
         if end:
             await self.emit(f"session.tool.{end}", sessionID=sid, id=tool_id)
+        else:
+            self.open_tools.setdefault(sid, []).append(tool_id)
 
     def settle(self, sid: str, outcome: str) -> None:
         """A turn's end as the snapshots record it, whether or not anyone hears the event: the
@@ -343,6 +347,10 @@ class AgentGatewayMock:
                 return 200, Envelope({"interrupted": False})
             for item in self.permissions.pop(sid, []):
                 await self.emit("permission.replied", sessionID=sid, requestID=item["id"], reply="reject")
+            # As measured on 2.2.7, the step under way ends as a failed tool whose error says aborted.
+            for tool_id in self.open_tools.pop(sid, []):
+                await self.emit("session.tool.failed", sessionID=sid, id=tool_id,
+                                error={"type": "aborted", "message": "Tool execution interrupted"})
             created = now_ms()
             if query.get("resume") == "true":
                 # A Redirect: the step under way stops and the next execution starts in the
@@ -2041,9 +2049,29 @@ async def run_protocol(identity: str) -> None:
                 break
             await asyncio.sleep(0.05)
         assert pending_state == {"state": "expired"}, "disconnect expires approval before its 30-second timeout"
+        # The event stream drops between the legs, and /prepare reconnects before GPT-Live
+        # accepts: that Agent Connection is recorded into the call at attach, marked as made
+        # before it, with its setup requests' timing rows.
+        await agent.close_events(1012, "service restarting")
+        agent.hello_delay, DaytonaMock.live_accept_delay = 0, 2.0
         body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST2", "live-test-3")
         assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
         await asyncio.wait_for(mocks.live_connected.wait(), 8)
+        agent.hello_delay, DaytonaMock.live_accept_delay = 1.5, 0.0
+        async def leg_rows() -> list[tuple[str, dict]]:
+            rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2", True)
+            return [(row["event"], json.loads(row["detail"])) for row in rows
+                    if json.loads(row["detail"]).get("live_session_id") == "live-test-3"]
+        await asyncio.sleep(1.2)  # one off-path telemetry flush
+        leg = await leg_rows()
+        [attached] = [detail for event, detail in leg if event == "voice.live.attached"]
+        [connected] = [detail for event, detail in leg if event == "agent.connected"]
+        assert attached["agent_ready"] is True and connected["before_call"] is True, (attached, connected)
+        assert connected["agent_version"] == "2.2.7" and connected["session_count"] >= 1, connected
+        assert connected["started_ms"] <= connected["connected_ms"] < attached["ts_ms"], (connected, attached)
+        early = [detail for event, detail in leg if event == "voice.timing" and detail.get("before_call")]
+        assert any(row["event"] == "agent.sent" and row["route"] == "/api/info" for row in early), early
+        assert all(connected["started_ms"] <= row["ts_ms"] < attached["ts_ms"] for row in early), early
         rejoined = next(payload for path, payload in DaytonaMock.openai_requests if path == "/live/sessions/live-test-3/accept")
         assert rejoined["session"]["audio"]["output"]["voice"] == "sage", rejoined["session"]["audio"]
         assert "The survey (Survey theme)" in rejoined["session"]["instructions"]
@@ -2515,8 +2543,11 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     await mocks.send_live(transcript("input", "Have Juniper profile the parser.", 25500, 26100))
     await mocks.send_live(delegation("del-s2", 26150))
     # The step under way waits on a Permission Request, which the Redirect's interrupt rejects:
-    # Dogwalk caused that answer, so it is not reported as answered elsewhere.
+    # Dogwalk caused that answer, so it is not reported as answered elsewhere. The interrupt
+    # aborts the running command, which is not a failed step: no failure beat.
     await agent.next_request(lambda item: item["body"] == {"text": REDIRECT_PROMPT})
+    redirected_at = len(beats())
+    await agent.tool(sid, "call_profile1", "bash", {"command": "py-spy record"}, end=None)
     await agent.ask_permission(sid, "per_profile1", "bash", ["py-spy record"], [])
     redirect = await agent.next_request(lambda item: item["path"] == f"/api/session/{sid}/interrupt")
     assert redirect["query"] == {"resume": "true"}, redirect
@@ -2525,6 +2556,11 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     await wait_for(lambda: beats().count("Juniper has the correction.") == 2, 10)
     await wait_for_activity("agent.turn.end_superseded", superseded + 1)
     assert sid in agent.active and harness_count(stopped) == ended, "the Redirect ended the turn"
+    await asyncio.sleep(2.5)  # past the failure burst
+    assert "failed" not in beats()[redirected_at:], beats()[redirected_at:]
+    timed = [json.loads(row["detail"]) for row in await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2", True)
+             if row["event"] == "voice.timing"]
+    assert [row["tool_status"] for row in timed if row.get("tool_call_id") == "call_profile1"][-1] == "interrupted"
     await agent.text(sid, REDIRECTED_REPORT)
     await agent.finish(sid)
     await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', REDIRECTED_REPORT) == 1, 10)
