@@ -295,6 +295,18 @@ def boundary_lines(items: list) -> list[str]:
             f"{len(out)} hits"] + out
 
 
+def input_detail(usage: dict, key: str) -> int:
+    return (usage.get("input_tokens_details") or {}).get(key) or 0
+
+
+def mid_call_misses(activity: list) -> list[dict]:
+    """Orchestrator steps after a call's first that processed over 15k fresh input tokens (#58).
+    The first step of a call is expected to miss when the cache lapsed between calls."""
+    steps = [r for r in activity if r["event"] == "orchestrator.model" and detail(r).get("usage")]
+    return [r for r in steps[1:]
+            if detail(r)["usage"].get("input_tokens", 0) - input_detail(detail(r)["usage"], "cached_tokens") > 15000]
+
+
 def stats_lines(call: dict, items: list) -> list[str]:
     activity = call.get("activity", [])
     t0 = activity[0]["ts"] if activity else call["started_at"]
@@ -314,6 +326,7 @@ def stats_lines(call: dict, items: list) -> list[str]:
     closes = [f"{detail(r).get('reason')} {(detail(r).get('usage') or {}).get('seconds')}s"
               for r in activity if r["event"] == "voice.live.closed"]
     themes = [detail(r).get("theme") for r in activity if r["event"] == "voice.theme"]
+    minutes = ((call.get("ended_at") or (activity[-1]["ts"] if activity else t0)) - t0) / 60
     out = [
         f"timeline: sandbox ready {first('sandbox.ready')}, voice attached {first('voice.live.attached')}, "
         f"ended +{(call.get('ended_at') or (activity[-1]['ts'] if activity else t0)) - t0}s ({call.get('status')})",
@@ -321,10 +334,13 @@ def stats_lines(call: dict, items: list) -> list[str]:
         f"closes: {', '.join(closes) or 'none'}" + (f"; theme changes: {', '.join(map(str, themes))}" if themes else ""),
         f"handoffs: {len(handoffs)}; first say accepted after handoff (not heard): {', '.join(waits) or 'n/a'}",
         f"model calls: {len(model_ms)}"
+        + (f" ({len(model_ms) / minutes:.1f}/min of call)" if minutes else "")
         + (f", p50 {statistics.median(model_ms) / 1000:.1f}s, max {max(model_ms) / 1000:.1f}s" if model_ms else "")
         + (f", tokens in {sum(u.get('input_tokens', 0) for u in usage)}"
-           f" (cached {sum((u.get('input_tokens_details') or {}).get('cached_tokens', 0) for u in usage)})"
-           f", out {sum(u.get('output_tokens', 0) for u in usage)}" if usage else ""),
+           f" (cached {sum(input_detail(u, 'cached_tokens') for u in usage)},"
+           f" written {sum(input_detail(u, 'cache_write_tokens') for u in usage)})"
+           f", out {sum(u.get('output_tokens', 0) for u in usage)}" if usage else "")
+        + f"; mid-call misses {len(mid_call_misses(activity))}",
         f"tools: {', '.join(f'{n}×{names.count(n)}' for n in dict.fromkeys(names)) or 'none'}; errors {errors}",
         f"turns: {sum(1 for r in activity if r['event'] == 'agent.turn.started')} started, "
         f"{sum(1 for r in activity if r['event'] == 'agent.turn.stopped')} stopped, "
@@ -409,15 +425,13 @@ def reminder_lines(conversation: dict, call: dict, bounds: tuple[int, int], depl
     if agent_errors:
         out.append(f"Agent connection errors ({', '.join(agent_errors)}): check agent.turn.failed in activity and the "
                    "Sandbox gateway/OpenCode logs (disk, memory) before blaming the Orchestrator")
-    # A cold start or a new voice session (Theme change) rewrites the prefix, so a miss then is expected.
-    fresh = [r["ts"] for r in activity if r["event"] == "voice.live.attached"]
-    misses = [r["ts"] - t0 for r in activity if r["event"] == "orchestrator.model"
-              and (detail(r).get("usage") or {}).get("input_tokens", 0) > 20000
-              and ((detail(r).get("usage") or {}).get("input_tokens_details") or {}).get("cached_tokens", 1) == 0
-              and not any(0 <= r["ts"] - f <= 90 for f in fresh)]
+    # Issue #58: a mid-call miss rewrites the whole context at 1.25x input; OpenAI's diagnosis
+    # (prompt_cache, recorded since then) names why.
+    misses = mid_call_misses(activity)
     if misses:
-        out.append(f"prompt cache misses at +{', +'.join(map(str, misses))}s, away from a voice session start: "
-                   "something changed the context prefix (orchestrator.model usage in activity)")
+        out.append("prompt cache misses mid-call at " + ", ".join(
+            f"+{r['ts'] - t0}s ({(detail(r).get('prompt_cache') or {}).get('reason') or 'no diagnosis'})" for r in misses)
+            + ": a step that is not the call's first should reuse its context (orchestrator.model prompt_cache in activity)")
     money = [i for i in items if i.get("type") == "function_call_output" or i.get("role") == "user"
              if re.search(r"¢|\bcents\b|\bpaid\b", text_of(i) + str(i.get("output", "")))]
     if money:  # not "cost": every turn_stopped carries the Agent session's own cost

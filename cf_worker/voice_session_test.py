@@ -661,12 +661,20 @@ def created_alias(context: list[dict]) -> str:
 
 # Each step fires once its trigger appears in a user message, in order, after the
 # previous step's outputs are back. Steps that answer a handoff use its delegation id.
-# The provider's usage, and the counts Dogwalk records from it: cached and reasoning tokens
-# survive (#54), anything else is dropped.
-MOCK_USAGE = {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5,
-              "input_tokens_details": {"cached_tokens": 1, "unlisted": 9}, "output_tokens_details": {"reasoning_tokens": 1}}
-RECORDED_USAGE = {"input_tokens": 3, "output_tokens": 2,
-                  "input_tokens_details": {"cached_tokens": 1}, "output_tokens_details": {"reasoning_tokens": 1}}
+# The provider's usage and cache diagnosis, and what Dogwalk records from them: token counts,
+# cache writes, and the miss reason survive (#54, #58), anything else is dropped.
+MOCK_USAGE = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2,
+              "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 1, "unlisted": 9,
+                                       "cache_write_tokens_details": {"ttl_30m_tokens": 1, "ttl_12h_tokens": 0}},
+              "output_tokens_details": {"reasoning_tokens": 1}}
+RECORDED_USAGE = {"input_tokens": 1, "output_tokens": 1,
+                  "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 1,
+                                           "cache_write_tokens_details": {"ttl_30m_tokens": 1, "ttl_12h_tokens": 0}},
+                  "output_tokens_details": {"reasoning_tokens": 1}}
+MOCK_CACHE_DIAGNOSIS = {"type": "cache_miss", "reason": "input_changed", "comparison_reusable_tokens": 7,
+                        "cache_missed_tokens": 5, "detail": "dropped"}
+RECORDED_CACHE_DIAGNOSIS = {"type": "cache_miss", "reason": "input_changed", "comparison_reusable_tokens": 7,
+                            "cache_missed_tokens": 5}
 
 ORCHESTRATOR_SCRIPT = [
     # Session tools fail fast while the Sandbox is still starting.
@@ -964,7 +972,8 @@ class OrchestratorMock(BaseHTTPRequestHandler):
         # Provider correlation metadata, derived from the client's ID so the test can match rows.
         client = headers.get("x-client-request-id", "").replace("-", "")
         self.respond({"id": f"resp_{client}", "model": "mock-model-2026-11-10", "output": output,
-                      "usage": MOCK_USAGE}, {"x-request-id": f"req_{client}"})
+                      "usage": MOCK_USAGE,
+                      "prompt_cache_diagnostics": MOCK_CACHE_DIAGNOSIS}, {"x-request-id": f"req_{client}"})
 
     def respond(self, value: dict, extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(value).encode()
@@ -1576,7 +1585,11 @@ async def run_protocol(identity: str) -> None:
             assert heard["provider_request_id"] == f"req_{client}", heard
             assert (done["response_id"], done["response_model"], done["usage"]) == (
                 f"resp_{client}", "mock-model-2026-11-10", RECORDED_USAGE), done
+            assert done["prompt_cache"] == RECORDED_CACHE_DIAGNOSIS, done
         assert not any({"input", "output", "instructions"} & row.keys() for row in timed if row["event"].startswith("model."))
+        # OpenAI-only request options stay off any other Responses-compatible endpoint, like this mock.
+        assert not any("prompt_cache_options" in payload or "context" in payload["reasoning"]
+                       for _, payload in OrchestratorMock.requests), "OpenAI-only options sent to a compatible endpoint"
         received = next(row for row in timed if row["event"] == "live.received" and row.get("type") == "session.input_transcript.delta")
         assert received["end_ms"] >= received["start_ms"] and received["queue_ms"] >= 0
         assert isinstance(received.get("content_text"), str) and received.get("content_kind") == "caller"

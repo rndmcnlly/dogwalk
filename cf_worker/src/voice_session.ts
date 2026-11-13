@@ -16,7 +16,7 @@ import {
 import { ENROLL_ANSWERS } from "./identity_check";
 import { availableHandles, HANDLE_OPTIONS_PER_SPIN, HANDLE_QUARANTINE_SECONDS, HANDLE_SPINS_PER_CALL, renameUser } from "./handles";
 import { PAIR_BUILD } from "./pair_page";
-import { producerFields } from "./otlp";
+import { isOpenAiHost, producerFields } from "./otlp";
 import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, type TraceContext } from "./trace_context";
 import { ACCESS_COMPONENTS, type AccessKind, type BoardElement, boardElements, checkRasterSize } from "./board_images";
 import { hostSpeaker } from "./voice_verify";
@@ -972,6 +972,8 @@ export class VoiceSession {
   private memory: MemoryVersion | null = null;
   // Input tokens of the last Orchestrator model call, which the backstop and the model sense.
   private contextTokens = 0;
+  // The previous Orchestrator step's response, which the next asks OpenAI to explain a cache miss against.
+  private lastResponseId: string | null = null;
   // compact_context runs while its own call is unanswered, so the Memory writer starts once
   // the step is answered (compactionRequested), then runs off the queue (compaction).
   private compactionRequested: { focus: string } | null = null;
@@ -3076,6 +3078,7 @@ export class VoiceSession {
     // traceparent names this request's span and X-Client-Request-Id our request_id. OpenAI
     // documents the client ID for support correlation only: no provider is known to continue
     // our trace or return spans, so these are correlation keys, not distributed tracing.
+    const openAi = isOpenAiHost(endpoint.host);
     const response = await fetch(`${endpoint.base}/responses`, {
       method: "POST",
       headers: {
@@ -3090,7 +3093,11 @@ export class VoiceSession {
         input: [...this.pinnedMemory(), ...this.orchestratorContext],
         tools: ORCHESTRATOR_TOOLS,
         parallel_tool_calls: true,
-        reasoning: { effort },
+        // OpenAI only: reasoning items from earlier turns stay rendered (gpt-6.1-sol's default,
+        // pinned), so the context is append-only as the provider sees it too; and each step asks
+        // OpenAI to explain a cache miss against the previous one, at no cost (#58).
+        reasoning: { effort, ...(openAi ? { context: "all_turns" } : {}) },
+        ...(openAi && this.lastResponseId ? { prompt_cache_options: { comparison_response_id: this.lastResponseId } } : {}),
         store: false,
         include: ["reasoning.encrypted_content"],
       }),
@@ -3102,16 +3109,20 @@ export class VoiceSession {
     if (!response.ok) {
       throw Object.assign(new Error(`Orchestrator model ${response.status}: ${(await response.text()).slice(0, 200)}`), { status: response.status });
     }
-    const body = await response.json<{ id?: unknown; model?: unknown; output?: unknown[]; usage?: Record<string, unknown> }>();
-    // Response metadata only: identifiers, the served model, and token counts, never content.
+    const body = await response.json<{ id?: unknown; model?: unknown; output?: unknown[]; usage?: Record<string, unknown>;
+      prompt_cache_diagnostics?: unknown }>();
+    // Response metadata only: identifiers, the served model, token counts, and the cache
+    // diagnosis, never content.
     const responseId = correlationId(body.id), responseModel = modelName(body.model);
     const usage = tokenUsage(body.usage);
+    const cache = cacheDiagnosis(body.prompt_cache_diagnostics);
+    this.lastResponseId = responseId;
     this.timing("model.completed", { request_id: requestId, ms: Date.now() - started, ...span,
       ...(responseId ? { response_id: responseId } : {}), ...(responseModel ? { response_model: responseModel } : {}),
-      ...(Object.keys(usage).length ? { usage } : {}),
+      ...(Object.keys(usage).length ? { usage } : {}), ...(cache ? { prompt_cache: cache } : {}),
       tool_call_ids: (body.output ?? []).filter((item: any) => item.type === "function_call").map((item: any) => item.call_id) }, Date.now(), scope);
     await this.record("orchestrator.model", { request_id: requestId, started_ms: started, ms: Date.now() - started,
-      usage: Object.keys(usage).length ? usage : null }, scope);
+      usage: Object.keys(usage).length ? usage : null, ...(cache ? { prompt_cache: cache } : {}) }, scope);
     const inputTokens = Number(body.usage?.input_tokens);
     if (Number.isFinite(inputTokens) && inputTokens > 0) {
       this.contextTokens = inputTokens;
@@ -5452,20 +5463,40 @@ function modelErrorType(error: unknown): string {
   return typeof name === "string" && name !== "Error" && /^[A-Za-z]\w{0,63}$/.test(name) ? name : "_OTHER";
 }
 
-// Token counts from a Responses `usage`, in the provider's nested shape, and nothing else:
-// cached input tokens tell a prompt-cache hit from a miss (#54), reasoning tokens what the
-// output cost was spent on.
-function tokenUsage(usage: Record<string, unknown> | undefined): Record<string, unknown> {
-  const count = (value: unknown) => (Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined);
-  const details = (key: string, field: string) => {
-    const value = count((usage?.[key] as Record<string, unknown> | undefined)?.[field]);
-    return value === undefined ? [] : [[key, { [field]: value }]];
-  };
-  return Object.fromEntries([
-    ...(["input_tokens", "output_tokens"] as const).flatMap((key) => (count(usage?.[key]) === undefined ? [] : [[key, usage?.[key]]])),
-    ...details("input_tokens_details", "cached_tokens"),
-    ...details("output_tokens_details", "reasoning_tokens"),
-  ]);
+// The token counts kept from a Responses `usage`, in the provider's nested shape: cached input
+// tells a prompt-cache hit from a miss (#54), cache writes what a miss cost (1.25x input on
+// gpt-6.1-sol), reasoning tokens what the output was spent on.
+const USAGE_COUNTS = {
+  input_tokens: true, output_tokens: true,
+  input_tokens_details: { cached_tokens: true, cache_write_tokens: true,
+    cache_write_tokens_details: { ttl_30m_tokens: true, ttl_12h_tokens: true } },
+  output_tokens_details: { reasoning_tokens: true },
+} as const;
+
+// Counts only, as nonnegative integers; anything else the provider adds is dropped.
+function tokenUsage(usage: unknown, shape: Record<string, unknown> = USAGE_COUNTS): Record<string, unknown> {
+  const kept: Record<string, unknown> = {};
+  for (const [key, inner] of Object.entries(shape)) {
+    const value = (usage as Record<string, unknown> | null | undefined)?.[key];
+    if (inner === true) {
+      if (Number.isSafeInteger(value) && (value as number) >= 0) kept[key] = value;
+    } else if (value && typeof value === "object") {
+      const nested = tokenUsage(value, inner as Record<string, unknown>);
+      if (Object.keys(nested).length) kept[key] = nested;
+    }
+  }
+  return kept;
+}
+
+// OpenAI's explanation of a prompt-cache miss against the previous step (prompt cache
+// diagnostics): its classification and token estimates, never content.
+function cacheDiagnosis(value: unknown): Record<string, unknown> | null {
+  const raw = value as Record<string, unknown> | null | undefined;
+  const label = (text: unknown) => (typeof text === "string" && /^[a-z_]{1,64}$/.test(text) ? text : undefined);
+  const type = label(raw?.type);
+  if (!type) return null;
+  return Object.fromEntries(Object.entries({ type, reason: label(raw?.reason), ...tokenUsage(raw,
+    { comparison_reusable_tokens: true, cache_missed_tokens: true }) }).filter(([, field]) => field !== undefined));
 }
 
 // A tool-free Responses reply's text, joined.
