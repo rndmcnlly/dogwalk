@@ -172,10 +172,12 @@ export function uploadClaimScript(root: string, folder: string, stem: string, ex
     `done`,
     `set -C`,
     `n="$stem$ext"; i=2`,
-    `until { : > "$dir/$n"; } 2>/dev/null; do`,
+    // noclobber still opens an existing FIFO or device, so anything already there is skipped first.
+    `until [ ! -e "$dir/$n" ] && [ ! -L "$dir/$n" ] && { : > "$dir/$n"; } 2>/dev/null; do`,
     `  [ -e "$dir/$n" ] || [ -L "$dir/$n" ] || exit 2`,
     `  n="$stem ($i)$ext"; i=$((i+1)); [ "$i" -gt 999 ] && exit 4`,
     `done`,
+    `[ -f "$dir/$n" ] && [ ! -L "$dir/$n" ] && [ ! -s "$dir/$n" ] || exit 2`,
     `printf '%s/%s' "$dir" "$n"`,
   ].join("\n");
 }

@@ -145,6 +145,9 @@ if (gnu) {
   // A dangling link where the name would go is skipped, not followed.
   symlinkSync(join(base, "elsewhere"), `${root}/talk/link.txt`);
   assert.equal(claim(`${root}/talk`, "link", ".txt").stdout, `${root}/talk/link (2).txt`);
+  // A FIFO where the name would go is skipped, never opened (opening it would block the claim).
+  execFileSync("mkfifo", [`${root}/talk/pipe`]);
+  assert.equal(claim(`${root}/talk`, "pipe", "").stdout, `${root}/talk/pipe (2)`);
   assert.deepEqual(readdirSync(base).sort(), ["bin", "uploads"]);
   // A symlinked folder step is refused before anything is made beneath it.
   mkdirSync(join(base, "outside"));

@@ -2768,8 +2768,9 @@ export class VoiceSession {
       await this.streamUpload(path, name, request.body, size);
       claimed = null;
     } catch (error) {
-      if (claimed) await this.sandboxExecute(`rm -f -- ${shellQuote(claimed)}`, 10).catch(() => {});
-      if (reserved) await this.reserveUpload(boardId, key, -size, -1).catch(() => {});
+      // The reservation comes back only once nothing is left behind; a crash keeps it spent.
+      const cleared = !claimed || (await this.sandboxExecute(`rm -f -- ${shellQuote(claimed)}`, 10).catch(() => null))?.exitCode === 0;
+      if (reserved && cleared) await this.reserveUpload(boardId, key, -size, -1).catch(() => {});
       // A body refused before it was read is dropped, not left for the runtime to complain about.
       if (request.body && !request.bodyUsed) await request.body.cancel().catch(() => {});
       const asleep = error instanceof SandboxAsleepError;
@@ -2780,7 +2781,7 @@ export class VoiceSession {
         await this.record("whiteboard.upload_failed", { board_id: boardId, status });
         await this.orchestratorEvent(`[harness event] upload_failed: ${JSON.stringify({
           board_id: boardId, display: browser.display, name, size: Number.isFinite(size) ? size : null, error: errorMessage(error),
-        })}`, last && status !== 429);
+        })}`, last);
       }
       return Response.json({ error: errorMessage(error), ...(asleep ? { asleep: true } : {}) }, { status });
     }
@@ -4392,7 +4393,7 @@ export class VoiceSession {
   private async listWorkspaceProjects(): Promise<Record<string, unknown>> {
     const script = [
       `cd ${shellQuote(WORKSPACE)} || exit 1`,
-      "find . -maxdepth 4 \\( -name node_modules -o -name .cache -o -name .local -o -name .config -o -name .npm -o -name recordings \\) -prune"
+      "find . -maxdepth 4 \\( -name node_modules -o -name .cache -o -name .local -o -name .config -o -name .npm -o -name recordings -o -path ./uploads \\) -prune"
         + " -o -name .git -prune -print -o \\( -name '.*' ! -name . \\) -prune -o \\( -name AGENTS.md -o -name AGENT.md \\) -print 2>/dev/null"
         + ` | sed 's|/[^/]*$||' | sort -u | head -n ${MAX_WORKSPACE_PROJECTS + 1}`
         + " | while IFS= read -r d; do g=0; a=0; o=;"
@@ -5857,6 +5858,8 @@ function workspaceDirectory(input: string): string {
   const segments = (raw.startsWith("/") ? raw : `${WORKSPACE}/${raw}`).split("/").filter((part) => part && part !== ".");
   const path = `/${segments.join("/")}`;
   if (segments.includes("..") || !insideWorkspace(path)) throw new Error("directory must be inside the Workspace");
+  // Uploads are a drop folder, never a project: an uploaded AGENTS.md must not become instructions.
+  if (path === UPLOAD_ROOT || path.startsWith(`${UPLOAD_ROOT}/`)) throw new Error("~/uploads is a drop folder; start the session in a project and have it copy the files it needs");
   return path;
 }
 

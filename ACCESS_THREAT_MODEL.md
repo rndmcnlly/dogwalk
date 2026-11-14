@@ -203,8 +203,15 @@ directory, so a planted `AGENTS.md` or dotfile cannot reach an Agent's context
 or a tool automatically. Names are flattened to one segment, never a dotfile,
 never overwrite (a taken name gets ` (2)`), and are written without the execute
 bit. The grant caps 25 MB per file, 20 files, and 100 MB in all, reserved
-before bytes move; a name claimed for a file that never arrived is removed, and
-a browser that stops sending is dropped after 30 seconds. Someone holding a stolen Paired Browser token while an
+before bytes move; a name claimed for a file that never arrived is removed (the
+reservation comes back only once it is), and a browser that stops sending is
+dropped after 30 seconds. These are per grant, not a Workspace budget: each
+Upload drawn gets its own allowance, and redrawing one restores it without
+removing earlier files, so nothing bounds total upload storage but the
+Sandbox's disk. `~/uploads/` is excluded from project discovery and refused as
+a Managed Session's directory, so an uploaded `AGENTS.md` never becomes an
+Agent's instructions; but it is an ordinary Workspace folder, and a process an
+Agent left watching it would see new files. Someone holding a stolen Paired Browser token while an
 Upload grant is live and the Sandbox runs can therefore plant capped,
 non-executable, non-dot files in that folder only. Every file produces a harness
 event, and so do failed attempts up to 20 per grant (more are refused silently,
@@ -269,7 +276,9 @@ Accepted for one operator-managed deployment whose only Users are invited:
 - An Upload grant accepts files after the call ends, so a holder of the pairing
   token can plant capped files in `~/uploads/<folder>/` between calls, heard
   only at the next call. Accepted because files never land in a project
-  directory and reach an Agent only when someone asks it to read them.
+  directory, are never a Managed Session's root, and reach an Agent only when
+  someone asks it to read them (or a process an Agent started watches the
+  folder). Total upload storage is bounded only by the Sandbox's disk.
 - An uploaded file's name and declared type are text chosen by whoever holds
   the page, and reach the Session Orchestrator's context as part of the
   harness event: a prompt-injection channel bounded by the name rules and the

@@ -1187,7 +1187,9 @@ records it under `<board id>:<key>`:
   flattened to one segment (no dotfiles, at most 200 UTF-8 bytes, extension
   kept), never overwrite (`name (2).ext`), and are set to mode 0644.
   The grant carries 25 MB per file, 20 files, and 100 MB in all, reserved
-  before bytes move and released if a file fails. While sending, the card
+  before bytes move and released only once a failed file's name is removed;
+  there is no Workspace-wide upload budget. `~/uploads/` is pruned from
+  `list_workspace_projects` and refused as a session directory. While sending, the card
   counts as an open Access Element, so a stale page does not reload itself.
 
 `revoke_access`, a Display ending, a board evicted from its Display's five, or
