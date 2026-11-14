@@ -184,8 +184,9 @@ through the built-in OpenAI provider. Sandboxes receive `OPENAI_API_KEY` from th
 org Daytona Secret `dogwalk-openai`, allowlisted to `api.openai.com`. Daytona's
 egress proxy substitutes the real key into HTTPS request headers, so processes in
 the Sandbox, including an Agent with `sudo`, see only a `dtn_secret_` placeholder.
-The Agent can still *use* the key against the allowlisted host; scope it to a
-dedicated OpenAI project with a budget. Daytona already points
+The Agent can still *use* the key against the allowlisted host, so the secret holds
+`dogwalk-sandbox-agents`, a key of its own in the OpenAI Dogwalk project, whose hard
+monthly limit bounds what it can spend (`cf_worker/README.md`, OpenAI Keys and Budget). Daytona already points
 `NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE` at its proxy CA, and OpenCode needed
 no TLS changes. Verified 2026-11-07: a fresh Sandbox from `dogwalk-acp-20261107-v2`
 completed a real Prompt Turn through the ACP Gateway. The shared service inherits the

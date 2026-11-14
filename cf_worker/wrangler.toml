@@ -27,10 +27,14 @@ OPENAI_PROJECT_ID = "proj_jignpSyHyE5k18M1EGYS9Ijx"
 OPENAI_LIVE_MODEL = "gpt-live-1"
 ORCHESTRATOR_MODEL = "gpt-6.1-sol"
 ORCHESTRATOR_REASONING_EFFORT = "low"
+# Mirrors the hard monthly limit on the OpenAI Dogwalk project (issue #57): the spend ledger
+# measures against it, and the Opening mentions it past 75%. Change both together.
+DOGWALK_MONTHLY_BUDGET_USD = "80"
 PUBLIC_ORIGIN = "https://dogwalk.tools"
 # Name of a pre-built Daytona snapshot containing OpenCode and the Agent Gateway.
 DAYTONA_SNAPSHOT = "dogwalk-agent-20261112-v1"
-# Name of the org Daytona Secret mapped to OPENAI_API_KEY for sandbox Agents.
+# Name of the org Daytona Secret mapped to OPENAI_API_KEY for sandbox Agents; it holds the
+# OpenAI key dogwalk-sandbox-agents in the Dogwalk project.
 DAYTONA_AGENT_SECRET = "dogwalk-openai"
 # Stamped on every observation. The integration tests override it; so should a manual `wrangler dev`.
 DEPLOYMENT_ENVIRONMENT = "production"
@@ -88,8 +92,8 @@ deleted_classes = ["TerminalRelay"]
 # TWILIO_AUTH_TOKEN is a Worker secret, set via:
 #   wrangler secret put TWILIO_AUTH_TOKEN
 # For local `wrangler dev`, put it in .dev.vars (gitignored).
-# DAYTONA_API_KEY, DOGWALK_IDENTITY_SECRET, OPENAI_API_KEY, and
-# OPENAI_WEBHOOK_SECRET are also Worker secrets.
+# DAYTONA_API_KEY, DOGWALK_IDENTITY_SECRET, OPENAI_API_KEY (dogwalk-voice-frontend),
+# ORCHESTRATOR_API_KEY (dogwalk-orchestrator), and OPENAI_WEBHOOK_SECRET are also Worker secrets.
 
 # Observability: enable logs in the Cloudflare dashboard / wrangler tail.
 [observability]

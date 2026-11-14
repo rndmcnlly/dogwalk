@@ -5,7 +5,12 @@ export interface Env {
   TWILIO_API_BASE?: string;
   DAYTONA_API_KEY: string;
   DOGWALK_IDENTITY_SECRET: string;
+  // One OpenAI key per component (issue #57), so the Platform's per-key usage separates them:
+  // OPENAI_API_KEY is dogwalk-voice-frontend (GPT-Live), ORCHESTRATOR_API_KEY is
+  // dogwalk-orchestrator (Session Orchestrator, Memory writer, next-call greeting).
   OPENAI_API_KEY: string;
+  // Mirrors the OpenAI Dogwalk project's hard monthly limit, for the spend ledger (spend.ts).
+  DOGWALK_MONTHLY_BUDGET_USD?: string;
   DAYTONA_SNAPSHOT: string;
   DAYTONA_AGENT_SECRET?: string;
   DAYTONA_API_BASE?: string;
@@ -23,7 +28,7 @@ export interface Env {
   OPENAI_LIVE_MODEL?: string;
   ORCHESTRATOR_MODEL?: string;
   ORCHESTRATOR_API_BASE?: string;
-  ORCHESTRATOR_API_KEY?: string;
+  ORCHESTRATOR_API_KEY: string;
   ORCHESTRATOR_REASONING_EFFORT?: string;
   RECORDING_MUTE?: string;
   OPENAI_LIVE_API_BASE?: string;

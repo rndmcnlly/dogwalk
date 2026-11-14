@@ -57,6 +57,11 @@ ORCHESTRATOR_MOCK_PORT = PORT_BASE + 5
 # wrangler dev's output, kept per port base and shown when the suite fails.
 WRANGLER_LOG = Path(tempfile.gettempdir()) / f"dogwalk-voice-session-{PORT_BASE}.log"
 IDENTITY_SECRET = f"local-identity-secret-{secrets.token_hex(8)}"
+# Responses usage with cache reads and writes, kept verbatim, and what the Worker charges for it:
+# 100 ordinary at $2/M, 600 cached at $0.10/M, 300 written at 1.25 x $2/M, 50 out at $10/M.
+MOCK_USAGE = {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 300},
+              "output_tokens": 50, "output_tokens_details": {"reasoning_tokens": 20}}
+MOCK_STEP_USD = (100 * 2.0 + 600 * 0.1 + 300 * 1.25 * 2.0 + 50 * 10.0) / 1_000_000
 OPENAI_WEBHOOK_KEY = secrets.token_bytes(32)
 OPENAI_WEBHOOK_SECRET = "whsec_" + base64.b64encode(OPENAI_WEBHOOK_KEY).decode()
 TRACEPARENT = re.compile(r"00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-01")
@@ -661,6 +666,12 @@ def created_alias(context: list[dict]) -> str:
 
 # Each step fires once its trigger appears in a user message, in order, after the
 # previous step's outputs are back. Steps that answer a handoff use its delegation id.
+# OpenAI's cache diagnosis, and what Dogwalk records of it: classification and counts (#58).
+MOCK_CACHE_DIAGNOSIS = {"type": "cache_miss", "reason": "input_changed", "comparison_reusable_tokens": 7,
+                        "cache_missed_tokens": 5, "detail": "dropped"}
+RECORDED_CACHE_DIAGNOSIS = {"type": "cache_miss", "reason": "input_changed", "comparison_reusable_tokens": 7,
+                            "cache_missed_tokens": 5}
+
 ORCHESTRATOR_SCRIPT = [
     # Session tools fail fast while the Sandbox is still starting.
     ("call_started", lambda ctx: [
@@ -844,6 +855,12 @@ ORCHESTRATOR_SCRIPT = [
     ('"key":"C"', lambda ctx: [call("kC-donate", "start_voice_donation")]),
     # Asking to test their voice hands the call to deterministic Challenge Practice.
     ('"key":"D"', lambda ctx: [call("kD-practice", "start_challenge_practice")]),
+    # Self-knowledge lists its reference files' headings; one section is read at a time.
+    ("[handoff del-sk]", lambda ctx: [
+        {**call("sk-load", "load_voice_agent_skill"), "arguments": json.dumps({"name": "platform-self-knowledge"})},
+        call("sk-read", "read_voice_agent_skill_reference", skill="platform-self-knowledge", file="DOMAIN.md", section="Session Orchestrator"),
+        call("sk-bad", "read_voice_agent_skill_reference", skill="platform-self-knowledge", file="DOMAIN.md", section="Orchestrator Internals"),
+    ]),
 ]
 # Invitation fixtures (test numbers only). SEED_INVITER invited TEST_PHONE; FOREIGN is
 # SEED_INVITER's own, unbound and active; EXPIRED is TEST_PHONE's and lapsed.
@@ -862,6 +879,7 @@ TEST_NUMBERS = [TEST_PHONE, SEED_INVITER, BOUND_PHONE, INVITEE_PHONE, REBOUND_PH
 MEMORY_TEXT = "Caller prefers terse updates. Juniper fixes the parser; Dozer works in honeydozer."
 EARLY_MEMORY = "Juniper fixes the parser."
 EARLY_FOCUS = "Juniper's parser work"
+HANGUP_MEMORY = "Caller prefers terse updates. Juniper and Dozer are idle; voice practice found no reference."
 COMPACTION_BRIEF = "Tell the caller briefly that you are tidying your notes, and that they can keep talking meanwhile."
 BOARD_PROGRAM = (
     'root = Stack([fig, big, report, chart, pick, shell, docs])\nfig = Image("diagram.svg", "The parser\'s two stages", "Drawn by an agent", "small")\n'
@@ -899,6 +917,7 @@ STEP_IDS = [
     "wb-pair", "wb-say", "wb-unnamed", "wb-ghost", "wb-slides", "wm-pair", "wm-say", "we-rename", "we-preview", "we-say",
     "k9-access", "k9-state", "kB-revoke", "kB-state", "we-unpair", "we-state", "we-say2", "k3-say", "k3-theme",
     "k8-say", "pu-code-say", "dc-pair", "dc-say", "k2-dramaturgy", "kC-donate", "kD-practice",
+    "sk-load", "sk-read", "sk-bad",
 ]
 
 
@@ -910,8 +929,10 @@ class OrchestratorMock(BaseHTTPRequestHandler):
     # The Memory writer's requests, answered in order; clearing the gate holds them, as a slow
     # model writing a long Memory would (CAa3722805: 51.7 s).
     memory_requests: list[dict] = []
-    memory_replies = [EARLY_MEMORY, MEMORY_TEXT]
+    memory_replies = [EARLY_MEMORY, MEMORY_TEXT, HANGUP_MEMORY]
     memory_gate = threading.Event()
+    # Every step's usage; a test swaps in a larger input_tokens to make the context look large.
+    usage = MOCK_USAGE
     issued: list[tuple[str, int]] = []
     lock = threading.Lock()
 
@@ -957,7 +978,8 @@ class OrchestratorMock(BaseHTTPRequestHandler):
         # Provider correlation metadata, derived from the client's ID so the test can match rows.
         client = headers.get("x-client-request-id", "").replace("-", "")
         self.respond({"id": f"resp_{client}", "model": "mock-model-2026-11-10", "output": output,
-                      "usage": {"input_tokens": 1, "output_tokens": 1}}, {"x-request-id": f"req_{client}"})
+                      "usage": OrchestratorMock.usage,
+                      "prompt_cache_diagnostics": MOCK_CACHE_DIAGNOSIS}, {"x-request-id": f"req_{client}"})
 
     def respond(self, value: dict, extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(value).encode()
@@ -1190,6 +1212,12 @@ def operator_access_state(verbose: bool = False) -> dict:
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.load(response)
+
+
+def agent_connected_count() -> int:
+    """agent_connected events the model has read, plus any snoozed in the queue (#58)."""
+    queued = sum(text.count("[harness event] agent_connected") for item in conversations() for text in item.get("orchestrator_queue") or [])
+    return latest_user_text().count("[harness event] agent_connected") + queued
 
 
 def latest_user_text() -> str:
@@ -1566,8 +1594,17 @@ async def run_protocol(identity: str) -> None:
             heard = next(row for row in timed if row["event"] == "model.headers" and row["request_id"] == start["request_id"])
             assert heard["provider_request_id"] == f"req_{client}", heard
             assert (done["response_id"], done["response_model"], done["usage"]) == (
-                f"resp_{client}", "mock-model-2026-11-10", {"input_tokens": 1, "output_tokens": 1}), done
+                f"resp_{client}", "mock-model-2026-11-10", MOCK_USAGE), done
+            assert done["prompt_cache"] == RECORDED_CACHE_DIAGNOSIS, done
+        # Spend ledger (issue #57): every step priced from its usage, and GPT-Live's 6 s.
+        ledger = d1("SELECT component, usd, call_sid FROM spend WHERE component != 'baseline'")
+        steps = [row for row in ledger if row["component"] == "orchestrator"]
+        assert steps and all(abs(row["usd"] - MOCK_STEP_USD) < 1e-9 for row in steps), ledger
+        assert any(row["component"] == "voice_frontend" and abs(row["usd"] - 6 * 0.05 / 60) < 1e-9 for row in ledger), ledger
         assert not any({"input", "output", "instructions"} & row.keys() for row in timed if row["event"].startswith("model."))
+        # OpenAI-only request options stay off any other Responses-compatible endpoint, like this mock.
+        assert not any("prompt_cache_options" in payload or "context" in payload["reasoning"]
+                       for _, payload in OrchestratorMock.requests), "OpenAI-only options sent to a compatible endpoint"
         received = next(row for row in timed if row["event"] == "live.received" and row.get("type") == "session.input_transcript.delta")
         assert received["end_ms"] >= received["start_ms"] and received["queue_ms"] >= 0
         assert isinstance(received.get("content_text"), str) and received.get("content_kind") == "caller"
@@ -1671,6 +1708,12 @@ async def run_protocol(identity: str) -> None:
         await wait_for(lambda: OrchestratorMock.greeting_requests, 10)
         greeting_request = OrchestratorMock.greeting_requests[-1]
         assert greeting_request["tools"] and greeting_request["model"] == "gpt-6.1-sol"
+        # The greeting and the Memory writer share the steps' prefix, so the cache serves them.
+        step = next(payload for _, payload in reversed(OrchestratorMock.requests) if payload.get("tool_choice") != "none")
+        prefix = ("model", "instructions", "tools", "parallel_tool_calls", "reasoning", "include")
+        for shared in (greeting_request, OrchestratorMock.memory_requests[-1]):
+            assert all(shared.get(key) == step.get(key) for key in prefix), [key for key in prefix if shared.get(key) != step.get(key)]
+        assert str(greeting_request["input"][-1]["content"]).startswith("[write greeting]")
         assert "call_ended" in json.dumps(greeting_request["input"])
         handoffs = [item for item in greeting_request["input"]
                     if item.get("role") == "user" and "[handoff del-4]" in str(item.get("content"))]
@@ -1702,10 +1745,16 @@ async def run_protocol(identity: str) -> None:
         assert agent.events_connections == 2 and DaytonaMock.preview_reads == 1, (
             "the Agent Gateway preview URL was not reused", agent.events_connections, DaytonaMock.preview_reads,
         )
-        await wait_for(lambda: latest_user_text().count("[harness event] agent_connected") >= 2, 10)
         # Dozer's unheard end was finished from the snapshot and reached the Orchestrator.
         dozer_marker = 'turn_stopped: {"alias":"Dozer","outcome":"completed"'
         await wait_for(lambda: dozer_marker in latest_user_text(), 10)
+        # A returning caller's call_started and agent_connected snooze (#58): they reach the model
+        # with the event that woke it (here the Permission Request asked between calls, whose wake
+        # waited for this call, or Dozer's end), or wait in the queue for the next, never alone.
+        returning = [str(payload["input"][-1].get("content")) for _, payload in OrchestratorMock.requests
+                     if RETURN_OPENING in str(payload["input"][-1].get("content"))]
+        assert returning and all("permission_requested:" in text or dozer_marker in text for text in returning), returning
+        await wait_for(lambda: agent_connected_count() >= 2, 10)
         assert AWAY_REPORT in OrchestratorMock.user_message(dozer_marker)
         second_rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")
         caught_up = [json.loads(row["detail"]) for row in second_rows if row["event"] == "agent.turn.caught_up"]
@@ -1778,7 +1827,7 @@ async def run_protocol(identity: str) -> None:
         assert '"agent_termination":"out_of_memory"' in OrchestratorMock.user_message("turn_failed: {\"alias\":\"Juniper\",\"followed\":true,\"error\":\"The Agent was killed")
         killed = OrchestratorMock.tool_output("o-inspect")
         assert killed["turn_state"] == "failed" and killed["failure"] == f"Prompt Turn failed: {OOM_SENTENCE}", killed
-        await wait_for(lambda: latest_user_text().count("[harness event] agent_connected") >= 3, 15)
+        await wait_for(lambda: agent_connected_count() >= 3, 15)
         await run_turn_control(mocks, juniper_id, beats)
 
         # Star opens the System Menu: muted input, a prompt clip, star goes back. Status and
@@ -1871,7 +1920,9 @@ async def run_protocol(identity: str) -> None:
         assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1] == {"state": "waiting"}
         await mocks.send_live(dtmf("1"))
         def heard(fragment: str) -> bool:
-            return any(fragment in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"])
+            """Delivered to the Orchestrator: read in a step, or snoozed in its queue (#58)."""
+            return any(fragment in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]) \
+                or any(fragment in line for line in queued_lines())
 
         paired_note = (await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "browser is paired" in m.get("content", "")))["content"]
         assert 'as the display "main"' in paired_note and "mirroring" not in paired_note, paired_note
@@ -1958,7 +2009,7 @@ async def run_protocol(identity: str) -> None:
         assert main_display["boards"] == 0 and main_display["latest"] is None and main_display["access"] == [], main_display
         assert 55 <= main_display["expires_in_minutes"] <= 60, main_display
         assert state["earcon_style"] == "tonal", state
-        assert state["context_tokens"] == 1 and state["memory"]["chars"] == len(EARLY_MEMORY) and "compacting" not in state["memory"], state
+        assert state["context_tokens"] == MOCK_USAGE["input_tokens"] and state["memory"]["chars"] == len(EARLY_MEMORY) and "compacting" not in state["memory"], state
         # The Orchestrator draws a board; the caller answers it on the page; it hears the answer.
         await mocks.send_live(dtmf("5"))
         board = (await recv_type(browser, "board", 15))["board"]
@@ -2078,11 +2129,11 @@ async def run_protocol(identity: str) -> None:
         # sheds only what the writer read before the current call.
         assert not OrchestratorMock.memory_gate.is_set()
         OrchestratorMock.memory_gate.set()
-        await wait_for(lambda: any("context_compacted" in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-        compacted = next(payload["input"] for _, payload in OrchestratorMock.requests if any("context_compacted" in str(item.get("content")) for item in payload["input"]))
-        assert compacted[0] == {"role": "developer", "content": f"[memory] {MEMORY_TEXT}"}, compacted[0]
+        # A compaction of its own (no focus) snoozes: its outcome waits for the next woken step (#58).
+        await wait_for(lambda: any("context_compacted" in line for line in queued_lines()), 15)
+        compacted = next(item for item in await asyncio.to_thread(conversations) if item.get("memory"))["orchestrator_context"]
         assert not any(item.get("call_id") == "h1-create" for item in compacted), "the first call survived compaction"
-        assert compacted[1].get("role") == "user", compacted[1]
+        assert compacted[0].get("role") == "user", compacted[0]
         calls_in = {item["call_id"] for item in compacted if item.get("type") == "function_call"}
         outputs_in = {item["call_id"] for item in compacted if item.get("type") == "function_call_output"}
         assert calls_in == outputs_in and {"cc-memory", "kA-evict-1", "kA-evict-5"} <= calls_in, (calls_in ^ outputs_in, calls_in)
@@ -2277,7 +2328,9 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(dtmf("3"))
         await next_matching(mocks.live_messages, appended("commentary", SWITCH_SAY))
         await wait_for(lambda: len(OrchestratorMock.greeting_requests) > greetings, 10)
-        switch_instructions = OrchestratorMock.greeting_requests[-1]["instructions"]
+        switch_request = OrchestratorMock.greeting_requests[-1]
+        switch_instructions = str(switch_request["input"][-1]["content"])
+        assert switch_instructions.startswith("[write greeting]"), switch_instructions
         assert "The survey (Survey theme)" in switch_instructions and "switched to this theme mid-call" in switch_instructions
         assert "at the high rung" in switch_instructions, switch_instructions
         assert OrchestratorMock.greeting_requests[-1]["input"][0]["content"] == f"[memory] {MEMORY_TEXT}"
@@ -2369,9 +2422,11 @@ async def run_protocol(identity: str) -> None:
             assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
             await asyncio.wait_for(mocks.live_connected.wait(), 8)
             marker = f'"returned_from":{{"flow":"{flow}"'
-            await wait_for(lambda: any(marker in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]), 10)
-            started = OrchestratorMock.user_message(marker)
-            returned = json.loads(started.split("call_started: ", 1)[1].split("\n", 1)[0])["returned_from"]
+            # A returning call_started snoozes (#58): the flow already told the caller, so it
+            # waits in the queue for whatever next wakes the model.
+            await wait_for(lambda: heard_lines(marker), 10)
+            started = heard_lines(marker)[0]
+            returned = json.loads(started.split("call_started: ", 1)[1])["returned_from"]
             assert not {"score", "cosine", "level", "phrase", "transcript", "embedding"} & returned.keys(), returned
             return returned
         assert await return_from("practice", "live-test-4") == {"flow": "practice", "outcome": "unavailable", "reason": "no_voice_reference"}
@@ -2379,10 +2434,9 @@ async def run_protocol(identity: str) -> None:
         assert await asyncio.to_thread(d1, "SELECT returned_from FROM voice_calls WHERE call_sid = 'CA_VOICE_TEST2'") == [{"returned_from": None}]
         # The inviter hears how the bound invitee's Registration went (run_invitations) once: in
         # the first call_started after the invitee's call ended, by Handle, never a number or the words.
-        told = {str(item["content"]) for _, payload in OrchestratorMock.requests for item in payload["input"]
-                if '"invitees":' in str(item.get("content"))}
+        told = set(heard_lines('"invitees":'))
         assert len(told) == 1, told
-        invitees = json.loads(next(iter(told)).split("call_started: ", 1)[1].split("\n", 1)[0])["invitees"]
+        invitees = json.loads(next(iter(told)).split("call_started: ", 1)[1])["invitees"]
         assert invitees == [{"handle": bound_invitee, "invited_days_ago": 0, "how_it_went":
             "registered, but voice enrollment could not run; "
             "their next call from their home phone offers voice enrollment again"}], invitees
@@ -2395,13 +2449,49 @@ async def run_protocol(identity: str) -> None:
         body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST2", "live-test-6")
         assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
         await asyncio.wait_for(mocks.live_connected.wait(), 8)
-        await wait_for(lambda: '"returned_from":{"flow":"reenrollment","outcome":"reenrolled"}' in json.dumps([p["input"] for _, p in OrchestratorMock.requests]).replace('\\"', '"'), 10)
+        await wait_for(lambda: heard_lines('"returned_from":{"flow":"reenrollment","outcome":"reenrolled"}'), 10)
+
+        # Every leg so far ended below the hangup threshold, so none compacted at its end.
+        assert len(OrchestratorMock.memory_requests) == 2, len(OrchestratorMock.memory_requests)
+        archives = next(item for item in await asyncio.to_thread(conversations) if item.get("memory"))["context_archives"]
+        assert not any(item["reason"] == "hangup compaction" for item in archives), archives
+
+        # A skill's references are listed by heading, and read one section at a time. These
+        # steps report a context over the hangup threshold, so this leg compacts as it ends.
+        OrchestratorMock.usage = {**MOCK_USAGE, "input_tokens": 40_000}
+        await mocks.send_live(delegation("del-sk", 1000))
+        await wait_for(outputs_back("sk-load", "sk-read", "sk-bad"), 15)
+        guidance = OrchestratorMock.tool_output("sk-load")["guidance"]
+        assert len(guidance) < 8000 and "## References" in guidance and "Session Orchestrator" in guidance, len(guidance)
+        section = OrchestratorMock.tool_output("sk-read")
+        assert section["ok"] is True and section["text"].startswith("### Session Orchestrator"), section
+        assert "### Memory" not in section["text"], section["text"][-200:]
+        refused = OrchestratorMock.tool_output("sk-bad")
+        assert refused["ok"] is False and "References list" in refused["error"], refused
 
         # Star then two hands the call to the recovery menu, which ends the GPT-Live leg.
         await mocks.send_live(dtmf("*"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
         await mocks.send_live(dtmf("2"))
         await wait_for(lambda: any(path == "/live/sessions/live-test-6/hangup" for path, _ in DaytonaMock.openai_requests), 10)
+        # The sideband closes: after the next welcome, the large context is compacted through
+        # the end of the call by the Memory writer (its gate is open since the second compaction).
+        greetings = len(OrchestratorMock.greeting_requests)
+        await mocks.live.close()
+        await wait_for(lambda: len(OrchestratorMock.memory_requests) == 3, 15)
+        assert len(OrchestratorMock.greeting_requests) > greetings, "the welcome is written before the compaction"
+        def hangup_compacted() -> dict | None:
+            state = next(item for item in conversations() if item.get("memory"))
+            return state if any(item["reason"] == "hangup compaction" for item in state["context_archives"]) else None
+        await wait_for(hangup_compacted, 15)
+        state = await asyncio.to_thread(hangup_compacted)
+        assert state["memory"]["text"] == HANGUP_MEMORY and state["context_archives"][-1]["reason"] == "hangup compaction", state["context_archives"]
+        # Cut through the end of the call: nothing the call's steps added survives.
+        assert not any(item.get("type") in ("function_call", "function_call_output") for item in state["orchestrator_context"]), state["orchestrator_context"]
+        rows = [json.loads(row["detail"]) for row in await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")
+                if row["event"] == "orchestrator.compaction"]
+        assert any(row.get("at_hangup") is True and row["call_ended"] is True and row["removed_items"] > 0 for row in rows), rows
+        OrchestratorMock.usage = MOCK_USAGE
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
         # Drain the operator API by insertion cursor, independently of event-time
         # sorting and without pairing to either caller's browser.
@@ -2443,7 +2533,8 @@ async def run_protocol(identity: str) -> None:
         requests = OrchestratorMock.requests
         assert {step for step, _ in OrchestratorMock.issued} == set(STEP_IDS)
         for headers, payload in requests:
-            assert headers.get("authorization") == "Bearer local-openai-token"
+            # The Orchestrator bills to its own key, never the Voice Frontend's.
+            assert headers.get("authorization") == "Bearer local-orchestrator-token"
             assert payload["model"] == "gpt-6.1-sol"
             assert payload["store"] is False and payload["parallel_tool_calls"] is True
             assert "Session Orchestrator" in payload["instructions"]
@@ -2732,13 +2823,24 @@ async def run_invitations(mocks: SocketMocks) -> str:
 
 
 def harness_count(*fragments: str) -> int:
-    """Harness event lines in the Orchestrator's latest context containing every fragment: a
-    turn's end delivered twice shows up as two lines."""
-    if not OrchestratorMock.requests:
-        return 0
-    return sum(all(fragment in line for fragment in fragments)
-               for item in OrchestratorMock.requests[-1][1]["input"] if item.get("role") == "user"
-               for line in str(item["content"]).splitlines())
+    """Harness event lines delivered to the Orchestrator containing every fragment, whether in its
+    latest context or snoozed in its queue (#58): a turn's end delivered twice shows up as two lines."""
+    read = [line for _, payload in OrchestratorMock.requests[-1:] for item in payload["input"] if item.get("role") == "user"
+            for line in str(item["content"]).splitlines()]
+    return sum(all(fragment in line for fragment in fragments) for line in read + queued_lines())
+
+
+def heard_lines(fragment: str) -> list[str]:
+    """Harness event lines containing fragment that reached the Orchestrator: read in any step,
+    or snoozed in its queue (#58)."""
+    read = [line for _, payload in OrchestratorMock.requests for item in payload["input"] if item.get("role") == "user"
+            for line in str(item.get("content")).splitlines()]
+    return [line for line in read + queued_lines() if fragment in line]
+
+
+def queued_lines() -> list[str]:
+    """Events snoozed in the Orchestrator's queue, waiting for the next woken step."""
+    return [line for item in conversations() for text in item.get("orchestrator_queue") or [] for line in text.splitlines()]
 
 
 async def activity_count(event: str) -> int:
@@ -2901,16 +3003,16 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     await wait_for(outputs_back("d-begin"), 10)
     await agent.ask_permission(sid, "per_matrix1", "bash", ["tox -e all"], [])
     await wait_for(lambda: harness_count("permission_requested:", "tox -e all") == 1, 10)
-    connected = latest_user_text().count("[harness event] agent_connected")
+    connected = agent_connected_count()
     await agent.close_events(1012, "service restarting")
-    await wait_for(lambda: latest_user_text().count("[harness event] agent_connected") > connected, 15)
+    await wait_for(lambda: agent_connected_count() > connected, 15)
     assert sid in agent.active and harness_count(stopped, DROP_REPORT) == 0
     # Still pending with the Agent, and presented once: the reconnect does not ask again.
     assert harness_count("permission_requested:", "tox -e all") == 1, "a reconnect presented a pending Permission Request again"
     assert harness_count('turn_failed: {"alias":"Juniper"') == failed_before, "a reconnect failed the turn"
     await agent.text(sid, "Halfway through the matrix. ")
     # Down again, and refused while the turn ends unheard: catching up finishes it, once.
-    connected = latest_user_text().count("[harness event] agent_connected")
+    connected = agent_connected_count()
     agent.refuse_events = True
     await agent.close_events(1012, "service restarting")
     await asyncio.sleep(0.5)
@@ -2918,7 +3020,7 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     agent.settle(sid, "succeeded")
     await asyncio.sleep(2.0)
     agent.refuse_events = False
-    await wait_for(lambda: latest_user_text().count("[harness event] agent_connected") > connected, 20)
+    await wait_for(lambda: agent_connected_count() > connected, 20)
     await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', DROP_REPORT) == 1, 10)
     assert harness_count('turn_failed: {"alias":"Juniper"') == failed_before
     rows = await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")
@@ -2929,6 +3031,8 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     agent.reports[sid] = ""
     await agent.start(sid)
     await wait_for(lambda: harness_count('turn_started_elsewhere: {"alias":"Juniper"}') == 1, 10)
+    # It snoozes: no model step starts for it; it waits for the turn's end, which wakes one.
+    assert any('turn_started_elsewhere: {"alias":"Juniper"}' in line for line in queued_lines()), queued_lines()
     await agent.text(sid, ELSEWHERE_REPORT)
     await agent.finish(sid)
     await wait_for(lambda: harness_count(stopped, '"outcome":"completed"', '"started_elsewhere":true', ELSEWHERE_REPORT) == 1, 10)
@@ -3237,6 +3341,8 @@ def start_wrangler(wrangler: str) -> subprocess.Popen:
             f"DAYTONA_API_BASE:http://127.0.0.1:{DAYTONA_MOCK_PORT}/api",
             "--var",
             "OPENAI_API_KEY:local-openai-token",
+            "--var",
+            "ORCHESTRATOR_API_KEY:local-orchestrator-token",
             "--var",
             "OPENAI_PROJECT_ID:proj_test",
             "--var",

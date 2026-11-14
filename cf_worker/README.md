@@ -23,11 +23,49 @@ npm run db:init:remote
 npx wrangler secret put TWILIO_AUTH_TOKEN
 npx wrangler secret put DAYTONA_API_KEY
 npx wrangler secret put DOGWALK_IDENTITY_SECRET
-npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put OPENAI_API_KEY          # dogwalk-voice-frontend
+npx wrangler secret put ORCHESTRATOR_API_KEY    # dogwalk-orchestrator
 npx wrangler secret put OPENAI_WEBHOOK_SECRET
 npx wrangler secret put ADMIN_PASSWORD
 npm run deploy
 ```
+
+### OpenAI Keys and Budget
+
+Every OpenAI key Dogwalk uses lives in the Dogwalk project (`OPENAI_PROJECT_ID`), one key per
+architectural component, named for it, so the Platform's Usage page (group by API key) and API
+Keys page (monthly spend per key) say what costs what (issue #57):
+
+| Key | Holder | Carries |
+|---|---|---|
+| `dogwalk-voice-frontend` | Worker secret `OPENAI_API_KEY` | GPT-Live accept, sideband, hangup |
+| `dogwalk-orchestrator` | Worker secret `ORCHESTRATOR_API_KEY` | Session Orchestrator, Memory writer, next-call greeting |
+| `dogwalk-sandbox-agents` | org Daytona Secret `dogwalk-openai` | OpenCode in every Sandbox |
+| `dogwalk-dev-laptop` | `OPENAI_API_KEY` in the repository-root `.env` | `delegation_probe.py`, `orchestrator_spike.py`, voice research |
+
+Both Worker secrets are required: the Orchestrator never falls back to the Voice Frontend's key.
+To rotate the Sandbox key, update the secret's value in place (Daytona SDK
+`daytona.secret.update(id, UpdateSecretParams(value=...))`); rotated values reach running
+Sandboxes' outbound requests within seconds, with no restart. Laptop copies of the new keys
+live in `~/.tokens/dogwalk-openai/` (mode 0600, not in the repository).
+
+The Dogwalk project has a hard monthly spend limit of $80 (Platform: Project Settings, Limits),
+below the organization's limit, so Dogwalk running out cannot stop other projects; requests then
+fail with 429. `DOGWALK_MONTHLY_BUDGET_USD` in `wrangler.toml` mirrors it: change both together.
+Separately, the organization is prepaid: at a zero credit balance every project stops
+(`credit_balance_exhausted`), whatever the budgets say.
+
+The Worker keeps its own estimate in the D1 `spend` table (`src/spend.ts`): each Orchestrator,
+Memory-writer, and greeting request priced from its Responses usage (cached and cache-write
+tokens included), GPT-Live seconds as `session.usage.updated` reports them, and each increase
+in an Agent Session's OpenCode cost, attributed to the call attached at the time (or none,
+for Agent work after hangup). Prices are a table in `spend.ts`; update it when OpenAI's
+change. Laptop probes are not in the ledger but do count against the project limit, so the
+Platform stays the authority. `playtest.py` shows a call's cost by component in its stats and
+`--spend` totals by day; the Diagnostics header shows today and the month; the Opening says
+how much of the budget is used once the month passes 75%; and a refused accept names the budget
+or the credit balance. Apply `migrations/2026-11-18-spend.sql` remotely before deploying; it
+carries in the $58.45 the Platform showed for November before the ledger existed.
 
 `DOGWALK_IDENTITY_SECRET` should be a stable random value. Changing it prevents
 recovery by provider label for assignments that have not yet stored a Daytona
@@ -803,8 +841,9 @@ or `orchestrator.compaction.failed`; a call still attached gets
 starts compacted. The context backstop stays a synchronous mechanical cut at
 150,000 input tokens: it writes no Memory and needs no model, and a cut past a
 running compaction's anchor leaves that compaction nothing to cut.
-`ORCHESTRATOR_API_BASE` and `ORCHESTRATOR_API_KEY` can point it at any compatible
-endpoint.
+`ORCHESTRATOR_API_BASE` and `ORCHESTRATOR_API_KEY` (required: the `dogwalk-orchestrator`
+key, see OpenAI Keys and Budget) can point it at any compatible endpoint; the spend ledger
+prices only the models in `src/spend.ts`.
 
 Voice Agent Skills live in `voice_agent_skills/*.md`: frontmatter `name` and
 `description` (the trigger), an Orchestrator body, and an optional
