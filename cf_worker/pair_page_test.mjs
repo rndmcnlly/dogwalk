@@ -23,6 +23,7 @@ function harness(responses) {
   let now = 0, connections = 0, screen;
   const context = vm.createContext({
     $: (id) => nodes[id],
+    AbortSignal,
     Date: { now: () => now },
     sleep: async (ms) => { now += ms; },
     setStatus: (text, tone) => statuses.push({ text, tone }),
@@ -55,7 +56,9 @@ test("page has valid JavaScript and an accessible typed form, with no acoustic p
   assert.match(html, /aria-describedby="pairHelp status"/);
   assert.match(html, /Use spaces or hyphens/);
   assert.match(html, /90 seconds/);
-  assert.match(html, /press 1 in the call to accept it, or star to refuse/);
+  assert.match(html, /asks whether it is yours: say yes to pair it/);
+  assert.match(html, /Waiting for you to confirm in the call/);
+  assert.equal(/press (1|one)|star to refuse/i.exec(html), null);
   // AudioContext still powers the paired screen's notification chime, not pairing.
   const acoustic = /AudioWorklet|getUserMedia|ScriptProcessor|decode-failed|Reed-Solomon|Press Listen|id="listen"|id="frames"|class="meter"/;
   assert.equal(acoustic.exec(html), null);
@@ -124,10 +127,19 @@ for (const state of ["refused", "expired"]) {
   });
 }
 
-test("approval retains its existing 45-second polling deadline", async () => {
-  const h = harness([reply(200, { ticket: "ticket" }), ...Array.from({ length: 45 }, () => reply(200, { state: "waiting" }))]);
+test("approval waits as long as the claim does, with no page deadline", async () => {
+  const h = harness([reply(200, { ticket: "ticket" }), ...Array.from({ length: 120 }, () => reply(200, { state: "waiting" })), reply(200, { state: "expired" })]);
   await h.claim("123-aardvark-adroitness");
-  assert.equal(h.requests.length, 46);
-  assert.match(h.statuses.at(-1).text, /within 45 seconds/);
+  assert.equal(h.requests.length, 122);
+  assert.match(h.statuses.at(-1).text, /expired before it was accepted/);
+  assert.equal(h.nodes.claimCode.disabled, false);
+});
+
+test("a minute without reaching the server releases the form; one success resets the count", async () => {
+  const offline = (n) => Array.from({ length: n }, () => new Error("offline"));
+  const h = harness([reply(200, { ticket: "ticket" }), ...offline(59), reply(200, { state: "waiting" }), ...offline(60)]);
+  await h.claim("123-aardvark-adroitness");
+  assert.equal(h.requests.length, 121);
+  assert.match(h.statuses.at(-1).text, /Lost contact/);
   assert.equal(h.nodes.claimCode.disabled, false);
 });

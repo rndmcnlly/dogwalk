@@ -770,7 +770,7 @@ end-of-call welcome, a returning caller's composed Opening with caller-ID and
 since-last-call clauses, `session/resume` on reconnect with a cached preview
 URL, the keypad conventions and System Menu, voice-set Earcon Style, browser
 pairing end to end (spoken code allocation, typed claim, single
-use, keypad acceptance, status and file reads over the browser socket, path
+use, spoken acceptance by `accept_browser`, status and file reads over the browser socket, path
 confinement, refusal, and unpairing), and call termination without
 consuming provider traffic.
 
@@ -840,7 +840,6 @@ takes a minute or two." and the Orchestrator loads the `first-call-tour` skill.
 | Conversation | `0` | Repeat the Voice Frontend's last utterance verbatim |
 | Conversation | other | `keypad` harness event to the Orchestrator with the conversation since the last handoff |
 | Recording | `#` / `*` | Save / discard |
-| Pairing confirmation | `1` / `*` | Accept / refuse the browser that claimed the Pairing Code |
 
 The System Menu is a deterministic state machine in the Durable Object, kept for
 what must work when the Voice Agent cannot hear or think straight: it mutes the
@@ -999,8 +998,11 @@ offers a fresh code. Code text is excluded from diagnostic events, Memory, and
 Workspace files, apart from unavoidable spoken/model conversation content.
 `POST /pair/claim` consumes the code row and
 forwards the browser's description (user agent) and place (Cloudflare `cf`
-city and region) to the Durable Object, which has the Voice Frontend name them;
-`1` accepts, `*` refuses, 30 s lapses. The page polls
+city and region) to the Durable Object, which wakes the Orchestrator with
+`pairing_claimed`; it names them, asks the caller whether that is them, and
+calls `accept_browser` (optionally naming another Display) or `refuse_browser`.
+The claim waits for that answer until a new code replaces it or the call ends;
+there is no keypad step and no confirm timer (issue #59). The page polls
 `GET /pair/claim/status` with its ticket and receives its credential once.
 
 Two complete PGP wordlists give 16 secret bits (odd list first, matching
@@ -1008,8 +1010,9 @@ Wormhole); the numeric Nameplate is public routing, not entropy. Entry accepts
 spaces or hyphens and ignores case. A transactional D1 batch counts at most five
 guesses per code across all source addresses, spends a successful code, and
 retires an exhausted code. `pairing_claim_budget` enforces 120 requests per
-fixed minute service-wide, including malformed requests. HTTPS and independent
-caller approval are required; the budgets do not prevent denial of service or
+fixed minute service-wide, including malformed requests. HTTPS and the
+caller's spoken confirmation are required;
+ the budgets do not prevent denial of service or
 overhearing. Run `node --experimental-strip-types pairing_test.ts` for code
 generation, normalization, and vocabulary checks; `voice_session_test.py`
 exercises claim and approval behavior through the Worker.

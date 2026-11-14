@@ -316,7 +316,7 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
   <ol class="steps">
     <li>In the call, ask the walker to pair a browser.</li>
     <li>Type the spoken code below: a number from 1 to 999, then two words.</li>
-    <li>Select Pair browser. The call describes this browser: press 1 in the call to accept it, or star to refuse.</li>
+    <li>Select Pair browser. The call describes this browser and asks whether it is yours: say yes to pair it.</li>
   </ol>
   <form id="pairForm">
     <label class="wb-field" for="pairCode"><span>Pairing code</span>
@@ -443,16 +443,21 @@ function claimFailed(message) {
 }
 
 async function waitForAnswer(ticket) {
-  setStatus("Waiting for you to press one in the call");
-  const deadline = Date.now() + 45000;
-  while (Date.now() < deadline) {
+  setStatus("Waiting for you to confirm in the call");
+  // A claim waits for the caller's answer until a new code replaces it or the call ends, and the
+  // server then reports it expired, so the page waits as long as the claim does, but gives up
+  // after a minute without reaching the server, so the form never stays locked.
+  let unreachable = 0;
+  for (;;) {
     await sleep(1000);
     let response, body;
     try {
-      response = await fetch("/pair/claim/status", { headers: { authorization: "Bearer " + ticket } });
+      response = await fetch("/pair/claim/status", { headers: { authorization: "Bearer " + ticket }, signal: AbortSignal.timeout(10000) });
       body = await response.json().catch(() => ({}));
+      unreachable = 0;
     } catch (error) {
       log("claim status check failed: " + error.message);
+      if (++unreachable >= 60) return pairingFailed("Lost contact with Dogwalk while waiting for the call.");
       continue;
     }
     if (!response.ok) return pairingFailed("Pairing check failed (" + response.status + "): " + (body.error || response.statusText) + ".");
@@ -465,7 +470,6 @@ async function waitForAnswer(ticket) {
     if (body.state === "refused") return pairingFailed("The pairing was refused in the call.");
     return pairingFailed("The pairing request expired before it was accepted.");
   }
-  pairingFailed("No answer in the call within 45 seconds.");
 }
 
 function pairingFailed(message) {
