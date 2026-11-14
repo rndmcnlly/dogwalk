@@ -445,15 +445,19 @@ function claimFailed(message) {
 async function waitForAnswer(ticket) {
   setStatus("Waiting for you to confirm in the call");
   // A claim waits for the caller's answer until a new code replaces it or the call ends, and the
-  // server then reports it expired, so the page waits as long as the claim does.
+  // server then reports it expired, so the page waits as long as the claim does, but gives up
+  // after a minute without reaching the server, so the form never stays locked.
+  let unreachable = 0;
   for (;;) {
     await sleep(1000);
     let response, body;
     try {
-      response = await fetch("/pair/claim/status", { headers: { authorization: "Bearer " + ticket } });
+      response = await fetch("/pair/claim/status", { headers: { authorization: "Bearer " + ticket }, signal: AbortSignal.timeout(10000) });
       body = await response.json().catch(() => ({}));
+      unreachable = 0;
     } catch (error) {
       log("claim status check failed: " + error.message);
+      if (++unreachable >= 60) return pairingFailed("Lost contact with Dogwalk while waiting for the call.");
       continue;
     }
     if (!response.ok) return pairingFailed("Pairing check failed (" + response.status + "): " + (body.error || response.statusText) + ".");

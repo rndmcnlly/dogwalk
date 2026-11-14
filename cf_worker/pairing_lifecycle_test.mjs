@@ -132,6 +132,39 @@ test("refuse_browser spends the code and pairs nothing; with no claim both tools
   assert.equal(h.stored.get("paired_browsers"), undefined);
 });
 
+const statusRequest = () => new Request("https://voice-session/pair/claim/status", { headers: { "x-dogwalk-secret": "ticket-secret" } });
+const status = async (h) => plain(await (await h.session.pairRequest(statusRequest(), "/pair/claim/status")).json());
+
+test("an accept in flight reads as waiting until its credential exists", async () => {
+  const h = harness();
+  await h.session.pairRequest(claimRequest(), "/pair/claim");
+  let release;
+  h.session.pairedBrowsers = () => new Promise((resolve) => { release = () => resolve([]); });
+  const accepting = h.session.resolvePairingClaim("accepted");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(await status(h), { state: "waiting" });
+  await assert.rejects(h.session.resolvePairingClaim("accepted"), /no browser is waiting to pair/);
+  release();
+  assert.equal(plain(await accepting).outcome, "accepted");
+  assert.deepEqual(await status(h), { state: "accepted", token: "identity.ticket-secret" });
+});
+
+test("a code replaced while accept_browser awaits stores no browser", async () => {
+  const h = harness();
+  await h.session.pairRequest(claimRequest(), "/pair/claim");
+  const claim = h.session.pairing.claim;
+  let release;
+  h.session.pairedBrowsers = () => new Promise((resolve) => { release = () => resolve([]); });
+  const accepting = h.session.resolvePairingClaim("accepted");
+  await new Promise((resolve) => setImmediate(resolve));
+  h.session.pairing = null;  // pair_browser replaced the code
+  release();
+  await assert.rejects(accepting, /ended before it was accepted/);
+  assert.equal(h.stored.get("paired_browsers"), undefined);
+  assert.equal(claim.state, "expired");
+  assert.equal(claim.token, null);
+});
+
 // Access Grants (DOMAIN.md): drawing in a call is the authorization. Results cross back from the
 // harness's realm, so they compare as plain JSON.
 const plain = (value) => JSON.parse(JSON.stringify(value));

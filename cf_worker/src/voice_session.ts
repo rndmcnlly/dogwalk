@@ -275,7 +275,8 @@ interface PairingAttempt {
     secretHash: string;
     device: string;
     place: string;
-    state: "waiting" | "accepted" | "refused" | "expired";
+    // "accepting" is accept_browser in flight: it reads as waiting until the credential exists.
+    state: "waiting" | "accepting" | "accepted" | "refused" | "expired";
     token: string | null;  // handed to the claiming browser once, then forgotten
   } | null;
 }
@@ -2088,6 +2089,9 @@ export class VoiceSession {
   private async createPairingCode(displayInput: unknown): Promise<Record<string, unknown>> {
     if (!this.identityHash) throw new Error("pairing is not available on this call");
     if (this.recording) throw new Error("a recording is in progress; finish it first");
+    // A code belongs to the voice session that asked for it: one that hangs up while this
+    // awaits must not leave a code a later call could claim.
+    const liveSessionId = this.liveSessionId;
     const browsers = await this.pairedBrowsers();
     const names = displayNames(browsers);
     let display: string;
@@ -2109,6 +2113,11 @@ export class VoiceSession {
       const inserted = await this.env.DB.prepare("INSERT OR IGNORE INTO pairing_codes (code_hash, nameplate, identity_hash, expires_at, attempts) VALUES (?, ?, ?, ?, 0)")
         .bind(codeHash, code.nameplate, this.identityHash, Math.ceil(expiresAt / 1000)).run();
       if (!inserted.meta.changes) continue;
+      if (!this.liveAttached || this.liveSessionId !== liveSessionId) {
+        await this.env.DB.prepare("DELETE FROM pairing_codes WHERE code_hash = ?").bind(codeHash).run();
+        throw new Error("the call ended before the pairing code was ready");
+      }
+      this.endPairingTimers();
       const attempt: PairingAttempt = { codeHash, expiresAt, display, unclaimedTimer: null, claim: null };
       this.pairing = attempt;
       if (this.liveAttached) {
@@ -2171,7 +2180,8 @@ export class VoiceSession {
       }
       const token = claim.token;
       claim.token = null;
-      return Response.json(token ? { state: claim.state, token } : { state: claim.state });
+      const state = claim.state === "accepting" ? "waiting" : claim.state;
+      return Response.json(token ? { state, token } : { state });
     }
     if (path === "/pair/file" && request.method === "GET") return this.pairedFile(request, new URL(request.url));
     if (path === "/pair/upload" && request.method === "POST") return this.pairedUpload(request, new URL(request.url));
@@ -2185,25 +2195,41 @@ export class VoiceSession {
 
   // accept_browser and refuse_browser: the Orchestrator acts on the caller's spoken answer.
   private async resolvePairingClaim(outcome: "accepted" | "refused", displayInput?: unknown): Promise<Record<string, unknown>> {
-    const claim = this.pairing?.claim;
-    if (!this.pairing || !claim || claim.state !== "waiting") {
+    const attempt = this.pairing;
+    const claim = attempt?.claim;
+    if (!attempt || !claim || claim.state !== "waiting") {
       throw new Error("no browser is waiting to pair; pair_browser makes a fresh code");
     }
-    const display = typeof displayInput === "string" && displayInput.trim() ? normalizeDisplayName(displayInput) : this.pairing.display;
-    claim.state = outcome;
-    this.pairing.codeHash = "";  // spent either way
-    await this.record(`pairing.${outcome}`, { device: claim.device, display });
-    if (outcome === "refused") return { ok: true, outcome, device: claim.device };
-    // Accepting a browser never unpairs another: it joins its Display, mirroring any browser there.
-    const browsers = await this.pairedBrowsers();
-    const mirrors = browsers.some((item) => item.display === display);
-    const secret = newBrowserSecret();
-    const now = Date.now();
-    browsers.push({ secretHash: await sha256Hex(secret), display, device: claim.device, place: claim.place, createdAt: now, lastSeen: now });
-    await this.state.storage.put("paired_browsers", browsers);
-    await this.scheduleAlarm();
-    claim.token = `${this.identityHash}.${secret}`;
-    return { ok: true, outcome, display, mirrors_existing_display: mirrors, device: claim.device };
+    const display = typeof displayInput === "string" && displayInput.trim() ? normalizeDisplayName(displayInput) : attempt.display;
+    attempt.codeHash = "";  // spent either way
+    if (outcome === "refused") {
+      claim.state = "refused";
+      await this.record("pairing.refused", { device: claim.device, display });
+      return { ok: true, outcome, device: claim.device };
+    }
+    // Accepted and its credential become visible together, only once the browser is stored.
+    claim.state = "accepting";
+    try {
+      const secret = newBrowserSecret();
+      const secretHash = await sha256Hex(secret);
+      // Accepting a browser never unpairs another: it joins its Display, mirroring any browser there.
+      const browsers = await this.pairedBrowsers();
+      // A new code or the call's end may have retired this claim meanwhile: store nothing then.
+      if (this.pairing !== attempt || claim.state !== "accepting") {
+        throw new Error("that pairing request ended before it was accepted; pair_browser makes a fresh code");
+      }
+      const mirrors = browsers.some((item) => item.display === display);
+      const now = Date.now();
+      browsers.push({ secretHash, display, device: claim.device, place: claim.place, createdAt: now, lastSeen: now });
+      await this.state.storage.put("paired_browsers", browsers);
+      claim.token = `${this.identityHash}.${secret}`;
+      claim.state = "accepted";
+      await this.record("pairing.accepted", { device: claim.device, display });
+      await this.scheduleAlarm();
+      return { ok: true, outcome, display, mirrors_existing_display: mirrors, device: claim.device };
+    } finally {
+      if (claim.state === "accepting") claim.state = "expired";
+    }
   }
 
   // Drop these browsers' pairings and close their pages. A Display left with no browser ends.
@@ -5465,7 +5491,7 @@ export class VoiceSession {
     if (this.pairing) {
       this.pairing.codeHash = "";
       this.pairing.expiresAt = 0;
-      if (this.pairing.claim?.state === "waiting") this.pairing.claim.state = "expired";
+      if (this.pairing.claim?.state === "waiting" || this.pairing.claim?.state === "accepting") this.pairing.claim.state = "expired";
     }
     if (this.recording) await this.finishRecording(true, "call ended");
     this.endMenu();

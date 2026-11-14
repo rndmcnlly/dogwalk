@@ -23,6 +23,7 @@ function harness(responses) {
   let now = 0, connections = 0, screen;
   const context = vm.createContext({
     $: (id) => nodes[id],
+    AbortSignal,
     Date: { now: () => now },
     sleep: async (ms) => { now += ms; },
     setStatus: (text, tone) => statuses.push({ text, tone }),
@@ -131,5 +132,14 @@ test("approval waits as long as the claim does, with no page deadline", async ()
   await h.claim("123-aardvark-adroitness");
   assert.equal(h.requests.length, 122);
   assert.match(h.statuses.at(-1).text, /expired before it was accepted/);
+  assert.equal(h.nodes.claimCode.disabled, false);
+});
+
+test("a minute without reaching the server releases the form; one success resets the count", async () => {
+  const offline = (n) => Array.from({ length: n }, () => new Error("offline"));
+  const h = harness([reply(200, { ticket: "ticket" }), ...offline(59), reply(200, { state: "waiting" }), ...offline(60)]);
+  await h.claim("123-aardvark-adroitness");
+  assert.equal(h.requests.length, 121);
+  assert.match(h.statuses.at(-1).text, /Lost contact/);
   assert.equal(h.nodes.claimCode.disabled, false);
 });

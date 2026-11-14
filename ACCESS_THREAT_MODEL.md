@@ -52,10 +52,10 @@ possible after it ends.**
 5. **Using current capabilities is distinct from creating durable access.** An
    admitted call may do work; actions that leave access behind after the call
    (pairing a browser, minting Invitations, renaming a Handle, Re-enrollment, or a
-   new credential written into the Sandbox) are a separate class. None is gated
-   outside the model today: pairing once needed a keypad press, removed in
-   issue #59 because it protected nothing an Agent with `sudo` and egress lacks
-   (see Accepted risks). With unrestricted shell and `sudo` Dogwalk cannot
+   new credential written into the Sandbox) are a separate class. Apart from
+   Re-enrollment's own enforced check, none is gated outside the model today:
+   pairing once needed a keypad press, removed in issue #59 because it protected
+   nothing an Agent with `sudo` and egress lacks (see Accepted risks). With unrestricted shell and `sudo` Dogwalk cannot
    promise that any such path is preventable.
 
 ## Primary scenario: a long drive with friends
@@ -290,6 +290,10 @@ Accepted for one operator-managed deployment whose only Users are invited:
   a ritual and the harness a special workflow for that protection. What remains
   bounds online guessing, not overhearing: single-use codes, a ninety-second
   window to claim, Nameplates, guess budgets, and claims ending with the call.
+  A claim made within that window stays acceptable for the rest of the call
+  (until answered or replaced by a new code), and Dogwalk does not check that
+  the claiming page is still open; a browser accepted after its page gave up
+  holds an uncollected credential that lapses with the idle expiry.
 - An Upload grant accepts files after the call ends, so a holder of the pairing
   token can plant capped files in `~/uploads/<folder>/` between calls, heard
   only at the next call. Accepted because files never land in a project
