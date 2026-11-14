@@ -17,6 +17,7 @@ import pairBrowser from "../voice_agent_skills/pair-browser.md";
 import whiteboard from "../voice_agent_skills/whiteboard.md";
 import inviteSomeone from "../voice_agent_skills/invite-someone.md";
 import runtimeDramaturgy from "../voice_agent_skills/runtime-dramaturgy.md";
+import deviceAuthorization from "../voice_agent_skills/device-authorization.md";
 import domainDoc from "../../DOMAIN.md";
 import architectureDoc from "../../PSTN_CLOUDFLARE.md";
 import type { Theme } from "./themes";
@@ -99,6 +100,7 @@ const VOICE_AGENT_SKILLS: SkillSource[] = [
   parse(pairBrowser),
   parse(whiteboard),
   parse(inviteSomeone),
+  parse(deviceAuthorization),
   { ...parse(runtimeDramaturgy), themed: authoringNotes },
 ];
 

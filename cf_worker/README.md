@@ -270,6 +270,17 @@ reloads; stopping it mid-call would leave the caller without dogs while the
 object, still on old code, reconnects. `--no-deploy` performs
 only the refresh.
 
+The `npx wrangler d1 execute dogwalk --remote ...` commands in this runbook use
+wrangler's own login, which may be a different Cloudflare account (on Adam's
+laptop, BayLeaf): the database then answers `Authentication error [code: 10000]`
+and nothing changes. Select the personal account first, as `deploy.py` does:
+
+```sh
+cf workers list --profile personal >/dev/null   # refreshes the profile's OAuth bearer
+export CLOUDFLARE_ACCOUNT_ID=890753ccd6f0bbbfbe2c030cc44f6a87
+export CLOUDFLARE_API_TOKEN=$(python3 -c 'import json,pathlib;print(json.loads((pathlib.Path.home()/"Library/Preferences/cloudflare/config/personal.json").read_text())["oauth_token"])')
+```
+
 A deploy is refused unless `DAYTONA_SNAPSHOT` names a `dogwalk-agent-*` snapshot and
 every managed Sandbox either was created from one or carries the
 `dogwalk.dev/agent-api=native` label that an in-place migration sets; an ACP-era
