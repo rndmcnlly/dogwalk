@@ -82,6 +82,7 @@ assert.deepEqual(elements, [
   { component: "Desktop", target: "" },
   { component: "SshAccess", target: "" },
   { component: "Download", target: "out/report.zip" },
+  { component: "Preview", target: "" },
   { component: "Upload", target: "talk-slides" },
   { component: "Upload", target: "" },
   { component: "Image", target: "shot.png" },
@@ -90,8 +91,12 @@ assert.deepEqual(elements, [
 // The page derives the same grant keys from the same program.
 assert.deepEqual(
   elements.filter((item) => item.component in ACCESS_COMPONENTS).map((item) => `${ACCESS_COMPONENTS[item.component]}:${item.target}`),
-  ["preview:3000", "terminal:", "terminal:", "desktop:", "ssh:", "download:out/report.zip", "upload:talk-slides", "upload:", "preview:5173"],
+  ["preview:3000", "terminal:", "terminal:", "desktop:", "ssh:", "download:out/report.zip", "preview:", "upload:talk-slides", "upload:", "preview:5173"],
 );
+// A first argument that is not a literal (null, an unbound name) is no target, as the page reads it:
+// granted or refused under "", never dropped (playtest CAcca1c9d6).
+assert.deepEqual(boardElements('root = Stack([Upload(null, "Drop files"), Preview(nothing)])'),
+  [{ component: "Upload", target: "" }, { component: "Preview", target: "" }]);
 assert.deepEqual(boardElements("root = Stack([Preview(0080), Desktop(), SshAccess()])"),
   [{ component: "Preview", target: "80" }, { component: "Desktop", target: "" }, { component: "SshAccess", target: "" }]);
 assert.deepEqual(boardImagePaths('root = Stack([Document("a.png"), Image("b.png"), Download("c.png")])'), ["b.png"]);

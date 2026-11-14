@@ -140,8 +140,20 @@ Re-verify these before relying on them; they describe the code at commit
   The Agent cannot read the key but can spend it. `SANDBOX_AGENT_GATEWAY.md`
   recommends a dedicated OpenAI project with a budget; whether one is configured is
   an OpenAI-side setting not recorded here.
-- **No other credentials:** no GitHub token, git credential, or search key is
-  provisioned. Twilio, Daytona, identity, and admin secrets stay in the Worker.
+- **No other provisioned credentials:** Dogwalk provisions no GitHub token, git
+  credential, or search key. Twilio, Daytona, identity, and admin secrets stay in
+  the Worker.
+- **Caller-connected credentials:** a caller may sign a Sandbox tool in to an
+  account of their own through a device authorization flow (the
+  `device-authorization` Voice Agent Skill): the Orchestrator relays only the
+  public verification page and one-time code, never a token. The credential then
+  lives in the Sandbox, and every Agent there can use it, including one acting on
+  injected instructions, until the tool is signed out and the grant revoked at the
+  provider. The skill asks for the smallest scope and tells the caller this before
+  starting; nothing outside the model enforces either. First done 2026-11-14
+  (playtest CAcca1c9d6): `gh` signed in as the operator's GitHub account with
+  `repo`, `read:org`, and `gist`, so the Agent can write to every repository that
+  account can, including this one.
 - **`sudo` and open egress:** the `daytona` user has passwordless `sudo`; the
   Sandbox create request sets no egress allowlist, so egress beyond Daytona's
   account defaults is open.
@@ -317,7 +329,11 @@ Accepted for one operator-managed deployment whose only Users are invited:
 
 Each acceptance holds only while the portfolio stays narrow. Connecting a
 production deployment credential, a personal GitHub token, or a payment method to
-a Sandbox reopens this record.
+a Sandbox reopens this record. That happened on 2026-11-14 (see Caller-connected
+credentials): the operator's Sandbox holds a broad personal GitHub token, so a
+misled Agent can now reach the operator's repositories, not only the Sandbox. The
+record stays open until that token is signed out or replaced by a fine-grained
+token scoped to chosen repositories.
 
 ## Alternatives considered, none selected
 

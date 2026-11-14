@@ -95,7 +95,10 @@ export function boardElements(program: string): BoardElement[] {
       elements.push({ component, target: String(Number(raw)) });
     } else if (/^["']/.test(raw)) {
       elements.push({ component, target: unquote(raw) });
-    } else if (raw === ")" || raw === ",") {
+    } else {
+      // Absent, null, or anything else not a literal: the page reads it as no target too (wbTarget),
+      // so the element is granted or refused under "", never silently dropped (playtest CAcca1c9d6:
+      // Upload(null, label) drew a panel with no grant and the draw reported success).
       elements.push({ component, target: "" });
     }
   }
