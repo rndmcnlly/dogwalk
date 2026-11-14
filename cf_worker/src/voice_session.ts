@@ -283,7 +283,7 @@ interface SignedLink { token: string; grant: string; port: number; expiresAt: nu
 interface SshToken { token: string; grant: string; expiresAt: number }
 // Durable outbox: keep provider revocations across failures and Sandbox replacement.
 interface AccessRevocation { sandboxId: string; port: number | null; token: string; expiresAt: number; retryAt: number }
-interface RetiredAccess { sandboxId: string | null; grants: number; desktop: boolean }
+interface RetiredAccess { sandboxId: string | null; grants: number; desktop: boolean; displays?: number; boards?: number }
 const TERMINAL_PORT = 22222;
 const DESKTOP_PORT = 6080;
 const GRANT_DEFAULT_MINUTES = 60;
@@ -2140,9 +2140,9 @@ export class VoiceSession {
     if (!names.length) return null;
     const boards = await tx.get<Board[]>("whiteboard_boards") ?? [];
     const ending = boards.filter((item) => names.includes(item.display));
-    const retired = await this.queueGrantRevocations(tx, grantIds(ending));
+    const retired = await this.queueGrantRevocations(tx, grantIds(ending)) ?? { sandboxId: null, grants: 0, desktop: false };
     await tx.put("whiteboard_boards", boards.filter((item) => !names.includes(item.display)));
-    return retired;
+    return { ...retired, displays: names.length, boards: ending.length };
   }
 
   // Authenticated paired pages currently open.
@@ -2760,7 +2760,9 @@ export class VoiceSession {
         } catch (error) {
           // Never record provider error text: it can contain a credential.
           const status = /^Daytona (\d{3}):/.exec(errorMessage(error))?.[1];
-          await this.record("access.revocation_failed", { kind: item.port === null ? "ssh" : "signed", port: item.port, status: status ? Number(status) : null });
+          const failure = status ? "provider_http" : error instanceof SyntaxError ? "invalid_provider_json"
+            : /network|connection|fetch|timeout|abort/i.test(errorMessage(error)) ? "transport" : "unexpected";
+          await this.record("access.revocation_failed", { kind: item.port === null ? "ssh" : "signed", port: item.port, status: status ? Number(status) : null, failure });
         }
       }
       await this.state.storage.transaction(async (tx) => {
@@ -2813,6 +2815,7 @@ export class VoiceSession {
       }
     }
     if (retired) await this.record("access.revoked", { grants: retired.grants, pending });
+    if (retired?.displays) await this.record("display.ended", { displays: retired.displays, boards: retired.boards });
     return pending;
   }
 

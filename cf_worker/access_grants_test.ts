@@ -49,11 +49,12 @@ try {
   const browser = { secretHash: "paired", display: "main", device: "test", createdAt: now, lastSeen: now };
   const state = { storage: storage({ sandbox_id: "sandbox", paired_browsers: [browser], whiteboard_boards: [board] }), getWebSockets: () => [] };
   const requests: string[] = [];
+  const records: Array<{ event: string; detail: unknown }> = [];
   const host = Object.assign(new AccessHost(), {
     identityHash: "identity", attachedSandboxId: "sandbox", state,
     sessions: new Map(), liveAttached: false, compaction: null,
     requireRunningSandbox: async () => {},
-    record: async () => {},
+    record: async (event: string, detail: unknown) => { records.push({ event, detail }); },
     broadcastDisplay: async () => {},
     targetDisplay: async () => "main",
     daytona: async (path: string) => {
@@ -165,6 +166,7 @@ try {
   assert.deepEqual(await state.storage.get("whiteboard_boards"), []);
   assert.match(expiryRequests.at(-1)!, /display-token\/expire$/);
   assert.equal(await state.storage.getAlarm(), null);
+  assert.ok(records.some((item) => item.event === "display.ended"), "Display retirement retains its diagnostic event");
 
   // Crash immediately after each authority-removal transaction, before any provider I/O.
   // A fresh object must find both signed/SSH credentials and an already-committed retry alarm.
