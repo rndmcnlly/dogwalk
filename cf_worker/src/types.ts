@@ -17,6 +17,12 @@ export interface Env {
   // Sandbox reaping (index.ts, reapSandboxes): days without a Voice Call, and dry-run or delete.
   SANDBOX_REAP_AGE_DAYS?: string;
   SANDBOX_REAP_MODE?: string;
+  // User reaping (index.ts, reapUsers): days without a Voice Call, and dry-run or reap.
+  USER_REAP_AGE_DAYS?: string;
+  USER_REAP_MODE?: string;
+  // The Registration cooldown (index.ts, registrationCooldown): hours before a number that
+  // registered a User can register another; "0" turns it off.
+  REGISTRATION_COOLDOWN_HOURS?: string;
   // Roaming admission (identity_check.ts): "on" admits a caller who passes a named User's three
   // Identity Challenges; anything else keeps Roaming in shadow mode.
   ROAMING_ADMISSION?: string;

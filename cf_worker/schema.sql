@@ -11,8 +11,9 @@ CREATE TABLE IF NOT EXISTS invite_codes (
 
 -- A User (DOMAIN.md, Access Control): a spoken Handle, an opaque identity_hash that keys the
 -- User's Durable Objects and provider label, Registration provenance (invite_code,
--- registered_at), and at most one Home number, which is Home to at most one User. A reaped
--- User keeps its row as provenance with handle and home_phone cleared.
+-- registered_at, registered_from), and at most one Home number, which is Home to at most one
+-- User. A reaped User (index.ts, reapUsers) keeps its row as provenance with handle and
+-- home_phone cleared; forgotten_at records that its Voice Session and call text were wiped.
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
   handle TEXT UNIQUE,
@@ -24,10 +25,14 @@ CREATE TABLE IF NOT EXISTS users (
   home_used_at INTEGER,
   reaped_at INTEGER,
   -- Scored Home Identity Challenges, so the ritual is taught in full only the first few times.
-  challenges_completed INTEGER NOT NULL DEFAULT 0
+  challenges_completed INTEGER NOT NULL DEFAULT 0,
+  -- The number the Registration came from: the Registration cooldown counts it.
+  registered_from TEXT,
+  forgotten_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_invite ON users(invite_code);
+CREATE INDEX IF NOT EXISTS idx_users_registered_from ON users(registered_from, registered_at);
 
 -- Invitations: a User invites another person by voice. Each Invitation extends one
 -- single-use Invite Code row (same words, so the registration ritual is unchanged) with its
@@ -82,7 +87,7 @@ CREATE TABLE IF NOT EXISTS sandbox_deletions (
   noticed_at INTEGER
 );
 
--- Handles a User left behind by renaming (or, later, by being reaped). A retired Handle is
+-- Handles a User left behind by renaming or by being reaped. A retired Handle is
 -- not offered again until HANDLE_QUARANTINE_SECONDS (handles.ts) have passed.
 CREATE TABLE IF NOT EXISTS retired_handles (
   handle TEXT PRIMARY KEY,
