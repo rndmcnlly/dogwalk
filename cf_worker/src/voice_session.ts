@@ -7,7 +7,7 @@ import {
 } from "./audio";
 import {
   newBrowserSecret, newPairingCode, PAIRED_IDLE_MS, PAIRED_MAX_MS,
-  PAIRING_CODE_TTL_MS, PAIRING_CONFIRM_MS, sha256Hex, toHex,
+  PAIRING_CODE_TTL_MS, sha256Hex, toHex,
 } from "./pairing";
 import {
   createInvitation, inspectRegistration, inviteeNews, type InviteeNews, listInvitations, markInviteeNewsNoticed, MAX_ACTIVE_INVITATIONS,
@@ -262,8 +262,9 @@ interface SystemMenu {
   timer: ReturnType<typeof setTimeout>;
 }
 
-// Paired Browser (DOMAIN.md). Only a Pairing Code's hash lives here; a claim waits for
-// the caller's key press; accepted browsers persist (by secret hash) until they expire.
+// Paired Browser (DOMAIN.md). Only a Pairing Code's hash lives here; a claim waits for the
+// caller's spoken answer, acted on by accept_browser or refuse_browser, until a new code
+// replaces it or the call ends; accepted browsers persist (by secret hash) until they expire.
 interface PairingAttempt {
   codeHash: string;
   expiresAt: number;
@@ -276,7 +277,6 @@ interface PairingAttempt {
     place: string;
     state: "waiting" | "accepted" | "refused" | "expired";
     token: string | null;  // handed to the claiming browser once, then forgotten
-    timer: ReturnType<typeof setTimeout> | null;
   } | null;
 }
 
@@ -324,7 +324,7 @@ const MAX_BOARD_IMAGE_BYTES = 1_500_000;
 const MAX_REPORT_IMAGES = 24;
 const MAX_REPORT_IMAGE_BYTES = 6_000_000;
 
-// A browser accepted by keypad, joined to one Display (DOMAIN.md). A Display is the set of
+// A browser the caller accepted, joined to one Display (DOMAIN.md). A Display is the set of
 // browsers joined to it: it ends with its last pairing, and its boards and grants go with it.
 interface PairedBrowser {
   secretHash: string;
@@ -620,7 +620,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "pair_browser",
-    description: "Create a fresh, single-use Pairing Code for a browser to join a Display at dogwalk.tools/pair. A Display is a named whiteboard, usually named for its role (\"slides\", \"notes\"); browsers on the same Display mirror it, and pairing another browser never unpairs one. Returns a number-word-word code and the display name: say the code clearly for the caller to type into the page, including the hyphens, without inventing or changing it. The code expires after 90 seconds; another invocation replaces the old code. A newcomer needs the pair-browser skill's walkthrough. No microphone or second device is required. Pairing completes only if the caller then presses one after the system names the claiming browser; star refuses it.",
+    description: "Create a fresh, single-use Pairing Code for a browser to join a Display at dogwalk.tools/pair. A Display is a named whiteboard, usually named for its role (\"slides\", \"notes\"); browsers on the same Display mirror it, and pairing another browser never unpairs one. Returns a number-word-word code and the display name: say the code clearly for the caller to type into the page, including the hyphens, without inventing or changing it. The code expires after 90 seconds; another invocation replaces the old code. A newcomer needs the pair-browser skill's walkthrough. No microphone or second device is required. When a browser claims the code, pairing_claimed names it and where it is: ask the caller whether that is them, then call accept_browser or refuse_browser.",
     parameters: {
       type: "object",
       properties: {
@@ -628,6 +628,24 @@ export const ORCHESTRATOR_TOOLS = [
       },
       additionalProperties: false,
     },
+  },
+  {
+    type: "function",
+    name: "accept_browser",
+    description: "Pair the browser that claimed the caller's Pairing Code (the one pairing_claimed named), joining it to the Display pair_browser named. Call it only after the caller said yes, that browser and place are theirs. Returns the display it joined.",
+    parameters: {
+      type: "object",
+      properties: {
+        display: { type: "string", description: "A different Display to join, when the caller named one while accepting; leave out to keep pair_browser's" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "refuse_browser",
+    description: "Refuse the browser that claimed the caller's Pairing Code, when the caller says it is not theirs or does not want it paired. The code is spent; offer a fresh one if they still want to pair.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     type: "function",
@@ -844,7 +862,7 @@ Speech: short natural phone speech, usually one sentence, at most two, except wh
 
 Delegation policy:
 Backend tools: starting work in sessions, checking on sessions and what they reported, finding earlier sessions that are not attached, attaching, renaming, or closing sessions, correcting or cancelling a session's current work, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its theme, leaning into the theme or interpreting it for something it does not cover (runtime dramaturgy), changing the theme or the sounds, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, pairing a browser and creating a fresh spoken pairing code, showing things on the caller's paired screen, drawing on the whiteboard, inviting someone to Dogwalk, invitations and their status, who invited the caller, the caller's name on Dogwalk (their Handle) and choosing a new one, recovery controls, donating voice samples for research, practicing voice challenges (testing how well their voice matches), and ending the call.
-Generate <|SpawnThinking|> when: the caller asks for or about any of those, including questions about the setup or environment, or says a pairing page is open or ready, or asks you to lean into the theme, deepen the metaphor, or do runtime dramaturgy (climb the register at once, and think it over for the theme's sources), or corrects or cancels something they asked earlier, or wants to hang up.
+Generate <|SpawnThinking|> when: the caller asks for or about any of those, including questions about the setup or environment, or says a pairing page is open or ready, or answers whether a browser being paired is theirs, or asks you to lean into the theme, deepen the metaphor, or do runtime dramaturgy (climb the register at once, and think it over for the theme's sources), or corrects or cancels something they asked earlier, or wants to hang up.
 Do not generate <|SpawnThinking|> when: greeting, small talk, conversational repair, or repeating what you were already told.
 Generate <|SpawnThinking|> before giving an answer that depends on that work. Do not guess the result while waiting, and never answer "I don't have that detail" when a session could find out.
 
@@ -878,7 +896,7 @@ Inputs arrive as messages:
 - [handoff <delegation_id>] blocks carry the recent call transcript when the Voice Frontend asks for help. Transcripts contain recognition mistakes, fragments, and corrections; act on the latest intent. When an action matters and a detail is missing, ask through say rather than guessing. A newer handoff may correct or supersede an older one; preserve unrelated work.
 - [continued <delegation_id>] blocks carry what the caller went on to say after that handoff, before the Voice Frontend answered and without a new handoff: often a correction or the rest of the request. Treat it as part of that handoff, act on the latest intent, and answer with its delegation_id; if you already acted on the earlier words, set it right.
 - [harness event] lines are Session Management notifications (call started or ended, Prompt Turn stopped, Permission Request). They are not caller speech.
-- You are woken only by a handoff, its continuation, or an event that needs you (caller input, including the last file of an upload, a browser pairing accepted, a whiteboard error, a Permission Request or Elicitation, a Prompt Turn's end or failure, a bid, a recording's outcome, the sandbox failing, agent_connected when work waits on it, an unclaimed pairing code, a compaction with a focus). Other events (call_started outside a first call, call_ended, browser connections, other pairing outcomes, permission_resolved, turns started elsewhere or by steering, a discarded recording, earlier files of an upload, agent_connecting, a keypad restart) are delivered with the next thing that wakes you, earlier lines first: they are background that may already be stale, so act on the newest line and mention older ones only when they bear on it. A step where you only call say ends your turn unless a say has continues true.
+- You are woken only by a handoff, its continuation, or an event that needs you (caller input, including the last file of an upload, a browser claiming a pairing code, a whiteboard error, a Permission Request or Elicitation, a Prompt Turn's end or failure, a bid, a recording's outcome, the sandbox failing, agent_connected when work waits on it, an unclaimed pairing code, a compaction with a focus). Other events (call_started outside a first call, call_ended, browser connections, permission_resolved, turns started elsewhere or by steering, a discarded recording, earlier files of an upload, agent_connecting, a keypad restart) are delivered with the next thing that wakes you, earlier lines first: they are background that may already be stale, so act on the newest line and mention older ones only when they bear on it. A step where you only call say ends your turn unless a say has continues true.
 
 Your outputs go only through tools. Plain assistant text is discarded.
 - brief(text, delegation_id): context the Voice Frontend should know but not say now: what you understood, what you are doing, partial findings.
@@ -902,7 +920,7 @@ Rules:
 - Following: beginning a Prompt Turn follows that session, replacing any other. The Voice Frontend then hears its progress directly and narrates it in quiet moments without you. Use follow_managed_session when the caller wants to keep up with a session, and stop_following when they want to let it work unobserved; both are cheap. Following observes; it never directs the Agent. A bid event, or a turn or permission event with followed false, is a session you are not following asking for attention: mention it and offer to follow it, and do not call follow_managed_session unless the caller agrees.
 - call_started includes opening: the exact words already spoken to the caller at connection (a caller-ID verification clause, any Roaming as the caller from other phones since their last call from home, then a reorienting welcome written from your context at the end of the last call, plus anything that happened since). Do not repeat or paraphrase it. caller_id (the STIR/SHAKEN result), identity, and since_last_call are context; identity is how the caller got in through the voice check before you answered: via home or roaming, outcome and the level they already heard (or enrolled_now when they just enrolled their voice; mode name means a home caller who called recently only said their name, a short sample with no level spoken; mode sentence means they repeated a sentence), and would_have, what an enforcing check would have done. shadow true means the check only reports and never kept anyone out. admitted true means the caller named their Handle from a phone that is not their home and passed three voice checks: they have their full access, and their home number is unchanged. Never recite it, a score, or a level; mention it only if the caller asks how the voice check went, and say plainly what it reported; brief the Voice Frontend with what it needs from them and wait for the caller. Say something unprompted only when the opening missed something the caller needs now. since_last_call.sandbox_reaped true means the sandbox was cleared after a long stretch without calls and this call has a fresh one: the old files, clones, and sessions are no longer reachable even where your Memory mentions them, while what your Memory knows about the caller still holds; when the caller asks for earlier work, say it was cleared and offer to set it up again. Use inspect_call_activity when the caller asks what happened to a call or connection; explain plainly what is known and what is not.
 - call_started with first_call true is the caller's first call after registering, and their sandbox is still being set up: load the first-call-tour skill and follow it.
-- agent_connecting means the sandbox is still starting, so session tools fail fast until agent_connected arrives (with the session count). Keep conversing meanwhile. If the caller asks for work, tell them briefly that the sandbox is still starting and that you will start as soon as it is ready, then do it when agent_connected arrives without asking again. Inspection and listing answer from the last known state throughout. agent_unavailable means the sandbox could not be reached; say so plainly and offer open_recovery_menu. sandbox_restart_requested means the caller restarted the sandbox from the keypad menu: running work stopped, and agent_connected follows when it is back. pair_browser returns a fresh number-word-word code and the Display the browser will join: call say after receiving the result and speak that exact code clearly, including the hyphens, for the caller to type into dogwalk.tools/pair. Never invent a code or put one in Memory. browser_pairing reports a pairing outcome (see the pair-browser skill); the system already spoke it, so mention it again only if asked. pairing_unclaimed means the code expired after ninety seconds without a claim: say so promptly and offer a fresh code, not the expired one. The caller may have several Displays, named whiteboards for different roles (slides on a projector, notes on a laptop); each paired browser joins one, and browsers on the same Display mirror it. The paired page shows only Whiteboards: anything the caller should see, you draw (draw_on_whiteboard), naming the Display when there are several. browser_connected and browser_disconnected say whether a Display has a page open; call_started's displays (and inspect_call_state at any time) says what each shows and what access it holds, so a caller who calls back about something on a screen can be met with it. browser_page_stale means an open page was loaded before an update and lacks newer features: with reloads_itself true it reloads on its own once idle; otherwise, or while that Display's page_stale stays true, ask the caller to reload the page before drawing on it. When reading something aloud would be clumsy (a report, a diff, an image, a table) and a Display is open, offer to put it there; when the caller wants hands-on access (a terminal, the desktop, a site an Agent is serving, SSH, a file to download), draw the matching Access Element; for anything an Agent serves (a dev server, a file browser such as dufs), have the Agent start it on a port, then draw a Preview of that port. Nothing on a board wakes a sleeping Sandbox. Otherwise, if the caller wants to see something, offer to pair a browser.
+- agent_connecting means the sandbox is still starting, so session tools fail fast until agent_connected arrives (with the session count). Keep conversing meanwhile. If the caller asks for work, tell them briefly that the sandbox is still starting and that you will start as soon as it is ready, then do it when agent_connected arrives without asking again. Inspection and listing answer from the last known state throughout. agent_unavailable means the sandbox could not be reached; say so plainly and offer open_recovery_menu. sandbox_restart_requested means the caller restarted the sandbox from the keypad menu: running work stopped, and agent_connected follows when it is back. pair_browser returns a fresh number-word-word code and the Display the browser will join: call say after receiving the result and speak that exact code clearly, including the hyphens, for the caller to type into dogwalk.tools/pair. Never invent a code or put one in Memory. pairing_claimed means a browser typed the code: tell the caller which browser and roughly where, ask whether that is them, and call accept_browser on a yes or refuse_browser on a no (see the pair-browser skill); nothing else pairs it. pairing_unclaimed means the code expired after ninety seconds without a claim: say so promptly and offer a fresh code, not the expired one. The caller may have several Displays, named whiteboards for different roles (slides on a projector, notes on a laptop); each paired browser joins one, and browsers on the same Display mirror it. The paired page shows only Whiteboards: anything the caller should see, you draw (draw_on_whiteboard), naming the Display when there are several. browser_connected and browser_disconnected say whether a Display has a page open; call_started's displays (and inspect_call_state at any time) says what each shows and what access it holds, so a caller who calls back about something on a screen can be met with it. browser_page_stale means an open page was loaded before an update and lacks newer features: with reloads_itself true it reloads on its own once idle; otherwise, or while that Display's page_stale stays true, ask the caller to reload the page before drawing on it. When reading something aloud would be clumsy (a report, a diff, an image, a table) and a Display is open, offer to put it there; when the caller wants hands-on access (a terminal, the desktop, a site an Agent is serving, SSH, a file to download), draw the matching Access Element; for anything an Agent serves (a dev server, a file browser such as dufs), have the Agent start it on a port, then draw a Preview of that port. Nothing on a board wakes a sleeping Sandbox. Otherwise, if the caller wants to see something, offer to pair a browser.
 - agent_termination on turn_failed or agent_unavailable says why the Agent process ended (failed_turns names turns it cut short). For out_of_memory, tell the caller plainly that the Agent was killed because the sandbox ran out of memory (give the limit), that a large install or build was likely running, and that work since its last report may be incomplete; offer to retry in smaller steps (fewer packages at once, less build parallelism) or note that a bigger sandbox is an operator change.
 - When the caller wants to hang up, call end_call alone: the Voice Frontend says its own goodbye before handing off, and the call ends at once. Before open_recovery_menu, call say with an explanation of what comes next in the same response.
 - Voice Donation: when the caller asks to donate voice samples for research, call say with a few words and start_voice_donation together in the same response. The donation flow explains what it records, asks for consent itself, and ends the call when it finishes, so do not describe or promise its terms. It records nothing for the caller's sessions and is not part of their account.
@@ -1895,9 +1913,6 @@ export class VoiceSession {
       return;
     }
     if (this.menu) return this.menuKey(key);
-    if (this.pairing?.claim?.state === "waiting" && (key === "1" || key === "*")) {
-      return this.resolvePairingClaim(key === "1" ? "accepted" : "refused");
-    }
     switch (key) {
       case "*":
         return this.openMenu();
@@ -2060,13 +2075,16 @@ export class VoiceSession {
   // --- Paired Browsers and Displays ----------------------------------------------------
   //
   // The Orchestrator speaks a fresh Pairing Code for a named Display; the caller types it into
-  // /pair, which claims it at /pair/claim; the Voice Frontend names the browser and where it is;
-  // the caller presses one (or star). An accepted browser joins that Display, gets a credential
-  // once, and then shows the Display's Whiteboards through a hibernatable WebSocket. Several may
-  // be paired, each by its own press. The page has no views of its own and opens nothing
-  // without an Access Grant drawn in a call.
+  // /pair, which claims it at /pair/claim; pairing_claimed wakes the Orchestrator, which names
+  // the browser and where it is and acts on the caller's answer (accept_browser or
+  // refuse_browser). An accepted browser joins that Display, gets a credential once, and then
+  // shows the Display's Whiteboards through a hibernatable WebSocket. Several may be paired,
+  // each by its own answer. The page has no views of its own and opens nothing without an
+  // Access Grant drawn in a call.
 
-  // Knowing the spoken code authorizes nothing; only the caller's press of one does.
+  // Knowing the spoken code authorizes nothing; the caller's spoken yes does. That is
+  // convenience, not a boundary: the Sandbox's Agent already holds sudo and egress
+  // (ACCESS_THREAT_MODEL.md).
   private async createPairingCode(displayInput: unknown): Promise<Record<string, unknown>> {
     if (!this.identityHash) throw new Error("pairing is not available on this call");
     if (this.recording) throw new Error("a recording is in progress; finish it first");
@@ -2103,7 +2121,7 @@ export class VoiceSession {
         display,
         joins_existing_display: names.includes(display),
         expires_in_seconds: PAIRING_CODE_TTL_MS / 1000,
-        next: "Say this exact code clearly, including the hyphens, for the caller to type into dogwalk.tools/pair, and the display name the browser will join. The system names the claiming browser and asks the caller to press one to accept or star to refuse. If the code expires unclaimed, pairing_unclaimed follows: offer a fresh code.",
+        next: "Say this exact code clearly, including the hyphens, for the caller to type into dogwalk.tools/pair, and the display name the browser will join. When a browser claims it, pairing_claimed names the browser and place: ask the caller if that is them, then accept_browser or refuse_browser. If the code expires unclaimed, pairing_unclaimed follows: offer a fresh code.",
       };
     }
     throw new Error("pairing codes are busy; try again shortly");
@@ -2120,8 +2138,6 @@ export class VoiceSession {
   }
 
   private endPairingTimers(): void {
-    if (this.pairing?.claim?.timer) clearTimeout(this.pairing.claim.timer);
-    if (this.pairing?.claim) this.pairing.claim.timer = null;
     if (this.pairing?.unclaimedTimer) clearTimeout(this.pairing.unclaimedTimer);
     if (this.pairing) this.pairing.unclaimedTimer = null;
   }
@@ -2142,16 +2158,10 @@ export class VoiceSession {
       attempt.unclaimedTimer = null;
       const device = (request.headers.get("x-dogwalk-browser") ?? "a browser").slice(0, 80);
       const place = (request.headers.get("x-dogwalk-place") ?? "").slice(0, 120);
-      attempt.claim = {
-        secretHash, device, place, state: "waiting", token: null,
-        timer: setTimeout(() => void this.resolvePairingClaim("expired"), PAIRING_CONFIRM_MS),
-      };
+      attempt.claim = { secretHash, device, place, state: "waiting", token: null };
       await this.record("pairing.claimed", { device, place });
-      this.sendLive({
-        type: "session.commentary.append",
-        delegation_id: null,
-        content: `A browser just submitted the pairing code: ${device}, ${place}. Tell the caller exactly that, then ask them to press one to pair it as the display "${attempt.display}", or star to refuse.`,
-      });
+      // The caller is waiting on this, so it wakes the Orchestrator, which asks "is that you?".
+      await this.orchestratorEvent(`[harness event] pairing_claimed: ${JSON.stringify({ device, place, display: attempt.display })}`);
       return Response.json({ ticket: `${this.identityHash}.${secret}` });
     }
     if (path === "/pair/claim/status" && request.method === "GET") {
@@ -2173,40 +2183,27 @@ export class VoiceSession {
     return new Response("not found", { status: 404 });
   }
 
-  private async resolvePairingClaim(outcome: "accepted" | "refused" | "expired"): Promise<void> {
+  // accept_browser and refuse_browser: the Orchestrator acts on the caller's spoken answer.
+  private async resolvePairingClaim(outcome: "accepted" | "refused", displayInput?: unknown): Promise<Record<string, unknown>> {
     const claim = this.pairing?.claim;
-    if (!this.pairing || !claim || claim.state !== "waiting") return;
-    if (claim.timer) clearTimeout(claim.timer);
-    claim.timer = null;
+    if (!this.pairing || !claim || claim.state !== "waiting") {
+      throw new Error("no browser is waiting to pair; pair_browser makes a fresh code");
+    }
+    const display = typeof displayInput === "string" && displayInput.trim() ? normalizeDisplayName(displayInput) : this.pairing.display;
     claim.state = outcome;
     this.pairing.codeHash = "";  // spent either way
-    const display = this.pairing.display;
     await this.record(`pairing.${outcome}`, { device: claim.device, display });
-    let mirrors = false;
-    if (outcome === "accepted") {
-      // Accepting a browser never unpairs another: it joins its Display, mirroring any browser there.
-      const browsers = await this.pairedBrowsers();
-      mirrors = browsers.some((item) => item.display === display);
-      const secret = newBrowserSecret();
-      const now = Date.now();
-      browsers.push({ secretHash: await sha256Hex(secret), display, device: claim.device, place: claim.place, createdAt: now, lastSeen: now });
-      await this.state.storage.put("paired_browsers", browsers);
-      await this.scheduleAlarm();
-      claim.token = `${this.identityHash}.${secret}`;
-    }
-    this.sendLive({
-      type: "session.commentary.append",
-      delegation_id: null,
-      content: {
-        accepted: `The caller pressed one: the browser is paired as the display "${display}"${mirrors ? ", mirroring the browser already showing it" : ""}. Say so in a few words.`,
-        refused: "The caller pressed star: the browser was not paired. Say so in a few words.",
-        expired: "Nobody pressed one in time, so the browser was not paired. Say so in a few words.",
-      }[outcome],
-    });
-    // The system spoke the outcome. Only an accepted browser wakes the Orchestrator: the press
-    // completes its own pairing, and what the caller wanted shown comes next.
-    await this.orchestratorEvent(`[harness event] browser_pairing: ${JSON.stringify({ outcome, display, device: claim.device, place: claim.place })}`,
-      outcome === "accepted");
+    if (outcome === "refused") return { ok: true, outcome, device: claim.device };
+    // Accepting a browser never unpairs another: it joins its Display, mirroring any browser there.
+    const browsers = await this.pairedBrowsers();
+    const mirrors = browsers.some((item) => item.display === display);
+    const secret = newBrowserSecret();
+    const now = Date.now();
+    browsers.push({ secretHash: await sha256Hex(secret), display, device: claim.device, place: claim.place, createdAt: now, lastSeen: now });
+    await this.state.storage.put("paired_browsers", browsers);
+    await this.scheduleAlarm();
+    claim.token = `${this.identityHash}.${secret}`;
+    return { ok: true, outcome, display, mirrors_existing_display: mirrors, device: claim.device };
   }
 
   // Drop these browsers' pairings and close their pages. A Display left with no browser ends.
@@ -3805,6 +3802,12 @@ export class VoiceSession {
           break;
         case "pair_browser":
           result = await this.createPairingCode(args.display);
+          break;
+        case "accept_browser":
+          result = await this.resolvePairingClaim("accepted", args.display);
+          break;
+        case "refuse_browser":
+          result = await this.resolvePairingClaim("refused");
           break;
         case "rename_display":
           result = await this.renameDisplay(requiredString(args, "display"), requiredString(args, "new_name"));
@@ -5454,7 +5457,7 @@ export class VoiceSession {
   private async cleanupVoice(reason: string): Promise<void> {
     if (this.cleaningUpVoice) return;
     this.cleaningUpVoice = true;
-    // Approval belongs to this call, never a later call's status-key press.
+    // Approval belongs to this call, never a later call's accept_browser.
     // Invalidate synchronously before cleanup's first await; keep the spent
     // ticket long enough for its browser to learn that the request expired.
     const pendingCodeHash = this.pairing?.codeHash;

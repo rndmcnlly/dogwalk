@@ -1,7 +1,6 @@
 // Spoken Pairing Codes: a public rendezvous number and 16 secret bits. Not PAKE.
-// HTTPS, expiry, bounded guesses, and independent caller approval remain required.
+// HTTPS, expiry, bounded guesses, and the caller's spoken confirmation remain required.
 export const PAIRING_CODE_TTL_MS = 90_000;
-export const PAIRING_CONFIRM_MS = 30_000;
 export const PAIRING_MAX_ATTEMPTS = 5;
 export const PAIRING_GLOBAL_ATTEMPTS_PER_MINUTE = 120;
 export const PAIRED_IDLE_MS = 60 * 60_000;

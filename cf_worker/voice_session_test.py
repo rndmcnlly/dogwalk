@@ -630,6 +630,7 @@ def before_reply(hooks: list, output: list[dict]) -> list[dict]:
     return output
 FORM_TITLE = "Which search provider should I use?"
 REPLAY_SAY = "That pairing code expired; here is a fresh one."
+CLAIM_SAY = "Chrome on a Mac just typed the code. Is that you?"
 
 
 def call(call_id: str, name: str, **arguments) -> dict:
@@ -802,11 +803,16 @@ ORCHESTRATOR_SCRIPT = [
     ('"key":"8"', lambda ctx: [call("k8-pair", "pair_browser")]),
     ('"key":"8"', lambda ctx: [call("k8-say", "say", text=f"Pairing code {tool_result(ctx, 'k8-pair')['code']}", delegation_id=None)]),
     # No browser claimed the first spoken code: offer a fresh one after expiry.
+    # Nothing has claimed a code yet, so there is no browser to accept.
     ("[harness event] pairing_unclaimed", lambda ctx: [
         call("pu-say", "say", text=REPLAY_SAY, delegation_id=None),
+        call("pu-early", "accept_browser"),
         call("pu-pair", "pair_browser"),
     ]),
     ("[harness event] pairing_unclaimed", lambda ctx: [call("pu-code-say", "say", text=f"Pairing code {tool_result(ctx, 'pu-pair')['code']}", delegation_id=None)]),
+    # A claim wakes the Orchestrator, which names the browser and asks; the caller's yes pairs it.
+    ('pairing_claimed: {"device":"Chrome on a Mac"', lambda ctx: [call("pc-say", "say", text=CLAIM_SAY, delegation_id=None)]),
+    ("[handoff del-pair-yes]", lambda ctx: [call("pc-accept", "accept_browser")]),
     ('"key":"4"', lambda ctx: [call("k4-state", "inspect_call_state")]),
     ('"key":"5"', lambda ctx: [call("k5-board", "draw_on_whiteboard", program=BOARD_PROGRAM, note="pick one")]),
     ('"key":"5"', lambda ctx: [call("k5-checks", "draw_on_whiteboard", program=CHECKS_PROGRAM, note="file checks")]),
@@ -818,14 +824,16 @@ ORCHESTRATOR_SCRIPT = [
     # A second Display: pairing it leaves the first paired; drawing must then name one.
     ("[handoff del-wb-slides]", lambda ctx: [call("wb-pair", "pair_browser", display="Slides!")]),
     ("[handoff del-wb-slides]", lambda ctx: [call("wb-say", "say", text=f"Pairing code {tool_result(ctx, 'wb-pair')['code']}", delegation_id="del-wb-slides")]),
-    ('browser_pairing: {"outcome":"accepted","display":"slides"', lambda ctx: [
+    ("[handoff del-wb-yes]", lambda ctx: [call("wb-accept", "accept_browser")]),
+    ("[handoff del-wb-yes]", lambda ctx: [
         call("wb-unnamed", "draw_on_whiteboard", program=SLIDES_PROGRAM),
         call("wb-ghost", "draw_on_whiteboard", program=SLIDES_PROGRAM, display="kitchen"),
     ]),
-    ('browser_pairing: {"outcome":"accepted","display":"slides"', lambda ctx: [call("wb-slides", "draw_on_whiteboard", program=SLIDES_PROGRAM, display="Slides", note="first slide")]),
+    ("[handoff del-wb-yes]", lambda ctx: [call("wb-slides", "draw_on_whiteboard", program=SLIDES_PROGRAM, display="Slides", note="first slide")]),
     # A browser paired to a Display that has one mirrors it.
     ("[handoff del-wb-mirror]", lambda ctx: [call("wm-pair", "pair_browser", display="main")]),
     ("[handoff del-wb-mirror]", lambda ctx: [call("wm-say", "say", text=f"Pairing code {tool_result(ctx, 'wm-pair')['code']}", delegation_id="del-wb-mirror")]),
+    ("[handoff del-wm-yes]", lambda ctx: [call("wm-accept", "accept_browser")]),
     ("[handoff del-wb-end]", lambda ctx: [call("we-rename", "rename_display", display="slides", new_name="Projector")]),
     ("[handoff del-wb-end]", lambda ctx: [
         call("we-preview", "draw_on_whiteboard", program=PROJECTOR_PROGRAM, display="projector"),
@@ -841,12 +849,18 @@ ORCHESTRATOR_SCRIPT = [
         call("we-state", "inspect_call_state"),
         call("we-say2", "say", text="The projector is unpaired.", delegation_id="del-wb-end2"),
     ]),
+    # A browser the caller says is not theirs is refused, and its code is spent.
+    ("[handoff del-pair-refuse]", lambda ctx: [call("rf-pair", "pair_browser")]),
+    ("[handoff del-pair-refuse]", lambda ctx: [call("rf-say", "say", text=f"Pairing code {tool_result(ctx, 'rf-pair')['code']}", delegation_id="del-pair-refuse")]),
+    ("[handoff del-pair-no]", lambda ctx: [call("rf-refuse", "refuse_browser")]),
     ("[handoff del-pair-disconnect]", lambda ctx: [call("dc-pair", "pair_browser")]),
     ("[handoff del-pair-disconnect]", lambda ctx: [call("dc-say", "say", text=f"Pairing code {tool_result(ctx, 'dc-pair')['code']}", delegation_id="del-pair-disconnect")]),
     ('"key":"3"', lambda ctx: [
         call("k3-say", "say", text=SWITCH_SAY, delegation_id=None),
         call("k3-theme", "set_theme", theme="survey", register="high"),
     ]),
+    # The rejoined call cannot accept the claim the disconnect expired.
+    ("[handoff del-pair-late]", lambda ctx: [call("dl-accept", "accept_browser")]),
     # After the bounce, Runtime Dramaturgy renders the active theme's authoring notes.
     ('"key":"2"', lambda ctx: [{
         **call("k2-dramaturgy", "load_voice_agent_skill"),
@@ -914,10 +928,10 @@ STEP_IDS = [
     "s3-begin", "s3-steer", "s4-begin", "s4-steer", "d-begin", "g-begin", "g2-begin", "g3-begin",
     "x-cancel", "x-close", "x-inspect", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
     "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist",
-    "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-pair", "k4-state", "k5-board", "k5-checks", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5",
-    "wb-pair", "wb-say", "wb-unnamed", "wb-ghost", "wb-slides", "wm-pair", "wm-say", "we-rename", "we-preview", "we-say",
+    "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-early", "pu-pair", "pc-say", "pc-accept", "k4-state", "k5-board", "k5-checks", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5",
+    "wb-pair", "wb-say", "wb-accept", "wb-unnamed", "wb-ghost", "wb-slides", "wm-pair", "wm-say", "wm-accept", "we-rename", "we-preview", "we-say",
     "k9-access", "k9-state", "kB-revoke", "kB-state", "we-unpair", "we-state", "we-say2", "k3-say", "k3-theme",
-    "k8-say", "pu-code-say", "dc-pair", "dc-say", "k2-dramaturgy", "kC-donate", "kD-practice",
+    "k8-say", "pu-code-say", "rf-pair", "rf-say", "rf-refuse", "dc-pair", "dc-say", "dl-accept", "k2-dramaturgy", "kC-donate", "kD-practice",
     "sk-load", "sk-read", "sk-bad",
 ]
 
@@ -1929,6 +1943,8 @@ async def run_protocol(identity: str) -> None:
         assert not any(key in unclaimed for key in ("baud", "decode_failures", "symbols_heard")), unclaimed
         await next_matching(mocks.live_messages, appended("commentary", REPLAY_SAY))
         code = await next_pairing_code("pu-pair")
+        early = OrchestratorMock.tool_output("pu-early")
+        assert early["ok"] is False and "no browser is waiting to pair" in early["error"], early
         await next_matching(mocks.live_messages, appended("commentary", f"Pairing code {code}"))
         assert sum(m.get("type") == "session.output_audio.fixture.play" for m in mocks.seen) == fixture_count
         assert code != unclaimed_code
@@ -1956,27 +1972,35 @@ async def run_protocol(identity: str) -> None:
         assert sorted(status for status, _ in claims) == [200, 404], claims
         status, claim = next(result for result in claims if result[0] == 200)
         assert status == 200 and claim["ticket"].startswith(identity + "."), (status, claim)
-        named = await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "submitted the pairing code" in m.get("content", ""))
-        assert "Chrome on a Mac" in named["content"] and "press one" in named["content"]
+        # The claim wakes the Orchestrator, which names the browser; the system says nothing itself.
+        await next_matching(mocks.live_messages, appended("commentary", CLAIM_SAY))
+        claimed = OrchestratorMock.user_message("[harness event] pairing_claimed")
+        assert '"device":"Chrome on a Mac"' in claimed and '"display":"main"' in claimed, claimed
+        assert not any(m.get("type") == "session.commentary.append" and re.search(r"press(ed)? one|submitted the pairing code", str(m.get("content")))
+                       for m in mocks.seen), "no keypad prompt for pairing"
         status, _ = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": code})
         assert status == 404, "a Pairing Code works once"
         ticket = {"authorization": f"Bearer {claim['ticket']}"}
         assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1] == {"state": "waiting"}
-        await mocks.send_live(dtmf("1"))
+        # Without a keypad timer the claim keeps waiting for the caller's answer.
+        await asyncio.sleep(1)
+        assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1] == {"state": "waiting"}
+        await mocks.send_live(transcript("input", "Yes, that's me.", 40000, 40800))
+        await mocks.send_live(delegation("del-pair-yes", 40850))
         def heard(fragment: str) -> bool:
             """Delivered to the Orchestrator: read in a step, or snoozed in its queue (#58)."""
             return any(fragment in str(item.get("content")) for _, payload in OrchestratorMock.requests for item in payload["input"]) \
                 or any(fragment in line for line in queued_lines())
 
-        paired_note = (await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "browser is paired" in m.get("content", "")))["content"]
-        assert 'as the display "main"' in paired_note and "mirroring" not in paired_note, paired_note
+        await wait_for(outputs_back("pc-accept"), 15)
+        first_accept = OrchestratorMock.tool_output("pc-accept")
+        assert first_accept == {"ok": True, "outcome": "accepted", "display": "main", "mirrors_existing_display": False, "device": "Chrome on a Mac"}, first_accept
         first_pairing = OrchestratorMock.tool_output("pu-pair")
         assert first_pairing["display"] == "main" and first_pairing["joins_existing_display"] is False, first_pairing
         accepted = (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1]
         assert accepted["state"] == "accepted" and accepted["token"].startswith(identity + ".")
         assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, ticket))[1] == {"state": "accepted"}, "the token is handed out once"
         token = accepted["token"]
-        await wait_for(lambda: heard('browser_pairing: {"outcome":"accepted","display":"main"'), 10)
         # The page carries its build identity and sends it when it connects.
         page = await asyncio.to_thread(lambda: urllib.request.urlopen(f"http://127.0.0.1:{WORKER_PORT}/pair", timeout=10).read().decode())
         build = re.search(r'const PAIR_BUILD = "([0-9a-f]{8})";', page).group(1)
@@ -2205,23 +2229,25 @@ async def run_protocol(identity: str) -> None:
         assert (await asyncio.to_thread(file, "REPORT.md", board["id"]))[0] == 404, "a dropped board's files are no longer read"
 
         # A second Display: pairing it leaves the first paired and its page open.
-        async def pair_another(call_id: str) -> tuple[str, str]:
+        async def pair_another(call_id: str, display: str, yes: str, accept_id: str, offset_ms: int) -> tuple[str, dict]:
+            """Claim the spoken code, let the claim reach the Orchestrator, and answer yes."""
             code = await next_pairing_code(call_id)
             await next_matching(mocks.live_messages, appended("commentary", f"Pairing code {code}"))
             status, claim = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": code}, {"user-agent": CHROME_MAC})
             assert status == 200, (status, claim)
-            await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "submitted the pairing code" in m.get("content", ""))
-            await mocks.send_live(dtmf("1"))
-            said = await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "browser is paired" in m.get("content", ""))
+            await wait_for(lambda: heard("pairing_claimed") and f'"display":"{display}"' in latest_user_text(), 10)
+            await mocks.send_live(transcript("input", "Yes, that's mine.", offset_ms, offset_ms + 800))
+            await mocks.send_live(delegation(yes, offset_ms + 850))
+            await wait_for(outputs_back(accept_id), 15)
             accepted = (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, {"authorization": f"Bearer {claim['ticket']}"}))[1]
             assert accepted["state"] == "accepted", accepted
-            return accepted["token"], said["content"]
+            return accepted["token"], OrchestratorMock.tool_output(accept_id)
 
         await mocks.send_live(transcript("input", "Pair my laptop as the slides display.", 100000, 101000))
         await mocks.send_live(delegation("del-wb-slides", 101050))
-        slides_token, said = await pair_another("wb-pair")
+        slides_token, said = await pair_another("wb-pair", "slides", "del-wb-yes", "wb-accept", 101500)
         assert OrchestratorMock.tool_output("wb-pair")["display"] == "slides" and not OrchestratorMock.tool_output("wb-pair")["joins_existing_display"]
-        assert 'as the display "slides"' in said and "mirroring" not in said, said
+        assert said["display"] == "slides" and said["mirrors_existing_display"] is False, said
         assert await pong_after(browser) == [], "the first browser stays paired, its page open"
         await wait_for(outputs_back("wb-unnamed", "wb-ghost", "wb-slides"), 15)
         unnamed = OrchestratorMock.tool_output("wb-unnamed")
@@ -2242,8 +2268,8 @@ async def run_protocol(identity: str) -> None:
         # A browser paired to a Display that has one mirrors it, boards and all.
         await mocks.send_live(transcript("input", "And pair my phone to the main display too.", 102000, 103000))
         await mocks.send_live(delegation("del-wb-mirror", 103050))
-        mirror_token, said = await pair_another("wm-pair")
-        assert OrchestratorMock.tool_output("wm-pair")["joins_existing_display"] is True and "mirroring" in said, said
+        mirror_token, said = await pair_another("wm-pair", "main", "del-wm-yes", "wm-accept", 103500)
+        assert OrchestratorMock.tool_output("wm-pair")["joins_existing_display"] is True and said["mirrors_existing_display"] is True, said
         mirror, hello, mirror_boards = await open_page(mirror_token, "main")
         assert [item["id"] for item in mirror_boards] == [item["id"] for item in icons], mirror_boards
         # Renaming keeps a Display's browsers, boards, and grants.
@@ -2414,8 +2440,22 @@ async def run_protocol(identity: str) -> None:
 
         # A theme switch bounces the call: the new theme's greeting is written before the
         # GPT-Live leg hangs up, then the same CallSid returns with the new voice and conceit.
+        # A browser the caller disowns is refused: nothing pairs, and its page learns so.
+        await mocks.send_live(transcript("input", "Pair another browser.", 128000, 128800))
+        await mocks.send_live(delegation("del-pair-refuse", 128850))
+        refused_code = await next_pairing_code("rf-pair")
+        await next_matching(mocks.live_messages, appended("commentary", f"Pairing code {refused_code}"))
+        status, stranger_claim = await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": refused_code}, {"user-agent": CHROME_MAC})
+        assert status == 200, (status, stranger_claim)
+        stranger_ticket = {"authorization": f"Bearer {stranger_claim['ticket']}"}
+        await mocks.send_live(transcript("input", "No, that isn't me.", 129000, 129600))
+        await mocks.send_live(delegation("del-pair-no", 129650))
+        await wait_for(outputs_back("rf-refuse"), 15)
+        assert OrchestratorMock.tool_output("rf-refuse") == {"ok": True, "outcome": "refused", "device": "Chrome on a Mac"}
+        assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, stranger_ticket))[1] == {"state": "refused"}
+        assert (await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": refused_code}))[0] == 404, "a refused code is spent"
         # A waiting pairing claim must expire at disconnect, not remain available
-        # for a later status-key press to approve without a fresh announcement.
+        # for a later call to accept without a fresh announcement.
         await mocks.send_live(transcript("input", "Pair a browser before switching themes.", 130000, 131000))
         await mocks.send_live(delegation("del-pair-disconnect", 131050))
         disconnect_code = await next_pairing_code("dc-pair")
@@ -2424,7 +2464,7 @@ async def run_protocol(identity: str) -> None:
         assert status == 200, (status, pending)
         pending_ticket = {"authorization": f"Bearer {pending['ticket']}"}
         assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, pending_ticket))[1] == {"state": "waiting"}
-        await next_matching(mocks.live_messages, lambda m: m.get("type") == "session.commentary.append" and "submitted the pairing code" in m.get("content", ""))
+        await wait_for(lambda: heard("pairing_claimed") and '"place"' in latest_user_text(), 10)
         greetings = len(OrchestratorMock.greeting_requests)
         await mocks.send_live(dtmf("3"))
         await next_matching(mocks.live_messages, appended("commentary", SWITCH_SAY))
@@ -2444,7 +2484,7 @@ async def run_protocol(identity: str) -> None:
             if pending_state == {"state": "expired"}:
                 break
             await asyncio.sleep(0.05)
-        assert pending_state == {"state": "expired"}, "disconnect expires approval before its 30-second timeout"
+        assert pending_state == {"state": "expired"}, "disconnect expires a waiting claim"
         # The event stream drops between the legs, and /prepare reconnects before GPT-Live
         # accepts: that Agent Connection is recorded into the call at attach, marked as made
         # before it, with its setup requests' timing rows.
@@ -2474,7 +2514,11 @@ async def run_protocol(identity: str) -> None:
         await next_matching(mocks.live_messages, appended("commentary", f"Dogwalk. {NEXT_GREETING}"))
         # The register carries across the bounce as unspoken context for the new voice.
         await next_matching(mocks.live_messages, appended("thinking", "The caller had the register at high; start there."))
-        await mocks.send_live(dtmf("1"))
+        await mocks.send_live(transcript("input", "Yes, pair that browser.", 2000, 2800))
+        await mocks.send_live(delegation("del-pair-late", 2850))
+        await wait_for(outputs_back("dl-accept"), 15)
+        late = OrchestratorMock.tool_output("dl-accept")
+        assert late["ok"] is False and "no browser is waiting to pair" in late["error"], late
         assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, pending_ticket))[1] == {"state": "expired"}, "a rejoined call cannot approve the old claim"
         await mocks.send_live(dtmf("2"))
         await wait_for(lambda: '"call_id": "k2-dramaturgy"' in json.dumps([p["input"] for _, p in OrchestratorMock.requests]), 10)
@@ -2612,7 +2656,7 @@ async def run_protocol(identity: str) -> None:
         turn = next(row for row in observed if row["event"] == "agent.turn.stopped")
         assert turn["detail"]["agent_session_id"] and turn["detail"]["ms"] >= 0
         for expected in ("menu.opened", "menu.closed", "menu.restart.requested", "menu.recovery", "voice.keypad.stop", "voice.keypad.status",
-                         "voice.earcons", "voice.theme", "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted", "pairing.page_stale",
+                         "voice.earcons", "voice.theme", "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted", "pairing.refused", "pairing.page_stale",
                          "whiteboard.drawn", "whiteboard.uploaded", "whiteboard.upload_failed", "access.opened", "access.revoked", "display.renamed", "display.ended"):
             assert expected in events, (expected, events)
         handoff_rows = OrchestratorMock.user_message('"key":"7"')

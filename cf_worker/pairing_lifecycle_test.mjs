@@ -8,7 +8,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { ACCESS_COMPONENTS, boardElements, UPLOAD_LIMITS, uploadFolder } from "./src/board_images.ts";
 
 const source = readFileSync(new URL("src/voice_session.ts", import.meta.url), "utf8");
-const methods = ["pairRequest", "cleanupVoice", "endPairingTimers", "grantAccess", "workspacePath"].map((name) => {
+const methods = ["pairRequest", "resolvePairingClaim", "cleanupVoice", "endPairingTimers", "grantAccess", "workspacePath"].map((name) => {
   const start = source.search(new RegExp("  private (?:async )?" + name + "\\("));
   const end = source.indexOf("\n  private ", start + 1);
   assert.ok(start >= 0 && end > start, name);
@@ -17,9 +17,9 @@ const methods = ["pairRequest", "cleanupVoice", "endPairingTimers", "grantAccess
 const code = stripTypeScriptTypes(`globalThis.Harness = class Harness { ${methods.join("\n")}\n};`);
 
 function harness(hash = async () => "ticket-hash", failDelete = false) {
-  const pending = [], warnings = [], cleared = [];
+  const pending = [], warnings = [], cleared = [], events = [];
   const context = vm.createContext({
-    Response, Date, WebSocket: { OPEN: 1 }, PAIRING_CONFIRM_MS: 30_000,
+    Response, Date, WebSocket: { OPEN: 1 }, normalizeDisplayName: (input) => input.trim().toLowerCase(),
     ACCESS_COMPONENTS, UPLOAD_LIMITS, uploadFolder, GATEWAY_PORT: 8765, WORKSPACE_ROOT: "/home/daytona", errorMessage: (error) => error.message,
     newBrowserSecret: () => "ticket-secret", sha256Hex: hash,
     setTimeout: () => 7, clearTimeout: (id) => cleared.push(id),
@@ -43,9 +43,10 @@ function harness(hash = async () => "ticket-hash", failDelete = false) {
       storage: { put: async (key, value) => stored.set(key, value), delete: async (key) => stored.delete(key), get: async (key) => stored.get(key) },
     },
     endMenu() {}, record: async () => {}, flushTiming: async () => {}, sendLive() {},
-    saveTranscript: async () => { saved = true; }, closeOutContext: async () => {}, orchestratorEvent: async () => {}, writeNextGreeting: async () => {},
+    saveTranscript: async () => { saved = true; }, orchestratorEvent: async (line) => { events.push(line); }, writeNextGreeting: async () => {},
+    closeOutContext: async () => {}, pairedBrowsers: async () => stored.get("paired_browsers") ?? [], scheduleAlarm: async () => {},
   });
-  return { session, pending, warnings, cleared, stored, get closed() { return closed; }, get saved() { return saved; } };
+  return { session, pending, warnings, cleared, stored, events, get closed() { return closed; }, get saved() { return saved; } };
 }
 const request = () => new Request("https://voice-session/pair/claim", { method: "POST", headers: { "x-dogwalk-code-hash": "code-hash" } });
 
@@ -70,7 +71,6 @@ test("disconnect expires an installed claim, even when D1 deletion fails", async
   assert.equal(h.session.pairing.claim.state, "expired");
   assert.equal(h.session.pairing.codeHash, "");
   assert.equal(h.session.pairing.expiresAt, 0);
-  assert.equal(h.session.pairing.claim.timer, null);
   assert.equal(h.closed, true);
   assert.equal(h.saved, true);
   assert.equal(h.session.cleaningUpVoice, false);
@@ -80,11 +80,56 @@ test("disconnect expires an installed claim, even when D1 deletion fails", async
 
 test("disconnect preserves an accepted browser's uncollected credential", async () => {
   const h = harness();
-  h.session.pairing.claim = { state: "accepted", token: "accepted-credential", timer: null };
+  h.session.pairing.claim = { state: "accepted", token: "accepted-credential" };
   await h.session.cleanupVoice("disconnect");
   await Promise.all(h.pending);
   assert.equal(h.session.pairing.claim.state, "accepted");
   assert.equal(h.session.pairing.claim.token, "accepted-credential");
+});
+
+const claimRequest = () => new Request("https://voice-session/pair/claim", {
+  method: "POST", headers: { "x-dogwalk-code-hash": "code-hash", "x-dogwalk-browser": "Chrome on a Mac", "x-dogwalk-place": "near Santa Cruz" },
+});
+
+test("a claim wakes the Orchestrator with pairing_claimed and waits without a timer", async () => {
+  const h = harness();
+  assert.equal((await h.session.pairRequest(claimRequest(), "/pair/claim")).status, 200);
+  assert.deepEqual(h.events, ['[harness event] pairing_claimed: {"device":"Chrome on a Mac","place":"near Santa Cruz","display":"main"}']);
+  assert.equal(h.session.pairing.claim.state, "waiting");
+  assert.equal("timer" in h.session.pairing.claim, false);
+});
+
+test("accept_browser joins the claiming browser to a Display, honoring a spoken override", async () => {
+  const h = harness();
+  h.stored.set("paired_browsers", [{ secretHash: "old", display: "slides" }]);
+  await h.session.pairRequest(claimRequest(), "/pair/claim");
+  const result = plain(await h.session.resolvePairingClaim("accepted", " Slides "));
+  assert.deepEqual(result, { ok: true, outcome: "accepted", display: "slides", mirrors_existing_display: true, device: "Chrome on a Mac" });
+  assert.equal(h.session.pairing.claim.state, "accepted");
+  assert.equal(h.session.pairing.claim.token, "identity.ticket-secret");
+  assert.equal(h.session.pairing.codeHash, "");
+  assert.deepEqual(h.stored.get("paired_browsers").map((item) => item.display), ["slides", "slides"]);
+  await assert.rejects(h.session.resolvePairingClaim("accepted"), /no browser is waiting to pair/);
+});
+
+test("accept_browser without an override keeps pair_browser's Display", async () => {
+  const h = harness();
+  await h.session.pairRequest(claimRequest(), "/pair/claim");
+  const result = plain(await h.session.resolvePairingClaim("accepted", "  "));
+  assert.equal(result.display, "main");
+  assert.equal(result.mirrors_existing_display, false);
+});
+
+test("refuse_browser spends the code and pairs nothing; with no claim both tools throw", async () => {
+  const h = harness();
+  await assert.rejects(h.session.resolvePairingClaim("refused"), /no browser is waiting to pair/);
+  await assert.rejects(h.session.resolvePairingClaim("accepted"), /no browser is waiting to pair/);
+  await h.session.pairRequest(claimRequest(), "/pair/claim");
+  assert.deepEqual(plain(await h.session.resolvePairingClaim("refused")), { ok: true, outcome: "refused", device: "Chrome on a Mac" });
+  assert.equal(h.session.pairing.claim.state, "refused");
+  assert.equal(h.session.pairing.claim.token, null);
+  assert.equal(h.session.pairing.codeHash, "");
+  assert.equal(h.stored.get("paired_browsers"), undefined);
 });
 
 // Access Grants (DOMAIN.md): drawing in a call is the authorization. Results cross back from the
@@ -103,6 +148,7 @@ test("a board drawn in a call grants its Access Elements for the minutes asked, 
     assert.ok(grant.expires_at >= before + 90 * 60_000 && grant.expires_at <= Date.now() + 90 * 60_000);
     assert.equal(grant.revoked, undefined);
   }
+  // A Terminal has no name since provider-hosted terminals (#65): Terminal("Build") is the one Terminal.
   assert.deepEqual(refused.map((item) => item.key), ["preview:8765", "preview:70000", "download:../../etc/passwd", "upload:../etc"]);
   assert.match(refused[0].reason, /Agent Gateway/);
   assert.match(refused[1].reason, /port number/);

@@ -52,10 +52,11 @@ possible after it ends.**
 5. **Using current capabilities is distinct from creating durable access.** An
    admitted call may do work; actions that leave access behind after the call
    (pairing a browser, minting Invitations, renaming a Handle, Re-enrollment, or a
-   new credential written into the Sandbox) are a separate class. Some are gated
-   outside the model today (pairing needs a keypad press); others are not, and
-   with unrestricted shell and `sudo` Dogwalk cannot promise that every such path
-   is preventable.
+   new credential written into the Sandbox) are a separate class. None is gated
+   outside the model today: pairing once needed a keypad press, removed in
+   issue #59 because it protected nothing an Agent with `sudo` and egress lacks
+   (see Accepted risks). With unrestricted shell and `sudo` Dogwalk cannot
+   promise that any such path is preventable.
 
 ## Primary scenario: a long drive with friends
 
@@ -157,7 +158,7 @@ Re-verify these before relying on them; they describe the code at commit
 
 | Path | Triggered by | Lifetime | Outlives the call |
 | --- | --- | --- | --- |
-| Paired Browser (any number, each on a named Display) | Voice tool plus keypad press (no model can complete it) | 1 h idle, 12 h total; shows boards, opens nothing by itself | Yes |
+| Paired Browser (any number, each on a named Display) | `pair_browser`, then `accept_browser` on the caller's spoken yes (a model can complete it; convenience, not a boundary) | 1 h idle, 12 h total; shows boards, opens nothing by itself | Yes |
 | Access Grant: Terminal, Desktop, Preview, SSH Access, Download, Upload | Drawn on a board during a call; opened by a click on that Display while the Sandbox runs | 1 h default, up to 12 h on request; ends with its Display or `revoke_access`; Terminal and SSH give a full shell with `sudo`; Upload is a capped write path into `~/uploads/` that accepts files after the call | Yes |
 | Invitation | `create_invitation` voice tool | 24 h, single use; `revoke_invitation` exists | Yes |
 | Handle rename | `offer_handles`, `set_handle` | Permanent; old Handle quarantined 90 days | Yes |
@@ -167,8 +168,8 @@ Re-verify these before relying on them; they describe the code at commit
 Access Grants are the largest gap: for up to twelve hours after a call, an
 Access Element drawn during it reaches a `sudo` shell (a Terminal, or SSH Access,
 which works outside any browser and is accepted without a spoken confirmation).
-A grant needs the Voice Agent to draw it, so a model can create one, but only on a
-Display a keypad press admitted, and anyone holding the handset can press one.
+A grant needs the Voice Agent to draw it, so a model can create one, on a Display
+the Voice Agent accepted on a spoken yes; a model can do both.
 Narrowing it from the previous design: a grant is scoped to one Display and one
 target, has its own expiry, can be revoked by voice (`revoke_access`,
 `unpair_display`), and nothing on a board wakes a sleeping Sandbox.
@@ -224,8 +225,9 @@ file already streaming finishes. An upload is caller input, never authorization.
 
 ### Hangup
 
-- Instructions through the call end. Outstanding Pairing Codes and unclaimed
+- Instructions through the call end. Outstanding Pairing Codes and unanswered
   browser claims expire.
+
 - Prompt Turns keep running; ending access and cancelling work are distinct
   operations.
 - Pending Permission Requests stay pending: never auto-approved, never
@@ -271,8 +273,23 @@ Accepted for one operator-managed deployment whose only Users are invited:
 - A determined attacker with recordings of the User and a voice converter can pass
   Roaming. Mitigation is the narrow credential portfolio, not the ceremony.
 - A spoofed Home number admits while Home stays in shadow mode.
-- Anyone admitted to a call, and anyone who can press a key on the handset, can
-  create durable access through a Paired Browser and the Access Grants drawn on it.
+- Anyone admitted to a call, and anyone who can speak into it, can create durable
+  access through a Paired Browser and the Access Grants drawn on it.
+- A model can complete a pairing (issue #59): the Voice Agent accepts a browser
+  on the caller's spoken yes, so a confused or prompt-injected Session
+  Orchestrator could accept one unasked. Accepted because this is convenience,
+  not a boundary, for two reasons. First, the Agent in the Sandbox already holds
+  `sudo` and unrestricted egress, so a prompt-injected Agent can open its own
+  reverse channel without any Paired Browser; guarding the Orchestrator's pairing
+  tool while the Agent holds a root shell with network access protects nothing an
+  attacker needs. Second, the keypad press only ever confirmed the system's
+  description of the claiming browser and its rough place ("Chrome on a Mac near
+  Santa Cruz"). An attacker close enough to hear the code and type it first is,
+  almost by construction, on a similar browser in the same place, so the
+  description the caller approves would match theirs. The press cost the caller
+  a ritual and the harness a special workflow for that protection. What remains
+  bounds online guessing, not overhearing: single-use codes, a ninety-second
+  window to claim, Nameplates, guess budgets, and claims ending with the call.
 - An Upload grant accepts files after the call ends, so a holder of the pairing
   token can plant capped files in `~/uploads/<folder>/` between calls, heard
   only at the next call. Accepted because files never land in a project
