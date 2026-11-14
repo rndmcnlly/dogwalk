@@ -1246,6 +1246,8 @@ def registration_cooldown_checks(base_url: str, token: str) -> None:
     registers no one; another number still registers. A number that registered three Users in
     30 days is listed for the operator, masked unless verbose."""
     cooling = "This phone already registered someone on Dogwalk in the last 24 hours"
+    # Audit rows outlive a run; count only this run's.
+    mark = d1_local("SELECT COALESCE(MAX(id), 0) AS id FROM audit_log")[0]["id"]
 
     def claim(phone: str, sid: str) -> str:
         return post(base_url, "/voice/claim?attempts=1", {"From": phone, "CallSid": sid, "SpeechResult": LOCAL_INVITE, "Confidence": "0.9"}, token)[1]
@@ -1255,7 +1257,7 @@ def registration_cooldown_checks(base_url: str, token: str) -> None:
 
     def stages(sid: str) -> list:
         return [json.loads(row["detail"])["stage"] for row in d1_local(
-            f"SELECT detail FROM audit_log WHERE event = 'registration.cooldown' AND call_sid = '{sid}'")]
+            f"SELECT detail FROM audit_log WHERE id > {mark} AND event = 'registration.cooldown' AND call_sid = '{sid}'")]
 
     def registered(phone: str) -> int:
         return d1_local(f"SELECT COUNT(*) AS n FROM users WHERE registered_from = '{phone}'")[0]["n"]
