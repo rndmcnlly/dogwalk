@@ -1338,6 +1338,8 @@ def provider_posts(path: str, payload: dict, _raw: bytes):
 
 # Files a Paired Browser uploaded, by sandbox path, as the toolbox received them.
 UPLOADED: dict[str, bytes] = {}
+# Names the claim script created and no upload has filled or removed yet.
+CLAIMED: set[str] = set()
 
 
 def upload_posts(path: str, _payload: dict, raw: bytes):
@@ -1351,21 +1353,29 @@ def upload_posts(path: str, _payload: dict, raw: bytes):
     if not boundary or head_end < 0 or not raw.endswith(tail):
         return {"error": "incomplete multipart body"}
     UPLOADED[urllib.parse.unquote(path[len(prefix):])] = raw[head_end + 4:-len(tail)]
+    CLAIMED.discard(urllib.parse.unquote(path[len(prefix):]))
     return {}
 
 
 def upload_destination(command: str) -> dict | None:
-    """The upload folder script: a folder under the root, and the first name no file holds."""
+    """The upload claim script (board_images.ts uploadClaimScript): a folder under the root, and
+    the first name no file holds, claimed at once; chmod and rm on uploads succeed."""
     script = shlex.split(command)[2] if command.startswith("bash -c ") else ""
+    if script.startswith(("chmod 0644 -- '/home/daytona/uploads/", "rm -f -- '/home/daytona/uploads/")):
+        if script.startswith("rm "):
+            CLAIMED.discard(shlex.split(script)[3])
+        return {"result": "", "exitCode": 0}
     if not script.startswith("root='/home/daytona/uploads'"):
         return None
-    names = dict(item.rstrip(";").split("=", 1) for item in shlex.split(script.split("\n", 1)[0]))
-    folder, stem, extension = names["dir"], names["stem"], names["ext"]
-    if not (folder + "/").startswith(names["root"] + "/"):
-        return {"result": "", "exitCode": 3}
+    lines = script.split("\n")
+    names = dict(item.rstrip(";").split("=", 1) for item in shlex.split(lines[0]))
+    parts = shlex.split(next(line for line in lines if line.startswith("for part in "))[len("for part in "):].rsplit(";", 1)[0])
+    folder = "/".join([names["root"], *parts])
+    stem, extension = names["stem"], names["ext"]
     name, index = stem + extension, 2
-    while f"{folder}/{name}" in UPLOADED:
+    while f"{folder}/{name}" in UPLOADED or f"{folder}/{name}" in CLAIMED:
         name, index = f"{stem} ({index}){extension}", index + 1
+    CLAIMED.add(f"{folder}/{name}")
     return {"result": f"{folder}/{name}", "exitCode": 0}
 
 
@@ -2293,7 +2303,7 @@ async def run_protocol(identity: str) -> None:
         assert (await asyncio.to_thread(file, "REPORT.md", icons[-1]["id"], download="1"))[0] == 404
         # An Upload streams each file into its folder under ~/uploads, never over a file already there.
         assert access_board["access"]["upload:talk-slides"]["upload"] == {
-            "limits": {"file_bytes": 25_000_000, "files": 20, "bytes": 100_000_000}, "files": 0, "bytes": 0,
+            "limits": {"file_bytes": 25_000_000, "files": 20, "bytes": 100_000_000}, "files": 0, "bytes": 0, "failures": 0,
         }, access_board["access"]["upload:talk-slides"]
         slides_pdf = b"%PDF-1.7\n" + bytes(range(256)) * 300 + b"\r\n--not-a-boundary--\r\n"
         status, landed = await asyncio.to_thread(upload, slides_pdf, "Talk slides.pdf", access_board["id"])

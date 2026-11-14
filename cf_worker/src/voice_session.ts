@@ -19,7 +19,7 @@ import { PAIR_BUILD } from "./pair_page";
 import { isOpenAiHost, producerFields } from "./otlp";
 import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, type TraceContext } from "./trace_context";
 import {
-  ACCESS_COMPONENTS, type AccessKind, type BoardElement, boardElements, checkRasterSize, UPLOAD_LIMITS, UPLOAD_ROOT, uploadFileName, uploadFolder,
+  ACCESS_COMPONENTS, type AccessKind, type BoardElement, boardElements, checkRasterSize, UPLOAD_LIMITS, UPLOAD_ROOT, uploadClaimScript, uploadFileName, uploadFolder,
 } from "./board_images";
 import { hostSpeaker } from "./voice_verify";
 import { budgetClause, liveCost, recordSpend, responseUsage, spendSummary, type SpendComponent, type SpendSummary,
@@ -288,7 +288,7 @@ interface PairingAttempt {
 // An Upload mints nothing: its grant carries its limits and what it has received so far.
 interface AccessGrant {
   kind: AccessKind; target: string; expires_at: number; revoked?: true;
-  upload?: { limits: typeof UPLOAD_LIMITS; files: number; bytes: number };
+  upload?: { limits: typeof UPLOAD_LIMITS; files: number; bytes: number; failures: number };
 }
 interface SignedLink { token: string; grant: string; port: number; expiresAt: number }
 interface SshToken { token: string; grant: string; expiresAt: number }
@@ -338,6 +338,9 @@ interface PairedBrowser {
 const WORKSPACE_ROOT = "/home/daytona";
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
+// An upload whose browser pauses this long is dropped; its toolbox deadline allows this slow a link.
+const UPLOAD_IDLE_MS = 30_000;
+const UPLOAD_MIN_BYTES_PER_MS = 50;  // 50 kB/s
 
 // Media types the Paired Browser may display, by extension. HTML and SVG documents are
 // served as text or images only: the response is sandboxed so nothing runs on our origin.
@@ -957,8 +960,6 @@ export class VoiceSession {
   private identityHash: string | null = null;
   private pairing: PairingAttempt | null = null;
   private boardDraws: Promise<void> = Promise.resolve();
-  // Uploads take turns, so two files with one name never pick the same free name.
-  private uploads: Promise<void> = Promise.resolve();
   // Whether the Sandbox was running at the last check, so a page reading files does not ask
   // Daytona on every request. Checking never wakes it.
   private sandboxRunningCheck: { at: number; running: boolean } | null = null;
@@ -2430,7 +2431,7 @@ export class VoiceSession {
         }
         if (kind === "download") this.workspacePath(target);
         if (kind === "upload") uploadFolder(target);
-        access[key] = { kind, target, expires_at, ...(kind === "upload" ? { upload: { limits: UPLOAD_LIMITS, files: 0, bytes: 0 } } : {}) };
+        access[key] = { kind, target, expires_at, ...(kind === "upload" ? { upload: { limits: UPLOAD_LIMITS, files: 0, bytes: 0, failures: 0 } } : {}) };
       } catch (error) {
         refused.push({ key, reason: errorMessage(error) });
       }
@@ -2729,10 +2730,11 @@ export class VoiceSession {
   }
 
   // An Upload (DOMAIN.md: Access Grant): one file per request, streamed from the browser to the
-  // toolbox, never held whole. The board names the folder; the file's name is flattened and never
-  // replaces a file already there. The grant's limits are reserved before a byte moves and released
-  // if the file does not land. The Orchestrator hears of each file, never its bytes: the last of a
-  // drop wakes it and an earcon tells the call, the rest ride along as background.
+  // toolbox, never held whole. The board names the folder; the file's name is flattened and claimed
+  // in the Sandbox without replacing anything there. The grant's limits are reserved before a byte
+  // moves and released if the file does not land, and a claimed name that never filled is removed.
+  // The Orchestrator hears of each file, never its bytes: the last of a drop wakes it and an earcon
+  // tells the call, the rest ride along as background. Failures are news only up to a cap per grant.
   private async pairedUpload(request: Request, url: URL): Promise<Response> {
     const browser = await this.pairedRequest(request);
     if (!browser) return Response.json({ error: "this pairing has expired" }, { status: 401 });
@@ -2740,11 +2742,14 @@ export class VoiceSession {
     const target = (url.searchParams.get("folder") ?? "").trim();
     const key = `upload:${target}`;
     const last = request.headers.get("x-dogwalk-upload-last") === "1";
-    const size = Number(request.headers.get("x-dogwalk-file-size") ?? "");
+    const sizeHeader = request.headers.get("x-dogwalk-file-size") ?? "";
+    const size = /^\d{1,15}$/.test(sizeHeader) ? Number(sizeHeader) : NaN;
     const { name, stem, extension } = uploadFileName(decodeHeader(request.headers.get("x-dogwalk-file-name")));
     const type = (request.headers.get("x-dogwalk-file-type") ?? "").toLowerCase().replace(/[^\w.+/-]/g, "").slice(0, 80) || "unknown";
     let granted = false;
     let reserved = false;
+    let claimed: string | null = null;
+    let path: string;
     try {
       const board = (await this.boards()).find((item) => item.id === boardId && item.display === browser.display);
       if (!board || !boardElements(board.program).some((item) => item.component === "Upload" && item.target === target)) {
@@ -2752,47 +2757,46 @@ export class VoiceSession {
       }
       liveGrant(board, key);
       granted = true;
-      if (!request.body || !Number.isSafeInteger(size) || size < 0) throw new WorkspaceFileError(411, "an upload states its size");
+      if (!request.body || !Number.isSafeInteger(size)) throw new WorkspaceFileError(411, "an upload states its size");
       if (size > UPLOAD_LIMITS.file_bytes) {
         throw new WorkspaceFileError(413, `that file is too large (${megabytes(size)}; at most ${megabytes(UPLOAD_LIMITS.file_bytes)} each)`);
       }
       await this.requireRunningSandbox();
       await this.reserveUpload(boardId, key, size, 1);
       reserved = true;
-      const previous = this.uploads;
-      let done!: () => void;
-      this.uploads = new Promise<void>((resolve) => { done = resolve; });
-      await previous;
-      let path: string;
-      try {
-        path = await this.uploadDestination(uploadFolder(target), stem, extension);
-        await this.streamUpload(path, name, request.body, size);
-      } finally {
-        done();
-      }
-      reserved = false;
-      const shown = `~/${path.slice(WORKSPACE_ROOT.length + 1)}`;
-      await this.record("whiteboard.uploaded", { board_id: boardId, bytes: size, last });
-      if (last) this.queueEarcon("upload_received");
-      await this.orchestratorEvent(`[harness event] upload_received: ${JSON.stringify({
-        board_id: boardId, display: browser.display, path: shown, size, type, last_of_drop: last,
-      })}`, last);
-      return Response.json({ ok: true, path: shown, size });
+      path = claimed = await this.claimUploadPath(uploadFolder(target), stem, extension);
+      await this.streamUpload(path, name, request.body, size);
+      claimed = null;
     } catch (error) {
+      if (claimed) await this.sandboxExecute(`rm -f -- ${shellQuote(claimed)}`, 10).catch(() => {});
       if (reserved) await this.reserveUpload(boardId, key, -size, -1).catch(() => {});
       // A body refused before it was read is dropped, not left for the runtime to complain about.
       if (request.body && !request.bodyUsed) await request.body.cancel().catch(() => {});
       const asleep = error instanceof SandboxAsleepError;
       const status = asleep ? 503 : error instanceof WorkspaceFileError ? error.status : 400;
-      // Only an attempt under a live grant is news; an asleep Sandbox means no call is waiting for it.
-      if (granted && !asleep) {
+      // Only an attempt under a live grant is news, and only up to a cap: a retrying page or a stolen
+      // pairing must not flood the Orchestrator. An asleep Sandbox means no call is waiting for it.
+      if (granted && !asleep && await this.countUploadFailure(boardId, key).catch(() => false)) {
         await this.record("whiteboard.upload_failed", { board_id: boardId, status });
         await this.orchestratorEvent(`[harness event] upload_failed: ${JSON.stringify({
           board_id: boardId, display: browser.display, name, size: Number.isFinite(size) ? size : null, error: errorMessage(error),
-        })}`, last);
+        })}`, last && status !== 429);
       }
       return Response.json({ error: errorMessage(error), ...(asleep ? { asleep: true } : {}) }, { status });
     }
+    // The file has landed: bookkeeping that fails now must not report it as failed.
+    const shown = `~/${path.slice(WORKSPACE_ROOT.length + 1)}`;
+    try {
+      await this.sandboxExecute(`chmod 0644 -- ${shellQuote(path)}`, 10).catch(() => {});
+      await this.record("whiteboard.uploaded", { board_id: boardId, bytes: size, last });
+      if (last) this.queueEarcon("upload_received");
+      await this.orchestratorEvent(`[harness event] upload_received: ${JSON.stringify({
+        board_id: boardId, display: browser.display, path: shown, size, type, last_of_drop: last,
+      })}`, last);
+    } catch (error) {
+      console.error("upload bookkeeping failed", errorMessage(error));
+    }
+    return Response.json({ ok: true, path: shown, size });
   }
 
   // Count a file against its grant's limits (negative counts release it) and show the mirrors.
@@ -2819,21 +2823,23 @@ export class VoiceSession {
     await this.broadcastDisplay(board.display, { type: "board", board });
   }
 
-  // Create the folder, check that its real path stays under the upload root (a symlink an Agent
-  // left cannot redirect it; a link swapped in afterwards is not caught, as for reads), and pick
-  // the first free name: "name.ext", then "name (2).ext", and so on.
-  private async uploadDestination(folder: string, stem: string, extension: string): Promise<string> {
-    const script = [
-      `root=${shellQuote(UPLOAD_ROOT)}; dir=${shellQuote(folder)}; stem=${shellQuote(stem)}; ext=${shellQuote(extension)}`,
-      `mkdir -p -- "$dir" || exit 2`,
-      `real=$(realpath -e -- "$dir") || exit 2`,
-      `case "$real/" in "$root"/*) ;; *) exit 3;; esac`,
-      `[ -d "$real" ] && [ ! -L "$real" ] || exit 3`,
-      `n="$stem$ext"; i=2`,
-      `while [ -e "$real/$n" ] || [ -L "$real/$n" ]; do n="$stem ($i)$ext"; i=$((i+1)); [ "$i" -gt 999 ] && exit 4; done`,
-      `printf '%s/%s' "$real" "$n"`,
-    ].join("\n");
-    const { result, exitCode } = await this.sandboxExecute(script, 15);
+  // Whether one more failure under this grant is still news (at most as many as it takes files).
+  private async countUploadFailure(boardId: string, key: string): Promise<boolean> {
+    return this.state.storage.transaction(async (tx) => {
+      const boards = await tx.get<Board[]>("whiteboard_boards") ?? [];
+      const upload = boards.find((item) => item.id === boardId)?.access?.[key]?.upload;
+      if (!upload) return false;
+      upload.failures += 1;
+      await tx.put("whiteboard_boards", boards);
+      return upload.failures <= upload.limits.files;
+    });
+  }
+
+  // Create the folder and claim a free name in it, in one Sandbox command (uploadClaimScript):
+  // every existing step must be a real directory, the root's real path must be the root, and the
+  // name is created exclusively, so neither a symlink nor a concurrent upload can redirect it.
+  private async claimUploadPath(folder: string, stem: string, extension: string): Promise<string> {
+    const { result, exitCode } = await this.sandboxExecute(uploadClaimScript(UPLOAD_ROOT, folder, stem, extension), 15);
     if (exitCode === 3) throw new WorkspaceFileError(403, `that folder leads outside ${UPLOAD_ROOT}`);
     if (exitCode === 4) throw new WorkspaceFileError(409, "that folder already holds too many files with this name");
     if (exitCode !== 0) throw new WorkspaceFileError(502, "could not prepare the upload folder");
@@ -2842,6 +2848,7 @@ export class VoiceSession {
 
   // Wrap the browser's bytes in one multipart part on the way to the toolbox, counting them: a
   // body longer or shorter than it declared fails the fixed-length stream, so no cap is bypassed.
+  // A browser that stops sending is dropped after a pause, and the deadline scales with the size.
   private async streamUpload(path: string, name: string, body: ReadableStream<Uint8Array>, size: number): Promise<void> {
     const { toolbox, headers } = await this.workspaceToolbox();
     const boundary = `dogwalk-${toHexId(12)}`;
@@ -2849,14 +2856,14 @@ export class VoiceSession {
     const head = encoder.encode(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="${name}"\r\ncontent-type: application/octet-stream\r\n\r\n`);
     const tail = encoder.encode(`\r\n--${boundary}--\r\n`);
     const { readable, writable } = new FixedLengthStream(head.length + size + tail.length);
+    const reader = body.getReader();
+    const writer = writable.getWriter();
     const pump = (async () => {
-      const writer = writable.getWriter();
-      const reader = body.getReader();
       let received = 0;
       try {
         await writer.write(head);
         for (;;) {
-          const { done, value } = await reader.read();
+          const { done, value } = await readWithin(reader, UPLOAD_IDLE_MS);
           if (done) break;
           received += value.length;
           if (received > size) throw new WorkspaceFileError(400, "the file was longer than it said");
@@ -2867,7 +2874,7 @@ export class VoiceSession {
         await writer.close();
       } catch (error) {
         await reader.cancel().catch(() => {});
-        await writer.abort(error).catch(() => {});
+        await writer.abort().catch(() => {});
         throw error;
       }
     })();
@@ -2875,8 +2882,10 @@ export class VoiceSession {
       method: "POST",
       headers: { ...headers, "content-type": `multipart/form-data; boundary=${boundary}` },
       body: readable,
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(60_000 + Math.ceil(size / UPLOAD_MIN_BYTES_PER_MS)),
     });
+    // A toolbox that gives up must not leave the pump waiting on the browser.
+    sent.catch(() => reader.cancel().catch(() => {}));
     const [pumped, uploaded] = await Promise.allSettled([pump, sent]);
     if (pumped.status === "rejected") throw pumped.reason;
     if (uploaded.status === "rejected") throw new WorkspaceFileError(502, `could not save that file (${errorMessage(uploaded.reason)})`);
@@ -2961,7 +2970,7 @@ export class VoiceSession {
         { token: access.token, grant: grantId, expiresAt: Date.now() + minutes * 60_000 });
       return { ssh: { command: access.sshCommand, expires_at: Date.now() + minutes * 60_000 } };
     }
-    throw new Error("a download opens from its button");
+    throw new Error(grant.kind === "upload" ? "an upload takes files from its card" : "a download opens from its button");
   }
 
   // Minting awaits a provider. Check the stored authority again and register the token in one
@@ -5643,6 +5652,19 @@ function toHexId(bytes: number): string {
 function sandboxFileError(status: number, action: string): string {
   if (status === 404) return `could not ${action}: it does not exist`;
   return `could not ${action} (sandbox answered ${status}); a stopped sandbox wakes when you call`;
+}
+
+// One read, or a timeout error when the stream gives nothing for ms.
+async function readWithin<T>(reader: ReadableStreamDefaultReader<T>, ms: number): Promise<ReadableStreamReadResult<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new WorkspaceFileError(408, "the browser stopped sending")), ms); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // A header the page percent-encoded (file names are not ASCII-safe), or "" when malformed.

@@ -1,8 +1,12 @@
 // node --experimental-strip-types cf_worker/board_images_test.ts
 import assert from "node:assert/strict";
 import {
-  ACCESS_COMPONENTS, boardElements, boardImagePaths, checkRasterSize, UPLOAD_ROOT, uploadFileName, uploadFolder,
+  ACCESS_COMPONENTS, boardElements, boardImagePaths, checkRasterSize, UPLOAD_ROOT, uploadClaimScript, uploadFileName, uploadFolder,
 } from "./src/board_images.ts";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function png(width: number, height: number): Uint8Array {
   const bytes = new Uint8Array(24), view = new DataView(bytes.buffer);
@@ -114,8 +118,46 @@ assert.equal(uploadFileName("").name, "upload");
 assert.equal(uploadFileName("...").name, "upload");
 assert.deepEqual(uploadFileName(".pdf"), { name: "pdf", stem: "pdf", extension: "" });
 const long = uploadFileName(`${"x".repeat(300)}.tar.gz`);
-assert.equal(long.name.length, 120);
+assert.equal(new TextEncoder().encode(long.name).length, 200);
 assert.ok(long.name.endsWith("x.gz"));
 assert.equal(long.extension, ".gz");
 assert.equal(uploadFileName(`archive.${"y".repeat(20)}`).extension, "");
+// Multibyte names stay under the byte cap and are never cut inside a character.
+const wide = uploadFileName(`${"\u{1F415}\u732B".repeat(80)}.png`);
+assert.ok(new TextEncoder().encode(wide.name).length <= 200);
+assert.ok(!/[\uD800-\uDFFF]$/.test(wide.stem.slice(-1)) || /\p{L}|\p{N}/u.test(wide.stem.slice(-2)));
+
+// The claim script itself, run by bash against a real folder (GNU realpath; grealpath on macOS).
+const gnu = spawnSync("realpath", ["-e", "/"]).status === 0 ? "realpath" : spawnSync("grealpath", ["-e", "/"]).status === 0 ? "grealpath" : null;
+if (gnu) {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "dogwalk-upload-")));
+  const bin = join(base, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "realpath"), `#!/bin/sh\nexec ${gnu} "$@"\n`, { mode: 0o755 });
+  const root = join(base, "uploads");
+  const claim = (folder: string, stem: string, ext: string) => spawnSync("bash", ["-c", uploadClaimScript(root, folder, stem, ext)],
+    { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: "utf8" });
+  const first = claim(`${root}/talk/slides`, "deck", ".pdf");
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.stdout, `${root}/talk/slides/deck.pdf`);
+  assert.equal(claim(`${root}/talk/slides`, "deck", ".pdf").stdout, `${root}/talk/slides/deck (2).pdf`);
+  assert.equal(claim(root, "it's", "").stdout, `${root}/it's`);
+  // A dangling link where the name would go is skipped, not followed.
+  symlinkSync(join(base, "elsewhere"), `${root}/talk/link.txt`);
+  assert.equal(claim(`${root}/talk`, "link", ".txt").stdout, `${root}/talk/link (2).txt`);
+  assert.deepEqual(readdirSync(base).sort(), ["bin", "uploads"]);
+  // A symlinked folder step is refused before anything is made beneath it.
+  mkdirSync(join(base, "outside"));
+  symlinkSync(join(base, "outside"), `${root}/escape`);
+  assert.equal(claim(`${root}/escape/deeper`, "x", "").status, 3);
+  assert.deepEqual(readdirSync(join(base, "outside")), []);
+  // A symlinked root is refused outright.
+  const other = join(base, "uploads2");
+  symlinkSync(join(base, "outside"), other);
+  assert.equal(spawnSync("bash", ["-c", uploadClaimScript(other, `${other}/a`, "x", "")], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } }).status, 3);
+  assert.deepEqual(readdirSync(join(base, "outside")), []);
+  execFileSync("rm", ["-rf", base]);
+} else {
+  console.log("skipping the claim script run: no GNU realpath");
+}
 console.log("board image header limits, path capture, board elements, and upload names: passed");

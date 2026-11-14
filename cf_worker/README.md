@@ -1062,12 +1062,13 @@ headers `x-dogwalk-file-name` percent-encoded, `x-dogwalk-file-size`,
 `x-dogwalk-file-type`, and `x-dogwalk-upload-last: 1` on a drop's last file)
 answers `{ok, path, size}` or `{error, asleep?}`. The body streams to Daytona's
 toolbox `files/upload` through a fixed-length stream that refuses a body longer
-or shorter than declared; nothing is buffered whole. Each file emits
+or shorter than declared; nothing is buffered whole. A browser silent for 30
+seconds is dropped, and the toolbox deadline allows 50 kB/s. Each file emits
 `upload_received` `{board_id, display, path, size, type, last_of_drop}`; only
 the last wakes the Orchestrator and plays the `upload_received` earcon ("File
 received."). A failed attempt under a live grant emits `upload_failed` `{board_id,
-display, name, size, error}` (not when the Sandbox is asleep), waking only if it
-was last. Activity: `whiteboard.uploaded`, `whiteboard.upload_failed`.
+display, name, size, error}` (not when the Sandbox is asleep; at most 20 per
+grant), waking only if it was last and not refused for the file count. Activity: `whiteboard.uploaded`, `whiteboard.upload_failed`.
 
 ### Whiteboard
 
@@ -1180,9 +1181,11 @@ records it under `<board id>:<key>`:
   each file, for its whole lifetime (after the call too) while the Sandbox runs.
   Files land only under `/home/daytona/uploads/` (`~/uploads/`), in a folder of
   at most three plain segments (no leading dot, no `..`); the folder is
-  `mkdir -p`'d and its realpath must stay under the root and not be a symlink.
-  Names are flattened to one segment (no dotfiles, at most 120 characters,
-  extension kept), never overwrite (`name (2).ext`), and get no execute bit.
+  made one real directory at a time (a symlinked step or root is refused,
+  `uploadClaimScript` in `board_images.ts`), and the name is claimed exclusively
+  in the same command, then filled, or removed if the file fails. Names are
+  flattened to one segment (no dotfiles, at most 200 UTF-8 bytes, extension
+  kept), never overwrite (`name (2).ext`), and are set to mode 0644.
   The grant carries 25 MB per file, 20 files, and 100 MB in all, reserved
   before bytes move and released if a file fails. While sending, the card
   counts as an open Access Element, so a stale page does not reload itself.

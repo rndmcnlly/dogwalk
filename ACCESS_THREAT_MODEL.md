@@ -196,19 +196,24 @@ Upload is the only Access Element that writes. It mints no provider credential:
 each file is one `POST /pair/upload` under the pairing token, streamed through
 the Worker and Durable Object to Daytona's toolbox with a fixed length, never
 buffered whole. Files land only under `~/uploads/<folder>/` (at most three plain
-segments; the folder's realpath must stay under the root and not be a symlink,
-with the same accepted swap-after-check race as reads), never in a project
+segments; every step below the root must be a real directory, not a symlink,
+the root's real path must be the root, and the name is created exclusively, with
+the same accepted swap-after-check race as reads), never in a project
 directory, so a planted `AGENTS.md` or dotfile cannot reach an Agent's context
 or a tool automatically. Names are flattened to one segment, never a dotfile,
 never overwrite (a taken name gets ` (2)`), and are written without the execute
 bit. The grant caps 25 MB per file, 20 files, and 100 MB in all, reserved
-before bytes move. Someone holding a stolen Paired Browser token while an
+before bytes move; a name claimed for a file that never arrived is removed, and
+a browser that stops sending is dropped after 30 seconds. Someone holding a stolen Paired Browser token while an
 Upload grant is live and the Sandbox runs can therefore plant capped,
-non-executable, non-dot files in that folder only. Every file, and every failed
-attempt, produces a harness event, but an upload accepted between calls is heard
-only at the next call. Planted content is an injection risk only once the
-Session Orchestrator or the User has an Agent read it; an upload is caller
-input, never authorization.
+non-executable, non-dot files in that folder only. Every file produces a harness
+event, and so do failed attempts up to 20 per grant (more are refused silently,
+so retries cannot flood the Session Orchestrator's queue); an upload accepted
+between calls is heard only at the next call. A file's contents are an injection
+risk only once the Session Orchestrator or the User has an Agent read them, but
+its name (up to 200 bytes of letters, digits and punctuation) and declared type
+reach the Orchestrator's context directly. Revoking a grant refuses new files; a
+file already streaming finishes. An upload is caller input, never authorization.
 
 ### Hangup
 
@@ -265,6 +270,10 @@ Accepted for one operator-managed deployment whose only Users are invited:
   token can plant capped files in `~/uploads/<folder>/` between calls, heard
   only at the next call. Accepted because files never land in a project
   directory and reach an Agent only when someone asks it to read them.
+- An uploaded file's name and declared type are text chosen by whoever holds
+  the page, and reach the Session Orchestrator's context as part of the
+  harness event: a prompt-injection channel bounded by the name rules and the
+  failure cap. Accepted on the same terms as a Whiteboard Answer's free text.
 - An Agent with `sudo` can create durable access, spend the inference budget, and
   likely self-approve Permission Requests. The Sandbox is the trust boundary, and
   everything inside it is trusted equally.

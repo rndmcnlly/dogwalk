@@ -97,7 +97,7 @@ test("a board drawn in a call grants its Access Elements for the minutes asked, 
   const before = Date.now();
   const { access, refused } = plain(h.session.grantAccess(boardElements(ACCESS_BOARD), 90));
   assert.deepEqual(Object.keys(access), ["preview:5173", "terminal:", "desktop:", "ssh:", "download:out/a.zip", "upload:talk-slides"]);
-  assert.deepEqual(access["upload:talk-slides"].upload, { limits: { file_bytes: 25_000_000, files: 20, bytes: 100_000_000 }, files: 0, bytes: 0 });
+  assert.deepEqual(access["upload:talk-slides"].upload, { limits: { file_bytes: 25_000_000, files: 20, bytes: 100_000_000 }, files: 0, bytes: 0, failures: 0 });
   for (const [key, grant] of Object.entries(access)) {
     assert.equal(`${grant.kind}:${grant.target}`, key);
     assert.ok(grant.expires_at >= before + 90 * 60_000 && grant.expires_at <= Date.now() + 90 * 60_000);

@@ -127,7 +127,9 @@ export function uploadFolder(target: string): string {
 }
 
 // A received file's name, flattened to one plain segment: no separators, control characters,
-// quotes, or leading dot (so never a dotfile), at most 120 characters with its extension kept.
+// quotes, or leading dot (so never a dotfile), with its extension kept. It stays under 200 UTF-8
+// bytes, so a collision suffix still fits the filesystem's 255, and is cut by code point.
+const MAX_NAME_BYTES = 200;
 export function uploadFileName(raw: string): { name: string; stem: string; extension: string } {
   const base = raw.split(/[\\/]/).pop() ?? "";
   const cleaned = base.normalize("NFC").replace(/[\u0000-\u001f\u007f]/g, "").replace(/[^\p{L}\p{N} .,()+=@_-]/gu, "_")
@@ -136,8 +138,46 @@ export function uploadFileName(raw: string): { name: string; stem: string; exten
   let stem = dot > 0 ? cleaned.slice(0, dot) : cleaned;
   let extension = dot > 0 ? cleaned.slice(dot) : "";
   if (extension.length > 16) { stem = cleaned; extension = ""; }
-  stem = stem.slice(0, 120 - extension.length).trim() || "upload";
+  const bytes = (text: string) => new TextEncoder().encode(text).length;
+  const kept: string[] = [];
+  let used = bytes(extension);
+  for (const char of stem) {
+    used += bytes(char);
+    if (used > MAX_NAME_BYTES) break;
+    kept.push(char);
+  }
+  stem = kept.join("").trim() || "upload";
   return { name: stem + extension, stem, extension };
+}
+
+// One Sandbox command that makes folder (absolute, under root) and claims a free name in it,
+// printing the claimed path. Every step below root must be a real directory, never a symlink, and
+// root's real path must be root, so nothing is created or written outside it. The name is created
+// exclusively (noclobber), so a concurrent upload or a planted link takes the next number instead:
+// "name.ext", then "name (2).ext". Exit 3: outside the root; 4: too many of that name; 2: other.
+export function uploadClaimScript(root: string, folder: string, stem: string, extension: string): string {
+  const quote = (text: string) => `'${text.replace(/'/g, "'\\''")}'`;
+  const segments = folder === root ? [] : folder.slice(root.length + 1).split("/");
+  return [
+    `root=${quote(root)}; stem=${quote(stem)}; ext=${quote(extension)}`,
+    `[ -L "$root" ] && exit 3`,
+    `mkdir -p -- "$root" || exit 2`,
+    `[ "$(realpath -e -- "$root")" = "$root" ] || exit 3`,
+    `dir=$root`,
+    `for part in ${segments.map(quote).join(" ")}; do`,
+    `  dir="$dir/$part"`,
+    `  [ -L "$dir" ] && exit 3`,
+    `  [ -d "$dir" ] || mkdir -- "$dir" 2>/dev/null || exit 2`,
+    `  [ -d "$dir" ] && [ ! -L "$dir" ] || exit 3`,
+    `done`,
+    `set -C`,
+    `n="$stem$ext"; i=2`,
+    `until { : > "$dir/$n"; } 2>/dev/null; do`,
+    `  [ -e "$dir/$n" ] || [ -L "$dir/$n" ] || exit 2`,
+    `  n="$stem ($i)$ext"; i=$((i+1)); [ "$i" -gt 999 ] && exit 4`,
+    `done`,
+    `printf '%s/%s' "$dir" "$n"`,
+  ].join("\n");
 }
 
 export function boardImagePaths(program: string): string[] {
