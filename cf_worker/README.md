@@ -1056,6 +1056,19 @@ document); others keep their tag, with the reason in `alt`. HTML renders in an
 `<iframe sandbox="allow-scripts">` from `srcdoc` with a prepended CSP of
 `default-src 'none'` (inline scripts, styles, and data: images only).
 
+Files go the other way only through an Upload element: one `POST
+/pair/upload?board=<id>&folder=<as written>` per file (bearer credential;
+headers `x-dogwalk-file-name` percent-encoded, `x-dogwalk-file-size`,
+`x-dogwalk-file-type`, and `x-dogwalk-upload-last: 1` on a drop's last file)
+answers `{ok, path, size}` or `{error, asleep?}`. The body streams to Daytona's
+toolbox `files/upload` through a fixed-length stream that refuses a body longer
+or shorter than declared; nothing is buffered whole. Each file emits
+`upload_received` `{board_id, display, path, size, type, last_of_drop}`; only
+the last wakes the Orchestrator and plays the `upload_received` earcon ("File
+received."). A failed attempt under a live grant emits `upload_failed` `{board_id,
+display, name, size, error}` (not when the Sandbox is asleep), waking only if it
+was last. Activity: `whiteboard.uploaded`, `whiteboard.upload_failed`.
+
 ### Whiteboard
 
 #### Image follow-up decisions (#3)
@@ -1141,7 +1154,8 @@ version back, multibyte text included.
 ### Access Grants and Human Takeover
 
 Access Elements (`../DOMAIN.md`, Access Grant) are `Terminal(label?)`,
-`Desktop()`, `Preview(port)`, `SshAccess()`, and `Download(path)`. Drawing one
+`Desktop()`, `Preview(port)`, `SshAccess()`, `Download(path)`, and
+`Upload(folder?)`. Drawing one
 while a call is live grants it on that board's Display for `access_minutes`
 (60 by default, at most 720); the board stores only the grant. A click sends
 `open {board_id, key}`; if the grant is live and the Sandbox is running (nothing
@@ -1162,6 +1176,16 @@ records it under `<board id>:<key>`:
 - SSH Access: `POST /sandbox/{id}/ssh-access?expiresInMinutes=` within the
   grant; the page shows the returned `sshCommand`, kept in `ssh_tokens`.
 - Download: no credential; `/pair/file?...&download=1` checks the grant.
+- Upload: no credential; `/pair/upload` checks the grant on
+  each file, for its whole lifetime (after the call too) while the Sandbox runs.
+  Files land only under `/home/daytona/uploads/` (`~/uploads/`), in a folder of
+  at most three plain segments (no leading dot, no `..`); the folder is
+  `mkdir -p`'d and its realpath must stay under the root and not be a symlink.
+  Names are flattened to one segment (no dotfiles, at most 120 characters,
+  extension kept), never overwrite (`name (2).ext`), and get no execute bit.
+  The grant carries 25 MB per file, 20 files, and 100 MB in all, reserved
+  before bytes move and released if a file fails. While sending, the card
+  counts as an open Access Element, so a stale page does not reload itself.
 
 `revoke_access`, a Display ending, a board evicted from its Display's five, or
 Sandbox replacement revoke the grants' credentials: signed links are expired,

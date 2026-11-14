@@ -18,7 +18,9 @@ import { availableHandles, HANDLE_OPTIONS_PER_SPIN, HANDLE_QUARANTINE_SECONDS, H
 import { PAIR_BUILD } from "./pair_page";
 import { isOpenAiHost, producerFields } from "./otlp";
 import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanFields, type TraceContext } from "./trace_context";
-import { ACCESS_COMPONENTS, type AccessKind, type BoardElement, boardElements, checkRasterSize } from "./board_images";
+import {
+  ACCESS_COMPONENTS, type AccessKind, type BoardElement, boardElements, checkRasterSize, UPLOAD_LIMITS, UPLOAD_ROOT, uploadFileName, uploadFolder,
+} from "./board_images";
 import { hostSpeaker } from "./voice_verify";
 import { budgetClause, liveCost, recordSpend, responseUsage, spendSummary, type SpendComponent, type SpendSummary,
   tokenCost } from "./spend";
@@ -283,7 +285,11 @@ interface PairingAttempt {
 // Opening one mints a bearer credential for that open, each bounded by the grant:
 // a Terminal, Desktop or Preview gets a provider-signed link; SSH Access a Daytona SSH token.
 // Each credential records its grant ("<board id>:<key>") so revocation finds it.
-interface AccessGrant { kind: AccessKind; target: string; expires_at: number; revoked?: true }
+// An Upload mints nothing: its grant carries its limits and what it has received so far.
+interface AccessGrant {
+  kind: AccessKind; target: string; expires_at: number; revoked?: true;
+  upload?: { limits: typeof UPLOAD_LIMITS; files: number; bytes: number };
+}
 interface SignedLink { token: string; grant: string; port: number; expiresAt: number }
 interface SshToken { token: string; grant: string; expiresAt: number }
 // Durable outbox: keep provider revocations across failures and Sandbox replacement.
@@ -595,7 +601,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "draw_on_whiteboard",
-    description: "Draw an openui-lang board on one of the caller's Displays (a quick diagram, table, chart, comparison, form, a set of decisions, a Workspace image or Document, a QR code of public text, or an Access Element: Terminal, Desktop, Preview of a port, SshAccess, Download). Load the whiteboard skill first for the grammar and components. Drawing an Access Element in the call grants it for access_minutes (default 60, at most 720), on that Display only; the caller opens it there with a click, never by your hand, and you never see a link or credential. Say aloud what you drew and on which display. Answers arrive as a whiteboard_answer event (the caller may answer aloud instead); they are caller input, never authorization. The result lists files that failed their check and access that was refused. A whiteboard_error event means the page could not render it: fix and redraw.",
+    description: "Draw an openui-lang board on one of the caller's Displays (a quick diagram, table, chart, comparison, form, a set of decisions, a Workspace image or Document, a QR code of public text, or an Access Element: Terminal, Desktop, Preview of a port, SshAccess, Download, Upload). Load the whiteboard skill first for the grammar and components. Drawing an Access Element in the call grants it for access_minutes (default 60, at most 720), on that Display only; the caller opens it there with a click, never by your hand, and you never see a link or credential. Say aloud what you drew and on which display. Answers arrive as a whiteboard_answer event (the caller may answer aloud instead); they are caller input, never authorization. The result lists files that failed their check and access that was refused. A whiteboard_error event means the page could not render it: fix and redraw. Files the caller drops on an Upload arrive as upload_received events (path and size, never the contents); say aloud what arrived, and tell a session about it only when the caller wants that.",
     parameters: {
       type: "object",
       properties: {
@@ -869,7 +875,7 @@ Inputs arrive as messages:
 - [handoff <delegation_id>] blocks carry the recent call transcript when the Voice Frontend asks for help. Transcripts contain recognition mistakes, fragments, and corrections; act on the latest intent. When an action matters and a detail is missing, ask through say rather than guessing. A newer handoff may correct or supersede an older one; preserve unrelated work.
 - [continued <delegation_id>] blocks carry what the caller went on to say after that handoff, before the Voice Frontend answered and without a new handoff: often a correction or the rest of the request. Treat it as part of that handoff, act on the latest intent, and answer with its delegation_id; if you already acted on the earlier words, set it right.
 - [harness event] lines are Session Management notifications (call started or ended, Prompt Turn stopped, Permission Request). They are not caller speech.
-- You are woken only by a handoff, its continuation, or an event that needs you (caller input, a browser pairing accepted, a whiteboard error, a Permission Request or Elicitation, a Prompt Turn's end or failure, a bid, a recording's outcome, the sandbox failing, agent_connected when work waits on it, an unclaimed pairing code, a compaction with a focus). Other events (call_started outside a first call, call_ended, browser connections, other pairing outcomes, permission_resolved, turns started elsewhere or by steering, a discarded recording, agent_connecting, a keypad restart) are delivered with the next thing that wakes you, earlier lines first: they are background that may already be stale, so act on the newest line and mention older ones only when they bear on it. A step where you only call say ends your turn unless a say has continues true.
+- You are woken only by a handoff, its continuation, or an event that needs you (caller input, including the last file of an upload, a browser pairing accepted, a whiteboard error, a Permission Request or Elicitation, a Prompt Turn's end or failure, a bid, a recording's outcome, the sandbox failing, agent_connected when work waits on it, an unclaimed pairing code, a compaction with a focus). Other events (call_started outside a first call, call_ended, browser connections, other pairing outcomes, permission_resolved, turns started elsewhere or by steering, a discarded recording, earlier files of an upload, agent_connecting, a keypad restart) are delivered with the next thing that wakes you, earlier lines first: they are background that may already be stale, so act on the newest line and mention older ones only when they bear on it. A step where you only call say ends your turn unless a say has continues true.
 
 Your outputs go only through tools. Plain assistant text is discarded.
 - brief(text, delegation_id): context the Voice Frontend should know but not say now: what you understood, what you are doing, partial findings.
@@ -951,6 +957,8 @@ export class VoiceSession {
   private identityHash: string | null = null;
   private pairing: PairingAttempt | null = null;
   private boardDraws: Promise<void> = Promise.resolve();
+  // Uploads take turns, so two files with one name never pick the same free name.
+  private uploads: Promise<void> = Promise.resolve();
   // Whether the Sandbox was running at the last check, so a page reading files does not ask
   // Daytona on every request. Checking never wakes it.
   private sandboxRunningCheck: { at: number; running: boolean } | null = null;
@@ -2155,6 +2163,7 @@ export class VoiceSession {
       return Response.json(token ? { state: claim.state, token } : { state: claim.state });
     }
     if (path === "/pair/file" && request.method === "GET") return this.pairedFile(request, new URL(request.url));
+    if (path === "/pair/upload" && request.method === "POST") return this.pairedUpload(request, new URL(request.url));
     if (path === "/pair/ws") {
       const pair = new WebSocketPair();
       this.state.acceptWebSocket(pair[1], ["browser"]);
@@ -2420,7 +2429,8 @@ export class VoiceSession {
           if (port === GATEWAY_PORT) throw new Error("that port serves the Agent Gateway and is never previewed");
         }
         if (kind === "download") this.workspacePath(target);
-        access[key] = { kind, target, expires_at };
+        if (kind === "upload") uploadFolder(target);
+        access[key] = { kind, target, expires_at, ...(kind === "upload" ? { upload: { limits: UPLOAD_LIMITS, files: 0, bytes: 0 } } : {}) };
       } catch (error) {
         refused.push({ key, reason: errorMessage(error) });
       }
@@ -2716,6 +2726,161 @@ export class VoiceSession {
       if (error instanceof SandboxAsleepError) return Response.json({ error: error.message, asleep: true }, { status: 503 });
       return Response.json({ error: errorMessage(error) }, { status: error instanceof WorkspaceFileError ? error.status : 400 });
     }
+  }
+
+  // An Upload (DOMAIN.md: Access Grant): one file per request, streamed from the browser to the
+  // toolbox, never held whole. The board names the folder; the file's name is flattened and never
+  // replaces a file already there. The grant's limits are reserved before a byte moves and released
+  // if the file does not land. The Orchestrator hears of each file, never its bytes: the last of a
+  // drop wakes it and an earcon tells the call, the rest ride along as background.
+  private async pairedUpload(request: Request, url: URL): Promise<Response> {
+    const browser = await this.pairedRequest(request);
+    if (!browser) return Response.json({ error: "this pairing has expired" }, { status: 401 });
+    const boardId = url.searchParams.get("board") ?? "";
+    const target = (url.searchParams.get("folder") ?? "").trim();
+    const key = `upload:${target}`;
+    const last = request.headers.get("x-dogwalk-upload-last") === "1";
+    const size = Number(request.headers.get("x-dogwalk-file-size") ?? "");
+    const { name, stem, extension } = uploadFileName(decodeHeader(request.headers.get("x-dogwalk-file-name")));
+    const type = (request.headers.get("x-dogwalk-file-type") ?? "").toLowerCase().replace(/[^\w.+/-]/g, "").slice(0, 80) || "unknown";
+    let granted = false;
+    let reserved = false;
+    try {
+      const board = (await this.boards()).find((item) => item.id === boardId && item.display === browser.display);
+      if (!board || !boardElements(board.program).some((item) => item.component === "Upload" && item.target === target)) {
+        throw new WorkspaceFileError(404, "no board on this display takes uploads there");
+      }
+      liveGrant(board, key);
+      granted = true;
+      if (!request.body || !Number.isSafeInteger(size) || size < 0) throw new WorkspaceFileError(411, "an upload states its size");
+      if (size > UPLOAD_LIMITS.file_bytes) {
+        throw new WorkspaceFileError(413, `that file is too large (${megabytes(size)}; at most ${megabytes(UPLOAD_LIMITS.file_bytes)} each)`);
+      }
+      await this.requireRunningSandbox();
+      await this.reserveUpload(boardId, key, size, 1);
+      reserved = true;
+      const previous = this.uploads;
+      let done!: () => void;
+      this.uploads = new Promise<void>((resolve) => { done = resolve; });
+      await previous;
+      let path: string;
+      try {
+        path = await this.uploadDestination(uploadFolder(target), stem, extension);
+        await this.streamUpload(path, name, request.body, size);
+      } finally {
+        done();
+      }
+      reserved = false;
+      const shown = `~/${path.slice(WORKSPACE_ROOT.length + 1)}`;
+      await this.record("whiteboard.uploaded", { board_id: boardId, bytes: size, last });
+      if (last) this.queueEarcon("upload_received");
+      await this.orchestratorEvent(`[harness event] upload_received: ${JSON.stringify({
+        board_id: boardId, display: browser.display, path: shown, size, type, last_of_drop: last,
+      })}`, last);
+      return Response.json({ ok: true, path: shown, size });
+    } catch (error) {
+      if (reserved) await this.reserveUpload(boardId, key, -size, -1).catch(() => {});
+      // A body refused before it was read is dropped, not left for the runtime to complain about.
+      if (request.body && !request.bodyUsed) await request.body.cancel().catch(() => {});
+      const asleep = error instanceof SandboxAsleepError;
+      const status = asleep ? 503 : error instanceof WorkspaceFileError ? error.status : 400;
+      // Only an attempt under a live grant is news; an asleep Sandbox means no call is waiting for it.
+      if (granted && !asleep) {
+        await this.record("whiteboard.upload_failed", { board_id: boardId, status });
+        await this.orchestratorEvent(`[harness event] upload_failed: ${JSON.stringify({
+          board_id: boardId, display: browser.display, name, size: Number.isFinite(size) ? size : null, error: errorMessage(error),
+        })}`, last);
+      }
+      return Response.json({ error: errorMessage(error), ...(asleep ? { asleep: true } : {}) }, { status });
+    }
+  }
+
+  // Count a file against its grant's limits (negative counts release it) and show the mirrors.
+  private async reserveUpload(boardId: string, key: string, bytes: number, files: number): Promise<void> {
+    const board = await this.state.storage.transaction(async (tx) => {
+      const boards = await tx.get<Board[]>("whiteboard_boards") ?? [];
+      const board = boards.find((item) => item.id === boardId);
+      const upload = board?.access?.[key]?.upload;
+      if (!board || !upload) throw new Error("this was not granted; ask on the call");
+      if (files > 0) {
+        liveGrant(board, key);
+        if (upload.files + files > upload.limits.files) {
+          throw new WorkspaceFileError(429, `this upload has taken its ${upload.limits.files} files; ask on the call to draw it again`);
+        }
+        if (upload.bytes + bytes > upload.limits.bytes) {
+          throw new WorkspaceFileError(413, `this upload has room for ${megabytes(upload.limits.bytes - upload.bytes)} more; ask on the call to draw it again`);
+        }
+      }
+      upload.files = Math.max(0, upload.files + files);
+      upload.bytes = Math.max(0, upload.bytes + bytes);
+      await tx.put("whiteboard_boards", boards);
+      return board;
+    });
+    await this.broadcastDisplay(board.display, { type: "board", board });
+  }
+
+  // Create the folder, check that its real path stays under the upload root (a symlink an Agent
+  // left cannot redirect it; a link swapped in afterwards is not caught, as for reads), and pick
+  // the first free name: "name.ext", then "name (2).ext", and so on.
+  private async uploadDestination(folder: string, stem: string, extension: string): Promise<string> {
+    const script = [
+      `root=${shellQuote(UPLOAD_ROOT)}; dir=${shellQuote(folder)}; stem=${shellQuote(stem)}; ext=${shellQuote(extension)}`,
+      `mkdir -p -- "$dir" || exit 2`,
+      `real=$(realpath -e -- "$dir") || exit 2`,
+      `case "$real/" in "$root"/*) ;; *) exit 3;; esac`,
+      `[ -d "$real" ] && [ ! -L "$real" ] || exit 3`,
+      `n="$stem$ext"; i=2`,
+      `while [ -e "$real/$n" ] || [ -L "$real/$n" ]; do n="$stem ($i)$ext"; i=$((i+1)); [ "$i" -gt 999 ] && exit 4; done`,
+      `printf '%s/%s' "$real" "$n"`,
+    ].join("\n");
+    const { result, exitCode } = await this.sandboxExecute(script, 15);
+    if (exitCode === 3) throw new WorkspaceFileError(403, `that folder leads outside ${UPLOAD_ROOT}`);
+    if (exitCode === 4) throw new WorkspaceFileError(409, "that folder already holds too many files with this name");
+    if (exitCode !== 0) throw new WorkspaceFileError(502, "could not prepare the upload folder");
+    return result.trim();
+  }
+
+  // Wrap the browser's bytes in one multipart part on the way to the toolbox, counting them: a
+  // body longer or shorter than it declared fails the fixed-length stream, so no cap is bypassed.
+  private async streamUpload(path: string, name: string, body: ReadableStream<Uint8Array>, size: number): Promise<void> {
+    const { toolbox, headers } = await this.workspaceToolbox();
+    const boundary = `dogwalk-${toHexId(12)}`;
+    const encoder = new TextEncoder();
+    const head = encoder.encode(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="${name}"\r\ncontent-type: application/octet-stream\r\n\r\n`);
+    const tail = encoder.encode(`\r\n--${boundary}--\r\n`);
+    const { readable, writable } = new FixedLengthStream(head.length + size + tail.length);
+    const pump = (async () => {
+      const writer = writable.getWriter();
+      const reader = body.getReader();
+      let received = 0;
+      try {
+        await writer.write(head);
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          received += value.length;
+          if (received > size) throw new WorkspaceFileError(400, "the file was longer than it said");
+          await writer.write(value);
+        }
+        if (received !== size) throw new WorkspaceFileError(400, "the file arrived incomplete");
+        await writer.write(tail);
+        await writer.close();
+      } catch (error) {
+        await reader.cancel().catch(() => {});
+        await writer.abort(error).catch(() => {});
+        throw error;
+      }
+    })();
+    const sent = fetch(`${toolbox}/files/upload?path=${encodeURIComponent(path)}`, {
+      method: "POST",
+      headers: { ...headers, "content-type": `multipart/form-data; boundary=${boundary}` },
+      body: readable,
+      signal: AbortSignal.timeout(120_000),
+    });
+    const [pumped, uploaded] = await Promise.allSettled([pump, sent]);
+    if (pumped.status === "rejected") throw pumped.reason;
+    if (uploaded.status === "rejected") throw new WorkspaceFileError(502, `could not save that file (${errorMessage(uploaded.reason)})`);
+    if (!uploaded.value.ok) throw new WorkspaceFileError(502, sandboxFileError(uploaded.value.status, "save that file"));
   }
 
   // A Workspace file's real path and size: present, inside the Workspace, and not a directory.
@@ -5478,6 +5643,15 @@ function toHexId(bytes: number): string {
 function sandboxFileError(status: number, action: string): string {
   if (status === 404) return `could not ${action}: it does not exist`;
   return `could not ${action} (sandbox answered ${status}); a stopped sandbox wakes when you call`;
+}
+
+// A header the page percent-encoded (file names are not ASCII-safe), or "" when malformed.
+function decodeHeader(value: string | null): string {
+  try {
+    return decodeURIComponent(value ?? "");
+  } catch {
+    return "";
+  }
 }
 
 // A Workspace read refused for a reason the page should see as an HTTP status.

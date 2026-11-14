@@ -165,6 +165,11 @@ const EVENTS: Record<EarconName, EventInfo> = {
     meaning: "Something you chose, typed, or decided on the paired browser's whiteboard reached the walker, which is now taking it into account.",
     label: "Answer received.",
   },
+  upload_received: {
+    title: "File received",
+    meaning: "A file you dropped on the paired browser's whiteboard landed in the Sandbox's uploads folder; the walker will say what arrived.",
+    label: "File received.",
+  },
 };
 
 interface Group {
@@ -209,7 +214,7 @@ const GROUPS: Group[] = [
     id: "whiteboard",
     title: "Whiteboard",
     intro: "Confirmation, in the call, of what you do on the paired browser's whiteboard.",
-    names: ["whiteboard_answer"],
+    names: ["whiteboard_answer", "upload_received"],
   },
 ];
 

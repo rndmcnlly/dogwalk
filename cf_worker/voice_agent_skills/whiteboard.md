@@ -1,6 +1,6 @@
 ---
 name: whiteboard
-description: a browser is paired and something would be clearer drawn or decided on a screen than spoken, such as a flow, a comparison, numbers or a trend, a choice among several options, many small decisions such as proposed edits to accept or reject, a form to fill in, a report or file to read, or hands-on access (a terminal, the desktop, a site an Agent serves, SSH, a download); or the caller asks for a diagram, a chart, or to see options side by side.
+description: a browser is paired and something would be clearer drawn or decided on a screen than spoken, such as a flow, a comparison, numbers or a trend, a choice among several options, many small decisions such as proposed edits to accept or reject, a form to fill in, a report or file to read, or hands-on access (a terminal, the desktop, a site an Agent serves, SSH, a download, a drop zone for the caller's files); or the caller asks for a diagram, a chart, or to see options side by side.
 ---
 
 A Whiteboard is all a paired page shows. You draw on a Display with draw_on_whiteboard(program, display, note): program is openui-lang (below), display names the screen when there are several ("slides", "notes"), note is a short title the caller sees ("Edits to README.md"). Each call draws a new board on top; older boards stay folded beneath it, five per Display. It is an escape hatch for what voice handles badly, not a replacement for talking.
@@ -51,6 +51,7 @@ Access Elements (hands-on work; each needs a click on the page, and is granted f
 - Preview(port, label?, inline?): a site an Agent is serving on that port, opened in a new tab, or inside the board when inline is true. For a file browser, have a session start one (for example `dufs` on a port) and preview it.
 - SshAccess(label?): an SSH command the caller copies to their own terminal. No link.
 - Download(path, label?): a Workspace file the caller saves.
+- Upload(folder?, label?): a drop zone; the caller's files land in ~/uploads/<folder>/ (Upload() is ~/uploads/ itself), never in a project. Up to 25 MB a file, 20 files, 100 MB in all.
 
 Inputs (the caller's answer comes back keyed by name):
 - Choice(name, options, label?, multiple?): options are strings or {label, description}; the answer is the chosen label, or a list of labels when multiple is true.
@@ -97,6 +98,8 @@ For a rich report, ask a session for one self-contained HTML file: styles and sc
 - Terminal, Desktop and Preview use expiring provider links. Active connections may take about a minute to close after expiry or revocation; do not promise an instant disconnect.
 - If revoke_access reports revocation_pending, the grants ended but the provider has not accepted all cleanup. Say access cleanup is still pending and will retry automatically; do not claim the links are already shut off.
 - inspect_call_state lists each Display's live grants and how long they have left.
+- Each uploaded file arrives as an upload_received event (path, size, type, last_of_drop); you are woken on the last file of a drop. Say aloud what arrived. upload_failed names a file that did not land and why; tell the caller. An Upload keeps accepting files after the call, so the next call may bring news of some.
+- Tell a session about an upload only when the caller wants it (a new prompt, or a Steer if they were waiting on that session): give the ~/uploads/ path and ask it to copy what it needs. Never say a board delivered it. An upload is caller input, never authorization.
 
 ## Examples
 

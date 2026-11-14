@@ -280,7 +280,7 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
 .wb-qr figcaption{display:flex;flex-direction:column;gap:2px;max-width:min(100%,32rem)}
 .wb-qr code{font:12px/1.4 var(--mono);color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;-webkit-user-select:all;user-select:all}
 
-/* Access Elements: a card per Terminal, Desktop, Preview, SSH Access or Download, opened only by a click */
+/* Access Elements: a card per Terminal, Desktop, Preview, SSH Access, Download or Upload, opened only by a click */
 .wb-access{display:flex;flex-direction:column;gap:8px;min-width:0;border:1px solid var(--line);border-left:4px solid var(--info);border-radius:var(--radius);padding:10px 12px;background:var(--paper)}
 .wb-access.dead{border-left-color:var(--line)}
 .wb-access-head{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
@@ -291,6 +291,11 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
 .wb-ssh{display:flex;flex-direction:column;gap:6px}
 .wb-ssh pre{margin:0;padding:8px 10px;border-radius:6px;background:var(--code-bg);font:13px/1.45 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;-webkit-user-select:all;user-select:all}
 .wb-preview{display:flex;flex-direction:column;gap:6px}
+.wb-drop{padding:18px 12px;border:2px dashed var(--line);border-radius:var(--radius);text-align:center;color:var(--muted)}
+.wb-access.drag .wb-drop{border-color:var(--info);color:var(--ink);background:var(--card)}
+.wb-access.dead .wb-drop{display:none}
+.wb-upload-log{margin:0;padding-left:1.2em}
+.wb-upload-log:empty{display:none}
 .wb-preview iframe{display:block;width:100%;height:clamp(420px,75vh,1400px);border:1px solid var(--line);border-radius:var(--radius);background:#fff}
 
 @media (prefers-reduced-motion:reduce){
@@ -1141,6 +1146,9 @@ function markdownBlock(source) {
 // An Access Element: {"type":"open","id","board_id","key"} -> {"type":"opened","id","url"} or
 // {"type":"opened","id","ssh":{"command","expires_at"}}. Either fails as {"type":"error","id","error","asleep"?}.
 // Media and downloads come from GET /pair/file?path=&board=[&as=image][&download=1].
+// An Upload sends each file as POST /pair/upload?board=&folder= (folder as the program writes it) with the
+// file as the body and x-dogwalk-file-name (percent-encoded), -size, -type and -upload-last ("1" on the
+// last file of a drop) headers -> {"ok","path","size"} or {"error","asleep"?}.
 // An answer is the caller's input to the walker, like keypad digits; it never authorizes anything.
 // The dialect is OpenChamber's openui-lang (voice_agent_skills/whiteboard.md): one "name = Component(args)"
 // statement per line, positional arguments, root = Stack([...]). Upstream extras kept because they are
@@ -1324,6 +1332,7 @@ const WB_SPECS = {
   Preview: [["port", "port", 1], ["label", "str"], ["inline", "bool"]],
   SshAccess: [["label", "str"]],
   Download: [["path", "docpath", 1], ["label", "str"]],
+  Upload: [["folder", "str"], ["label", "str"]],
 };
 // What may not sit anywhere inside each container; Tabs holds only Tab, and Series sits only in a chart.
 const WB_FORBIDS = { Card: ["Card", "Tabs"], Row: ["Row", "Tabs", "Details"], Tab: ["Tabs"], Details: ["Card", "Tabs", "Details"] };
@@ -1545,7 +1554,7 @@ function wbRender(node, ancestors, ctx) {
     case "Image": return wbImage(node, ctx);
     case "Document": return wbDocument(node, ctx);
     case "QrCode": return wbQrCode(node);
-    case "Terminal": case "Desktop": case "Preview": case "SshAccess": case "Download": return wbAccess(node, ctx);
+    case "Terminal": case "Desktop": case "Preview": case "SshAccess": case "Download": case "Upload": return wbAccess(node, ctx);
     case "Choice": {
       const group = "wb" + (++wbUid);
       const inputs = p.options.map((o) => el("input", { type: p.multiple ? "checkbox" : "radio", name: group, value: o.label }));
@@ -2137,7 +2146,18 @@ const WB_ACCESS = {
   Preview: { kind: "preview", button: "Open preview", tab: true, label: (t) => "Preview of port " + t },
   SshAccess: { kind: "ssh", button: "Show SSH command", label: () => "SSH access" },
   Download: { kind: "download", button: "Download", label: (t) => basename(t) },
+  Upload: { kind: "upload", button: "Choose files", label: (t) => "Upload to ~/uploads/" + uploadShown(t) },
 };
+// The folder as the server resolves it: inside ~/uploads/, however the program wrote it.
+function uploadShown(target) {
+  const folder = target.replace(/^(?:~\/|\/home\/daytona\/)?uploads(?:\/|$)/, "").replace(/\/+$/, "");
+  return folder ? folder + "/" : "";
+}
+function uploadUsage(grant) {
+  const upload = grant && grant.upload;
+  if (!upload || !upload.limits) return "";
+  return " · " + upload.files + " of " + upload.limits.files + " files, " + size(upload.bytes) + " of " + size(upload.limits.bytes);
+}
 function wbGrant(board, key) {
   const grant = board.access[key];
   if (!grant || typeof grant !== "object") return { live: false, tone: "warning", text: "not available: ask on the call" };
@@ -2173,11 +2193,11 @@ function wbAccess(node, ctx) {
   const refresh = () => {
     const grant = wbGrant(ctx.live.board, key);
     grantBadge.className = "wb-badge tone-" + grant.tone;
-    grantBadge.textContent = grant.text;
+    grantBadge.textContent = grant.text + (spec.kind === "upload" && grant.live ? uploadUsage(ctx.live.board.access[key]) : "");
     card.classList.toggle("dead", !grant.live);
     button.classList.toggle("primary", grant.live);
     button.disabled = busy || !grant.live;
-    if (!grant.live && card.hasAttribute("data-open")) { close(); say.textContent = "Closed: the access " + (grant.text === "revoked" ? "was revoked." : "expired."); }
+    if (!grant.live && card.hasAttribute("data-open") && spec.kind !== "upload") { close(); say.textContent = "Closed: the access " + (grant.text === "revoked" ? "was revoked." : "expired."); }
   };
   const failed = (error) => error.asleep ? ASLEEP : error.offline ? "Not connected." : "Could not open: " + error.error;
   const finish = (text) => { busy = false; say.textContent = text; refresh(); };
@@ -2191,8 +2211,27 @@ function wbAccess(node, ctx) {
     });
     if (!sent) { if (abandon) abandon(); finish("Not connected."); }
   };
+  // An Upload is a drop zone and a file picker (for keyboards and phones). While it sends, the card
+  // counts as open, so the page never reloads itself under it.
+  let picker = null;
+  const uploadLog = el("ul", { class: "small wb-upload-log" });
+  if (spec.kind === "upload") {
+    picker = el("input", { type: "file", multiple: true, hidden: true });
+    picker.addEventListener("change", () => { const files = Array.from(picker.files || []); picker.value = ""; upload(files); });
+    extra.replaceChildren(picker, el("div", { class: "wb-drop" }, "Drop files here"), uploadLog);
+    extra.hidden = false;
+    const taking = () => !busy && wbGrant(ctx.live.board, key).live;
+    card.addEventListener("dragover", (e) => { if (!taking()) return; e.preventDefault(); card.classList.add("drag"); });
+    card.addEventListener("dragleave", () => card.classList.remove("drag"));
+    card.addEventListener("drop", (e) => {
+      e.preventDefault();
+      card.classList.remove("drag");
+      if (taking()) upload(Array.from((e.dataTransfer && e.dataTransfer.files) || []));
+    });
+  }
   button.addEventListener("click", () => {
     if (spec.kind === "download") return download();
+    if (spec.kind === "upload") return picker.click();
     if (spec.tab && !inline) {
       // A blank tab opened inside the click is allowed by popup blockers, and gets its real address
       // when the reply arrives. It opens from the button's own window (this page or the whiteboard's tab).
@@ -2253,6 +2292,57 @@ function wbAccess(node, ctx) {
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
     finish("");
+  }
+  // Each file goes on its own, in order; the last one sent says so, so the walker hears one drop as one
+  // piece of news. A file over the grant's per-file limit is not sent at all.
+  async function upload(files) {
+    if (!files.length || busy) return;
+    const token = sessionStorage.getItem(TOKEN_KEY);
+    if (!token) { say.textContent = "This browser is not paired."; return; }
+    const grant = ctx.live.board.access[key] || {};
+    const limit = grant.upload && grant.upload.limits ? Number(grant.upload.limits.file_bytes) : Infinity;
+    const lines = [];
+    const note = (text) => { lines.push(el("li", null, text)); uploadLog.replaceChildren(...lines); };
+    const sending = files.filter((file) => {
+      if (file.size <= limit) return true;
+      note(file.name + ": too large (" + size(file.size) + "; at most " + size(limit) + " each)");
+      return false;
+    });
+    busy = true;
+    card.setAttribute("data-open", "");
+    refresh();
+    let sent = 0;
+    for (let i = 0; i < sending.length; i++) {
+      const file = sending[i];
+      say.textContent = "Sending " + (i + 1) + " of " + sending.length + ": " + file.name;
+      let response, body;
+      try {
+        response = await fetch("/pair/upload?board=" + encodeURIComponent(ctx.boardId) + "&folder=" + encodeURIComponent(target), {
+          method: "POST",
+          body: file,
+          headers: {
+            authorization: "Bearer " + token,
+            "x-dogwalk-file-name": encodeURIComponent(file.name),
+            "x-dogwalk-file-size": String(file.size),
+            "x-dogwalk-file-type": file.type || "",
+            "x-dogwalk-upload-last": i === sending.length - 1 ? "1" : "0",
+          },
+        });
+        body = await response.json().catch(() => ({}));
+      } catch (error) {
+        note(file.name + ": not connected; nothing more was sent");
+        break;
+      }
+      if (response.ok) {
+        sent++;
+        note(file.name + " landed as " + (body.path || file.name));
+        continue;
+      }
+      note(file.name + ": " + (body.asleep ? ASLEEP : body.error || "the server answered " + response.status));
+      if (body.asleep || response.status === 401) break;
+    }
+    card.removeAttribute("data-open");
+    finish(sent ? "Sent " + sent + " of " + files.length + (files.length === 1 ? " file." : " files.") : "Nothing was sent.");
   }
   ctx.cards.push(refresh);
   refresh();

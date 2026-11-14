@@ -46,6 +46,7 @@ LABELS = {
     "recording_started": "Recording.",
     "recording_saved": "Recording saved.",
     "whiteboard_answer": "Answer received.",
+    "upload_received": "File received.",
     "recording_discarded": "Recording discarded.",
     "follow_started": "Following.",
     "follow_stopped": "Ranging.",
@@ -106,7 +107,7 @@ GROUPS = [
     ("Progress Beats", ["progress_looking", "progress_changing", "progress_running", "progress_still_running",
                         "progress_failed", "progress_remark", "progress_step", "progress_plan_done", "progress_context_low"]),
     ("Recording", ["recording_started", "recording_saved", "recording_discarded"]),
-    ("Whiteboard", ["whiteboard_answer"]),
+    ("Whiteboard", ["whiteboard_answer", "upload_received"]),
 ]
 NEW = {"bid", "follow_started", "follow_stopped"} | {name for name in LABELS if name.startswith("progress_")}
 # [earcon, seconds after the previous one]

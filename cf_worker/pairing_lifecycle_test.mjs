@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import { stripTypeScriptTypes } from "node:module";
-import { ACCESS_COMPONENTS, boardElements } from "./src/board_images.ts";
+import { ACCESS_COMPONENTS, boardElements, UPLOAD_LIMITS, uploadFolder } from "./src/board_images.ts";
 
 const source = readFileSync(new URL("src/voice_session.ts", import.meta.url), "utf8");
 const methods = ["pairRequest", "cleanupVoice", "endPairingTimers", "grantAccess", "workspacePath"].map((name) => {
@@ -20,7 +20,7 @@ function harness(hash = async () => "ticket-hash", failDelete = false) {
   const pending = [], warnings = [], cleared = [];
   const context = vm.createContext({
     Response, Date, WebSocket: { OPEN: 1 }, PAIRING_CONFIRM_MS: 30_000,
-    ACCESS_COMPONENTS, GATEWAY_PORT: 8765, WORKSPACE_ROOT: "/home/daytona", errorMessage: (error) => error.message,
+    ACCESS_COMPONENTS, UPLOAD_LIMITS, uploadFolder, GATEWAY_PORT: 8765, WORKSPACE_ROOT: "/home/daytona", errorMessage: (error) => error.message,
     newBrowserSecret: () => "ticket-secret", sha256Hex: hash,
     setTimeout: () => 7, clearTimeout: (id) => cleared.push(id),
     summarizeLevels: () => ({}), newLevels: () => ({}), lastWords: () => [],
@@ -43,7 +43,7 @@ function harness(hash = async () => "ticket-hash", failDelete = false) {
       storage: { put: async (key, value) => stored.set(key, value), delete: async (key) => stored.delete(key), get: async (key) => stored.get(key) },
     },
     endMenu() {}, record: async () => {}, flushTiming: async () => {}, sendLive() {},
-    saveTranscript: async () => { saved = true; }, orchestratorEvent: async () => {}, writeNextGreeting: async () => {},
+    saveTranscript: async () => { saved = true; }, closeOutContext: async () => {}, orchestratorEvent: async () => {}, writeNextGreeting: async () => {},
   });
   return { session, pending, warnings, cleared, stored, get closed() { return closed; }, get saved() { return saved; } };
 }
@@ -90,23 +90,24 @@ test("disconnect preserves an accepted browser's uncollected credential", async 
 // Access Grants (DOMAIN.md): drawing in a call is the authorization. Results cross back from the
 // harness's realm, so they compare as plain JSON.
 const plain = (value) => JSON.parse(JSON.stringify(value));
-const ACCESS_BOARD = 'root = Stack([Preview(5173), Preview(8765), Preview(70000), Terminal(), Terminal("Build"), Desktop(), SshAccess(), Download("out/a.zip"), Download("../../etc/passwd"), Preview(5173)])';
+const ACCESS_BOARD = 'root = Stack([Preview(5173), Preview(8765), Preview(70000), Terminal(), Terminal("Build"), Desktop(), SshAccess(), Download("out/a.zip"), Download("../../etc/passwd"), Upload("talk-slides"), Upload("../etc"), Preview(5173)])';
 
 test("a board drawn in a call grants its Access Elements for the minutes asked, on valid targets only", () => {
   const h = harness();
   const before = Date.now();
   const { access, refused } = plain(h.session.grantAccess(boardElements(ACCESS_BOARD), 90));
-  assert.deepEqual(Object.keys(access), ["preview:5173", "terminal:", "desktop:", "ssh:", "download:out/a.zip"]);
+  assert.deepEqual(Object.keys(access), ["preview:5173", "terminal:", "desktop:", "ssh:", "download:out/a.zip", "upload:talk-slides"]);
+  assert.deepEqual(access["upload:talk-slides"].upload, { limits: { file_bytes: 25_000_000, files: 20, bytes: 100_000_000 }, files: 0, bytes: 0 });
   for (const [key, grant] of Object.entries(access)) {
     assert.equal(`${grant.kind}:${grant.target}`, key);
     assert.ok(grant.expires_at >= before + 90 * 60_000 && grant.expires_at <= Date.now() + 90 * 60_000);
     assert.equal(grant.revoked, undefined);
   }
-  assert.deepEqual(refused.map((item) => item.key), ["preview:8765", "preview:70000", "terminal:Build", "download:../../etc/passwd"]);
+  assert.deepEqual(refused.map((item) => item.key), ["preview:8765", "preview:70000", "download:../../etc/passwd", "upload:../etc"]);
   assert.match(refused[0].reason, /Agent Gateway/);
   assert.match(refused[1].reason, /port number/);
-  assert.match(refused[2].reason, /lowercase/);
-  assert.match(refused[3].reason, /under \/home\/daytona/);
+  assert.match(refused[2].reason, /under \/home\/daytona/);
+  assert.match(refused[3].reason, /inside ~\/uploads/);
 });
 
 test("outside a call, nothing on a board is granted", () => {
@@ -114,5 +115,5 @@ test("outside a call, nothing on a board is granted", () => {
   h.session.liveAttached = false;
   const { access, refused } = plain(h.session.grantAccess(boardElements(ACCESS_BOARD), 60));
   assert.deepEqual(access, {});
-  assert.ok(refused.length >= 5 && refused.every((item) => /only while drawing in a call/.test(item.reason)));
+  assert.ok(refused.length >= 4 && refused.every((item) => /only while drawing in a call/.test(item.reason)));
 });

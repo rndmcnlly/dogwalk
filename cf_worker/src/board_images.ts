@@ -59,9 +59,9 @@ export function checkRasterSize(bytes: Uint8Array, kind: string): void {
 // Access Elements (DOMAIN.md: Access Grant). The kind names the element; the target is its first
 // argument as written (a number as its decimal string, "" when absent), which the page derives the
 // same way, so `${kind}:${target}` keys an Access Grant on both sides.
-export type AccessKind = "terminal" | "desktop" | "preview" | "ssh" | "download";
+export type AccessKind = "terminal" | "desktop" | "preview" | "ssh" | "download" | "upload";
 export const ACCESS_COMPONENTS: Record<string, AccessKind> = {
-  Terminal: "terminal", Desktop: "desktop", Preview: "preview", SshAccess: "ssh", Download: "download",
+  Terminal: "terminal", Desktop: "desktop", Preview: "preview", SshAccess: "ssh", Download: "download", Upload: "upload",
 };
 const FILE_COMPONENTS = new Set(["Image", "Document", "Download"]);
 // Terminal, Desktop and SSH Access have no target: their first argument, if any, is a label.
@@ -106,6 +106,38 @@ function unquote(raw: string): string {
   return raw.slice(1, -1).replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, escape: string) => escape.length === 5
     ? String.fromCharCode(parseInt(escape.slice(1), 16))
     : escape === "n" ? "\n" : escape === "t" ? "\t" : escape === "r" ? "" : escape).trim();
+}
+
+// Upload (DOMAIN.md: Access Grant): files a Paired Browser sends land in one folder under a root
+// of their own, never in a project directory, where a new AGENTS.md or dotfile would be picked up
+// by an Agent or a tool. The target names a folder inside the root ("" is the root itself); a
+// leading "~/uploads/" or the absolute root is tolerated, since that is how people say it.
+export const UPLOAD_ROOT = "/home/daytona/uploads";
+export const UPLOAD_LIMITS = { file_bytes: 25_000_000, files: 20, bytes: 100_000_000 };
+const UPLOAD_SEGMENT = /^[A-Za-z0-9_][\w .,()+=@-]{0,63}$/;
+
+export function uploadFolder(target: string): string {
+  const relative = target.trim().replace(/^(?:~\/|\/home\/daytona\/)?uploads(?:\/|$)/, "").replace(/\/+$/, "");
+  if (!relative) return UPLOAD_ROOT;
+  const segments = relative.split("/");
+  if (segments.length > 3 || !segments.every((part) => UPLOAD_SEGMENT.test(part) && part.trim() === part)) {
+    throw new Error(`Upload names a folder inside ~/uploads/: up to three plain names (letters, digits, spaces, - _ . ,), no leading dot, no ".."`);
+  }
+  return `${UPLOAD_ROOT}/${segments.join("/")}`;
+}
+
+// A received file's name, flattened to one plain segment: no separators, control characters,
+// quotes, or leading dot (so never a dotfile), at most 120 characters with its extension kept.
+export function uploadFileName(raw: string): { name: string; stem: string; extension: string } {
+  const base = raw.split(/[\\/]/).pop() ?? "";
+  const cleaned = base.normalize("NFC").replace(/[\u0000-\u001f\u007f]/g, "").replace(/[^\p{L}\p{N} .,()+=@_-]/gu, "_")
+    .replace(/^[\s.]+/, "").replace(/\s+/g, " ").trim();
+  const dot = cleaned.lastIndexOf(".");
+  let stem = dot > 0 ? cleaned.slice(0, dot) : cleaned;
+  let extension = dot > 0 ? cleaned.slice(dot) : "";
+  if (extension.length > 16) { stem = cleaned; extension = ""; }
+  stem = stem.slice(0, 120 - extension.length).trim() || "upload";
+  return { name: stem + extension, stem, extension };
 }
 
 export function boardImagePaths(program: string): string[] {

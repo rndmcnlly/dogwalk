@@ -1,6 +1,8 @@
 // node --experimental-strip-types cf_worker/board_images_test.ts
 import assert from "node:assert/strict";
-import { ACCESS_COMPONENTS, boardElements, boardImagePaths, checkRasterSize } from "./src/board_images.ts";
+import {
+  ACCESS_COMPONENTS, boardElements, boardImagePaths, checkRasterSize, UPLOAD_ROOT, uploadFileName, uploadFolder,
+} from "./src/board_images.ts";
 
 function png(width: number, height: number): Uint8Array {
   const bytes = new Uint8Array(24), view = new DataView(bytes.buffer);
@@ -60,7 +62,8 @@ assert.deepEqual(boardImagePaths('root = Stack([Image(path, "x")])\npath = "old.
 // Board elements: files a board shows and Access Elements, each with its target as written.
 const elements = boardElements(`
 root = Stack([shot, Document("REPORT.md", "The report"), app, Preview(3000.0), Terminal(), Terminal(label), Desktop("The desktop"),
-  SshAccess("Copy this"), Download('out/report.zip', "Get it"), Text("Preview(9) and Terminal('ghost')"), Preview(unbound)])
+  SshAccess("Copy this"), Download('out/report.zip', "Get it"), Text("Preview(9) and Terminal('ghost')"), Preview(unbound),
+  Upload("talk-slides", "Drop slides"), Upload()])
 // Preview(4444)
 shot = Image("shot.png", "x")
 app = Preview(port, "The dev server")
@@ -75,15 +78,44 @@ assert.deepEqual(elements, [
   { component: "Desktop", target: "" },
   { component: "SshAccess", target: "" },
   { component: "Download", target: "out/report.zip" },
+  { component: "Upload", target: "talk-slides" },
+  { component: "Upload", target: "" },
   { component: "Image", target: "shot.png" },
   { component: "Preview", target: "5173" },
 ]);
 // The page derives the same grant keys from the same program.
 assert.deepEqual(
   elements.filter((item) => item.component in ACCESS_COMPONENTS).map((item) => `${ACCESS_COMPONENTS[item.component]}:${item.target}`),
-  ["preview:3000", "terminal:", "terminal:", "desktop:", "ssh:", "download:out/report.zip", "preview:5173"],
+  ["preview:3000", "terminal:", "terminal:", "desktop:", "ssh:", "download:out/report.zip", "upload:talk-slides", "upload:", "preview:5173"],
 );
 assert.deepEqual(boardElements("root = Stack([Preview(0080), Desktop(), SshAccess()])"),
   [{ component: "Preview", target: "80" }, { component: "Desktop", target: "" }, { component: "SshAccess", target: "" }]);
 assert.deepEqual(boardImagePaths('root = Stack([Document("a.png"), Image("b.png"), Download("c.png")])'), ["b.png"]);
-console.log("board image header limits, path capture, and board elements: passed");
+
+// Upload folders stay inside the upload root; received names flatten to one plain segment.
+assert.equal(uploadFolder(""), UPLOAD_ROOT);
+assert.equal(uploadFolder("talk-slides"), `${UPLOAD_ROOT}/talk-slides`);
+for (const said of ["~/uploads/talk-slides", "uploads/talk-slides", "/home/daytona/uploads/talk-slides", "talk-slides/"]) {
+  assert.equal(uploadFolder(said), `${UPLOAD_ROOT}/talk-slides`, said);
+}
+assert.equal(uploadFolder("~/uploads"), UPLOAD_ROOT);
+assert.equal(uploadFolder("a/b c/d"), `${UPLOAD_ROOT}/a/b c/d`);
+for (const bad of ["../x", "a/../b", "..", ".ssh", "a/.git", "a/b/c/d", "/etc", "a//b", "a$b", "a\\b", "~/x", "a/ b", "a /b"]) {
+  assert.throws(() => uploadFolder(bad), /inside ~\/uploads/, bad);
+}
+assert.deepEqual(uploadFileName("Talk slides.pdf"), { name: "Talk slides.pdf", stem: "Talk slides", extension: ".pdf" });
+assert.deepEqual(uploadFileName("../../.bashrc"), { name: "bashrc", stem: "bashrc", extension: "" });
+assert.equal(uploadFileName("C:\\Users\\me\\notes.txt").name, "notes.txt");
+assert.equal(uploadFileName(".env").name, "env");
+assert.equal(uploadFileName("Café Ünïcode 日本.png").name, "Café Ünïcode 日本.png");
+assert.equal(uploadFileName("Cafe\u0301.txt").name, "Café.txt");
+assert.equal(uploadFileName('a"b;c\n.md').name, "a_b_c.md");
+assert.equal(uploadFileName("").name, "upload");
+assert.equal(uploadFileName("...").name, "upload");
+assert.deepEqual(uploadFileName(".pdf"), { name: "pdf", stem: "pdf", extension: "" });
+const long = uploadFileName(`${"x".repeat(300)}.tar.gz`);
+assert.equal(long.name.length, 120);
+assert.ok(long.name.endsWith("x.gz"));
+assert.equal(long.extension, ".gz");
+assert.equal(uploadFileName(`archive.${"y".repeat(20)}`).extension, "");
+console.log("board image header limits, path capture, board elements, and upload names: passed");
