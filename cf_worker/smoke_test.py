@@ -2306,6 +2306,7 @@ DELETE FROM retired_handles WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM roaming_attempts WHERE user_id NOT IN (SELECT id FROM users) OR phone_number LIKE '{TEST_NUMBERS}';
 DELETE FROM provider_call_jobs WHERE root_call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
 DELETE FROM call_activity WHERE call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
+DELETE FROM spend WHERE call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
 DELETE FROM call_handoffs WHERE phone_number LIKE '{TEST_NUMBERS}';
 DELETE FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}' OR user_id NOT IN (SELECT id FROM users);
 DELETE FROM claim_attempt WHERE phone_number LIKE '{TEST_NUMBERS}';

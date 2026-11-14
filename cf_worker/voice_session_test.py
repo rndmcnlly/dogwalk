@@ -855,6 +855,12 @@ ORCHESTRATOR_SCRIPT = [
     ('"key":"C"', lambda ctx: [call("kC-donate", "start_voice_donation")]),
     # Asking to test their voice hands the call to deterministic Challenge Practice.
     ('"key":"D"', lambda ctx: [call("kD-practice", "start_challenge_practice")]),
+    # Self-knowledge lists its reference files' headings; one section is read at a time.
+    ("[handoff del-sk]", lambda ctx: [
+        {**call("sk-load", "load_voice_agent_skill"), "arguments": json.dumps({"name": "platform-self-knowledge"})},
+        call("sk-read", "read_voice_agent_skill_reference", skill="platform-self-knowledge", file="DOMAIN.md", section="Session Orchestrator"),
+        call("sk-bad", "read_voice_agent_skill_reference", skill="platform-self-knowledge", file="DOMAIN.md", section="Orchestrator Internals"),
+    ]),
 ]
 # Invitation fixtures (test numbers only). SEED_INVITER invited TEST_PHONE; FOREIGN is
 # SEED_INVITER's own, unbound and active; EXPIRED is TEST_PHONE's and lapsed.
@@ -873,6 +879,7 @@ TEST_NUMBERS = [TEST_PHONE, SEED_INVITER, BOUND_PHONE, INVITEE_PHONE, REBOUND_PH
 MEMORY_TEXT = "Caller prefers terse updates. Juniper fixes the parser; Dozer works in honeydozer."
 EARLY_MEMORY = "Juniper fixes the parser."
 EARLY_FOCUS = "Juniper's parser work"
+HANGUP_MEMORY = "Caller prefers terse updates. Juniper and Dozer are idle; voice practice found no reference."
 COMPACTION_BRIEF = "Tell the caller briefly that you are tidying your notes, and that they can keep talking meanwhile."
 BOARD_PROGRAM = (
     'root = Stack([fig, big, report, chart, pick, shell, docs])\nfig = Image("diagram.svg", "The parser\'s two stages", "Drawn by an agent", "small")\n'
@@ -910,6 +917,7 @@ STEP_IDS = [
     "wb-pair", "wb-say", "wb-unnamed", "wb-ghost", "wb-slides", "wm-pair", "wm-say", "we-rename", "we-preview", "we-say",
     "k9-access", "k9-state", "kB-revoke", "kB-state", "we-unpair", "we-state", "we-say2", "k3-say", "k3-theme",
     "k8-say", "pu-code-say", "dc-pair", "dc-say", "k2-dramaturgy", "kC-donate", "kD-practice",
+    "sk-load", "sk-read", "sk-bad",
 ]
 
 
@@ -921,8 +929,10 @@ class OrchestratorMock(BaseHTTPRequestHandler):
     # The Memory writer's requests, answered in order; clearing the gate holds them, as a slow
     # model writing a long Memory would (CAa3722805: 51.7 s).
     memory_requests: list[dict] = []
-    memory_replies = [EARLY_MEMORY, MEMORY_TEXT]
+    memory_replies = [EARLY_MEMORY, MEMORY_TEXT, HANGUP_MEMORY]
     memory_gate = threading.Event()
+    # Every step's usage; a test swaps in a larger input_tokens to make the context look large.
+    usage = MOCK_USAGE
     issued: list[tuple[str, int]] = []
     lock = threading.Lock()
 
@@ -968,7 +978,7 @@ class OrchestratorMock(BaseHTTPRequestHandler):
         # Provider correlation metadata, derived from the client's ID so the test can match rows.
         client = headers.get("x-client-request-id", "").replace("-", "")
         self.respond({"id": f"resp_{client}", "model": "mock-model-2026-11-10", "output": output,
-                      "usage": MOCK_USAGE,
+                      "usage": OrchestratorMock.usage,
                       "prompt_cache_diagnostics": MOCK_CACHE_DIAGNOSIS}, {"x-request-id": f"req_{client}"})
 
     def respond(self, value: dict, extra_headers: dict[str, str] | None = None) -> None:
@@ -1700,6 +1710,12 @@ async def run_protocol(identity: str) -> None:
         await wait_for(lambda: OrchestratorMock.greeting_requests, 10)
         greeting_request = OrchestratorMock.greeting_requests[-1]
         assert greeting_request["tools"] and greeting_request["model"] == "gpt-6.1-sol"
+        # The greeting and the Memory writer share the steps' prefix, so the cache serves them.
+        step = next(payload for _, payload in reversed(OrchestratorMock.requests) if payload.get("tool_choice") != "none")
+        prefix = ("model", "instructions", "tools", "parallel_tool_calls", "reasoning", "include")
+        for shared in (greeting_request, OrchestratorMock.memory_requests[-1]):
+            assert all(shared.get(key) == step.get(key) for key in prefix), [key for key in prefix if shared.get(key) != step.get(key)]
+        assert str(greeting_request["input"][-1]["content"]).startswith("[write greeting]")
         assert "call_ended" in json.dumps(greeting_request["input"])
         handoffs = [item for item in greeting_request["input"]
                     if item.get("role") == "user" and "[handoff del-4]" in str(item.get("content"))]
@@ -2318,7 +2334,9 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(dtmf("3"))
         await next_matching(mocks.live_messages, appended("commentary", SWITCH_SAY))
         await wait_for(lambda: len(OrchestratorMock.greeting_requests) > greetings, 10)
-        switch_instructions = OrchestratorMock.greeting_requests[-1]["instructions"]
+        switch_request = OrchestratorMock.greeting_requests[-1]
+        switch_instructions = str(switch_request["input"][-1]["content"])
+        assert switch_instructions.startswith("[write greeting]"), switch_instructions
         assert "The survey (Survey theme)" in switch_instructions and "switched to this theme mid-call" in switch_instructions
         assert "at the high rung" in switch_instructions, switch_instructions
         assert OrchestratorMock.greeting_requests[-1]["input"][0]["content"] == f"[memory] {MEMORY_TEXT}"
@@ -2439,11 +2457,47 @@ async def run_protocol(identity: str) -> None:
         await asyncio.wait_for(mocks.live_connected.wait(), 8)
         await wait_for(lambda: heard_lines('"returned_from":{"flow":"reenrollment","outcome":"reenrolled"}'), 10)
 
+        # Every leg so far ended below the hangup threshold, so none compacted at its end.
+        assert len(OrchestratorMock.memory_requests) == 2, len(OrchestratorMock.memory_requests)
+        archives = next(item for item in await asyncio.to_thread(conversations) if item.get("memory"))["context_archives"]
+        assert not any(item["reason"] == "hangup compaction" for item in archives), archives
+
+        # A skill's references are listed by heading, and read one section at a time. These
+        # steps report a context over the hangup threshold, so this leg compacts as it ends.
+        OrchestratorMock.usage = {**MOCK_USAGE, "input_tokens": 40_000}
+        await mocks.send_live(delegation("del-sk", 1000))
+        await wait_for(outputs_back("sk-load", "sk-read", "sk-bad"), 15)
+        guidance = OrchestratorMock.tool_output("sk-load")["guidance"]
+        assert len(guidance) < 8000 and "## References" in guidance and "Session Orchestrator" in guidance, len(guidance)
+        section = OrchestratorMock.tool_output("sk-read")
+        assert section["ok"] is True and section["text"].startswith("### Session Orchestrator"), section
+        assert "### Memory" not in section["text"], section["text"][-200:]
+        refused = OrchestratorMock.tool_output("sk-bad")
+        assert refused["ok"] is False and "References list" in refused["error"], refused
+
         # Star then two hands the call to the recovery menu, which ends the GPT-Live leg.
         await mocks.send_live(dtmf("*"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
         await mocks.send_live(dtmf("2"))
         await wait_for(lambda: any(path == "/live/sessions/live-test-6/hangup" for path, _ in DaytonaMock.openai_requests), 10)
+        # The sideband closes: after the next welcome, the large context is compacted through
+        # the end of the call by the Memory writer (its gate is open since the second compaction).
+        greetings = len(OrchestratorMock.greeting_requests)
+        await mocks.live.close()
+        await wait_for(lambda: len(OrchestratorMock.memory_requests) == 3, 15)
+        assert len(OrchestratorMock.greeting_requests) > greetings, "the welcome is written before the compaction"
+        def hangup_compacted() -> dict | None:
+            state = next(item for item in conversations() if item.get("memory"))
+            return state if any(item["reason"] == "hangup compaction" for item in state["context_archives"]) else None
+        await wait_for(hangup_compacted, 15)
+        state = await asyncio.to_thread(hangup_compacted)
+        assert state["memory"]["text"] == HANGUP_MEMORY and state["context_archives"][-1]["reason"] == "hangup compaction", state["context_archives"]
+        # Cut through the end of the call: nothing the call's steps added survives.
+        assert not any(item.get("type") in ("function_call", "function_call_output") for item in state["orchestrator_context"]), state["orchestrator_context"]
+        rows = [json.loads(row["detail"]) for row in await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2")
+                if row["event"] == "orchestrator.compaction"]
+        assert any(row.get("at_hangup") is True and row["call_ended"] is True and row["removed_items"] > 0 for row in rows), rows
+        OrchestratorMock.usage = MOCK_USAGE
         events = await asyncio.to_thread(call_activity, "CA_VOICE_TEST2")
         # Drain the operator API by insertion cursor, independently of event-time
         # sorting and without pairing to either caller's browser.
