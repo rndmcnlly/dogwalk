@@ -7,7 +7,8 @@ ALTER TABLE users ADD COLUMN registered_from TEXT;
 ALTER TABLE users ADD COLUMN forgotten_at INTEGER;
 
 -- Back-patch: an Invitation recorded the redeeming number; an operator Invite Code left none,
--- so the Home stands in where it is still the User's (a displaced Home stays unknown).
+-- so the Home stands in where it is still the User's (a displaced Home stays unknown, and a
+-- User who later moved their Home gets the new number: this only skews the busy-numbers view).
 UPDATE users SET registered_from = COALESCE(
   (SELECT v.redeemed_from FROM invitations v WHERE v.redeemed_by_user_id = users.id),
   home_phone);

@@ -667,8 +667,10 @@ async function deleteReapedSandboxes(env: Env): Promise<void> {
 const USER_REAP_BATCH = 10;
 const USER_FORGET_BATCH = 10;
 // Free text a diagnostic row can carry (speech, Agent text, session names, directories, provider
-// messages); forgetting a User removes these keys from their calls' rows and keeps the rest.
-const FORGOTTEN_TEXT_PATHS = ["content_text", "text", "alias", "previous", "directory", "message", "error", "said", "command"]
+// messages and bodies, a pairing's place and device); forgetting a User removes these keys from
+// their calls' rows and keeps the rest.
+const FORGOTTEN_TEXT_PATHS = ["content_text", "text", "alias", "previous", "directory", "message", "error", "detail", "said",
+  "command", "place", "device", "display"]
   .map((key) => `'$.${key}'`).join(", ");
 
 interface UserReapCandidate {
@@ -693,49 +695,56 @@ async function reapUsers(env: Env): Promise<void> {
       WHERE u.reaped_at IS NULL AND u.registered_at < ?1 AND ${userIdleSince("u.id")}
       ORDER BY last_call_at LIMIT ?2`,
   ).bind(cutoff, USER_REAP_BATCH).all<UserReapCandidate>();
+  // One User's failure holds back neither the others nor forgetting those already reaped.
   for (const candidate of results) {
-    const detail = {
-      user_id: candidate.user_id, mode,
-      last_call_at: candidate.last_call_at, idle_days: Math.floor((now - candidate.last_call_at) / 86400),
-    };
-    if (mode === "dry-run") {
-      await audit(env, "user.reap.candidate", null, null, detail);
-      continue;
-    }
-    // ?1 cutoff, ?2 User. The users UPDATE comes last: the statements before it read the Handle,
-    // Home, and identity it clears, and each repeats the same guard.
-    const live = `EXISTS (SELECT 1 FROM users WHERE id = ?2 AND reaped_at IS NULL AND ${userIdleSince("?2")})`;
-    const results = await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO retired_handles (handle, user_id, retired_at)
-         SELECT handle, id, unixepoch() FROM users WHERE id = ?2 AND handle IS NOT NULL AND ${live}
-         ON CONFLICT(handle) DO UPDATE SET user_id = excluded.user_id, retired_at = excluded.retired_at`,
-      ).bind(cutoff, candidate.user_id),
-      env.DB.prepare(`DELETE FROM voice_references WHERE user_id = ?2 AND ${live}`).bind(cutoff, candidate.user_id),
-      env.DB.prepare(
-        `DELETE FROM pairing_codes WHERE identity_hash = (SELECT identity_hash FROM users WHERE id = ?2) AND ${live}`,
-      ).bind(cutoff, candidate.user_id),
-      // A Sandbox the Sandbox pass has not reaped (paused, or stuck in conflict) has no one left
-      // who could want it: record it for deletion and let the assignment go, as that pass does.
-      env.DB.prepare(
-        `INSERT INTO sandbox_deletions (provider_id, user_id, reaped_at, next_attempt_at)
-         SELECT provider_id, user_id, unixepoch(), unixepoch() FROM sandbox_assignments
-          WHERE user_id = ?2 AND provider_id IS NOT NULL AND ${live}`,
-      ).bind(cutoff, candidate.user_id),
-      env.DB.prepare(
-        `UPDATE sandbox_assignments
-            SET provider_id = NULL, state = 'reaped', error = NULL, provisioning_started_at = 0, last_checked_at = unixepoch()
-          WHERE user_id = ?2 AND provider_id IS NOT NULL AND ${live}`,
-      ).bind(cutoff, candidate.user_id),
-      env.DB.prepare(
-        `UPDATE users SET handle = NULL, home_phone = NULL, home_used_at = NULL, reaped_at = unixepoch()
-          WHERE id = ?2 AND reaped_at IS NULL AND ${userIdleSince("?2")}`,
-      ).bind(cutoff, candidate.user_id),
-    ]);
-    const sandbox = results[4].meta.changes === 1;
-    if (results[5].meta.changes === 1) await audit(env, "user.reap.started", null, null, { ...detail, sandbox_reaped: sandbox });
+    await reapUser(env, candidate, mode, now, cutoff).catch((error) => audit(env, "user.reap.failed", null, null, {
+      user_id: candidate.user_id, message: (error instanceof Error ? error.message : String(error)).slice(0, 200),
+    }));
   }
   if (mode === "reap") await forgetReapedUsers(env);
+}
+
+async function reapUser(env: Env, candidate: UserReapCandidate, mode: "reap" | "dry-run", now: number, cutoff: number): Promise<void> {
+  const detail = {
+    user_id: candidate.user_id, mode,
+    last_call_at: candidate.last_call_at, idle_days: Math.floor((now - candidate.last_call_at) / 86400),
+  };
+  if (mode === "dry-run") {
+    await audit(env, "user.reap.candidate", null, null, detail);
+    return;
+  }
+  // ?1 cutoff, ?2 User. The users UPDATE comes last: the statements before it read the Handle,
+  // Home, and identity it clears, and each repeats the same guard.
+  const live = `EXISTS (SELECT 1 FROM users WHERE id = ?2 AND reaped_at IS NULL AND ${userIdleSince("?2")})`;
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO retired_handles (handle, user_id, retired_at)
+       SELECT handle, id, unixepoch() FROM users WHERE id = ?2 AND handle IS NOT NULL AND ${live}
+       ON CONFLICT(handle) DO UPDATE SET user_id = excluded.user_id, retired_at = excluded.retired_at`,
+    ).bind(cutoff, candidate.user_id),
+    env.DB.prepare(`DELETE FROM voice_references WHERE user_id = ?2 AND ${live}`).bind(cutoff, candidate.user_id),
+    env.DB.prepare(
+      `DELETE FROM pairing_codes WHERE identity_hash = (SELECT identity_hash FROM users WHERE id = ?2) AND ${live}`,
+    ).bind(cutoff, candidate.user_id),
+    // A Sandbox the Sandbox pass has not reaped (paused, or stuck in conflict) has no one left
+    // who could want it: record it for deletion and let the assignment go, as that pass does.
+    env.DB.prepare(
+      `INSERT INTO sandbox_deletions (provider_id, user_id, reaped_at, next_attempt_at)
+       SELECT provider_id, user_id, unixepoch(), unixepoch() FROM sandbox_assignments
+        WHERE user_id = ?2 AND provider_id IS NOT NULL AND ${live}`,
+    ).bind(cutoff, candidate.user_id),
+    env.DB.prepare(
+      `UPDATE sandbox_assignments
+          SET provider_id = NULL, state = 'reaped', error = NULL, provisioning_started_at = 0, last_checked_at = unixepoch()
+        WHERE user_id = ?2 AND provider_id IS NOT NULL AND ${live}`,
+    ).bind(cutoff, candidate.user_id),
+    env.DB.prepare(
+      `UPDATE users SET handle = NULL, home_phone = NULL, home_used_at = NULL, reaped_at = unixepoch()
+        WHERE id = ?2 AND reaped_at IS NULL AND ${userIdleSince("?2")}`,
+    ).bind(cutoff, candidate.user_id),
+  ]);
+  const sandbox = results[4].meta.changes === 1;
+  if (results[5].meta.changes === 1) await audit(env, "user.reap.started", null, null, { ...detail, sandbox_reaped: sandbox });
 }
 
 // Forget reaped Users, the cleanup after the reap. Idempotent: a User whose wipe fails is tried
@@ -750,7 +759,11 @@ async function forgetReapedUsers(env: Env): Promise<void> {
       const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(user.identity_hash));
       const response = await object.fetch("https://voice-session/forget", { method: "POST" });
       if (!response.ok) throw new Error(`voice session ${response.status}: ${(await response.text()).slice(0, 200)}`);
-      const calls = "call_sid IN (SELECT call_sid FROM voice_calls WHERE user_id = ?)";
+      // The User's calls, their Registration call (never linked to them), and Roaming attempts at
+      // their Handle that were not admitted (pruned after 90 days anyway).
+      const calls = `call_sid IN (SELECT call_sid FROM voice_calls WHERE user_id = ?1
+        UNION SELECT onboarding_call_sid FROM invitations WHERE redeemed_by_user_id = ?1 AND onboarding_call_sid IS NOT NULL
+        UNION SELECT call_sid FROM roaming_attempts WHERE user_id = ?1)`;
       const [activity, audits] = await env.DB.batch([
         env.DB.prepare(`UPDATE call_activity SET detail = json_remove(detail, ${FORGOTTEN_TEXT_PATHS})
                          WHERE ${calls} AND json_valid(detail)`).bind(user.id),
@@ -1233,7 +1246,7 @@ async function handlePair(req: Request, env: Env, url: URL): Promise<Response> {
 // Only identities with a Sandbox Assignment get a VoiceSession; random ones never create objects.
 async function knownIdentity(env: Env, identity: string): Promise<boolean> {
   const row = await env.DB.prepare(
-    "SELECT 1 AS ok FROM users u JOIN sandbox_assignments s ON s.user_id = u.id WHERE u.identity_hash = ?",
+    "SELECT 1 AS ok FROM users u JOIN sandbox_assignments s ON s.user_id = u.id WHERE u.identity_hash = ? AND u.reaped_at IS NULL",
   ).bind(identity).first();
   return Boolean(row);
 }

@@ -209,7 +209,9 @@ Handle into `retired_handles` (the renaming quarantine), deletes the Voice
 Reference and the identity's `pairing_codes`, records any still-assigned Sandbox
 in `sandbox_deletions` and clears the assignment, then clears `handle`,
 `home_phone`, and `home_used_at` and sets `reaped_at`. It audits
-`user.reap.started` (`sandbox_reaped` says whether it took a Sandbox).
+`user.reap.started` (`sandbox_reaped` says whether it took a Sandbox). A User
+whose reap throws is audited `user.reap.failed` and retried next pass; the
+others, and forgetting, go ahead.
 
 Then, in this pass and later ones until it succeeds, the pass forgets each
 reaped User with `forgotten_at` NULL (ten per pass): `POST /forget` on their
@@ -217,11 +219,15 @@ VoiceSession revokes any Paired Browser access through the outbox and wipes the
 object's storage (`deleteAll`, no alarm). A 409 (revocations still pending, or a
 call or compaction in flight) leaves it for the next pass. The pass then removes
 the free-text keys (`FORGOTTEN_TEXT_PATHS`: `content_text`, `text`, `alias`,
-`previous`, `directory`, `message`, `error`, `said`, `command`) from the
-`call_activity` and `audit_log` details of the User's calls, keeping the timing,
+`previous`, `directory`, `message`, `error`, `detail`, `said`, `command`,
+`place`, `device`, `display`) from the `call_activity` and `audit_log` details
+of the User's calls (linked ones, their Registration call by Invitation, and
+Roaming attempts at their Handle), keeping the timing,
 sets `forgotten_at`, and audits `user.forgotten` (`activity_rows`, `audit_rows`)
-or `user.forget.failed` (`message`). The admin conversations view skips
-forgotten Users, so it never re-creates their object.
+or `user.forget.failed` (`message`). The wiped object keeps one `forgotten`
+tombstone key, so a later instance never back-patches keys into it, and the
+admin conversations and call content views, like Paired Browser routes, skip
+reaped or forgotten Users.
 
 Apply `migrations/2026-11-19-user-reaping.sql` remotely before deploying (it
 adds `users.registered_from` and `users.forgotten_at`):

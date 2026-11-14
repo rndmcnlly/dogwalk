@@ -1061,6 +1061,11 @@ export class VoiceSession {
 
   constructor(private state: DurableObjectState, private env: Env) {
     state.blockConcurrencyWhile(async () => {
+      // A forgotten object keeps only its tombstone: no back-patch below writes into it again.
+      if (await state.storage.get("forgotten")) {
+        this.forgotten = true;
+        return;
+      }
       const stored = await state.storage.get<ManagedSession[]>("managed_sessions");
       // Projections from before the native Agent API lack agentSessionId: they are dropped, and
       // their sessions can be rediscovered and loaded.
@@ -1477,7 +1482,8 @@ export class VoiceSession {
   // 409 and the Worker retries on its next pass. Idempotent.
   private async forget(): Promise<Response> {
     if (this.forgotten) return new Response(null, { status: 204 });
-    if (this.liveAttached || this.compaction) return new Response("a call or compaction is in progress", { status: 409 });
+    const working = this.agentConnectAttempt || Array.from(this.sessions.values()).some((session) => session.turnState === "in_progress");
+    if (this.liveAttached || this.compaction || working) return new Response("a call, compaction, or Agent work is in progress", { status: 409 });
     this.closeAgent("User forgotten");
     const retired = await this.state.storage.transaction((tx) => this.queueGrantRevocations(tx, null));
     const pending = await this.finishAccessRevocation(retired);
@@ -1488,6 +1494,8 @@ export class VoiceSession {
     for (const ws of this.state.getWebSockets()) ws.close(4001, "forgotten");
     await this.state.storage.deleteAlarm();
     await this.state.storage.deleteAll();
+    // The one key left, holding nothing of the User, so a later instance stays empty.
+    await this.state.storage.put("forgotten", true);
     return new Response(null, { status: 204 });
   }
 

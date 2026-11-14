@@ -33,7 +33,7 @@ function parsed(value: unknown): Record<string, any> {
 export async function operatorCallContent(env: Env, callSid: string): Promise<{ entries: ContentEntry[]; note?: string } | null> {
   const call = await env.DB.prepare(
     `SELECT u.identity_hash FROM voice_calls c
-     LEFT JOIN users u ON u.id = c.user_id WHERE c.call_sid = ?`,
+     LEFT JOIN users u ON u.id = c.user_id AND u.forgotten_at IS NULL WHERE c.call_sid = ?`,
   ).bind(callSid).first<{ identity_hash: string | null }>();
   if (!call) return null;
   if (!call.identity_hash) return { entries: [], note: "No User maps this call to conversation history." };
