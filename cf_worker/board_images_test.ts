@@ -59,19 +59,19 @@ assert.deepEqual(boardImagePaths('root = Stack([Image(path, "x")])\npath = "old.
 
 // Board elements: files a board shows and Access Elements, each with its target as written.
 const elements = boardElements(`
-root = Stack([shot, Document("REPORT.md", "The report"), app, Preview(3000.0), Terminal(), Terminal(name), Desktop("The desktop"),
+root = Stack([shot, Document("REPORT.md", "The report"), app, Preview(3000.0), Terminal(), Terminal(label), Desktop("The desktop"),
   SshAccess("Copy this"), Download('out/report.zip', "Get it"), Text("Preview(9) and Terminal('ghost')"), Preview(unbound)])
 // Preview(4444)
 shot = Image("shot.png", "x")
 app = Preview(port, "The dev server")
 port = 5173
-name = "build"
+label = "Build shell"
 `);
 assert.deepEqual(elements, [
   { component: "Document", target: "REPORT.md" },
   { component: "Preview", target: "3000" },
   { component: "Terminal", target: "" },
-  { component: "Terminal", target: "build" },
+  { component: "Terminal", target: "" },
   { component: "Desktop", target: "" },
   { component: "SshAccess", target: "" },
   { component: "Download", target: "out/report.zip" },
@@ -81,7 +81,7 @@ assert.deepEqual(elements, [
 // The page derives the same grant keys from the same program.
 assert.deepEqual(
   elements.filter((item) => item.component in ACCESS_COMPONENTS).map((item) => `${ACCESS_COMPONENTS[item.component]}:${item.target}`),
-  ["preview:3000", "terminal:", "terminal:build", "desktop:", "ssh:", "download:out/report.zip", "preview:5173"],
+  ["preview:3000", "terminal:", "terminal:", "desktop:", "ssh:", "download:out/report.zip", "preview:5173"],
 );
 assert.deepEqual(boardElements("root = Stack([Preview(0080), Desktop(), SshAccess()])"),
   [{ component: "Preview", target: "80" }, { component: "Desktop", target: "" }, { component: "SshAccess", target: "" }]);

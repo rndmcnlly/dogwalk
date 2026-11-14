@@ -13,13 +13,6 @@ type = "Text"
 globs = ["**/*.md"]
 fallthrough = true
 
-# Vendored browser assets (xterm.js for the takeover terminal) are bundled as text; the
-# .txt suffix keeps the bundler from treating them as Worker modules.
-[[rules]]
-type = "Text"
-globs = ["**/*.txt"]
-fallthrough = true
-
 # Spoken earcons rendered by make_earcons.py are bundled as binary.
 [[rules]]
 type = "Data"
@@ -83,10 +76,6 @@ bucket_name = "dogwalk-voice-research"
 name = "VOICE_SESSIONS"
 class_name = "VoiceSession"
 
-[[durable_objects.bindings]]
-name = "TERMINAL_RELAYS"
-class_name = "TerminalRelay"
-
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["VoiceSession"]
@@ -94,6 +83,11 @@ new_sqlite_classes = ["VoiceSession"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["TerminalRelay"]
+
+# Terminal access now opens Daytona's own web terminal through a signed preview URL.
+[[migrations]]
+tag = "v3"
+deleted_classes = ["TerminalRelay"]
 
 # TWILIO_AUTH_TOKEN is a Worker secret, set via:
 #   wrangler secret put TWILIO_AUTH_TOKEN

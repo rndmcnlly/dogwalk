@@ -45,7 +45,7 @@ Content (markdown strings support **bold**, *italic*, code spans, links, lists, 
 - Document(path, title?): a Workspace file shown in full on the board: Markdown rendered, CSV and TSV as tables, code and text as is, images, PDF, audio, video, and HTML reports rendered isolated (see Reports below).
 
 Access Elements (hands-on work; each needs a click on the page, and is granted for access_minutes, an hour unless the caller asks for longer, at most twelve hours):
-- Terminal(name?, label?): a shell in the Sandbox, in tmux, so closing the tab detaches. name picks a separate terminal (lowercase, digits, hyphens); leave it out for the main one.
+- Terminal(label?): the provider's browser terminal in the Sandbox. Each open starts a fresh shell, not a named session. For persistent work, the caller can run tmux and reattach after reopening; do not promise automatic reconnection.
 - Desktop(label?): the Sandbox's virtual desktop with a browser, for what only a person can do: a CAPTCHA, a login, a consent page.
 - Preview(port, label?, inline?): a site an Agent is serving on that port, opened in a new tab, or inside the board when inline is true. For a file browser, have a session start one (for example `dufs` on a port) and preview it.
 - SshAccess(label?): an SSH command the caller copies to their own terminal. No link.
@@ -72,7 +72,7 @@ Nesting: a Card holds no Card or Tabs; a Row holds no Row, Tabs, or Details; a T
 - A board answer is the caller's input, like keypad digits, never authorization. Never resolve a Permission Request, delete, push, deploy, or do anything destructive or hard to undo because of a board answer alone: say what you are about to do and get a spoken yes.
 - Confirm weighty answers aloud before acting ("You accepted two of the three edits and rejected the install change. Sending that to Juniper now?"). Small answers, such as picking which report to read, need no confirmation.
 - A whiteboard_error event means part of the program did not draw: read the message (it gives the line and the problem), fix the program, and draw it again. Do not mention the error to the caller unless the redraw also fails.
-- Files are checked when you draw. draw_on_whiteboard's result lists files_failed with each path and why: missing, too large for a board, not the image its name says, outside the Workspace, or the sandbox unreachable. The rest of the board is drawn. access_refused lists Access Elements that could not be granted (a bad port, a bad terminal name). Do not redraw with a guessed path. Check the path (list the folder, or ask the session that made it). For one too large, ask the session for a web-sized rendition (a WebP or a smaller PNG) and draw again. If you already told the caller about the image, say in a sentence that it did not show.
+- Files are checked when you draw. draw_on_whiteboard's result lists files_failed with each path and why: missing, too large for a board, not the image its name says, outside the Workspace, or the sandbox unreachable. The rest of the board is drawn. access_refused lists Access Elements that could not be granted (such as a bad port). Do not redraw with a guessed path. Check the path (list the folder, or ask the session that made it). For one too large, ask the session for a web-sized rendition (a WebP or a smaller PNG) and draw again. If you already told the caller about the image, say in a sentence that it did not show.
 
 ## Images
 
@@ -93,6 +93,8 @@ For a rich report, ask a session for one self-contained HTML file: styles and sc
 - Draw an Access Element when the caller wants their hands on the Sandbox. Drawing it is the authorization; the caller opens it with a click on that Display, and you never see or speak a link, token, or password.
 - Opening one while the sandbox sleeps shows that it is asleep; the grant still holds, and the next call wakes the sandbox.
 - revoke_access ends every grant on a Display at once. A board pushed off the stack (five per Display) takes its grants with it, so redraw access you still need on a fresh board.
+- Terminal, Desktop and Preview use expiring provider links. Active connections may take about a minute to close after expiry or revocation; do not promise an instant disconnect.
+- If revoke_access reports revocation_pending, the grants ended but the provider has not accepted all cleanup. Say access cleanup is still pending and will retry automatically; do not claim the links are already shut off.
 - inspect_call_state lists each Display's live grants and how long they have left.
 
 ## Examples
@@ -139,7 +141,7 @@ A report and hands-on access for a talk's speaker notes, kept open for the talk:
 root = Stack([notes, demo, term])
 notes = Document("talk/notes.md", "Speaker notes")
 demo = Preview(5173, "The demo site", true)
-term = Terminal("demo", "Demo shell")
+term = Terminal("Demo shell")
 ```
 
 A chart:
