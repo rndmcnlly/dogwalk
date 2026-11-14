@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 import { DEFAULT_THEME, THEMES, type Theme } from "./themes";
-import { VOICE_AGENT_SKILL_INDEX, voiceAgentSkill } from "./voice_agent_skills";
+import { VOICE_AGENT_SKILL_INDEX, voiceAgentSkill, voiceAgentSkillReference } from "./voice_agent_skills";
 import {
   base64ToBytes, earcon, loudness, MAX_FIXTURE_SECONDS, pcmToWav, prompt, SILENCE, wavToClip,
   type Clip, type EarconName, type EarconStyle, type PromptName,
@@ -238,6 +238,9 @@ const COMPACT_KEEP_JSON = 160_000;
 // Backstop for a Session Orchestrator that neglects to compact: past this many input tokens,
 // the oldest context is dropped at a user message until an estimate falls near the target.
 const CONTEXT_BACKSTOP_TOKENS = 150_000;
+// A call that ends with more context than this (instructions and tools are about 10k, the Memory
+// up to 3k) is compacted at hangup: below it, carrying the context costs less than writing a Memory.
+const HANGUP_COMPACT_TOKENS = 30_000;
 const CONTEXT_TARGET_TOKENS = 100_000;
 // compact_context's optional focus: a hint to the Memory writer, never the Memory itself.
 const MAX_COMPACT_FOCUS_CHARS = 500;
@@ -540,6 +543,17 @@ export const ORCHESTRATOR_TOOLS = [
       type: "object",
       properties: { name: { type: "string" } },
       required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "read_voice_agent_skill_reference",
+    description: "Read one section of a loaded Voice Agent Skill's reference file, by the exact heading its References list shows. Read only what the question needs: it stays in your context.",
+    parameters: {
+      type: "object",
+      properties: { skill: { type: "string" }, file: { type: "string" }, section: { type: "string" } },
+      required: ["skill", "file", "section"],
       additionalProperties: false,
     },
   },
@@ -891,7 +905,7 @@ Rules:
 - call_started may carry invitees: people the caller invited whose Registration changed since the caller was last told, each with their Handle (null when they never registered), invited_days_ago, and how_it_went. It is told once, here: mention it briefly at a natural moment early in the call (after the opening, never over a request the caller is making), naming the person by Handle, or as the person they invited today, yesterday, or that many days ago, and where they stopped if they got partway, so the caller can follow up with them in person. Do not raise it again unprompted, and never give phone numbers or invite words for it.
 - Invitations (create_invitation, list_invitations, set_invitation_recipient, revoke_invitation, inspect_registration) are the caller's own Access Control, which you operate yourself and never hand to a session; phone numbers and invite words never go into a prompt to an Agent. When the caller wants to invite someone, load the invite-someone skill. Take a number as heard and let the tools normalize it: ten digits count as a US number only when the caller's carrier is in the US, otherwise ask for the country code. Before binding or changing a recipient, read the number back in the spoken digit groups the tool returns, accept corrections, and confirm only after an explicit yes. Invite words and phone numbers may be spoken when the caller asked for them.
 - The caller's Handle is their two-word name on Dogwalk, which they say from other phones; inspect_registration tells it. Renaming happens only when the caller asks: offer_handles gives Dogwalk's options, the caller picks one (set_handle), spins again, or keeps their name. Never suggest, invent, or accept a Handle that offer_handles did not return in this call. A rename changes only the name, never the caller's identity, sessions, or Sandbox.
-- Your Memory, pinned as the first [memory] message of your context, is your own curated note of what matters across calls. Your context also carries every earlier call until you compact it with compact_context, which rewrites the Memory and drops old conversation. Compacting is your call: do it when a chapter of work closes, after a long stretch, or when inspect_call_state shows context_tokens growing large; past 150,000 the oldest conversation is cut without your say. compact_context returns at once and the Memory is written in the background, so it never holds up the caller or your other tools; the system briefs the Voice Frontend to tell the caller you are tidying your notes, so add no announcement of your own and do not mention it again unless asked. context_compacted says the new Memory is pinned; otherwise stay quiet about it. When the caller asks what you will remember or where something is written down, update the Memory with compact_context then, with focus naming what they asked about, and when context_compacted arrives tell them what you kept.
+- Your Memory, pinned as the first [memory] message of your context, is your own curated note of what matters across calls. Your context also carries every earlier call until you compact it with compact_context, which rewrites the Memory and drops old conversation. Compacting is your call: do it when a chapter of work closes, after a long stretch, or when inspect_call_state shows context_tokens growing large; past 150,000 the oldest conversation is cut without your say. When a call ends with a large context, the system compacts it for you through the end of that call, so the next call starts from your Memory, the last call's closing words, and the opening: keep what a later call needs (commitments, loose ends, what each session is for) in the Memory, not only in the conversation. compact_context returns at once and the Memory is written in the background, so it never holds up the caller or your other tools; the system briefs the Voice Frontend to tell the caller you are tidying your notes, so add no announcement of your own and do not mention it again unless asked. context_compacted says the new Memory is pinned; otherwise stay quiet about it. When the caller asks what you will remember or where something is written down, update the Memory with compact_context then, with focus naming what they asked about, and when context_compacted arrives tell them what you kept.
 - Latency is silence on a phone line. Issue independent tool calls together in one response; when starting work, say what you are doing in the same response as create_managed_session rather than after. When a request is finished, return no further tool calls.
 
 Audio: play_audio plays a Workspace WAV to the caller, the way a graphical tool would show an image. Telephone audio is narrowband, so speech, tones, rhythm, and melody survive better than timbre. When a clip is ready, call say (what it is and how long) and play_audio in the same response: play_audio waits for the announcement to finish before playing. Never say a clip is playing or "here it is" without calling play_audio. Keep unrequested clips short. play_audio renders any audio or video format itself, so sessions need only produce or find the file. For long recordings such as podcasts, have a session locate the moments that matter (for example by transcribing with timestamps), then play short samples by offset; offer further 30-second parts rather than playing long stretches. The first play in a fresh Sandbox may take longer while ffmpeg installs. After playing, brief the Voice Frontend on what the caller heard. Short chimes play automatically at call start and when a session's turn ends in a quiet moment.
@@ -1755,13 +1769,7 @@ export class VoiceSession {
     const callSid = this.callSid;
     try {
       const pending = this.orchestratorQueue.join("\n");
-      // Mid-loop (set_theme), the context ends with this response's calls, still unanswered;
-      // the Responses API refuses those, so cut back to the last fully answered point.
-      const answered = new Set(this.orchestratorContext
-        .filter((item: any) => item.type === "function_call_output").map((item: any) => item.call_id));
-      const cut = this.orchestratorContext.findIndex((item: any) => item.type === "function_call" && !answered.has(item.call_id));
-      const context = cut < 0 ? [...this.orchestratorContext] : this.orchestratorContext.slice(0, cut);
-      while ((context.at(-1) as any)?.type === "reasoning") context.pop();
+      const context = answeredPrefix(this.orchestratorContext);
       const endpoint = orchestratorEndpoint(this.env);
       const response = await fetch(`${endpoint.base}/responses`, {
         method: "POST",
@@ -1769,20 +1777,13 @@ export class VoiceSession {
           authorization: `Bearer ${this.env.ORCHESTRATOR_API_KEY}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({
-          model: endpoint.model,
-          instructions: greetingInstructions(theme, switching, register),
-          input: [
-            ...this.pinnedMemory(),
-            ...context,
-            { role: "user", content: `${pending}\nWrite the welcome line for the next call now.`.trim() },
-          ],
-          // The context holds tool calls, so the tools are declared; none may be used.
-          tools: ORCHESTRATOR_TOOLS,
-          tool_choice: "none",
-          reasoning: { effort: "low" },
-          store: false,
-        }),
+        // The Orchestrator's own prefix, so the cache serves the whole context; what makes this
+        // a greeting follows it (a playtest showed separate instructions rewrite the context).
+        body: JSON.stringify(this.orchestratorRequestBody([
+          ...context,
+          ...(pending ? [{ role: "user", content: pending }] : []),
+          { role: "developer", content: `[write greeting] ${greetingInstructions(theme, switching, register)}` },
+        ], { tool_choice: "none" })),
         signal: AbortSignal.timeout(30_000),
       });
       if (!response.ok) throw new Error(`greeting model ${response.status}`);
@@ -3138,20 +3139,9 @@ export class VoiceSession {
         "x-client-request-id": requestId,
         ...(context ? { traceparent: formatTraceparent(context) } : {}),
       },
-      body: JSON.stringify({
-        model: endpoint.model,
-        instructions: orchestratorInstructions(this.theme),
-        input: [...this.pinnedMemory(), ...this.orchestratorContext],
-        tools: ORCHESTRATOR_TOOLS,
-        parallel_tool_calls: true,
-        // OpenAI only: reasoning items from earlier turns stay rendered (gpt-6.1-sol's default,
-        // pinned), so the context is append-only as the provider sees it too; and each step asks
-        // OpenAI to explain a cache miss against the previous one, at no cost (#58).
-        reasoning: { effort, ...(openAi ? { context: "all_turns" } : {}) },
-        ...(openAi && this.lastResponseId ? { prompt_cache_options: { comparison_response_id: this.lastResponseId } } : {}),
-        store: false,
-        include: ["reasoning.encrypted_content"],
-      }),
+      // Each step asks OpenAI to explain a cache miss against the previous one, at no cost (#58).
+      body: JSON.stringify(this.orchestratorRequestBody(this.orchestratorContext,
+        openAi && this.lastResponseId ? { prompt_cache_options: { comparison_response_id: this.lastResponseId } } : {})),
       signal: AbortSignal.timeout(60_000),
     });
     const providerRequestId = correlationId(response.headers.get("x-request-id"));
@@ -3185,6 +3175,28 @@ export class VoiceSession {
     return body.output ?? [];
   }
 
+  // Every Orchestrator-model request (a step, the Memory writer, the next call's greeting) shares
+  // this shape, so the provider's prompt cache serves one prefix to all of them: instructions,
+  // tools, settings, the pinned Memory, then the context. A caller adds only what follows the
+  // context, and options that do not change the rendered prefix (tool_choice "none" keeps the
+  // tools declared, as the context holds tool calls). OpenAI only: reasoning items from earlier
+  // turns stay rendered (gpt-6.1-sol's default, pinned), so the context stays append-only as the
+  // provider sees it too.
+  private orchestratorRequestBody(input: unknown[], options: Record<string, unknown> = {}): Record<string, unknown> {
+    const endpoint = orchestratorEndpoint(this.env);
+    return {
+      model: endpoint.model,
+      instructions: orchestratorInstructions(this.theme),
+      input: [...this.pinnedMemory(), ...input],
+      tools: ORCHESTRATOR_TOOLS,
+      parallel_tool_calls: true,
+      reasoning: { effort: this.env.ORCHESTRATOR_REASONING_EFFORT ?? "low", ...(isOpenAiHost(endpoint.host) ? { context: "all_turns" } : {}) },
+      store: false,
+      include: ["reasoning.encrypted_content"],
+      ...options,
+    };
+  }
+
   // The Memory leads every input as one developer message rebuilt from storage, never stored in
   // the context: it changes only at a compaction, which rewrites the context anyway, so the
   // cached prefix (instructions, tools, Memory, older context) survives every ordinary step,
@@ -3213,12 +3225,15 @@ export class VoiceSession {
     const snapshot = [...this.orchestratorContext];
     const callSid = this.callSid;
     const anchor = compactionAnchor(snapshot, marks.find((mark) => mark.call_sid === callSid)?.context_index);
-    const run = this.compactInBackground(snapshot, anchor, focus, callSid).finally(() => { this.compaction = null; });
+    const run = this.compactInBackground(snapshot, anchor ? { before: anchor } : null, focus, callSid).finally(() => { this.compaction = null; });
     this.compaction = run;
     this.state.waitUntil(run);
   }
 
-  private async compactInBackground(snapshot: unknown[], anchor: unknown, focus: string, callSid: string | null): Promise<void> {
+  // The cut removes only what the writer read: everything before a user message in the snapshot,
+  // or, at a hangup, everything through the snapshot's last item. Items are found by identity,
+  // so the cut still lands right after the context has grown or been cut meanwhile.
+  private async compactInBackground(snapshot: unknown[], cut: CompactionCut | null, focus: string, callSid: string | null): Promise<void> {
     const started = Date.now();
     const sameCall = () => this.liveAttached && this.callSid === callSid;
     // Diagnostics belong to the call that asked, even when a later call is attached by the end.
@@ -3227,11 +3242,13 @@ export class VoiceSession {
     try {
       const version = await this.storeMemory(await this.writeMemory(snapshot, focus, callSid), callSid);
       stored = true;
-      // Only what the writer read is cut: the anchor is a user message in the snapshot, and
-      // everything added since lies after it. A backstop cut past it leaves nothing to do.
-      const index = anchor ? this.orchestratorContext.indexOf(anchor) : -1;
-      if (index > 0) await this.cutContext(index, "compaction", callSid);
-      await this.record("orchestrator.compaction", { ms: Date.now() - started, memory_chars: version.chars, removed_items: Math.max(index, 0), call_ended: !sameCall() }, scope);
+      // Everything added since lies after the cut. A backstop cut past it leaves nothing to do.
+      const index = !cut ? -1 : "through" in cut ? this.orchestratorContext.indexOf(cut.through) + 1
+        : this.orchestratorContext.indexOf(cut.before);
+      const atHangup = Boolean(cut && "through" in cut);
+      if (index > 0) await this.cutContext(index, atHangup ? "hangup compaction" : "compaction", callSid);
+      await this.record("orchestrator.compaction", { ms: Date.now() - started, memory_chars: version.chars, removed_items: Math.max(index, 0),
+        call_ended: !sameCall(), ...(atHangup ? { at_hangup: true } : {}) }, scope);
       // A focus means the caller asked what will be kept, so the outcome wakes the Orchestrator
       // to tell them; a voluntary compaction's outcome waits for the next woken step.
       if (sameCall()) await this.orchestratorEvent(`[harness event] context_compacted: ${JSON.stringify({ memory_chars: version.chars, removed_items: Math.max(index, 0) })}`, Boolean(focus.trim()));
@@ -3248,28 +3265,27 @@ export class VoiceSession {
   // over the limit gets one cheap request to condense it, with nothing but the draft.
   private async writeMemory(snapshot: unknown[], focus: string, callSid: string | null): Promise<string> {
     const ask = `[write memory] Write your complete new Memory now, as notes to yourself. It replaces your previous Memory entirely, so carry over everything from it that is still worth keeping: the caller's preferences, ongoing projects and what each session is for, commitments, and loose ends. At most ${MAX_MEMORY_CHARS} characters. Reply with the Memory text only.${focus ? ` It must keep: ${focus}` : ""}`;
-    let text = await this.memoryRequest([...this.pinnedMemory(), ...snapshot, { role: "developer", content: ask }], true, callSid);
+    let text = await this.memoryRequest(this.orchestratorRequestBody([...snapshot, { role: "developer", content: ask }], { tool_choice: "none" }), callSid);
     if (text.length > MAX_MEMORY_CHARS) {
-      text = await this.memoryRequest([{ role: "developer", content: `[condense memory] This Memory is ${text.length} characters. Condense it to at most ${MAX_MEMORY_CHARS}, keeping what matters most across calls. Reply with the Memory text only.\n\n${text}` }], false, callSid);
+      const endpoint = orchestratorEndpoint(this.env);
+      text = await this.memoryRequest({
+        model: endpoint.model,
+        instructions: orchestratorInstructions(this.theme),
+        input: [{ role: "developer", content: `[condense memory] This Memory is ${text.length} characters. Condense it to at most ${MAX_MEMORY_CHARS}, keeping what matters most across calls. Reply with the Memory text only.\n\n${text}` }],
+        reasoning: { effort: this.env.ORCHESTRATOR_REASONING_EFFORT ?? "low" },
+        store: false,
+      }, callSid);
     }
     return text;
   }
 
   // callSid is the call that asked: a Memory can finish after the next call attaches.
-  private async memoryRequest(input: unknown[], withTools: boolean, callSid: string | null): Promise<string> {
+  private async memoryRequest(request: Record<string, unknown>, callSid: string | null): Promise<string> {
     const endpoint = orchestratorEndpoint(this.env);
     const response = await fetch(`${endpoint.base}/responses`, {
       method: "POST",
       headers: { authorization: `Bearer ${this.env.ORCHESTRATOR_API_KEY}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        model: endpoint.model,
-        instructions: orchestratorInstructions(this.theme),
-        input,
-        // The context holds tool calls, so the tools are declared; none may be used.
-        ...(withTools ? { tools: ORCHESTRATOR_TOOLS, tool_choice: "none" } : {}),
-        reasoning: { effort: this.env.ORCHESTRATOR_REASONING_EFFORT ?? "low" },
-        store: false,
-      }),
+      body: JSON.stringify(request),
       signal: AbortSignal.timeout(MEMORY_WRITE_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`memory model ${response.status}: ${(await response.text()).slice(0, 200)}`);
@@ -3486,6 +3502,9 @@ export class VoiceSession {
           result = { ok: true, name: skill.name, guidance: skill.body, voice_guidance_applied: Boolean(skill.voiceGuidance && this.liveAttached) };
           break;
         }
+        case "read_voice_agent_skill_reference":
+          result = { ok: true, text: voiceAgentSkillReference(requiredString(args, "skill"), requiredString(args, "file"), requiredString(args, "section")) };
+          break;
         case "start_recording":
           result = await this.startRecording(Number(args.max_seconds ?? 300));
           break;
@@ -5184,7 +5203,24 @@ export class VoiceSession {
     this.cleaningUpVoice = false;
     // Off the critical path of both calls: the next opening is ready before anyone dials.
     // A theme switch already wrote the bounce's greeting.
-    if (await this.state.storage.get<string>("rejoin_call_sid") !== this.callSid) void this.writeNextGreeting();
+    if (await this.state.storage.get<string>("rejoin_call_sid") !== this.callSid) void this.closeOutContext();
+  }
+
+  // After a call: the next welcome, then, for a large context, a Compaction through the end of the
+  // call. The cut is nearly free in cache terms: the next call's first step rewrites the context
+  // anyway once the provider's 30-minute cache lapses, so a smaller context makes that rewrite,
+  // and every later step's cached read, cheaper. Both requests share the steps' cached prefix.
+  private async closeOutContext(): Promise<void> {
+    const callSid = this.callSid;
+    await this.writeNextGreeting();
+    // A next call may have attached meanwhile, or the Orchestrator be compacting already.
+    if (this.liveAttached || this.callSid !== callSid || this.compaction || this.compactionRequested) return;
+    if (this.contextTokens <= HANGUP_COMPACT_TOKENS) return;
+    const snapshot = answeredPrefix(this.orchestratorContext);
+    if (!snapshot.length) return;
+    const run = this.compactInBackground(snapshot, { through: snapshot.at(-1) }, "", callSid).finally(() => { this.compaction = null; });
+    this.compaction = run;
+    this.state.waitUntil(run);
   }
 
   private resetCallState(sessionId: string): void {
@@ -5589,6 +5625,18 @@ function outputText(body: { output?: Array<Record<string, any>> }): string {
     .map((part: Record<string, any>) => String(part.text ?? ""))
     .join(" ")
     .trim();
+}
+
+type CompactionCut = { before: unknown } | { through: unknown };
+
+// The context up to its last fully answered point. Mid-loop (set_theme, a hangup during a step),
+// it ends with a response's calls still unanswered, which the Responses API refuses.
+function answeredPrefix(context: unknown[]): unknown[] {
+  const answered = new Set(context.filter((item: any) => item.type === "function_call_output").map((item: any) => item.call_id));
+  const cut = context.findIndex((item: any) => item.type === "function_call" && !answered.has(item.call_id));
+  const prefix = cut < 0 ? [...context] : context.slice(0, cut);
+  while ((prefix.at(-1) as any)?.type === "reasoning") prefix.pop();
+  return prefix;
 }
 
 // Where a compaction cuts its snapshot: the current call verbatim when it is a reasonable size,
