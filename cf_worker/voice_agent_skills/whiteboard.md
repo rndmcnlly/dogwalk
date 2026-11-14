@@ -94,6 +94,7 @@ For a rich report, ask a session for one self-contained HTML file: styles and sc
 - Opening one while the sandbox sleeps shows that it is asleep; the grant still holds, and the next call wakes the sandbox.
 - revoke_access ends every grant on a Display at once. A board pushed off the stack (five per Display) takes its grants with it, so redraw access you still need on a fresh board.
 - Terminal, Desktop and Preview use expiring provider links. Active connections may take about a minute to close after expiry or revocation; do not promise an instant disconnect.
+- If revoke_access reports revocation_pending, the grants ended but the provider has not accepted all cleanup. Say access cleanup is still pending and will retry automatically; do not claim the links are already shut off.
 - inspect_call_state lists each Display's live grants and how long they have left.
 
 ## Examples

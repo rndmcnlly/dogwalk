@@ -1058,6 +1058,18 @@ after expiry), and a fresh request then returned 401. These observations are not
 a provider SLA. An open Access Element is not yet made to keep the Sandbox awake
 beyond the traffic it carries.
 
+Mint completion rechecks the stored grant, browser membership, and Sandbox
+Assignment in the same transaction that registers the credential. A grant that
+ended while Daytona was minting gets no returned link; that credential is revoked
+instead. Failed provider revocations remain in the durable `access_revocations`
+outbox (including their Sandbox ID, so replacement cannot misdirect a retry).
+The Durable Object alarm retries them every 30 seconds until success or natural
+expiry; `revoke_access` reports incomplete provider cleanup instead of confirming
+that all access has ended. The same alarm serves call keepalive and the earliest
+paired-browser expiry, so an unattended Display ends and revokes its links even
+when no page sends another message. Browser activity recomputes the deadline
+without postponing an already-due revocation retry.
+
 Deploying this change applies Wrangler migration `v3`, deleting the retired
 `TerminalRelay` Durable Object class. A one-time VoiceSession back-patch removes
 `terminal_tickets`, `terminal_tokens`, and old Terminal grants, leaving other
@@ -1067,7 +1079,8 @@ sessions in the Sandbox are not killed; attach manually if needed.
 
 Focused checks from the repository root:
 `node --experimental-strip-types cf_worker/access_grants_test.ts` covers
-short remaining lifetimes, refused opens, and the one-time state back-patch.
+short remaining lifetimes, refused opens, mint/revoke races, failed revocation
+retries, unattended Display expiry, and the one-time state back-patch.
 `voice_session_test.py` covers fresh terminal links, Display isolation, board
 eviction, explicit revocation, unpairing, and keeping credentials out of the
 Orchestrator context.

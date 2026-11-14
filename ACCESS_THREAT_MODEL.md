@@ -182,6 +182,11 @@ block new access, but existing provider connections close on a grace period,
 not immediately. A 2026-11-14 PoC on daemon 0.232.2 observed a 3.7-second disconnect
 after explicit revocation and a live connection ending 48 seconds after its
 60-second link expired. This is evidence of behavior, not a hard cutoff guarantee.
+Mint completion rechecks stored authorization atomically with credential
+registration, so revocation cannot miss a token still being minted. Failed
+provider revocations are kept in a durable outbox and retried by alarm; explicit
+revocation reports pending cleanup rather than claiming success. The alarm also
+expires unattended browsers and ends a Display when its last browser expires.
 
 ### Hangup
 
