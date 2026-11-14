@@ -22,7 +22,8 @@ import {
 } from "./pairing";
 import type { Env } from "./types";
 import {
-  findInviteCode, INVITATION_STATUS_SQL, noteEnrollmentOutcome, noteInviteHeard, redemptionStatements, USABLE_FOR_PHONE_SQL,
+  findInviteCode, INVITATION_STATUS_SQL, noteEnrollmentOutcome, noteInviteHeard, redemptionStatements, registrationCoolingDown,
+  USABLE_FOR_PHONE_SQL,
 } from "./invitations";
 import { availableHandles } from "./handles";
 import { frontendInstructions, VoiceSession } from "./voice_session";
@@ -538,7 +539,7 @@ async function resolveSandbox(
 // through, this pass and later ones, retrying failures with backoff. The row stays afterwards as
 // a tombstone (Daytona's label listing can still show a deleted Sandbox) and as the notice the
 // User's next Opening consumes (VoiceSession.sinceLastCall).
-const SANDBOX_REAP_CRON = "17 10 * * *";
+const REAP_CRON = "17 10 * * *";
 const SANDBOX_REAP_BATCH = 10;
 const SANDBOX_DELETE_BATCH = 20;
 // Failed deletions are retried after 1, 2, 4, 8, then 16 days; at this many failures the
@@ -649,6 +650,137 @@ async function deleteReapedSandboxes(env: Env): Promise<void> {
   }
 }
 
+// --- User reaping -------------------------------------------------------
+
+// Identity and Hosting Lifecycle (DOMAIN.md): a User is reaped once they have made no Voice Call
+// for USER_REAP_AGE_DAYS (365 by default), measured from voice_calls.user_id, since
+// users.last_seen_at moves only on Home calls. Anything but USER_REAP_MODE=reap is a dry run
+// that only audits user.reap.candidate.
+//
+// The same shape as Sandbox reaping. One transaction takes the identity out of service: every
+// statement rechecks idleness, so a call arriving now either blocks the whole reap or finds the
+// User gone. The Handle enters the renaming quarantine, the Home and Voice Reference go, any
+// Sandbox still assigned is reaped (the Sandbox pass deletes it), and reaped_at is set. Then,
+// in this pass and later ones until it succeeds, cleanup forgets the User: their Voice Session
+// storage (Memory, transcripts, archives) is wiped, and their words are stripped from the
+// diagnostic call records, keeping the timing. forgotten_at records that.
+const USER_REAP_BATCH = 10;
+const USER_FORGET_BATCH = 10;
+// Free text a diagnostic row can carry (speech, Agent text, session names, directories, provider
+// messages and bodies, a pairing's place and device); forgetting a User removes these keys from
+// their calls' rows and keeps the rest.
+const FORGOTTEN_TEXT_PATHS = ["content_text", "text", "alias", "previous", "directory", "message", "error", "detail", "said",
+  "command", "place", "device", "display", "thoughts.tail"]
+  .map((key) => `'$.${key}'`).join(", ");
+
+interface UserReapCandidate {
+  user_id: number;
+  identity_hash: string;
+  last_call_at: number;
+}
+
+async function reapUsers(env: Env): Promise<void> {
+  const days = Number(env.USER_REAP_AGE_DAYS ?? "365");
+  if (!Number.isFinite(days) || days < 1) {
+    console.error(`USER_REAP_AGE_DAYS must be at least 1; reaping skipped (${env.USER_REAP_AGE_DAYS})`);
+    return;
+  }
+  const mode = env.USER_REAP_MODE === "reap" ? "reap" : "dry-run";
+  const now = Math.floor(Date.now() / 1000);
+  const cutoff = now - Math.round(days * 86400);
+  const { results } = await env.DB.prepare(
+    `SELECT u.id AS user_id, u.identity_hash,
+            COALESCE((SELECT MAX(c.started_at) FROM voice_calls c WHERE c.user_id = u.id), u.registered_at) AS last_call_at
+       FROM users u
+      WHERE u.reaped_at IS NULL AND u.registered_at < ?1 AND ${userIdleSince("u.id")}
+      ORDER BY last_call_at LIMIT ?2`,
+  ).bind(cutoff, USER_REAP_BATCH).all<UserReapCandidate>();
+  // One User's failure holds back neither the others nor forgetting those already reaped.
+  for (const candidate of results) {
+    await reapUser(env, candidate, mode, now, cutoff).catch((error) => audit(env, "user.reap.failed", null, null, {
+      user_id: candidate.user_id, message: (error instanceof Error ? error.message : String(error)).slice(0, 200),
+    }));
+  }
+  if (mode === "reap") await forgetReapedUsers(env);
+}
+
+async function reapUser(env: Env, candidate: UserReapCandidate, mode: "reap" | "dry-run", now: number, cutoff: number): Promise<void> {
+  const detail = {
+    user_id: candidate.user_id, mode,
+    last_call_at: candidate.last_call_at, idle_days: Math.floor((now - candidate.last_call_at) / 86400),
+  };
+  if (mode === "dry-run") {
+    await audit(env, "user.reap.candidate", null, null, detail);
+    return;
+  }
+  // ?1 cutoff, ?2 User. The users UPDATE comes last: the statements before it read the Handle,
+  // Home, and identity it clears, and each repeats the same guard.
+  const live = `EXISTS (SELECT 1 FROM users WHERE id = ?2 AND reaped_at IS NULL AND ${userIdleSince("?2")})`;
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO retired_handles (handle, user_id, retired_at)
+       SELECT handle, id, unixepoch() FROM users WHERE id = ?2 AND handle IS NOT NULL AND ${live}
+       ON CONFLICT(handle) DO UPDATE SET user_id = excluded.user_id, retired_at = excluded.retired_at`,
+    ).bind(cutoff, candidate.user_id),
+    env.DB.prepare(`DELETE FROM voice_references WHERE user_id = ?2 AND ${live}`).bind(cutoff, candidate.user_id),
+    env.DB.prepare(
+      `DELETE FROM pairing_codes WHERE identity_hash = (SELECT identity_hash FROM users WHERE id = ?2) AND ${live}`,
+    ).bind(cutoff, candidate.user_id),
+    // A Sandbox the Sandbox pass has not reaped (paused, or stuck in conflict) has no one left
+    // who could want it: record it for deletion and let the assignment go, as that pass does.
+    env.DB.prepare(
+      `INSERT INTO sandbox_deletions (provider_id, user_id, reaped_at, next_attempt_at)
+       SELECT provider_id, user_id, unixepoch(), unixepoch() FROM sandbox_assignments
+        WHERE user_id = ?2 AND provider_id IS NOT NULL AND ${live}`,
+    ).bind(cutoff, candidate.user_id),
+    env.DB.prepare(
+      `UPDATE sandbox_assignments
+          SET provider_id = NULL, state = 'reaped', error = NULL, provisioning_started_at = 0, last_checked_at = unixepoch()
+        WHERE user_id = ?2 AND provider_id IS NOT NULL AND ${live}`,
+    ).bind(cutoff, candidate.user_id),
+    env.DB.prepare(
+      `UPDATE users SET handle = NULL, home_phone = NULL, home_used_at = NULL, reaped_at = unixepoch()
+        WHERE id = ?2 AND reaped_at IS NULL AND ${userIdleSince("?2")}`,
+    ).bind(cutoff, candidate.user_id),
+  ]);
+  const sandbox = results[4].meta.changes === 1;
+  if (results[5].meta.changes === 1) await audit(env, "user.reap.started", null, null, { ...detail, sandbox_reaped: sandbox });
+}
+
+// Forget reaped Users, the cleanup after the reap. Idempotent: a User whose wipe fails is tried
+// again by the next pass, and nothing reaches them meanwhile, since a new Registration always
+// mints a fresh identity_hash.
+async function forgetReapedUsers(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare(
+    "SELECT id, identity_hash FROM users WHERE reaped_at IS NOT NULL AND forgotten_at IS NULL ORDER BY reaped_at LIMIT ?",
+  ).bind(USER_FORGET_BATCH).all<{ id: number; identity_hash: string }>();
+  for (const user of results) {
+    try {
+      const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(user.identity_hash));
+      const response = await object.fetch("https://voice-session/forget", { method: "POST" });
+      if (!response.ok) throw new Error(`voice session ${response.status}: ${(await response.text()).slice(0, 200)}`);
+      // The User's calls, their Registration call (never linked to them), and Roaming attempts at
+      // their Handle that were not admitted (pruned after 90 days anyway).
+      const calls = `call_sid IN (SELECT call_sid FROM voice_calls WHERE user_id = ?1
+        UNION SELECT registered_call_sid FROM users WHERE id = ?1 AND registered_call_sid IS NOT NULL
+        UNION SELECT call_sid FROM roaming_attempts WHERE user_id = ?1)`;
+      const [activity, audits] = await env.DB.batch([
+        env.DB.prepare(`UPDATE call_activity SET detail = json_remove(detail, ${FORGOTTEN_TEXT_PATHS})
+                         WHERE ${calls} AND json_valid(detail)`).bind(user.id),
+        env.DB.prepare(`UPDATE audit_log SET detail = json_remove(detail, ${FORGOTTEN_TEXT_PATHS})
+                         WHERE ${calls} AND json_valid(detail)`).bind(user.id),
+        env.DB.prepare("UPDATE users SET forgotten_at = unixepoch() WHERE id = ? AND forgotten_at IS NULL").bind(user.id),
+      ]);
+      await audit(env, "user.forgotten", null, null, {
+        user_id: user.id, activity_rows: activity.meta.changes, audit_rows: audits.meta.changes,
+      });
+    } catch (error) {
+      const message = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+      await audit(env, "user.forget.failed", null, null, { user_id: user.id, message });
+    }
+  }
+}
+
 // --- Diagnostics --------------------------------------------------------
 
 const accessKeySets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
@@ -698,6 +830,10 @@ const jsonResponse = (value: unknown, status = 200, extra: Record<string, string
   headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extra },
 });
 
+// The Diagnostics Surface lists a number that registered at least this many Users this many days.
+const BUSY_NUMBER_REGISTRATIONS = 3;
+const BUSY_NUMBER_DAYS = 30;
+
 async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<string, unknown>> {
   // One row per User (its Registration, Home, and Sandbox Assignment). Stable, non-capability
   // diagnostic ids preserve graph identity when masked numbers collide or a Home is gone.
@@ -743,6 +879,14 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
     }
   }));
 
+  // Numbers that registered several Users lately: no cap applies (a shared phone is first-class),
+  // so the operator watches for one phone minting Users beyond the Registration cooldown.
+  const busyResult = await env.DB.prepare(
+    `SELECT registered_from AS phone_number, COUNT(*) AS registrations, MAX(registered_at) AS last_registered_at
+       FROM users WHERE registered_from IS NOT NULL AND registered_at > unixepoch() - ?
+      GROUP BY registered_from HAVING COUNT(*) >= ? ORDER BY registrations DESC, last_registered_at DESC`,
+  ).bind(BUSY_NUMBER_DAYS * 86400, BUSY_NUMBER_REGISTRATIONS).all<Record<string, unknown>>();
+  const busyNumbers = busyResult.results ?? [];
   const inviteSummary = await env.DB.prepare(
     `SELECT COUNT(*) AS total,
             SUM(CASE WHEN expires_at IS NOT NULL AND expires_at <= unixepoch() THEN 1 ELSE 0 END) AS expired,
@@ -775,6 +919,7 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
     verbose,
     registrations,
     invitations,
+    busy_numbers: busyNumbers,
     invites: inviteSummary,
     live_calls: liveCalls,
     // Totals only, no identifiers, so the redacted lens shows them too.
@@ -791,6 +936,7 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
       identity_hash: undefined,
       error: row.error ? "operator attention required" : null,
     })),
+    busy_numbers: busyNumbers.map((row) => ({ ...row, phone_number: maskPhone(String(row.phone_number)) })),
     invitations: invitations.map((row) => ({
       ...row,
       code_words: undefined,
@@ -1009,7 +1155,8 @@ async function handleAdmin(req: Request, env: Env, pathname: string): Promise<Re
     // Conversation content is never part of the redacted default lens.
     if (!verbose) return new Response("conversations require verbose=1", { status: 400 });
     const assignments = await env.DB.prepare(
-      "SELECT u.identity_hash FROM sandbox_assignments s JOIN users u ON u.id = s.user_id",
+      // A forgotten User's Voice Session is wiped; reading it would only recreate empty keys.
+      "SELECT u.identity_hash FROM sandbox_assignments s JOIN users u ON u.id = s.user_id WHERE u.forgotten_at IS NULL",
     ).all<{ identity_hash: string }>();
     const conversations = await Promise.all(assignments.results.map(async ({ identity_hash }) => {
       const object = env.VOICE_SESSIONS.get(env.VOICE_SESSIONS.idFromName(identity_hash));
@@ -1099,7 +1246,7 @@ async function handlePair(req: Request, env: Env, url: URL): Promise<Response> {
 // Only identities with a Sandbox Assignment get a VoiceSession; random ones never create objects.
 async function knownIdentity(env: Env, identity: string): Promise<boolean> {
   const row = await env.DB.prepare(
-    "SELECT 1 AS ok FROM users u JOIN sandbox_assignments s ON s.user_id = u.id WHERE u.identity_hash = ?",
+    "SELECT 1 AS ok FROM users u JOIN sandbox_assignments s ON s.user_id = u.id WHERE u.identity_hash = ? AND u.reaped_at IS NULL",
   ).bind(identity).first();
   return Boolean(row);
 }
@@ -1112,12 +1259,21 @@ function voiceSessionFor(env: Env, identity: string): DurableObjectStub {
 
 export default {
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    if (event.cron === SANDBOX_REAP_CRON) {
-      // Rethrown so the cron invocation records the failure, not just the log.
-      ctx.waitUntil(reapSandboxes(env).catch((error) => {
-        console.error("sandbox reaping failed", error);
-        throw error;
-      }));
+    if (event.cron === REAP_CRON) {
+      // Users first, so a Sandbox their reap let go of is deleted by this same pass. A failed
+      // User pass still lets the Sandbox pass run. Rethrown so the cron invocation records the
+      // failure, not just the log.
+      ctx.waitUntil((async () => {
+        const users = await reapUsers(env).then(() => null, (error) => {
+          console.error("user reaping failed", error);
+          return error;
+        });
+        await reapSandboxes(env).catch((error) => {
+          console.error("sandbox reaping failed", error);
+          throw error;
+        });
+        if (users) throw users;
+      })());
       return;
     }
     ctx.waitUntil(processTwilioJobs(env));
@@ -1897,6 +2053,12 @@ async function handleClaim(req: Request, env: Env, ctx: ExecutionContext): Promi
 // confirm step can pick it up by callSid. The PGPfone ritual: machine echoes what it heard,
 // caller confirms.
 async function inviteReadback(env: Env, from: string, callSid: string, match: string, attempts: number): Promise<string> {
+  // Before the readback, so a cooling-down phone never spends the words (bindClaim rechecks).
+  const cooldown = registrationCooldown(env);
+  if (await registrationCoolingDown(env.DB, from, cooldown.since)) {
+    await audit(env, "registration.cooldown", from, callSid, { stage: "readback" });
+    return cooldown.twiml;
+  }
   await env.DB.prepare(
     `INSERT OR REPLACE INTO claim_attempt (call_sid, phone_number, code_words, ts)
      VALUES (?, ?, ?, ?)`,
@@ -2070,6 +2232,7 @@ async function bindClaim(
   const now = Math.floor(Date.now() / 1000);
   // Expiry, uses, revocation, and a bound recipient are checked in the same transaction that
   // registers the phone and records the Invitation's redeemer (invitations.ts).
+  const cooldown = registrationCooldown(env);
   const clearPendingStatement = env.DB.prepare(
     "DELETE FROM claim_attempt WHERE call_sid = ? AND phone_number = ?",
   ).bind(callSid, from);
@@ -2080,7 +2243,7 @@ async function bindClaim(
     [handle] = await availableHandles(env.DB, 1);
     try {
       results = await env.DB.batch([
-        ...redemptionStatements(env.DB, from, callSid, codeWords, now, handle, newIdentityHash()),
+        ...redemptionStatements(env.DB, from, callSid, codeWords, now, handle, newIdentityHash(), cooldown.since),
         clearPendingStatement,
       ]);
     } catch (error) {
@@ -2091,6 +2254,10 @@ async function bindClaim(
   const [registration, , , redeemed] = results;
 
   if (registration.meta.changes === 0) {
+    if (await registrationCoolingDown(env.DB, from, cooldown.since)) {
+      await audit(env, "registration.cooldown", from, callSid, { stage: "confirm" });
+      return twiml(cooldown.twiml);
+    }
     await audit(env, "registration.rejected", from, callSid, {});
     return twiml(Say("That invite is no longer available. Goodbye.") + Hangup());
   }
@@ -2118,6 +2285,19 @@ async function bindClaim(
 }
 
 // --- helpers ------------------------------------------------------------
+
+// The Registration cooldown (Access Control): REGISTRATION_COOLDOWN_HOURS, 24 by default; "0"
+// turns it off. `since` is the cutoff a recent Registration from the same number must follow.
+function registrationCooldown(env: Env): { since: number; twiml: string } {
+  const configured = Number(env.REGISTRATION_COOLDOWN_HOURS ?? "24");
+  const hours = Number.isFinite(configured) && configured > 0 ? configured : 0;
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    since: hours ? now - Math.round(hours * 3600) : now,
+    twiml: Say(`This phone already registered someone on Dogwalk in the last ${hours} hours, so it cannot register another yet. `
+      + "You can register from a different phone now, or call back later. Goodbye.") + Hangup(),
+  };
+}
 
 async function retryOrHangup(
   env: Env,

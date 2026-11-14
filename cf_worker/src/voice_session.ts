@@ -963,6 +963,9 @@ export class VoiceSession {
   private thoughts = new Map<string, { chunks: number; chars: number; tail: string }>();
   private permissions = new Map<string, PendingPermission>();
   private liveAttached = false;
+  // Set once forget() wiped storage, and while it wipes: this instance then serves nothing.
+  private forgotten = false;
+  private forgetting = false;
   private agentReady = false;
   // Background Agent Connection: talking starts before the Sandbox is reachable.
   private agentConnectAttempt: Promise<void> | null = null;
@@ -1059,6 +1062,11 @@ export class VoiceSession {
 
   constructor(private state: DurableObjectState, private env: Env) {
     state.blockConcurrencyWhile(async () => {
+      // A forgotten object keeps only its tombstone: no back-patch below writes into it again.
+      if (await state.storage.get("forgotten")) {
+        this.forgotten = true;
+        return;
+      }
       const stored = await state.storage.get<ManagedSession[]>("managed_sessions");
       // Projections from before the native Agent API lack agentSessionId: they are dropped, and
       // their sessions can be rediscovered and loaded.
@@ -1109,6 +1117,7 @@ export class VoiceSession {
   // ended this way at 902 s and 918 s). An alarm is an incoming event, so one every 30 s keeps
   // the object resident while a call is attached or Agent work is running, and lapses after.
   async alarm(): Promise<void> {
+    if (this.forgotten || this.forgetting) return;
     try {
       await this.pairedBrowsers();
       await this.flushAccessRevocations();
@@ -1135,6 +1144,9 @@ export class VoiceSession {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    // Before anything that stamps identity_hash or reads storage, so a wiped object stays empty.
+    if (request.method === "POST" && url.pathname === "/forget") return this.forget();
+    if (this.forgotten || this.forgetting) return new Response("this User was forgotten", { status: 410 });
     if (request.method === "GET" && url.pathname === "/conversation") {
       // Read-only operator diagnostics; the Worker gates this behind admin auth.
       return Response.json({
@@ -1462,6 +1474,38 @@ export class VoiceSession {
         typeof parsed.message === "string" ? parsed.message : text.slice(0, 200) || `HTTP ${response.status}`);
     }
     return parsed;
+  }
+
+  // User reaping (index.ts, forgetReapedUsers): wipe everything this object holds for its
+  // reaped User (Memory and its versions, transcripts, archives, preferences, boards). Access
+  // a Paired Browser still holds is revoked first, through the outbox, which the wipe would
+  // otherwise lose; anything still pending, or a call, compaction, or Agent connection in flight
+  // that would write again, answers 409 and the Worker retries on its next pass. A Managed
+  // Session still marked running is not in flight: its Sandbox is gone and cannot report back.
+  // Idempotent: a wipe that failed partway is resumed by the next call.
+  private async forget(): Promise<Response> {
+    if (this.forgotten) return new Response(null, { status: 204 });
+    if (this.liveAttached || this.compaction || this.agentConnectAttempt) {
+      return new Response("a call, compaction, or Agent connection is in progress", { status: 409 });
+    }
+    this.closeAgent("User forgotten");
+    const retired = await this.state.storage.transaction((tx) => this.queueGrantRevocations(tx, null));
+    const pending = await this.finishAccessRevocation(retired);
+    if (pending) return new Response(`${pending} access revocations pending`, { status: 409 });
+    this.forgetting = true;
+    try {
+      this.sessions.clear();
+      for (const timer of [this.timingTimer, this.transcriptSaveTimer, this.continuationTimer]) if (timer) clearTimeout(timer);
+      for (const ws of this.state.getWebSockets()) ws.close(4001, "forgotten");
+      await this.state.storage.deleteAlarm();
+      await this.state.storage.deleteAll();
+      // The one key left, holding nothing of the User, so a later instance stays empty.
+      await this.state.storage.put("forgotten", true);
+      this.forgotten = true;
+    } finally {
+      this.forgetting = false;
+    }
+    return new Response(null, { status: 204 });
   }
 
   private closeAgent(reason: string): void {

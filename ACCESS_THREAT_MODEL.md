@@ -223,7 +223,12 @@ credentials or leave retries dependent on another caller action.
   applies.
 - **Bounds that exist:** one live call per Sandbox; 24 Orchestrator steps per run;
   Sandboxes auto-stop after 15 idle minutes and are reaped after 30 days without
-  calls; pairing guess budgets; 3 active Invitations per User; Roaming pause limits.
+  calls; Users are reaped after 365 days without calls (shipping as a dry run), which
+  quarantines the Handle and deletes the Voice Reference, so an abandoned identity
+  stops being a Roaming target; pairing guess budgets; 3 active Invitations per User;
+  a 24-hour Registration cooldown per number (no cap on Users per phone, so a
+  willing inviter and one phone can still make one User a day; the Diagnostics
+  Surface lists such numbers); Roaming pause limits.
 - **Records:** `voice_calls` (duration, User), `call_activity` (per-call timeline),
   `audit_log` (phone number, no User column), and `spend`, the Worker's estimate per
   component, Sandbox, and call (`cf_worker/src/spend.ts`). Spend can be totalled per
@@ -241,6 +246,9 @@ Accepted for one operator-managed deployment whose only Users are invited:
 - An Agent with `sudo` can create durable access, spend the inference budget, and
   likely self-approve Permission Requests. The Sandbox is the trust boundary, and
   everything inside it is trusted equally.
+- Until User reaping leaves its dry run, and for a year after a User's last call
+  either way, a dormant Handle with an old Voice Reference stays claimable by Roaming.
+  If Home enforcement makes that target more valuable, shorten the reap age.
 - No per-User spending cap exists. The OpenAI Dogwalk project's hard $80 monthly
   limit (verified 2026-11-13) bounds inference spend for the whole deployment, so one
   User's Agents can exhaust it for every User; idle timeouts stop idle Sandboxes

@@ -42,6 +42,14 @@ DEPLOYMENT_ENVIRONMENT = "production"
 # Voice Call for this many days. Anything but "delete" is a dry run that audits candidates only.
 SANDBOX_REAP_AGE_DAYS = "30"
 SANDBOX_REAP_MODE = "delete"
+# User reaping (README: User Reaping): the same daily pass takes a User out of service after
+# this many days without a Voice Call, then wipes their Voice Session and call text. Anything
+# but "reap" is a dry run that audits candidates only.
+USER_REAP_AGE_DAYS = "365"
+USER_REAP_MODE = "dry-run"
+# Hours before a number that registered a User can register another (README: Registration
+# cooldown). "0" turns it off.
+REGISTRATION_COOLDOWN_HOURS = "24"
 # Roaming admission (README: Identity Check): "on" admits a caller who names a Handle and passes
 # its three Identity Challenges. Anything else keeps Roaming in shadow mode, admitting nobody.
 ROAMING_ADMISSION = "on"
@@ -100,6 +108,6 @@ deleted_classes = ["TerminalRelay"]
 enabled = true
 
 # Delayed provider logs must arrive even when no operator browser is open. The daily
-# entry is the Sandbox reaping pass (SANDBOX_REAP_CRON in src/index.ts).
+# entry is the User and Sandbox reaping pass (REAP_CRON in src/index.ts).
 [triggers]
 crons = ["* * * * *", "17 10 * * *"]

@@ -310,23 +310,34 @@ export const USABLE_FOR_PHONE_SQL = `(i.expires_at IS NULL OR i.expires_at > ?)
         AND NOT EXISTS (SELECT 1 FROM invitations v WHERE v.code_words = i.code_words
                           AND (v.revoked_at IS NOT NULL OR (v.recipient_phone IS NOT NULL AND v.recipient_phone != ?)))`;
 
+// The Registration cooldown (Access Control): a number that registered a User after `since`
+// cannot register another yet. Users per phone are not capped, since a shared or borrowed phone
+// is first-class; the cooldown only slows one phone minting Users.
+const COOLING_DOWN_SQL = "EXISTS (SELECT 1 FROM users r WHERE r.registered_from = ? AND r.registered_at > ?)";
+
+export async function registrationCoolingDown(db: D1Database, phone: string, since: number): Promise<boolean> {
+  return Boolean(await db.prepare(`SELECT ${COOLING_DOWN_SQL} AS cooling`).bind(phone, since).first<number>("cooling"));
+}
+
 // One D1 batch, one transaction: the User is inserted only if the code is usable by this
-// phone, and every later statement acts only if that insert happened (the new User is found by
-// its fresh identity_hash). Registering from a number that is already a Home displaces its
-// User, as re-homing does. D1 serializes writes, so of two concurrent claims on a single-use
-// code only one finds it below its uses; the other inserts nothing and records nothing.
-// Results: [registration, displacement, home, redemption].
+// phone and the phone is not cooling down, and every later statement acts only if that insert
+// happened (the new User is found by its fresh identity_hash). Registering from a number that
+// is already a Home displaces its User, as re-homing does. D1 serializes writes, so of two
+// concurrent claims on a single-use code only one finds it below its uses; the other inserts
+// nothing and records nothing. Results: [registration, displacement, home, redemption].
 export function redemptionStatements(
   db: D1Database, phone: string, callSid: string, codeWords: string, now: number, handle: string, identityHash: string,
+  coolingSince: number,
 ): D1PreparedStatement[] {
   return [
     db.prepare(
-      `INSERT INTO users (handle, identity_hash, invite_code, registered_at, last_seen_at)
-       SELECT ?, ?, i.code_words, ?, ?
+      `INSERT INTO users (handle, identity_hash, invite_code, registered_at, last_seen_at, registered_from, registered_call_sid)
+       SELECT ?, ?, i.code_words, ?, ?, ?, ?
          FROM invite_codes i
         WHERE i.code_words = ?
-          AND ${USABLE_FOR_PHONE_SQL}`,
-    ).bind(handle, identityHash, now, now, codeWords, now, phone),
+          AND ${USABLE_FOR_PHONE_SQL}
+          AND NOT ${COOLING_DOWN_SQL}`,
+    ).bind(handle, identityHash, now, now, phone, callSid, codeWords, now, phone, phone, coolingSince),
     db.prepare(
       `UPDATE users SET home_phone = NULL, home_used_at = NULL
         WHERE home_phone = ? AND EXISTS (SELECT 1 FROM users WHERE identity_hash = ?)`,

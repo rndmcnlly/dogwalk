@@ -620,7 +620,9 @@ export async function handleIdentityResult(env: Env, ctx: ExecutionContext, url:
  * its number as before.
  */
 async function admitRoaming(env: Env, callSid: string, log: Log, subject: Subject, spoken: string, judged: number): Promise<string> {
-  await env.DB.prepare("UPDATE voice_calls SET user_id = ? WHERE call_sid = ?").bind(subject.id, callSid).run();
+  // Not a User reaped meanwhile: the call would escape forgetting (index.ts, reapUsers).
+  await env.DB.prepare("UPDATE voice_calls SET user_id = ?1 WHERE call_sid = ?2 AND EXISTS (SELECT 1 FROM users WHERE id = ?1 AND reaped_at IS NULL)")
+    .bind(subject.id, callSid).run();
   await conclude(env, callSid, log, { path: "roaming", user_id: subject.id, outcome: "passed", enforcement: "admit_roaming", judged,
     passed: judged, admitted: true }, false);
   return Say(`${spoken} Welcome, ${subject.handle}.`) + CONNECT;

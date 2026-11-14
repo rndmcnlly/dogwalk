@@ -122,7 +122,7 @@ explicit provider-side deletion or the caller's confirmed recovery replacement.
 
 ### Sandbox Reaping
 
-A daily cron pass (`17 10 * * *`, `SANDBOX_REAP_CRON` in `src/index.ts`) looks
+A daily cron pass (`17 10 * * *`, `REAP_CRON` in `src/index.ts`) looks
 for Sandbox Assignments whose User has made no Voice Call for
 `SANDBOX_REAP_AGE_DAYS` (default 30, minimum 1; the assignment's creation counts
 when there are no calls) and none in progress. It handles at most ten per pass,
@@ -191,6 +191,73 @@ send no deletions, and resume pending deletions once `delete` is back. In produc
 runs only on that schedule, so the first candidates appear after the next 10:17
 UTC following a deploy. Locally, `wrangler dev --test-scheduled` exposes
 `/__scheduled?cron=17+10+*+*+*`, which the smoke test uses.
+
+### User Reaping
+
+The same daily pass runs User reaping first (`reapUsers` in `src/index.ts`, issue
+#50), then Sandbox reaping, so a Sandbox a User reap let go of is deleted in the
+same pass. It looks for Users who are not reaped and have made no Voice Call for
+`USER_REAP_AGE_DAYS` (default 365, minimum 1), measured from
+`voice_calls.user_id` (not `users.last_seen_at`, which only Home calls move;
+`registered_at` counts when there are no calls), with the same in-progress and
+unlinked-Home-call guards. At most ten per pass, oldest first.
+`USER_REAP_MODE` ships as `dry-run`, which only audits `user.reap.candidate`
+(`user_id`, `last_call_at`, `idle_days`); `reap` reaps.
+
+In `reap` mode, one D1 batch whose every statement rechecks idleness moves the
+Handle into `retired_handles` (the renaming quarantine), deletes the Voice
+Reference and the identity's `pairing_codes`, records any still-assigned Sandbox
+in `sandbox_deletions` and clears the assignment, then clears `handle`,
+`home_phone`, and `home_used_at` and sets `reaped_at`. It audits
+`user.reap.started` (`sandbox_reaped` says whether it took a Sandbox). A User
+whose reap throws is audited `user.reap.failed` and retried next pass; the
+others, and forgetting, go ahead.
+
+Then, in this pass and later ones until it succeeds, the pass forgets each
+reaped User with `forgotten_at` NULL (ten per pass): `POST /forget` on their
+VoiceSession revokes any Paired Browser access through the outbox and wipes the
+object's storage (`deleteAll`, no alarm). A 409 (revocations still pending, or a
+call or compaction in flight) leaves it for the next pass. The pass then removes
+the free-text keys (`FORGOTTEN_TEXT_PATHS`: `content_text`, `text`, `alias`,
+`previous`, `directory`, `message`, `error`, `detail`, `said`, `command`,
+`place`, `device`, `display`) from the `call_activity` and `audit_log` details
+of the User's calls (linked ones, their Registration call, and
+Roaming attempts at their Handle), keeping the timing,
+sets `forgotten_at`, and audits `user.forgotten` (`activity_rows`, `audit_rows`)
+or `user.forget.failed` (`message`). The wiped object keeps one `forgotten`
+tombstone key, so a later instance never back-patches keys into it, and the
+admin conversations and call content views, like Paired Browser routes, skip
+reaped or forgotten Users.
+
+Apply `migrations/2026-11-19-user-reaping.sql` remotely before deploying (it
+adds `users.registered_from` and `users.forgotten_at`):
+
+```sh
+npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-19-user-reaping.sql
+```
+
+Recent User reaping, candidates included in a dry run:
+
+```sh
+npx wrangler d1 execute dogwalk --remote --command \
+  "SELECT datetime(ts, 'unixepoch') AS at, event, detail FROM audit_log
+    WHERE event LIKE 'user.%' ORDER BY id DESC LIMIT 50"
+```
+
+To turn reaping on after reviewing candidates, set `USER_REAP_MODE = "reap"` in
+`wrangler.toml` and deploy. A reap is never undone: the person is invited again
+and registers as a new User.
+
+### Registration Cooldown
+
+A number that registered a User within `REGISTRATION_COOLDOWN_HOURS` (default
+24; `0` turns it off) cannot register another. The caller hears why right after
+their invite words match, before the readback, so the words are not spent; the
+Registration batch rechecks it (`registration.cooldown`, `stage` `readback` or
+`confirm`). `users.registered_from` records the number each Registration came
+from. There is no cap on Users per phone. The Access Control root on the
+Diagnostics Surface lists numbers that registered three or more Users in 30
+days (`busy_numbers` in `/admin/api/state`, masked in the redacted lens).
 
 ## Deploying Changes
 

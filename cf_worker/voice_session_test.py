@@ -2660,6 +2660,53 @@ async def pairing_claim_checks(identity: str) -> None:
         await asyncio.to_thread(d1, "DELETE FROM pairing_claim_budget; DELETE FROM pairing_codes WHERE nameplate IN ('997', '998', '999')")
 
 
+def user_reaping_checks(identity: str) -> None:
+    """User reaping (USER_REAP_MODE reap) on a User with a lived-in Voice Session: once every
+    call is a year old, the daily pass reaps and forgets them. The Voice Session no longer
+    appears among the operator's conversations, and their calls keep voice.timing rows with the
+    caller's words stripped."""
+    user = d1(f"SELECT id, home_phone FROM users WHERE identity_hash = '{identity}'")[0]
+    calls = f"(user_id = {user['id']} OR phone_number = '{TEST_PHONE}')"
+    # configure_assignment's CA_VOICE_TEST and CA_VOICE_TEST2 never get a status callback, so their
+    # rows stay open; run_unobserved_end's restart left no call attached to the Voice Session, so
+    # ending them below is only bookkeeping.
+    open_calls = {row["call_sid"] for row in d1(f"SELECT call_sid FROM voice_calls WHERE {calls} AND ended_at IS NULL")}
+    assert open_calls <= {"CA_VOICE_TEST", "CA_VOICE_TEST2"}, f"the protocol left calls in progress: {open_calls}"
+    timing = f"event = 'voice.timing' AND call_sid IN (SELECT call_sid FROM voice_calls WHERE user_id = {user['id']})"
+    worded = d1(f"SELECT COUNT(*) AS n FROM call_activity WHERE {timing} AND json_extract(detail, '$.content_text') IS NOT NULL")[0]["n"]
+    assert worded, "no voice.timing row carried the caller's words to strip"
+    before = conversations()
+    mine = [item for item in before if any(t["call_sid"] == "CA_VOICE_TEST3" for t in item["call_transcripts"])]
+    assert len(mine) == 1 and mine[0]["memory"], [item["memory"] for item in before]
+
+    # A year ago: every call (ended), the Registration, and the Sandbox Assignment.
+    d1(f"""UPDATE users SET registered_at = unixepoch() - {400 * 86400} WHERE id = {user['id']};
+        UPDATE voice_calls SET started_at = unixepoch() - {400 * 86400}, last_activity_at = unixepoch() - {400 * 86400},
+               ended_at = unixepoch() - {400 * 86400} WHERE {calls};
+        UPDATE sandbox_assignments SET created_at = unixepoch() - {400 * 86400} WHERE user_id = {user['id']}""")
+    mark = d1("SELECT COALESCE(MAX(id), 0) AS id FROM audit_log")[0]["id"]
+    with urllib.request.urlopen(f"{DEFAULT_LOCAL}/__scheduled?cron=17+10+*+*+*", timeout=10) as response:
+        assert response.status == 200, response.status
+    deadline = time.time() + 20
+    while True:
+        rows = d1(f"SELECT event, detail FROM audit_log WHERE id > {mark} AND event LIKE 'user.%' "
+                  f"AND json_extract(detail, '$.user_id') = {user['id']} ORDER BY id")
+        events = [row["event"] for row in rows]
+        failed = [json.loads(row["detail"]).get("message") for row in rows if row["event"] == "user.forget.failed"]
+        assert not failed, f"forgetting failed: {failed}"
+        if "user.forgotten" in events:
+            break
+        assert time.time() < deadline, f"no user.forgotten: {rows}"
+        time.sleep(0.3)
+    assert events == ["user.reap.started", "user.forgotten"], events
+
+    after = conversations()
+    assert len(after) == len(before) - 1, (len(before), len(after))
+    assert "CA_VOICE_TEST" not in json.dumps(after) and MEMORY_TEXT not in json.dumps(after), "the forgotten Voice Session is still listed"
+    rows = d1(f"SELECT detail FROM call_activity WHERE {timing}")
+    assert rows and not any("content_text" in json.loads(row["detail"]) for row in rows), "voice.timing kept the caller's words"
+
+
 def outputs_back(*call_ids: str):
     return lambda: set(call_ids) <= {
         item.get("call_id") for _, payload in OrchestratorMock.requests for item in payload["input"]
@@ -3293,7 +3340,8 @@ def main() -> int:
         asyncio.run(run_protocol(identity))
         asyncio.run(run_unobserved_end(restart))
         asyncio.run(pairing_claim_checks(identity))
-        print("voice session delegation checks passed")
+        user_reaping_checks(identity)
+        print("voice session delegation and User reaping checks passed")
         return 0
     except BaseException:
         # The known flake is one Worker call stalling under host load; these show which one.
@@ -3364,6 +3412,13 @@ def start_wrangler(wrangler: str) -> subprocess.Popen:
             # Registration and invitation rituals here assume shadow Roaming, whatever wrangler.toml deploys.
             "--var",
             "ROAMING_ADMISSION:off",
+            # Rituals here register from one number more than once; user_reaping_checks reaps for real.
+            "--var",
+            "REGISTRATION_COOLDOWN_HOURS:0",
+            "--var",
+            "USER_REAP_MODE:reap",
+            # user_reaping_checks triggers the daily pass through /__scheduled.
+            "--test-scheduled",
         ],
         cwd=WORKER_DIR,
         stdout=WRANGLER_LOG.open("a"),

@@ -133,6 +133,10 @@ function renderTree(){
   DATA.invitations.forEach((v)=>{
     t.append(node(2,{kind:"invitation",id:v.diagnostic_id,label:inviterLabel(v)+" \\u2192 "+inviteeLabel(v)+(v.hidden_at?" (hidden)":""),state:v.status,onSelect:true}));
   });
+  // Numbers that registered several Users in 30 days: no cap applies, so this is for the operator's eye.
+  const busy=DATA.busy_numbers||[];
+  t.append(node(1,{root:true,label:"Numbers registering several Users (30 days)",count:busy.length}));
+  busy.forEach((b)=>t.append(el("div",b.phone_number+" \\u00b7 "+b.registrations+" Registrations, last "+when(b.last_registered_at),"standby")));
 
   // ROOT: Event Log (wired via audit)
   t.append(node(0,{kind:"eventlog",id:"all",root:true,icon:"\\u2630",label:"Event Log",count:DATA.audit.length,tag:"audit",onSelect:true}));

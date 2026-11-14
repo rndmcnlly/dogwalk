@@ -895,15 +895,16 @@ def reap_deletions() -> dict[str, dict]:
     return {row["provider_id"]: row for row in rows}
 
 
-def run_reap_pass(base_url: str, users: dict[str, int], done) -> list[tuple[str, dict]]:
-    """Trigger the daily pass; return the fixture Users' new sandbox.reap* events once `done`."""
+def run_reap_pass(base_url: str, users: dict[str, int], done, where: str = "event LIKE 'sandbox.reap%'") -> list[tuple[str, dict]]:
+    """Trigger the daily pass; return the fixture Users' new sandbox.reap* events (or those
+    `where` selects) once `done`."""
     mark = d1_local("SELECT COALESCE(MAX(id), 0) AS id FROM audit_log")[0]["id"]
     status, _ = get(base_url, "/__scheduled?cron=" + urllib.parse.quote_plus(REAP_CRON))
     require(status == 200, f"scheduled trigger failed: {status}")
     ids = set(users.values())
 
     def events() -> list[tuple[str, dict]]:
-        rows = d1_local(f"SELECT event, detail FROM audit_log WHERE id > {mark} AND event LIKE 'sandbox.reap%' ORDER BY id")
+        rows = d1_local(f"SELECT event, detail FROM audit_log WHERE id > {mark} AND ({where}) ORDER BY id")
         pairs = [(row["event"], json.loads(row["detail"])) for row in rows]
         return [(event, detail) for event, detail in pairs if detail.get("user_id") in ids]
 
@@ -1055,6 +1056,244 @@ def diagnostics_race_checks(base_url: str, users: dict[str, int]) -> None:
     row = reap_assignments()[users["diag"]]
     require(row["provider_id"] == "mock-diag-new" and row["state"] == "creating",
             f"diagnostics refresh clobbered a replaced assignment: {row}")
+
+
+# User reaping fixtures (USER_REAP_AGE_DAYS 365): name -> (Home, registered days ago, calls),
+# calls as in REAP_USERS. "idle" also has a Handle, a Voice Reference, a pairing code, and a
+# Sandbox; "leftover" was reaped two days ago by a pass that never finished forgetting it.
+USER_REAP = {
+    "idle": ("+15555550130", 400, [(380, 380, True)]),
+    "recent": ("+15555550131", 400, [(10, 10, True)]),
+    "linking": ("+15555550132", 400, [(0.001, None, False)]),
+    "young": ("+15555550133", 100, []),
+    "leftover": ("+15555550134", 400, [(390, 390, True)]),
+}
+COOLDOWN_PHONE = "+15555550135"
+COOLDOWN_OTHER_PHONE = "+15555550136"
+BUSY_PHONE = "+15555550137"
+IDLE_PROVIDER = "mock-ureap-idle"
+# Text a diagnostic row can carry, which forgetting strips, and the timing it keeps.
+SPOKEN = {"content_text": "my bank PIN is 1234", "text": "call my sister", "alias": "Juniper"}
+TIMING = {"ts_ms": 1234, "event": "transcript.delta", "span_id": "00f067aa0ba902b7"}
+USER_EVENTS = "event LIKE 'user.%' OR event LIKE 'sandbox.reap%'"
+
+
+def ureap_sql(name: str) -> str:
+    return f"(SELECT id FROM users WHERE identity_hash = 'ureap-{name}')"
+
+
+def seed_user_reap_fixture() -> dict[str, int]:
+    statements = []
+    for name, (phone, registered, calls) in USER_REAP.items():
+        if name == "leftover":
+            statements.append(f"INSERT INTO users (identity_hash, invite_code, registered_at, reaped_at) "
+                              f"VALUES ('ureap-{name}', '{LOCAL_INVITE}', unixepoch() - {registered * DAY}, unixepoch() - {2 * DAY})")
+        else:
+            statements.append(f"INSERT INTO users (handle, identity_hash, invite_code, registered_at, home_phone, home_used_at) "
+                              f"VALUES ('ureap {name}', 'ureap-{name}', '{LOCAL_INVITE}', unixepoch() - {registered * DAY}, "
+                              f"'{phone}', unixepoch() - {registered * DAY})")
+        for index, (started, ended, linked) in enumerate(calls):
+            end = "NULL" if ended is None else f"unixepoch() - {int(ended * DAY)}"
+            statements.append(
+                f"INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at, ended_at, user_id) "
+                f"VALUES ('CA_UREAP_{name.upper()}_{index}', '{phone}', '{'in-progress' if ended is None else 'completed'}', "
+                f"unixepoch() - {int(started * DAY)}, unixepoch() - {int(started * DAY)}, {end}, "
+                f"{ureap_sql(name) if linked else 'NULL'})")
+    for name in ("idle", "leftover"):
+        sid, ts = f"CA_UREAP_{name.upper()}_0", f"unixepoch() - {380 * DAY}"
+        statements += [
+            f"INSERT INTO call_activity (call_sid, ts, source, direction, event, detail) VALUES "
+            f"('{sid}', {ts}, 'voice', 'inbound', 'transcript.delta', '{json.dumps({**SPOKEN, **TIMING})}'), "
+            f"('{sid}', {ts}, 'agent', 'internal', 'agent.turn.started', "
+            f"'{json.dumps({'alias': 'Juniper', 'directory': '/home/daytona/secret-project', 'ts_ms': 99})}')",
+            f"INSERT INTO audit_log (ts, event, phone_number, call_sid, detail) VALUES ({ts}, 'confirm.speech', "
+            f"'{USER_REAP[name][0]}', '{sid}', '{json.dumps({'said': 'yes my name is Ada', 'attempts': 1})}')",
+        ]
+    # Nested Agent reasoning, and an operator-code Registration call never linked to the User.
+    statements += [
+        f"INSERT INTO call_activity (call_sid, ts, source, direction, event, detail) VALUES "
+        f"('CA_UREAP_IDLE_0', unixepoch() - {380 * DAY}, 'agent', 'internal', 'agent.turn.stopped', "
+        f"'{json.dumps({'thoughts': {'chunks': 2, 'chars': 40, 'tail': 'the PIN they mentioned'}, 'ts_ms': 98})}')",
+        f"UPDATE users SET registered_call_sid = 'CA_UREAP_IDLE_REG' WHERE identity_hash = 'ureap-idle'",
+        f"INSERT INTO audit_log (ts, event, phone_number, call_sid, detail) VALUES (unixepoch() - {400 * DAY}, 'confirm.speech', "
+        f"'{USER_REAP['idle'][0]}', 'CA_UREAP_IDLE_REG', '{json.dumps({'said': 'yes I am Ada Lovelace', 'attempts': 1})}')",
+    ]
+    statements += [
+        f"INSERT INTO voice_references (user_id, embedding_space, embedding, enrolled_at) "
+        f"VALUES ({ureap_sql('idle')}, 'local-test', '[0.5, 0.5]', unixepoch() - {400 * DAY})",
+        "INSERT INTO pairing_codes (code_hash, nameplate, identity_hash, expires_at) "
+        "VALUES ('ureap-idle-code', '9301', 'ureap-idle', unixepoch() + 600)",
+        f"INSERT INTO sandbox_assignments (user_id, provider_id, state, provisioning_started_at, created_at) "
+        f"VALUES ({ureap_sql('idle')}, '{IDLE_PROVIDER}', 'stopped', unixepoch() - {400 * DAY}, unixepoch() - {400 * DAY})",
+    ]
+    d1_local(";\n".join(statements))
+    rows = d1_local("SELECT id, identity_hash FROM users WHERE identity_hash LIKE 'ureap-%'")
+    return {row["identity_hash"].removeprefix("ureap-"): row["id"] for row in rows}
+
+
+UREAP_USERS = "(SELECT id FROM users WHERE identity_hash LIKE 'ureap-%')"
+
+
+def drop_user_reap_fixture() -> None:
+    """Remove the User reaping fixtures, so the Sandbox reaping checks see only their own."""
+    d1_local(f"""DELETE FROM pairing_codes WHERE identity_hash LIKE 'ureap-%';
+        DELETE FROM voice_references WHERE user_id IN {UREAP_USERS};
+        DELETE FROM sandbox_assignments WHERE user_id IN {UREAP_USERS};
+        DELETE FROM sandbox_deletions WHERE user_id IN {UREAP_USERS};
+        DELETE FROM retired_handles WHERE user_id IN {UREAP_USERS};
+        DELETE FROM call_activity WHERE call_sid LIKE 'CA_UREAP_%';
+        DELETE FROM audit_log WHERE call_sid LIKE 'CA_UREAP_%';
+        DELETE FROM voice_calls WHERE call_sid LIKE 'CA_UREAP_%';
+        DELETE FROM users WHERE identity_hash LIKE 'ureap-%'""")
+
+
+def user_reap_state() -> dict:
+    """Everything a reap or a forget may change, for the fixtures."""
+    return {
+        "users": d1_local("SELECT id, handle, home_phone, home_used_at, reaped_at, forgotten_at FROM users "
+                          "WHERE identity_hash LIKE 'ureap-%' ORDER BY id"),
+        "references": d1_local(f"SELECT user_id FROM voice_references WHERE user_id IN {UREAP_USERS}"),
+        "pairing": d1_local("SELECT code_hash FROM pairing_codes WHERE identity_hash LIKE 'ureap-%'"),
+        "assignments": d1_local(f"SELECT user_id, provider_id, state FROM sandbox_assignments WHERE user_id IN {UREAP_USERS}"),
+        "deletions": d1_local(f"SELECT provider_id FROM sandbox_deletions WHERE user_id IN {UREAP_USERS}"),
+        "retired": d1_local(f"SELECT handle FROM retired_handles WHERE user_id IN {UREAP_USERS}"),
+        "activity": d1_local("SELECT id, detail FROM call_activity WHERE call_sid LIKE 'CA_UREAP_%' ORDER BY id"),
+        "audit": d1_local("SELECT id, detail FROM audit_log WHERE call_sid LIKE 'CA_UREAP_%' ORDER BY id"),
+    }
+
+
+def user_reap_dry_run_checks(base_url: str) -> None:
+    """A dry run audits only the User idle past USER_REAP_AGE_DAYS (not one with a recent call,
+    an unlinked call from its Home in progress, or a recent Registration), changes nothing, and
+    forgets no one (forgetting is reap mode only, so the leftover stays unforgotten)."""
+    users = seed_user_reap_fixture()
+    before = user_reap_state()
+    events = run_reap_pass(base_url, users, lambda found: by_event(found, "user.reap.candidate"), USER_EVENTS)
+    user_events = [(event, detail) for event, detail in events if event.startswith("user.")]
+    require({event for event, _ in user_events} == {"user.reap.candidate"}, f"User dry run events: {user_events}")
+    candidates = by_event(events, "user.reap.candidate")
+    require(set(candidates) == {users["idle"]}, f"User dry-run candidates: {user_events}")
+    require(candidates[users["idle"]]["mode"] == "dry-run" and candidates[users["idle"]]["idle_days"] >= 379,
+            f"User dry-run candidate detail: {candidates}")
+    require(user_reap_state() == before, "User dry run changed something")
+    drop_user_reap_fixture()
+
+
+def user_reap_checks(base_url: str, token: str) -> None:
+    """Reap mode: the idle User leaves service in one pass (Handle into quarantine, Home, Voice
+    Reference, and pairing code gone, its Sandbox recorded and deleted by the same pass), then is
+    forgotten, as is a User an earlier pass reaped but never forgot: call text stripped, timing
+    kept. The others are untouched, a second pass does nothing, and the old Home is a stranger."""
+    users = seed_user_reap_fixture()
+    before = user_reap_state()
+    handle = d1_local(f"SELECT handle FROM users WHERE id = {users['idle']}")[0]["handle"]
+    DaytonaMock.delete_hooks.insert(0, lambda path: 200 if path == f"/api/sandbox/{IDLE_PROVIDER}" else None)
+    DaytonaMock.deleted.clear()
+    events = run_reap_pass(base_url, users, lambda found: len(by_event(found, "user.forgotten")) >= 2
+                           and by_event(found, "sandbox.reaped"), USER_EVENTS)
+    require(not by_event(events, "user.forget.failed"), f"forgetting failed: {events}")
+    started = by_event(events, "user.reap.started")
+    require(set(started) == {users["idle"]} and started[users["idle"]]["sandbox_reaped"] is True
+            and started[users["idle"]]["mode"] == "reap", f"User reaps started: {events}")
+    require(not by_event(events, "user.reap.candidate"), f"reap mode audited candidates: {events}")
+    require(set(by_event(events, "user.forgotten")) == {users["idle"], users["leftover"]}, f"Users forgotten: {events}")
+    reaped = by_event(events, "sandbox.reaped")
+    require(set(reaped) == {users["idle"]} and reaped[users["idle"]]["already_gone"] is False, f"reaped Sandbox: {events}")
+    require(f"/api/sandbox/{IDLE_PROVIDER}" in DaytonaMock.deleted, f"the same pass did not delete the Sandbox: {DaytonaMock.deleted}")
+
+    idle = d1_local(f"SELECT handle, home_phone, home_used_at, reaped_at, forgotten_at FROM users WHERE id = {users['idle']}")[0]
+    require(idle["handle"] is None and idle["home_phone"] is None and idle["home_used_at"] is None
+            and idle["reaped_at"] and idle["forgotten_at"], f"reaped User row: {idle}")
+    require(d1_local(f"SELECT user_id FROM retired_handles WHERE handle = '{handle}'") == [{"user_id": users["idle"]}],
+            "the Handle did not enter quarantine")
+    require(not d1_local(f"SELECT 1 FROM voice_references WHERE user_id = {users['idle']}"), "the Voice Reference survived")
+    require(not d1_local("SELECT 1 FROM pairing_codes WHERE identity_hash = 'ureap-idle'"), "the pairing code survived")
+    require(d1_local(f"SELECT provider_id, state FROM sandbox_assignments WHERE user_id = {users['idle']}")
+            == [{"provider_id": None, "state": "reaped"}], "the assignment was not reaped")
+    deletion = d1_local(f"SELECT user_id, deleted_at FROM sandbox_deletions WHERE provider_id = '{IDLE_PROVIDER}'")
+    require(len(deletion) == 1 and deletion[0]["user_id"] == users["idle"] and deletion[0]["deleted_at"], f"Sandbox deletion: {deletion}")
+    require(d1_local(f"SELECT forgotten_at FROM users WHERE id = {users['leftover']}")[0]["forgotten_at"], "the leftover was not forgotten")
+    calls = "call_sid IN ('CA_UREAP_IDLE_0', 'CA_UREAP_LEFTOVER_0', 'CA_UREAP_IDLE_REG')"
+    rows = d1_local(f"SELECT detail FROM call_activity WHERE {calls}") + d1_local(f"SELECT detail FROM audit_log WHERE {calls}")
+    require(len(rows) == 8, f"forgotten rows: {rows}")
+    for row in rows:
+        detail = json.loads(row["detail"])
+        require(not {"content_text", "text", "alias", "directory", "said"} & detail.keys(), f"forgotten text kept: {detail}")
+        require("tail" not in (detail.get("thoughts") or {}), f"forgotten Agent reasoning kept: {detail}")
+        require(detail.get("ts_ms") or detail.get("attempts"), f"forgetting lost timing: {detail}")
+    require(sum(json.loads(row["detail"]) == TIMING for row in rows) == 2, f"the transcript rows lost their timing: {rows}")
+    after = user_reap_state()
+    for name in ("recent", "linking", "young"):
+        row = lambda state: next(user for user in state["users"] if user["id"] == users[name])
+        require(row(after) == row(before), f"{name} was touched: {row(after)}")
+
+    # Idempotent: the next pass finds nothing to reap or forget.
+    events = run_reap_pass(base_url, users, lambda found: False, "event LIKE 'user.%'")
+    require(events == [], f"a second pass acted again: {events}")
+    require(user_reap_state() == after, "a second pass changed something")
+
+    # The old Home now reaches the unregistered greeting.
+    phone = USER_REAP["idle"][0]
+    status, body = post(base_url, "/voice", {"From": phone, "CallSid": "CA_UREAP_STRANGER"}, token)
+    require(status == 200 and body.startswith("<Response><Gather") and "three invite words" in body,
+            f"reaped User's old Home: {status} {body}")
+    post(base_url, "/voice/status", {"From": phone, "CallSid": "CA_UREAP_STRANGER", "CallStatus": "completed"}, token)
+
+
+def registration_cooldown_checks(base_url: str, token: str) -> None:
+    """The Registration cooldown (24 hours here): a number that just registered a User hears the
+    cooldown line at the readback (storing no claim) and at a confirm already pending, and
+    registers no one; another number still registers. A number that registered three Users in
+    30 days is listed for the operator, masked unless verbose."""
+    cooling = "This phone already registered someone on Dogwalk in the last 24 hours"
+    # Audit rows outlive a run; count only this run's.
+    mark = d1_local("SELECT COALESCE(MAX(id), 0) AS id FROM audit_log")[0]["id"]
+
+    def claim(phone: str, sid: str) -> str:
+        return post(base_url, "/voice/claim?attempts=1", {"From": phone, "CallSid": sid, "SpeechResult": LOCAL_INVITE, "Confidence": "0.9"}, token)[1]
+
+    def confirm(phone: str, sid: str) -> str:
+        return post(base_url, "/voice/confirm?attempts=1", {"From": phone, "CallSid": sid, "SpeechResult": "yes", "Confidence": "0.9"}, token)[1]
+
+    def stages(sid: str) -> list:
+        return [json.loads(row["detail"])["stage"] for row in d1_local(
+            f"SELECT detail FROM audit_log WHERE id > {mark} AND event = 'registration.cooldown' AND call_sid = '{sid}'")]
+
+    def registered(phone: str) -> int:
+        return d1_local(f"SELECT COUNT(*) AS n FROM users WHERE registered_from = '{phone}'")[0]["n"]
+
+    require("I heard" in claim(COOLDOWN_PHONE, "CA_COOL_1"), "first claim from the cooldown number")
+    spoken_handle(confirm(COOLDOWN_PHONE, "CA_COOL_1"))
+    require(d1_local(f"SELECT registered_from FROM users WHERE home_phone = '{COOLDOWN_PHONE}'")
+            == [{"registered_from": COOLDOWN_PHONE}], "registered_from not recorded")
+    # A second ritual from the same number stops before the readback.
+    body = claim(COOLDOWN_PHONE, "CA_COOL_2")
+    require(cooling in body and body.endswith("<Hangup/></Response>") and "I heard" not in body, f"cooldown at readback: {body}")
+    require(not d1_local("SELECT 1 FROM claim_attempt WHERE call_sid = 'CA_COOL_2'"), "cooldown readback stored a claim")
+    require(stages("CA_COOL_2") == ["readback"], f"readback cooldown audit: {stages('CA_COOL_2')}")
+    # A claim already pending (read back before the first Registration landed) is refused at confirm.
+    d1_local(f"INSERT INTO claim_attempt (call_sid, phone_number, code_words, ts) "
+             f"VALUES ('CA_COOL_3', '{COOLDOWN_PHONE}', '{LOCAL_INVITE}', unixepoch())")
+    body = confirm(COOLDOWN_PHONE, "CA_COOL_3")
+    require(cooling in body and "Registered" not in body, f"cooldown at confirm: {body}")
+    require(stages("CA_COOL_3") == ["confirm"], f"confirm cooldown audit: {stages('CA_COOL_3')}")
+    require(registered(COOLDOWN_PHONE) == 1, "the cooldown let a second User register")
+    # Another number is unaffected.
+    require("I heard" in claim(COOLDOWN_OTHER_PHONE, "CA_COOL_4"), "claim from another number")
+    spoken_handle(confirm(COOLDOWN_OTHER_PHONE, "CA_COOL_4"))
+    require(registered(COOLDOWN_OTHER_PHONE) == 1, "another number did not register")
+
+    # Busy numbers: three Users registered from one number this month.
+    d1_local("INSERT INTO users (identity_hash, invite_code, registered_at, registered_from) VALUES "
+             + ", ".join(f"('ureap-busy-{n}', '{LOCAL_INVITE}', unixepoch() - {(n + 1) * DAY}, '{BUSY_PHONE}')" for n in range(3)))
+    headers = {"authorization": "Basic " + base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()}
+    masked = "+" + "*" * 7 + BUSY_PHONE[-4:]
+    for path, shown in (("/admin/api/state", masked), ("/admin/api/state?verbose=1", BUSY_PHONE)):
+        status, body = get(base_url, path, headers)
+        busy = {row["phone_number"]: row for row in json.loads(body)["busy_numbers"]}
+        require(status == 200 and shown in busy and busy[shown]["registrations"] == 3, f"busy numbers at {path}: {busy}")
+        require(not any(number.endswith(COOLDOWN_OTHER_PHONE[-4:]) for number in busy), f"a one-User number is listed: {busy}")
+    require(BUSY_PHONE not in get(base_url, "/admin/api/state", headers)[1], "the redacted lens shows a busy number")
 
 
 def research_object(key: str) -> bytes | None:
@@ -2303,6 +2542,8 @@ DELETE FROM sandbox_assignments WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM sandbox_deletions WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM voice_references WHERE user_id NOT IN (SELECT id FROM users);
 DELETE FROM retired_handles WHERE user_id NOT IN (SELECT id FROM users);
+DELETE FROM pairing_codes WHERE identity_hash LIKE 'ureap-%';
+DELETE FROM audit_log WHERE call_sid LIKE 'CA_UREAP_%';
 DELETE FROM roaming_attempts WHERE user_id NOT IN (SELECT id FROM users) OR phone_number LIKE '{TEST_NUMBERS}';
 DELETE FROM provider_call_jobs WHERE root_call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
 DELETE FROM call_activity WHERE call_sid IN (SELECT call_sid FROM voice_calls WHERE phone_number LIKE '{TEST_NUMBERS}');
@@ -2317,6 +2558,21 @@ INSERT INTO invite_codes (code_words, expires_at, max_uses)
 VALUES ('{LOCAL_INVITE}', unixepoch('now', '+1 hour'), NULL)
 ON CONFLICT(code_words) DO UPDATE SET expires_at = excluded.expires_at, max_uses = NULL;
 """
+    # schema.sql indexes users.registered_from, which a local D1 from before User reaping lacks;
+    # the migration adds the columns (and that index) first, once.
+    columns = json.loads(subprocess.run(
+        [wrangler, "d1", "execute", "dogwalk", "--local", "--json", "--command",
+         "SELECT name FROM pragma_table_info('users')"],
+        cwd=WORKER_DIR, check=True, capture_output=True, text=True,
+    ).stdout)[0]["results"]
+    names = {column["name"] for column in columns}
+    if columns and "registered_from" not in names:
+        subprocess.run(
+            [wrangler, "d1", "execute", "dogwalk", "--local", "--file", "migrations/2026-11-19-user-reaping.sql"],
+            cwd=WORKER_DIR,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
     subprocess.run(
         [wrangler, "d1", "execute", "dogwalk", "--local", "--file", "schema.sql"],
         cwd=WORKER_DIR,
@@ -2386,8 +2642,10 @@ def main() -> int:
     registry = tempfile.mkdtemp(prefix="dogwalk-wrangler-registry-")
     # Pinned to a dry run and shadow Roaming whatever wrangler.toml deploys, so the reaping checks
     # start without deleting and identity_checks see Roaming that admits nobody. The name path
-    # stays off until its own checks, so earlier Home calls all hear a sentence.
-    process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:dry-run", "ROAMING_ADMISSION:off", "HOME_NAME_WINDOW_HOURS:0")
+    # stays off until its own checks, so earlier Home calls all hear a sentence. run_tests
+    # registers from one number twice (rehome_checks), so the Registration cooldown is off.
+    process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:dry-run", "USER_REAP_MODE:dry-run", "REGISTRATION_COOLDOWN_HOURS:0",
+                           "ROAMING_ADMISSION:off", "HOME_NAME_WINDOW_HOURS:0")
     try:
         if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
             print("wrangler dev did not start", file=sys.stderr)
@@ -2399,17 +2657,24 @@ def main() -> int:
             return result
         # Sandbox reaping: the dry run first, then delete mode, which needs a restart.
         reap_users = reap_dry_run_checks(DEFAULT_LOCAL)
+        user_reap_dry_run_checks(DEFAULT_LOCAL)
+        # Delete and reap mode, with the default Registration cooldown (nothing else here registers).
         stop_worker(process)
-        process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:delete", "ROAMING_ADMISSION:off", "HOME_NAME_WINDOW_HOURS:0")
+        process = start_worker(wrangler, registry, "SANDBOX_REAP_MODE:delete", "USER_REAP_MODE:reap", "ROAMING_ADMISSION:off",
+                               "HOME_NAME_WINDOW_HOURS:0")
         if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
             print("wrangler dev did not restart", file=sys.stderr)
             return 1
         reap_delete_checks(DEFAULT_LOCAL, LOCAL_TOKEN, reap_users)
-        print("Sandbox reaping checks passed (dry run, delete, 404, leftover deletion, recent, live, and unlinked callers, call while deletion pending, backoff and stuck, diagnostics race)")
+        user_reap_checks(DEFAULT_LOCAL, LOCAL_TOKEN)
+        registration_cooldown_checks(DEFAULT_LOCAL, LOCAL_TOKEN)
+        print("Sandbox and User reaping checks passed (dry run, delete, 404, leftover deletion, recent, live, and unlinked callers, call while deletion pending, "
+              "backoff and stuck, diagnostics race; User dry run, reap, forget, interrupted forget, idempotence, old Home) "
+              "and Registration cooldown checks passed (readback, confirm, other number, busy numbers)")
         # Roaming admission is configuration: turning it on needs a restart too. This run keeps
         # wrangler.toml's name window, which the Roaming checks never reach (no Home calls).
         stop_worker(process)
-        process = start_worker(wrangler, registry, "ROAMING_ADMISSION:on")
+        process = start_worker(wrangler, registry, "ROAMING_ADMISSION:on", "REGISTRATION_COOLDOWN_HOURS:0")
         if not wait_port("127.0.0.1", WORKER_PORT, timeout=20):
             print("wrangler dev did not restart", file=sys.stderr)
             return 1
