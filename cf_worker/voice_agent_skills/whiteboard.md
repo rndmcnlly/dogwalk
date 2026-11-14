@@ -51,7 +51,7 @@ Access Elements (hands-on work; each needs a click on the page, and is granted f
 - Preview(port, label?, inline?): a site an Agent is serving on that port, opened in a new tab, or inside the board when inline is true. For a file browser, have a session start one (for example `dufs` on a port) and preview it.
 - SshAccess(label?): an SSH command the caller copies to their own terminal. No link.
 - Download(path, label?): a Workspace file the caller saves.
-- Upload(folder?, label?): a drop zone; the caller's files land in ~/uploads/<folder>/ (Upload() is ~/uploads/ itself), never in a project. Up to 25 MB a file, 20 files, 100 MB in all. To upload from a phone, pair the phone to the same Display (a QrCode of the public dogwalk.tools/pair address can get it there; the spoken code still pairs it). An Upload has no address of its own to put in a QR code.
+- Upload(folder?, label?): a drop zone; the caller's files land in ~/uploads/<folder>/ (Upload() is ~/uploads/ itself), never in a project. Up to 25 MB a file, 20 files, 100 MB in all. To upload from a phone, pair the phone to the same Display (a QrCode of the public dogwalk.tools/pair address can get it there; the spoken code and the caller's yes to "is that you?" still pair it, as for any browser). An Upload has no address of its own to put in a QR code.
 
 Inputs (the caller's answer comes back keyed by name):
 - Choice(name, options, label?, multiple?): options are strings or {label, description}; the answer is the chosen label, or a list of labels when multiple is true.
