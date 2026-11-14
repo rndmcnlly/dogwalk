@@ -59,9 +59,9 @@ export function checkRasterSize(bytes: Uint8Array, kind: string): void {
 // Access Elements (DOMAIN.md: Access Grant). The kind names the element; the target is its first
 // argument as written (a number as its decimal string, "" when absent), which the page derives the
 // same way, so `${kind}:${target}` keys an Access Grant on both sides.
-export type AccessKind = "terminal" | "desktop" | "preview" | "ssh" | "download";
+export type AccessKind = "terminal" | "desktop" | "preview" | "ssh" | "download" | "upload";
 export const ACCESS_COMPONENTS: Record<string, AccessKind> = {
-  Terminal: "terminal", Desktop: "desktop", Preview: "preview", SshAccess: "ssh", Download: "download",
+  Terminal: "terminal", Desktop: "desktop", Preview: "preview", SshAccess: "ssh", Download: "download", Upload: "upload",
 };
 const FILE_COMPONENTS = new Set(["Image", "Document", "Download"]);
 // Terminal, Desktop and SSH Access have no target: their first argument, if any, is a label.
@@ -106,6 +106,80 @@ function unquote(raw: string): string {
   return raw.slice(1, -1).replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, escape: string) => escape.length === 5
     ? String.fromCharCode(parseInt(escape.slice(1), 16))
     : escape === "n" ? "\n" : escape === "t" ? "\t" : escape === "r" ? "" : escape).trim();
+}
+
+// Upload (DOMAIN.md: Access Grant): files a Paired Browser sends land in one folder under a root
+// of their own, never in a project directory, where a new AGENTS.md or dotfile would be picked up
+// by an Agent or a tool. The target names a folder inside the root ("" is the root itself); a
+// leading "~/uploads/" or the absolute root is tolerated, since that is how people say it.
+export const UPLOAD_ROOT = "/home/daytona/uploads";
+export const UPLOAD_LIMITS = { file_bytes: 25_000_000, files: 20, bytes: 100_000_000 };
+const UPLOAD_SEGMENT = /^[A-Za-z0-9_][\w .,()+=@-]{0,63}$/;
+
+export function uploadFolder(target: string): string {
+  const relative = target.trim().replace(/^(?:~\/|\/home\/daytona\/)?uploads(?:\/|$)/, "").replace(/\/+$/, "");
+  if (!relative) return UPLOAD_ROOT;
+  const segments = relative.split("/");
+  if (segments.length > 3 || !segments.every((part) => UPLOAD_SEGMENT.test(part) && part.trim() === part)) {
+    throw new Error(`Upload names a folder inside ~/uploads/: up to three plain names (letters, digits, spaces, - _ . ,), no leading dot, no ".."`);
+  }
+  return `${UPLOAD_ROOT}/${segments.join("/")}`;
+}
+
+// A received file's name, flattened to one plain segment: no separators, control characters,
+// quotes, or leading dot (so never a dotfile), with its extension kept. It stays under 200 UTF-8
+// bytes, so a collision suffix still fits the filesystem's 255, and is cut by code point.
+const MAX_NAME_BYTES = 200;
+export function uploadFileName(raw: string): { name: string; stem: string; extension: string } {
+  const base = raw.split(/[\\/]/).pop() ?? "";
+  const cleaned = base.normalize("NFC").replace(/[\u0000-\u001f\u007f]/g, "").replace(/[^\p{L}\p{N} .,()+=@_-]/gu, "_")
+    .replace(/^[\s.]+/, "").replace(/\s+/g, " ").trim();
+  const dot = cleaned.lastIndexOf(".");
+  let stem = dot > 0 ? cleaned.slice(0, dot) : cleaned;
+  let extension = dot > 0 ? cleaned.slice(dot) : "";
+  if (extension.length > 16) { stem = cleaned; extension = ""; }
+  const bytes = (text: string) => new TextEncoder().encode(text).length;
+  const kept: string[] = [];
+  let used = bytes(extension);
+  for (const char of stem) {
+    used += bytes(char);
+    if (used > MAX_NAME_BYTES) break;
+    kept.push(char);
+  }
+  stem = kept.join("").trim() || "upload";
+  return { name: stem + extension, stem, extension };
+}
+
+// One Sandbox command that makes folder (absolute, under root) and claims a free name in it,
+// printing the claimed path. Every step below root must be a real directory, never a symlink, and
+// root's real path must be root, so nothing is created or written outside it. The name is created
+// exclusively (noclobber), so a concurrent upload or a planted link takes the next number instead:
+// "name.ext", then "name (2).ext". Exit 3: outside the root; 4: too many of that name; 2: other.
+export function uploadClaimScript(root: string, folder: string, stem: string, extension: string): string {
+  const quote = (text: string) => `'${text.replace(/'/g, "'\\''")}'`;
+  const segments = folder === root ? [] : folder.slice(root.length + 1).split("/");
+  return [
+    `root=${quote(root)}; stem=${quote(stem)}; ext=${quote(extension)}`,
+    `[ -L "$root" ] && exit 3`,
+    `mkdir -p -- "$root" || exit 2`,
+    `[ "$(realpath -e -- "$root")" = "$root" ] || exit 3`,
+    `dir=$root`,
+    `for part in ${segments.map(quote).join(" ")}; do`,
+    `  dir="$dir/$part"`,
+    `  [ -L "$dir" ] && exit 3`,
+    `  [ -d "$dir" ] || mkdir -- "$dir" 2>/dev/null || exit 2`,
+    `  [ -d "$dir" ] && [ ! -L "$dir" ] || exit 3`,
+    `done`,
+    `set -C`,
+    `n="$stem$ext"; i=2`,
+    // noclobber still opens an existing FIFO or device, so anything already there is skipped first.
+    `until [ ! -e "$dir/$n" ] && [ ! -L "$dir/$n" ] && { : > "$dir/$n"; } 2>/dev/null; do`,
+    `  [ -e "$dir/$n" ] || [ -L "$dir/$n" ] || exit 2`,
+    `  n="$stem ($i)$ext"; i=$((i+1)); [ "$i" -gt 999 ] && exit 4`,
+    `done`,
+    `[ -f "$dir/$n" ] && [ ! -L "$dir/$n" ] && [ ! -s "$dir/$n" ] || exit 2`,
+    `printf '%s/%s' "$dir" "$n"`,
+  ].join("\n");
 }
 
 export function boardImagePaths(program: string): string[] {

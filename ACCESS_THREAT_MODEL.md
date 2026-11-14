@@ -112,10 +112,10 @@ Three voice matches are one factor sampled three times, not three factors.
 - Accidents or malice by a legitimately admitted group member. Owner supervision
   and hangup do not undo completed actions.
 
-## Current state (2026-11-12)
+## Current state (2026-11-14)
 
 Re-verify these before relying on them; they describe the code at commit
-`1da7666`.
+`1da7666`, plus the Upload Access Element (issue #63, 2026-11-14).
 
 ### Authentication
 
@@ -158,7 +158,7 @@ Re-verify these before relying on them; they describe the code at commit
 | Path | Triggered by | Lifetime | Outlives the call |
 | --- | --- | --- | --- |
 | Paired Browser (any number, each on a named Display) | Voice tool plus keypad press (no model can complete it) | 1 h idle, 12 h total; shows boards, opens nothing by itself | Yes |
-| Access Grant: Terminal, Desktop, Preview, SSH Access, Download | Drawn on a board during a call; opened by a click on that Display while the Sandbox runs | 1 h default, up to 12 h on request; ends with its Display or `revoke_access`; Terminal and SSH give a full shell with `sudo` | Yes |
+| Access Grant: Terminal, Desktop, Preview, SSH Access, Download, Upload | Drawn on a board during a call; opened by a click on that Display while the Sandbox runs | 1 h default, up to 12 h on request; ends with its Display or `revoke_access`; Terminal and SSH give a full shell with `sudo`; Upload is a capped write path into `~/uploads/` that accepts files after the call | Yes |
 | Invitation | `create_invitation` voice tool | 24 h, single use; `revoke_invitation` exists | Yes |
 | Handle rename | `offer_handles`, `set_handle` | Permanent; old Handle quarantined 90 days | Yes |
 | Re-enrollment | `start_reenrollment`, own enforced check | Permanent | Yes |
@@ -191,6 +191,36 @@ Authority removal and durable credential capture share a transaction for explici
 revocation, board eviction, Display removal, and Sandbox replacement. The same
 commit arms an alarm, so a crash before provider cleanup cannot forget the
 credentials or leave retries dependent on another caller action.
+
+Upload is the only Access Element that writes. It mints no provider credential:
+each file is one `POST /pair/upload` under the pairing token, streamed through
+the Worker and Durable Object to Daytona's toolbox with a fixed length, never
+buffered whole. Files land only under `~/uploads/<folder>/` (at most three plain
+segments; every step below the root must be a real directory, not a symlink,
+the root's real path must be the root, and the name is created exclusively, with
+the same accepted swap-after-check race as reads), never in a project
+directory, so a planted `AGENTS.md` or dotfile cannot reach an Agent's context
+or a tool automatically. Names are flattened to one segment, never a dotfile,
+never overwrite (a taken name gets ` (2)`), and are written without the execute
+bit. The grant caps 25 MB per file, 20 files, and 100 MB in all, reserved
+before bytes move; a name claimed for a file that never arrived is removed (the
+reservation comes back only once it is), and a browser that stops sending is
+dropped after 30 seconds. These are per grant, not a Workspace budget: each
+Upload drawn gets its own allowance, and redrawing one restores it without
+removing earlier files, so nothing bounds total upload storage but the
+Sandbox's disk. `~/uploads/` is excluded from project discovery and refused as
+a Managed Session's directory, so an uploaded `AGENTS.md` never becomes an
+Agent's instructions; but it is an ordinary Workspace folder, and a process an
+Agent left watching it would see new files. Someone holding a stolen Paired Browser token while an
+Upload grant is live and the Sandbox runs can therefore plant capped,
+non-executable, non-dot files in that folder only. Every file produces a harness
+event, and so do failed attempts up to 20 per grant (more are refused silently,
+so retries cannot flood the Session Orchestrator's queue); an upload accepted
+between calls is heard only at the next call. A file's contents are an injection
+risk only once the Session Orchestrator or the User has an Agent read them, but
+its name (up to 200 bytes of letters, digits and punctuation) and declared type
+reach the Orchestrator's context directly. Revoking a grant refuses new files; a
+file already streaming finishes. An upload is caller input, never authorization.
 
 ### Hangup
 
@@ -243,6 +273,16 @@ Accepted for one operator-managed deployment whose only Users are invited:
 - A spoofed Home number admits while Home stays in shadow mode.
 - Anyone admitted to a call, and anyone who can press a key on the handset, can
   create durable access through a Paired Browser and the Access Grants drawn on it.
+- An Upload grant accepts files after the call ends, so a holder of the pairing
+  token can plant capped files in `~/uploads/<folder>/` between calls, heard
+  only at the next call. Accepted because files never land in a project
+  directory, are never a Managed Session's root, and reach an Agent only when
+  someone asks it to read them (or a process an Agent started watches the
+  folder). Total upload storage is bounded only by the Sandbox's disk.
+- An uploaded file's name and declared type are text chosen by whoever holds
+  the page, and reach the Session Orchestrator's context as part of the
+  harness event: a prompt-injection channel bounded by the name rules and the
+  failure cap. Accepted on the same terms as a Whiteboard Answer's free text.
 - An Agent with `sudo` can create durable access, spend the inference budget, and
   likely self-approve Permission Requests. The Sandbox is the trust boundary, and
   everything inside it is trusted equally.

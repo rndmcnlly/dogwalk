@@ -64,6 +64,7 @@ CODES = {
     "recording_saved":       ("caller", "offset", "mid", "routine",  "none",     "caller", "take",    None),
     "recording_discarded":   ("caller", "offset", "mid", "abnormal", "none",     "caller", "take",    None),
     "whiteboard_answer":     ("caller", "state",  "mid", "routine",  "none",     "caller", "take",    None),
+    "upload_received":       ("caller", "state",  "mid", "routine",  "none",     "caller", "take",    None),
     "progress_looking":      ("session", "state",  "bg",  "routine",  "none",     "news",   "step",    "read"),
     "progress_changing":     ("session", "state",  "bg",  "routine",  "none",     "news",   "step",    "edit"),
     "progress_running":      ("session", "state",  "bg",  "routine",  "none",     "news",   "step",    "execute"),
@@ -93,6 +94,8 @@ OVERRIDES = {
                        "why": "Same code as turn_failed. Running out of room is a cutoff, not a breakage: the falling tritone stops mid-note, without grit."},
     "turn_refused": {"contour": [0.5, 0.5],
                      "why": "Same code as turn_failed. A refusal is a flat 'no', so it keeps the roughness but drops to a low level pair, after the TNG deny buzz."},
+    "upload_received": {"contour": [1.5, 1, 1],
+                        "why": "Same code as whiteboard_answer (the caller's own input arriving). A file drops in from a fifth above and settles twice on home, so it reads as landing rather than as an answer."},
     "progress_context_low": {"register": 0.75, "rough": 0.6, "roughRate": 6, "lastMs": 300,
                         "why": "Weariness reads as a slow 6 Hz wobble rather than 75 Hz grit, and needs length to read as a state."},
 }

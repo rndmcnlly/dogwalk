@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import secrets
+import shlex
 import signal
 import subprocess
 import sys
@@ -900,9 +901,9 @@ ICON_PROGRAM = 'root = Stack([Image (asset, "", null, "icon"), Text("Example: Im
 SLIDES_PROGRAM = 'root = Stack([Image("chart.png", "Slide one")])'
 PROJECTOR_PROGRAM = 'root = Stack([Preview(5173, "The dev server"), Terminal("Projector shell")])'
 ACCESS_PROGRAM = (
-    'root = Stack([gw, app, ssh, dl, desk, term, notes])\ngw = Preview(8765, "The gateway")\napp = Preview(5173, "The dev server")\n'
+    'root = Stack([gw, app, ssh, dl, desk, term, notes, up])\ngw = Preview(8765, "The gateway")\napp = Preview(5173, "The dev server")\n'
     'ssh = SshAccess("Copy this")\ndl = Download("REPORT.md", "The report")\ndesk = Desktop()\nterm = Terminal("Build shell")\n'
-    'notes = Document("REPORT.md", "Read it here")'
+    'notes = Document("REPORT.md", "Read it here")\nup = Upload("talk-slides", "Drop the slides here")'
 )
 STEP_IDS = [
     "cs-brief", "cs-create", "cs-list", "dr-brief", "h1-brief", "h1-create", "h1-begin", "h1-say-url", "h1-say",
@@ -1324,7 +1325,7 @@ def provider_gets(path: str):
     return 200, json.dumps({"url": f"https://{match[1]}-{token}.preview.test/", "token": token}).encode(), "application/json"
 
 
-def provider_posts(path: str, payload: dict):
+def provider_posts(path: str, payload: dict, _raw: bytes):
     if match := re.fullmatch(r"/api/sandbox/mock-sandbox-1/ports/(\d+)/signed-preview-url/([^/]+)/expire", path):
         PROVIDER["expired"].append((int(match[1]), match[2]))
         return {}
@@ -1333,6 +1334,49 @@ def provider_posts(path: str, payload: dict):
         PROVIDER["ssh"].append({"minutes": int(match[1]), "token": token})
         return {"token": token, "sshCommand": f"ssh {token}@ssh.preview.test", "expiresAt": "2026-11-12T12:00:00Z"}
     return None
+
+
+# Files a Paired Browser uploaded, by sandbox path, as the toolbox received them.
+UPLOADED: dict[str, bytes] = {}
+# Names the claim script created and no upload has filled or removed yet.
+CLAIMED: set[str] = set()
+
+
+def upload_posts(path: str, _payload: dict, raw: bytes):
+    """The toolbox's multipart upload: one part, kept only when it arrived whole."""
+    prefix = "/toolbox/mock-sandbox-1/files/upload?path="
+    if not path.startswith(prefix):
+        return None
+    boundary = re.match(rb"--([^\r]+)\r\n", raw)
+    head_end = raw.find(b"\r\n\r\n")
+    tail = b"\r\n--" + boundary[1] + b"--\r\n" if boundary else b""
+    if not boundary or head_end < 0 or not raw.endswith(tail):
+        return {"error": "incomplete multipart body"}
+    UPLOADED[urllib.parse.unquote(path[len(prefix):])] = raw[head_end + 4:-len(tail)]
+    CLAIMED.discard(urllib.parse.unquote(path[len(prefix):]))
+    return {}
+
+
+def upload_destination(command: str) -> dict | None:
+    """The upload claim script (board_images.ts uploadClaimScript): a folder under the root, and
+    the first name no file holds, claimed at once; chmod and rm on uploads succeed."""
+    script = shlex.split(command)[2] if command.startswith("bash -c ") else ""
+    if script.startswith(("chmod 0644 -- '/home/daytona/uploads/", "rm -f -- '/home/daytona/uploads/")):
+        if script.startswith("rm "):
+            CLAIMED.discard(shlex.split(script)[3])
+        return {"result": "", "exitCode": 0}
+    if not script.startswith("root='/home/daytona/uploads'"):
+        return None
+    lines = script.split("\n")
+    names = dict(item.rstrip(";").split("=", 1) for item in shlex.split(lines[0]))
+    parts = shlex.split(next(line for line in lines if line.startswith("for part in "))[len("for part in "):].rsplit(";", 1)[0])
+    folder = "/".join([names["root"], *parts])
+    stem, extension = names["stem"], names["ext"]
+    name, index = stem + extension, 2
+    while f"{folder}/{name}" in UPLOADED or f"{folder}/{name}" in CLAIMED:
+        name, index = f"{stem} ({index}){extension}", index + 1
+    CLAIMED.add(f"{folder}/{name}")
+    return {"result": f"{folder}/{name}", "exitCode": 0}
 
 
 def provider_deletes(path: str):
@@ -1972,6 +2016,21 @@ async def run_protocol(identity: str) -> None:
             status, raw, body = pair_raw(f"/pair/file?{query}", {"authorization": f"Bearer {credential or token}"})
             return status, {key.lower(): value for key, value in raw.items()}, body
 
+        def upload(data: bytes, name: str, board: str, folder: str = "talk-slides", *, size: int | None = None,
+                   last: bool = False, credential: str | None = None) -> tuple[int, dict]:
+            """One file dropped on a board's Upload, its name percent-encoded as the page sends it."""
+            query = urllib.parse.urlencode({"board": board, "folder": folder})
+            request = urllib.request.Request(f"http://127.0.0.1:{WORKER_PORT}/pair/upload?{query}", data=data, method="POST", headers={
+                "authorization": f"Bearer {credential or token}", "content-type": "application/octet-stream",
+                "x-dogwalk-file-name": urllib.parse.quote(name), "x-dogwalk-file-size": str(len(data) if size is None else size),
+                "x-dogwalk-file-type": "application/pdf", **({"x-dogwalk-upload-last": "1"} if last else {}),
+            })
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    return response.status, json.loads(response.read() or b"{}")
+            except urllib.error.HTTPError as error:
+                return error.code, json.loads(error.read() or b"{}")
+
         # Dogwalk no longer serves a terminal emulator, its assets, or its relay socket.
         for path in ("/pair/terminal", f"/pair/terminal/ws?for={identity}", "/pair/assets/xterm.js"):
             assert (await asyncio.to_thread(pair_raw, path, {}))[0] == 404, path
@@ -2211,7 +2270,7 @@ async def run_protocol(identity: str) -> None:
         assert (await recv_type(mirror, "board", 15))["board"]["id"] == access_board["id"], "a Display's browsers mirror it"
         await wait_for(outputs_back("k9-access", "k9-state"), 15)
         drawn = OrchestratorMock.tool_output("k9-access")
-        granted = [("desktop", ""), ("download", "REPORT.md"), ("preview", "5173"), ("ssh", ""), ("terminal", "")]
+        granted = [("desktop", ""), ("download", "REPORT.md"), ("preview", "5173"), ("ssh", ""), ("terminal", ""), ("upload", "talk-slides")]
         assert sorted((item["kind"], item["target"]) for item in drawn["access"]) == granted and {item["minutes"] for item in drawn["access"]} == {90}, drawn
         [gateway] = drawn["access_refused"]
         assert gateway["key"] == "preview:8765" and "Agent Gateway" in gateway["reason"], drawn
@@ -2242,6 +2301,45 @@ async def run_protocol(identity: str) -> None:
         assert status == 200 and body == REPORT_TEXT.encode() and headers.get("content-disposition", "").startswith("attachment"), (status, headers)
         assert headers.get("content-type") == "application/octet-stream", headers
         assert (await asyncio.to_thread(file, "REPORT.md", icons[-1]["id"], download="1"))[0] == 404
+        # An Upload streams each file into its folder under ~/uploads, never over a file already there.
+        assert access_board["access"]["upload:talk-slides"]["upload"] == {
+            "limits": {"file_bytes": 25_000_000, "files": 20, "bytes": 100_000_000}, "files": 0, "bytes": 0, "failures": 0,
+        }, access_board["access"]["upload:talk-slides"]
+        slides_pdf = b"%PDF-1.7\n" + bytes(range(256)) * 300 + b"\r\n--not-a-boundary--\r\n"
+        status, landed = await asyncio.to_thread(upload, slides_pdf, "Talk slides.pdf", access_board["id"])
+        assert status == 200 and landed == {"ok": True, "path": "~/uploads/talk-slides/Talk slides.pdf", "size": len(slides_pdf)}, (status, landed)
+        assert UPLOADED["/home/daytona/uploads/talk-slides/Talk slides.pdf"] == slides_pdf, "the bytes reach the sandbox intact"
+        await wait_for(lambda: heard('upload_received: {"board_id":"' + access_board["id"] + '","display":"main","path":"~/uploads/talk-slides/Talk slides.pdf"'), 10)
+        status, again = await asyncio.to_thread(upload, b"second draft", "../Talk slides.pdf", access_board["id"], last=True)
+        assert status == 200 and again["path"] == "~/uploads/talk-slides/Talk slides (2).pdf", (status, again)
+        assert UPLOADED["/home/daytona/uploads/talk-slides/Talk slides (2).pdf"] == b"second draft"
+        # The last file of a drop wakes the Orchestrator and tells the call with an earcon.
+        await wait_for(lambda: any(
+            item.get("role") == "user" and "[harness event] upload_received" in str(item["content"]) and '"last_of_drop":true' in str(item["content"])
+            for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
+        def upload_earcons() -> list[dict]:
+            return [json.loads(row["detail"]) for row in call_activity_rows("CA_VOICE_TEST2")
+                    if row["event"].startswith("voice.fixture.") and json.loads(row["detail"]).get("label") == "upload_received"]
+        await wait_for(upload_earcons, 15)
+        assert "second draft" not in json.dumps([payload["input"] for _, payload in OrchestratorMock.requests]), "the Orchestrator never sees the bytes"
+        landed_board = (await recv_type(browser, "board", 15))["board"]
+        assert landed_board["access"]["upload:talk-slides"]["upload"]["files"] >= 1, landed_board["access"]
+        # Refused before a byte moves: too large, a folder no board names, another Display's board.
+        status, refused = await asyncio.to_thread(upload, b"x", "huge.bin", access_board["id"], size=25_000_001)
+        assert status == 413 and "too large" in refused["error"], (status, refused)
+        status, refused = await asyncio.to_thread(upload, b"x", "a.txt", access_board["id"], folder="elsewhere")
+        assert status == 404 and "no board on this display" in refused["error"], (status, refused)
+        status, refused = await asyncio.to_thread(upload, b"x", "a.txt", access_board["id"], folder="../etc")
+        assert status == 404, (status, refused)
+        # A body that does not match its declared size never lands, and gives back its reservation.
+        status, refused = await asyncio.to_thread(upload, b"short", "short.txt", access_board["id"], size=50)
+        assert status == 400 and "incomplete" in refused["error"], (status, refused)
+        status, refused = await asyncio.to_thread(upload, b"longer than it said", "long.txt", access_board["id"], size=4)
+        assert status == 400 and "longer" in refused["error"], (status, refused)
+        assert not any(path.endswith(("/short.txt", "/long.txt")) for path in UPLOADED), UPLOADED.keys()
+        await wait_for(lambda: heard('upload_failed: {"board_id":"' + access_board["id"] + '","display":"main","name":"short.txt"'), 10)
+        status, refused = await asyncio.to_thread(upload, b"x", "a.txt", access_board["id"], credential=f"{identity}.not-a-secret")
+        assert status == 401, (status, refused)
         # A Terminal's optional argument is only a label; it never selects a named shell.
         opened = await ask(browser, {"type": "open", "id": 5, "board_id": access_board["id"], "key": "terminal:"})
         build_link = PROVIDER["signed"][-1]
@@ -2257,7 +2355,7 @@ async def run_protocol(identity: str) -> None:
         assert revoked_board["id"] == access_board["id"] and all(grant.get("revoked") for grant in revoked_board["access"].values()), revoked_board
         await recv_type(mirror, "board", 15)
         await wait_for(outputs_back("kB-revoke", "kB-state"), 15)
-        assert OrchestratorMock.tool_output("kB-revoke") == {"ok": True, "display": "main", "grants_revoked": 5}, OrchestratorMock.tool_output("kB-revoke")
+        assert OrchestratorMock.tool_output("kB-revoke") == {"ok": True, "display": "main", "grants_revoked": 6}, OrchestratorMock.tool_output("kB-revoke")
         displays = {item["name"]: item for item in OrchestratorMock.tool_output("kB-state")["displays"]}
         assert displays["main"]["access"] == [] and len(displays["projector"]["access"]) == 2, displays
         assert (5173, app_link["token"]) in PROVIDER["expired"], PROVIDER["expired"]
@@ -2271,6 +2369,9 @@ async def run_protocol(identity: str) -> None:
         assert refused["type"] == "error" and "revoked" in refused["error"], refused
         status, _, body = await asyncio.to_thread(file, "REPORT.md", access_board["id"], download="1")
         assert status == 400 and b"revoked" in body, (status, body)
+        status, refused = await asyncio.to_thread(upload, b"late", "late.txt", access_board["id"])
+        assert status == 400 and "revoked" in refused["error"], (status, refused)
+        assert not any(path.endswith("/late.txt") for path in UPLOADED)
         # Unpairing a Display ends it: its browsers, boards, and grants.
         await mocks.send_live(transcript("input", "Unpair the projector.", 106000, 107000))
         await mocks.send_live(delegation("del-wb-end2", 107050))
@@ -2512,7 +2613,7 @@ async def run_protocol(identity: str) -> None:
         assert turn["detail"]["agent_session_id"] and turn["detail"]["ms"] >= 0
         for expected in ("menu.opened", "menu.closed", "menu.restart.requested", "menu.recovery", "voice.keypad.stop", "voice.keypad.status",
                          "voice.earcons", "voice.theme", "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted", "pairing.page_stale",
-                         "whiteboard.drawn", "access.opened", "access.revoked", "display.renamed", "display.ended"):
+                         "whiteboard.drawn", "whiteboard.uploaded", "whiteboard.upload_failed", "access.opened", "access.revoked", "display.renamed", "display.ended"):
             assert expected in events, (expected, events)
         handoff_rows = OrchestratorMock.user_message('"key":"7"')
         assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows
@@ -3320,9 +3421,9 @@ def main() -> int:
     DaytonaMock.openai_requests = []
     DaytonaMock.preview_reads = 0
     DaytonaMock.executed = []
-    DaytonaMock.execute_hooks = [sandbox_toolbox]
+    DaytonaMock.execute_hooks = [upload_destination, sandbox_toolbox]
     DaytonaMock.get_hooks = [sandbox_files, provider_gets]
-    DaytonaMock.post_hooks = [provider_posts]
+    DaytonaMock.post_hooks = [provider_posts, upload_posts]
     DaytonaMock.delete_hooks = [provider_deletes]
     daytona = ThreadingHTTPServer(("127.0.0.1", DAYTONA_MOCK_PORT), DaytonaMock)
     thread = threading.Thread(target=daytona.serve_forever, daemon=True)

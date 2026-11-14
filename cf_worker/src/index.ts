@@ -1232,6 +1232,19 @@ async function handlePair(req: Request, env: Env, url: URL): Promise<Response> {
       headers: { "x-dogwalk-secret": credential.secret },
     });
   }
+  // Upload: a file's bytes streamed into the folder a board's live Upload grant names.
+  if (url.pathname === "/pair/upload" && req.method === "POST") {
+    const credential = splitCredential(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null);
+    if (!credential || !(await knownIdentity(env, credential.identity))) return jsonResponse({ error: "this pairing has expired" }, 401);
+    const forwarded = new Headers({ "x-dogwalk-secret": credential.secret });
+    for (const name of ["x-dogwalk-file-name", "x-dogwalk-file-size", "x-dogwalk-file-type", "x-dogwalk-upload-last"]) {
+      const value = req.headers.get(name);
+      if (value !== null) forwarded.set(name, value);
+    }
+    return voiceSessionFor(env, credential.identity).fetch(`https://voice-session${url.pathname}${url.search}`, {
+      method: "POST", headers: forwarded, body: req.body,
+    });
+  }
   if (url.pathname === "/pair/ws") {
     if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("expected a WebSocket", { status: 426 });
     const identity = url.searchParams.get("for") ?? "";
