@@ -21,8 +21,6 @@ import {
   describeBrowser, describePlace, sha256Hex, splitCredential,
 } from "./pairing";
 import type { Env } from "./types";
-import { handleTerminalAssets, TERMINAL_HTML } from "./terminal_page";
-import { TerminalRelay } from "./terminal_relay";
 import {
   findInviteCode, INVITATION_STATUS_SQL, noteEnrollmentOutcome, noteInviteHeard, redemptionStatements, USABLE_FOR_PHONE_SQL,
 } from "./invitations";
@@ -38,7 +36,7 @@ import {
   startHomeCheck, startRegistrationEnrollment, startRoamingFromGreeting,
 } from "./identity_check";
 import { asksToDonate, donationConsent, donationTone, handleDonationConsent, handleDonationRound, handleDonationStream } from "./voice_donation";
-export { TerminalRelay, VoiceSession };
+export { VoiceSession };
 
 // --- env ----------------------------------------------------------------
 
@@ -1070,33 +1068,6 @@ async function handlePair(req: Request, env: Env, url: URL): Promise<Response> {
     return voiceSessionFor(env, ticket.identity).fetch("https://voice-session/pair/claim/status", {
       headers: { "x-dogwalk-secret": ticket.secret },
     });
-  }
-  // Human Takeover terminal: a full-screen page, its vendored assets, and the relay socket.
-  if (url.pathname === "/pair/terminal" && req.method === "GET") {
-    return new Response(TERMINAL_HTML, {
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": "no-store",
-        "referrer-policy": "no-referrer",
-        "x-content-type-options": "nosniff",
-        // xterm injects its own style elements; scripts are same-origin assets only.
-        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-      },
-    });
-  }
-  if (url.pathname.startsWith("/pair/assets/")) {
-    return handleTerminalAssets(url) ?? new Response("not found", { status: 404 });
-  }
-  if (url.pathname === "/pair/terminal/ws") {
-    if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("expected a WebSocket", { status: 426 });
-    const identity = url.searchParams.get("for") ?? "";
-    if (!/^[0-9a-f]{16,128}$/.test(identity) || !(await knownIdentity(env, identity))) {
-      return new Response("unknown pairing", { status: 404 });
-    }
-    const relay = env.TERMINAL_RELAYS.get(env.TERMINAL_RELAYS.idFromName(identity));
-    const headers = new Headers(req.headers);
-    headers.set("x-dogwalk-identity", identity);
-    return relay.fetch("https://terminal-relay/ws", { headers });
   }
   // Files a board on the browser's Display names, read from the Sandbox only while it runs.
   if (url.pathname === "/pair/file" && req.method === "GET") {

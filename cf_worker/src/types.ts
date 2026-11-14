@@ -1,7 +1,6 @@
 export interface Env {
   DB: D1Database;
   VOICE_SESSIONS: DurableObjectNamespace;
-  TERMINAL_RELAYS: DurableObjectNamespace;
   TWILIO_AUTH_TOKEN: string;
   TWILIO_API_BASE?: string;
   DAYTONA_API_KEY: string;

@@ -880,10 +880,10 @@ CHECKS_PROGRAM = (
 )
 ICON_PROGRAM = 'root = Stack([Image (asset, "", null, "icon"), Text("Example: Image(\'missing.png\', \'x\')")])\nasset = "/home/daytona/chart.png"'
 SLIDES_PROGRAM = 'root = Stack([Image("chart.png", "Slide one")])'
-PROJECTOR_PROGRAM = 'root = Stack([Preview(5173, "The dev server")])'
+PROJECTOR_PROGRAM = 'root = Stack([Preview(5173, "The dev server"), Terminal("Projector shell")])'
 ACCESS_PROGRAM = (
     'root = Stack([gw, app, ssh, dl, desk, term, notes])\ngw = Preview(8765, "The gateway")\napp = Preview(5173, "The dev server")\n'
-    'ssh = SshAccess("Copy this")\ndl = Download("REPORT.md", "The report")\ndesk = Desktop()\nterm = Terminal("build")\n'
+    'ssh = SshAccess("Copy this")\ndl = Download("REPORT.md", "The report")\ndesk = Desktop()\nterm = Terminal("Build shell")\n'
     'notes = Document("REPORT.md", "Read it here")'
 )
 STEP_IDS = [
@@ -1283,8 +1283,8 @@ def sandbox_files(path: str):
 
 
 # What Access Grants minted and revoked at Daytona: signed preview links, their expiries, SSH
-# tokens and their deletions, and the terminal PTYs the relay asked for.
-PROVIDER: dict[str, list] = {"signed": [], "expired": [], "ssh": [], "pty": []}
+# tokens and their deletions. Terminal, Desktop and Preview share the signed-link path.
+PROVIDER: dict[str, list] = {"signed": [], "expired": [], "ssh": []}
 
 
 def provider_gets(path: str):
@@ -1304,8 +1304,6 @@ def provider_posts(path: str, payload: dict):
         token = f"ssh-token-{len(PROVIDER['ssh']) + 1}"
         PROVIDER["ssh"].append({"minutes": int(match[1]), "token": token})
         return {"token": token, "sshCommand": f"ssh {token}@ssh.preview.test", "expiresAt": "2026-11-12T12:00:00Z"}
-    if path == "/toolbox/mock-sandbox-1/process/pty":
-        PROVIDER["pty"].append(payload.get("id"))  # still refused: the mock toolbox has no PTY
     return None
 
 
@@ -1923,20 +1921,9 @@ async def run_protocol(identity: str) -> None:
             status, raw, body = pair_raw(f"/pair/file?{query}", {"authorization": f"Bearer {credential or token}"})
             return status, {key.lower(): value for key, value in raw.items()}, body
 
-        terminal_url = f"ws://127.0.0.1:{WORKER_PORT}/pair/terminal/ws?for={identity}"
-
-        async def terminal_ready(credential: dict) -> dict:
-            async with connect(terminal_url) as terminal:
-                await terminal.send(json.dumps({**credential, "type": "auth", "cols": 100, "rows": 30}))
-                reply = await recv_type(terminal, "ready")
-                # The mock toolbox has no PTY, so the relay reports why and closes.
-                assert "terminal" in (await recv_type(terminal, "notice"))["text"]
-                return reply
-
-        async def terminal_refused(credential: dict) -> None:
-            async with connect(terminal_url) as terminal:
-                await terminal.send(json.dumps({**credential, "type": "auth"}))
-                assert "expired" in (await recv_type(terminal, "error"))["error"]
+        # Dogwalk no longer serves a terminal emulator, its assets, or its relay socket.
+        for path in ("/pair/terminal", f"/pair/terminal/ws?for={identity}", "/pair/assets/xterm.js"):
+            assert (await asyncio.to_thread(pair_raw, path, {}))[0] == 404, path
 
         browser, hello, boards = await open_page(token, "main")
         assert hello["device"] == "Chrome on a Mac" and hello["idle_expires_at"] > time.time() * 1000
@@ -2061,17 +2048,16 @@ async def run_protocol(identity: str) -> None:
         assert f'src="data:image/png;base64,{base64.b64encode(PNG_BYTES).decode()}"' in html and "srcset" not in html, html[:400]
         assert 'src="https://example.com/a.png"' in html and 'src="data:image/gif;base64,R0lG"' in html, html
         assert 'src="/etc/x.png" alt="Outside (image not shown: only files under /home/daytona can be read)"' in html, html
-        # Human Takeover: the board's Terminal opens with a one-time ticket in a URL fragment.
+        # Human Takeover: Terminal opens Daytona's web terminal with a grant-bounded signed link.
         opened = await ask(browser, {"type": "open", "id": 7, "board_id": board["id"], "key": "terminal:"})
-        assert opened["type"] == "opened" and f"/pair/terminal#t={identity}." in opened["url"], opened
-        ticket_credential = opened["url"].split("#t=", 1)[1]
-        ready = await terminal_ready({"ticket": ticket_credential})
-        terminal_token = ready["token"]
-        assert terminal_token.startswith(identity + ".") and terminal_token != ticket_credential
-        assert ready["expires_at"] == board["access"]["terminal:"]["expires_at"], "the terminal lasts as long as its grant"
-        assert PROVIDER["pty"][-1] == "human", PROVIDER["pty"]
-        await terminal_refused({"ticket": ticket_credential})  # a launch ticket works once
-        assert (await terminal_ready({"token": terminal_token}))["token"] == terminal_token, "a reload reconnects with its token"
+        terminal_link = PROVIDER["signed"][-1]
+        assert terminal_link["port"] == 22222 and 3500 <= terminal_link["seconds"] <= 3600, terminal_link
+        assert opened == {"type": "opened", "id": 7, "url": f"https://22222-{terminal_link['token']}.preview.test"}, opened
+        # Every open gets its own link, not a reusable Sandbox-wide preview token.
+        reopened = await ask(browser, {"type": "open", "id": 10, "board_id": board["id"], "key": "terminal:"})
+        terminal_reopened = PROVIDER["signed"][-1]
+        assert terminal_reopened["port"] == 22222 and terminal_reopened["token"] != terminal_link["token"], terminal_reopened
+        assert reopened["url"] == f"https://22222-{terminal_reopened['token']}.preview.test", reopened
         # A Preview opens as a provider-signed link, bounded by its grant.
         opened = await ask(browser, {"type": "open", "id": 8, "board_id": board["id"], "key": "preview:3000"})
         docs_link = PROVIDER["signed"][-1]
@@ -2105,7 +2091,7 @@ async def run_protocol(identity: str) -> None:
         assert diagnostics["context_archives"][-1]["reason"] == "compaction", diagnostics["context_archives"]
         assert not any(item.get("call_id") == "h1-create" for item in diagnostics["orchestrator_context"])
         assert (3000, docs_link["token"]) in PROVIDER["expired"], "a dropped board's signed link is expired"
-        await terminal_refused({"token": terminal_token})
+        assert all((22222, link["token"]) in PROVIDER["expired"] for link in (terminal_link, terminal_reopened)), "a dropped board expires every terminal link it minted"
         assert (await asyncio.to_thread(file, "REPORT.md", board["id"]))[0] == 404, "a dropped board's files are no longer read"
 
         # A second Display: pairing it leaves the first paired and its page open.
@@ -2155,7 +2141,7 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(delegation("del-wb-end", 105050))
         assert (await recv_type(slides, "display", 15))["name"] == "projector"
         projector_board = (await recv_type(slides, "board", 15))["board"]
-        assert projector_board["display"] == "projector" and set(projector_board["access"]) == {"preview:5173"}, projector_board
+        assert projector_board["display"] == "projector" and set(projector_board["access"]) == {"preview:5173", "terminal:"}, projector_board
         await wait_for(outputs_back("we-rename", "we-preview"), 15)
         assert OrchestratorMock.tool_output("we-rename") == {"ok": True, "display": "projector"}
         assert OrchestratorMock.tool_output("we-preview")["page_open"] is True
@@ -2163,13 +2149,18 @@ async def run_protocol(identity: str) -> None:
         opened = await ask(slides, {"type": "open", "id": 1, "board_id": projector_board["id"], "key": "preview:5173"})
         projector_link = PROVIDER["signed"][-1]
         assert opened["url"] == f"https://5173-{projector_link['token']}.preview.test", opened
+        opened = await ask(slides, {"type": "open", "id": 2, "board_id": projector_board["id"], "key": "terminal:"})
+        projector_terminal = PROVIDER["signed"][-1]
+        assert projector_terminal["port"] == 22222 and opened["url"] == f"https://22222-{projector_terminal['token']}.preview.test", opened
+        refused = await ask(browser, {"type": "open", "id": 11, "board_id": projector_board["id"], "key": "terminal:"})
+        assert refused["type"] == "error" and "no longer on this display" in refused["error"], refused
         # Access Elements: drawn in the call, they are granted on that Display for the minutes asked.
         await mocks.send_live(dtmf("9"))
         access_board = (await recv_type(browser, "board", 15))["board"]
         assert (await recv_type(mirror, "board", 15))["board"]["id"] == access_board["id"], "a Display's browsers mirror it"
         await wait_for(outputs_back("k9-access", "k9-state"), 15)
         drawn = OrchestratorMock.tool_output("k9-access")
-        granted = [("desktop", ""), ("download", "REPORT.md"), ("preview", "5173"), ("ssh", ""), ("terminal", "build")]
+        granted = [("desktop", ""), ("download", "REPORT.md"), ("preview", "5173"), ("ssh", ""), ("terminal", "")]
         assert sorted((item["kind"], item["target"]) for item in drawn["access"]) == granted and {item["minutes"] for item in drawn["access"]} == {90}, drawn
         [gateway] = drawn["access_refused"]
         assert gateway["key"] == "preview:8765" and "Agent Gateway" in gateway["reason"], drawn
@@ -2179,7 +2170,7 @@ async def run_protocol(identity: str) -> None:
         assert set(displays) == {"main", "projector"} and len(displays["main"]["browsers"]) == 2, displays
         assert displays["main"]["latest"]["board_id"] == access_board["id"] and displays["main"]["boards"] == 5, displays["main"]
         assert sorted((item["kind"], item["target"]) for item in displays["main"]["access"]) == granted, displays["main"]
-        assert [(item["kind"], item["target"]) for item in displays["projector"]["access"]] == [("preview", "5173")], displays
+        assert sorted((item["kind"], item["target"]) for item in displays["projector"]["access"]) == [("preview", "5173"), ("terminal", "")], displays
         # The mirror opens the Preview and SSH Access: a fresh link, and a command rather than a link.
         opened = await ask(mirror, {"type": "open", "id": 1, "board_id": access_board["id"], "key": "preview:5173"})
         app_link = PROVIDER["signed"][-1]
@@ -2200,15 +2191,14 @@ async def run_protocol(identity: str) -> None:
         assert status == 200 and body == REPORT_TEXT.encode() and headers.get("content-disposition", "").startswith("attachment"), (status, headers)
         assert headers.get("content-type") == "application/octet-stream", headers
         assert (await asyncio.to_thread(file, "REPORT.md", icons[-1]["id"], download="1"))[0] == 404
-        # A named Terminal is its own tmux session, lasting as long as its grant.
-        opened = await ask(browser, {"type": "open", "id": 5, "board_id": access_board["id"], "key": "terminal:build"})
-        ready = await terminal_ready({"ticket": opened["url"].split("#t=", 1)[1]})
-        build_token = ready["token"]
-        assert ready["expires_at"] == access_board["access"]["terminal:build"]["expires_at"], ready
-        assert PROVIDER["pty"][-1] == "human-build", PROVIDER["pty"]
+        # A Terminal's optional argument is only a label; it never selects a named shell.
+        opened = await ask(browser, {"type": "open", "id": 5, "board_id": access_board["id"], "key": "terminal:"})
+        build_link = PROVIDER["signed"][-1]
+        assert build_link["port"] == 22222 and 5300 <= build_link["seconds"] <= 5400, build_link
+        assert opened["url"] == f"https://22222-{build_link['token']}.preview.test", opened
         # No credential reaches the Orchestrator.
         context = json.dumps([payload["input"] for _, payload in OrchestratorMock.requests])
-        for secret in (app_link["token"], projector_link["token"], ssh_access["token"], build_token.split(".", 1)[1], "preview.test"):
+        for secret in (app_link["token"], projector_link["token"], projector_terminal["token"], ssh_access["token"], build_link["token"], terminal_link["token"], terminal_reopened["token"], "preview.test"):
             assert secret not in context, secret
         # Revoking ends every live grant on the Display at once; the boards stay, marked revoked.
         await mocks.send_live(dtmf("B"))
@@ -2218,11 +2208,14 @@ async def run_protocol(identity: str) -> None:
         await wait_for(outputs_back("kB-revoke", "kB-state"), 15)
         assert OrchestratorMock.tool_output("kB-revoke") == {"ok": True, "display": "main", "grants_revoked": 5}
         displays = {item["name"]: item for item in OrchestratorMock.tool_output("kB-state")["displays"]}
-        assert displays["main"]["access"] == [] and len(displays["projector"]["access"]) == 1, displays
+        assert displays["main"]["access"] == [] and len(displays["projector"]["access"]) == 2, displays
         assert (5173, app_link["token"]) in PROVIDER["expired"], PROVIDER["expired"]
         assert (5173, projector_link["token"]) not in PROVIDER["expired"], "another Display's grant stands"
+        assert (22222, projector_terminal["token"]) not in PROVIDER["expired"], "another Display's terminal grant stands"
         assert f"/api/sandbox/mock-sandbox-1/ssh-access?token={ssh_access['token']}" in DaytonaMock.deleted, DaytonaMock.deleted
-        await terminal_refused({"token": build_token})
+        assert (22222, build_link["token"]) in PROVIDER["expired"], "revoke_access expires terminal links too"
+        refused = await ask(mirror, {"type": "open", "id": 7, "board_id": access_board["id"], "key": "terminal:"})
+        assert refused["type"] == "error" and "revoked" in refused["error"], refused
         refused = await ask(mirror, {"type": "open", "id": 6, "board_id": access_board["id"], "key": "preview:5173"})
         assert refused["type"] == "error" and "revoked" in refused["error"], refused
         status, _, body = await asyncio.to_thread(file, "REPORT.md", access_board["id"], download="1")
@@ -2235,6 +2228,7 @@ async def run_protocol(identity: str) -> None:
         assert OrchestratorMock.tool_output("we-unpair") == {"ok": True, "display": "projector", "browsers_unpaired": 1}
         assert [item["name"] for item in OrchestratorMock.tool_output("we-state")["displays"]] == ["main"]
         assert (5173, projector_link["token"]) in PROVIDER["expired"], "an ended Display's grants are revoked"
+        assert (22222, projector_terminal["token"]) in PROVIDER["expired"], "an ended Display's terminal links are revoked"
         await wait_for(lambda: heard('browser_disconnected: {"display":"projector"}'), 10)
         await slides.close()
         assert (await asyncio.to_thread(file, "chart.png", slide["board_id"], slides_token, **{"as": "image"}))[0] == 401
@@ -3134,6 +3128,7 @@ def whiteboard_parser_checks() -> None:
         'root = Stack([Image("notes.txt", "x")])',
         'root = Stack([Image("/home/daytona/icon.png", "", null, "huge")])',
         'root = Stack([Image (path, "Plot")])\npath = alias\nalias = "chart.png"',
+        'root = Stack([Terminal(), Terminal("Build shell"), Desktop("Desktop"), SshAccess("SSH")])',
     ]
     script = (
         'const HOME = "/home/daytona";\n' + resolve + parser
@@ -3141,7 +3136,7 @@ def whiteboard_parser_checks() -> None:
         + " return { errors: r.errors, children: r.root ? r.root.props.children.map((c) => c.props) : null }; })));"
     )
     results = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
-    drawn, url, data, escape, text, size, reference = results
+    drawn, url, data, escape, text, size, reference, access = results
     assert not drawn["errors"] and drawn["children"][0] == {
         "path": "/home/daytona/bayleaf/diagram.svg", "alt": "Chain path", "caption": "Generated, unverified", "size": "large",
     }, drawn
@@ -3149,6 +3144,7 @@ def whiteboard_parser_checks() -> None:
         assert refused["children"] == [] and any(why in error for error in refused["errors"]), refused
     assert size["children"] == [{"path": "/home/daytona/icon.png", "alt": ""}] and "must be one of icon" in size["errors"][0], size
     assert not reference["errors"] and reference["children"] == [{"path": "/home/daytona/chart.png", "alt": "Plot"}], reference
+    assert not access["errors"] and access["children"] == [{}, {"label": "Build shell"}, {"label": "Desktop"}, {"label": "SSH"}], access
 
 
 def main() -> int:

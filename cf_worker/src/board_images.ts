@@ -64,8 +64,8 @@ export const ACCESS_COMPONENTS: Record<string, AccessKind> = {
   Terminal: "terminal", Desktop: "desktop", Preview: "preview", SshAccess: "ssh", Download: "download",
 };
 const FILE_COMPONENTS = new Set(["Image", "Document", "Download"]);
-// Desktop and SSH Access have no target: their first argument, if any, is a label.
-const UNTARGETED = new Set(["Desktop", "SshAccess"]);
+// Terminal, Desktop and SSH Access have no target: their first argument, if any, is a label.
+const UNTARGETED = new Set(["Terminal", "Desktop", "SshAccess"]);
 
 export interface BoardElement { component: string; target: string }
 

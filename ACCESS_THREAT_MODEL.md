@@ -173,6 +173,16 @@ Narrowing it from the previous design: a grant is scoped to one Display and one
 target, has its own expiry, can be revoked by voice (`revoke_access`,
 `unpair_display`), and nothing on a board wakes a sleeping Sandbox.
 
+Terminal, Desktop and Preview opens use port-scoped, expiring, revocable Daytona
+signed links. A Terminal reaches the provider web terminal on port 22222, not a
+Dogwalk relay. These links are bearer capabilities, not browser-bound credentials:
+anyone who obtains one can use it while it is valid, without a Daytona login.
+The API key and Sandbox-wide preview token stay server-side. Expiry and revocation
+block new access, but existing provider connections close on a grace period,
+not immediately. A 2026-11-14 PoC on daemon 0.232.2 observed a 3.7-second disconnect
+after explicit revocation and a live connection ending 48 seconds after its
+60-second link expired. This is evidence of behavior, not a hard cutoff guarantee.
+
 ### Hangup
 
 - Instructions through the call end. Outstanding Pairing Codes and unclaimed

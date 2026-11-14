@@ -275,16 +275,13 @@ interface PairingAttempt {
 
 // Access Grant (DOMAIN.md): the authority behind an Access Element, created when a board
 // carrying it is drawn in a call, scoped to that board's Display and the element's target.
-// Opening one mints a credential for that browser alone, each bounded by the grant:
-// a Terminal gets a single-use launch ticket, exchanged by the TerminalRelay for a reconnect
-// token; a Desktop or Preview gets a provider-signed link; SSH Access a Daytona SSH token.
+// Opening one mints a bearer credential for that open, each bounded by the grant:
+// a Terminal, Desktop or Preview gets a provider-signed link; SSH Access a Daytona SSH token.
 // Each credential records its grant ("<board id>:<key>") so revocation finds it.
 interface AccessGrant { kind: AccessKind; target: string; expires_at: number; revoked?: true }
-interface TerminalTicket { hash: string; grant: string; session: string; expiresAt: number }
-interface TerminalToken { hash: string; grant: string; session: string; expiresAt: number }
 interface SignedLink { token: string; grant: string; port: number; expiresAt: number }
 interface SshToken { token: string; grant: string; expiresAt: number }
-const TERMINAL_TICKET_MS = 60_000;
+const TERMINAL_PORT = 22222;
 const DESKTOP_PORT = 6080;
 const GRANT_DEFAULT_MINUTES = 60;
 const GRANT_MAX_MINUTES = 12 * 60;
@@ -625,7 +622,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "revoke_access",
-    description: "End every live Access Grant on a Display now (terminals close, desktop and preview links expire, SSH access is revoked). The boards stay, their elements marked revoked.",
+    description: "Revoke every live Access Grant on a Display (terminal, desktop and preview links expire, SSH access is revoked). The boards stay, their elements marked revoked. Provider connections may take about a minute to close; do not promise instant disconnection.",
     parameters: {
       type: "object",
       properties: { display: { type: "string" } },
@@ -1051,6 +1048,20 @@ export class VoiceSession {
         for (let at = 0; at < assets.length; at += 100) await state.storage.delete(assets.slice(at, at + 100));
         await state.storage.delete(["board_assets", "browser_views", "browser_connected", "paired_browsers", "whiteboard_boards",
           "takeover_tickets", "takeover_tokens", "desktop_links"]);
+      }
+      // One-time back-patch for provider-hosted terminals (2026-11-14; remove once deployed
+      // and every object has run it). Old Terminal elements must be redrawn: names no longer
+      // select tmux sessions. Other grants and browser pairings survive.
+      if (!await state.storage.get("daytona_terminal_migrated")) {
+        const boards = await state.storage.get<Board[]>("whiteboard_boards") ?? [];
+        for (const board of boards) {
+          if (!board.access) continue;
+          for (const [key, grant] of Object.entries(board.access)) {
+            if (grant.kind === "terminal") delete board.access[key];
+          }
+        }
+        await state.storage.put({ whiteboard_boards: boards, daytona_terminal_migrated: true });
+        await state.storage.delete(["terminal_tickets", "terminal_tokens"]);
       }
     });
   }
@@ -2037,7 +2048,6 @@ export class VoiceSession {
       return Response.json(token ? { state: claim.state, token } : { state: claim.state });
     }
     if (path === "/pair/file" && request.method === "GET") return this.pairedFile(request, new URL(request.url));
-    if (path === "/pair/takeover/redeem" && request.method === "POST") return this.redeemTerminal(request);
     if (path === "/pair/ws") {
       const pair = new WebSocketPair();
       this.state.acceptWebSocket(pair[1], ["browser"]);
@@ -2289,7 +2299,6 @@ export class VoiceSession {
           if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Preview takes a port number");
           if (port === GATEWAY_PORT) throw new Error("that port serves the Agent Gateway and is never previewed");
         }
-        if (kind === "terminal" && !/^[a-z0-9-]{0,24}$/.test(target)) throw new Error("a terminal name is up to 24 lowercase letters, digits, and hyphens");
         if (kind === "download") this.workspacePath(target);
         access[key] = { kind, target, expires_at };
       } catch (error) {
@@ -2604,7 +2613,7 @@ export class VoiceSession {
     return { bytes, kind };
   }
 
-  // Opening an Access Element: a credential for this browser alone, bounded by the grant, and
+  // Opening an Access Element: a bearer credential for this open, bounded by the grant, and
   // only while the Sandbox runs (nothing on a Whiteboard wakes it).
   private async openAccess(browser: PairedBrowser, boardId: string, key: string): Promise<Record<string, unknown>> {
     if (!this.identityHash) throw new Error("this pairing cannot open anything");
@@ -2615,16 +2624,10 @@ export class VoiceSession {
     const sandboxId = (this.sandboxId ?? this.attachedSandboxId)!;
     const grantId = `${board.id}:${key}`;
     const remainingSeconds = Math.floor((grant.expires_at - Date.now()) / 1000);
+    if (remainingSeconds < 1) throw new Error("that access has expired");
     await this.record("access.opened", { kind: grant.kind, device: browser.device, display: browser.display });
-    if (grant.kind === "terminal") {
-      const secret = newBrowserSecret();
-      const tickets = (await this.state.storage.get<TerminalTicket[]>("terminal_tickets") ?? []).filter((item) => item.expiresAt > Date.now());
-      tickets.push({ hash: await sha256Hex(secret), grant: grantId, session: grant.target || "main", expiresAt: Date.now() + TERMINAL_TICKET_MS });
-      await this.state.storage.put("terminal_tickets", tickets.slice(-20));
-      return { url: `${this.env.PUBLIC_ORIGIN ?? "https://dogwalk.tools"}/pair/terminal#t=${this.identityHash}.${secret}` };
-    }
-    if (grant.kind === "desktop" || grant.kind === "preview") {
-      const port = grant.kind === "desktop" ? DESKTOP_PORT : Number(grant.target);
+    if (grant.kind === "terminal" || grant.kind === "desktop" || grant.kind === "preview") {
+      const port = grant.kind === "terminal" ? TERMINAL_PORT : grant.kind === "desktop" ? DESKTOP_PORT : Number(grant.target);
       if (grant.kind === "desktop") {
         const { toolbox, headers } = await this.workspaceToolbox();
         const started = await fetch(`${toolbox}/computeruse/start`, { method: "POST", headers, signal: AbortSignal.timeout(30_000) })
@@ -2633,13 +2636,15 @@ export class VoiceSession {
           throw new Error(started.status === 503 ? "the desktop is not installed on this sandbox yet" : `the desktop did not start (${started.status})`);
         }
       }
-      // Daytona closes a signed link's sockets about a minute after it expires.
-      const seconds = Math.max(60, Math.min(remainingSeconds, 24 * 3600));
+      // Daytona closes a signed link's sockets on a provider grace period, not immediately.
+      // Recompute after desktop startup; never round a nearly expired grant up to a minute.
+      const seconds = Math.min(Math.floor((grant.expires_at - Date.now()) / 1000), 24 * 3600);
+      if (seconds < 1) throw new Error("that access has expired");
       const signed = await this.daytona<{ url: string; token: string }>(
         `/sandbox/${encodeURIComponent(sandboxId)}/ports/${port}/signed-preview-url?expiresInSeconds=${seconds}`,
       );
       const links = (await this.state.storage.get<SignedLink[]>("signed_links") ?? []).filter((item) => item.expiresAt > Date.now());
-      links.push({ token: signed.token, grant: grantId, port, expiresAt: Date.now() + seconds * 1000 });
+      links.push({ token: signed.token, grant: grantId, port, expiresAt: grant.expires_at });
       await this.state.storage.put("signed_links", links);
       const base = signed.url.replace(/\/$/, "");
       return { url: grant.kind === "desktop" ? `${base}/vnc.html?autoconnect=1&resize=scale&path=websockify` : base };
@@ -2657,74 +2662,18 @@ export class VoiceSession {
     throw new Error("a download opens from its button");
   }
 
-  // The TerminalRelay's check: a ticket (once) or a terminal token, under a grant still live.
-  private async redeemTerminal(request: Request): Promise<Response> {
-    const body = await request.json<{ ticket?: string | null; token?: string | null }>().catch(() => ({ ticket: null, token: null }));
-    const secretOf = (credential: string | null | undefined) => {
-      const [identity, secret] = String(credential ?? "").split(".");
-      return identity === this.identityHash && secret ? secret : null;
-    };
-    let found: TerminalToken | null = null;
-    let token: string | null = null;
-    const ticketSecret = secretOf(body.ticket);
-    const tokenSecret = secretOf(body.token);
-    if (ticketSecret) {
-      const hash = await sha256Hex(ticketSecret);
-      const tickets = await this.state.storage.get<TerminalTicket[]>("terminal_tickets") ?? [];
-      const ticket = tickets.find((item) => item.hash === hash && item.expiresAt > Date.now());
-      await this.state.storage.put("terminal_tickets", tickets.filter((item) => item !== ticket && item.expiresAt > Date.now()));
-      if (ticket) {
-        const secret = newBrowserSecret();
-        const grant = this.grantById(await this.boards(), ticket.grant);
-        if (grant) {
-          found = { hash: await sha256Hex(secret), grant: ticket.grant, session: ticket.session, expiresAt: grant.expires_at };
-          const tokens = (await this.state.storage.get<TerminalToken[]>("terminal_tokens") ?? []).filter((item) => item.expiresAt > Date.now());
-          tokens.push(found);
-          await this.state.storage.put("terminal_tokens", tokens.slice(-20));
-          token = `${this.identityHash}.${secret}`;
-        }
-      }
-    } else if (tokenSecret) {
-      const hash = await sha256Hex(tokenSecret);
-      found = (await this.state.storage.get<TerminalToken[]>("terminal_tokens") ?? []).find((item) => item.hash === hash) ?? null;
-      token = found ? body.token ?? null : null;
-    }
-    const live = found ? this.grantById(await this.boards(), found.grant) : null;
-    const sandboxId = this.sandboxId ?? this.attachedSandboxId;
-    if (!found || !live || !token || !sandboxId) return Response.json({ error: "this terminal link has expired" }, { status: 401 });
-    return Response.json({ token, grant: found.grant, session: found.session, sandboxId, expiresAt: live.expires_at });
-  }
-
-  // A grant by "<board id>:<key>", if it is still live.
-  private grantById(boards: Board[], id: string): AccessGrant | null {
-    const split = id.indexOf(":");
-    const board = boards.find((item) => item.id === id.slice(0, split));
-    const grant = board?.access?.[id.slice(split + 1)];
-    return grant && !grant.revoked && grant.expires_at > Date.now() ? grant : null;
-  }
-
-  // End every credential minted under these grants: terminals close now, signed links are
-  // expired, SSH tokens revoked, and computer use stops once no desktop link remains.
+  // End every credential minted under these grants: signed links are expired (their sockets
+  // close on Daytona's grace period), SSH tokens revoked, and computer use stops once no desktop link remains.
   private async revokeGrants(ids: string[]): Promise<void> {
     if (!ids.length) return;
     const gone = (item: { grant: string }) => ids.includes(item.grant);
     const now = Date.now();
-    const tickets = await this.state.storage.get<TerminalTicket[]>("terminal_tickets") ?? [];
-    const tokens = await this.state.storage.get<TerminalToken[]>("terminal_tokens") ?? [];
     const links = await this.state.storage.get<SignedLink[]>("signed_links") ?? [];
     const ssh = await this.state.storage.get<SshToken[]>("ssh_tokens") ?? [];
     await this.state.storage.put({
-      terminal_tickets: tickets.filter((item) => !gone(item) && item.expiresAt > now),
-      terminal_tokens: tokens.filter((item) => !gone(item) && item.expiresAt > now),
       signed_links: links.filter((item) => !gone(item) && item.expiresAt > now),
       ssh_tokens: ssh.filter((item) => !gone(item) && item.expiresAt > now),
     });
-    if (this.identityHash && tokens.some(gone)) {
-      const relay = this.env.TERMINAL_RELAYS.get(this.env.TERMINAL_RELAYS.idFromName(this.identityHash));
-      await relay.fetch("https://terminal-relay/revoke", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grants: ids }),
-      }).catch(() => undefined);
-    }
     const sandboxId = this.sandboxId ?? this.attachedSandboxId;
     const revokedLinks = links.filter((item) => gone(item) && item.expiresAt > now);
     const revokedSsh = ssh.filter((item) => gone(item) && item.expiresAt > now);
@@ -4952,7 +4901,7 @@ export class VoiceSession {
     this.orchestratorContext = [];
     await this.revokeGrants(grantIds(await this.boards())).catch(() => undefined);
     await this.state.storage.delete(["managed_sessions", "orchestrator_queue", "orchestrator_context", "paired_browsers",
-      "whiteboard_boards", "displays_open", "terminal_tickets", "terminal_tokens", "signed_links", "ssh_tokens"]);
+      "whiteboard_boards", "displays_open", "signed_links", "ssh_tokens"]);
     // A replaced Sandbox is a different Workspace: browsers paired to the old one are revoked.
     for (const ws of this.state.getWebSockets("browser")) ws.close(4001, "sandbox replaced");
   }

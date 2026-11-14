@@ -1311,8 +1311,8 @@ const WB_SPECS = {
   Button: [["label", "str", 1], ["variant", "variant"], ["value", "str"]],
   Image: [["path", "imagepath", 1], ["alt", "str", 1], ["caption", "str"], ["size", "imagesize"]],
   Document: [["path", "docpath", 1], ["title", "str"]],
-  // Access Elements: the first argument is the grant's target (Desktop and SshAccess have none).
-  Terminal: [["name", "str"], ["label", "str"]],
+  // Access Elements: the first argument is the grant's target, or a label for untargeted ones.
+  Terminal: [["label", "str"]],
   Desktop: [["label", "str"]],
   Preview: [["port", "port", 1], ["label", "str"], ["inline", "bool"]],
   SshAccess: [["label", "str"]],
@@ -1931,9 +1931,9 @@ function wbRelease(entry) {
 // ---- Access Elements (DOMAIN.md: Access Grant). The program names the element and its target; the
 // grant behind it arrives in board.access, keyed "kind:target", and may change (expire, be revoked)
 // without the board being redrawn, so each card reads it afresh from ctx.live and on a timer. A click
-// sends open and the server mints a credential for this browser alone; nothing opens by itself.
+// sends open and the server mints a bearer credential for this open; nothing opens by itself.
 const WB_ACCESS = {
-  Terminal: { kind: "terminal", button: "Open terminal", tab: true, label: (t) => t ? "Terminal: " + t : "Terminal" },
+  Terminal: { kind: "terminal", button: "Open terminal", tab: true, label: () => "Terminal" },
   Desktop: { kind: "desktop", button: "Open desktop", tab: true, label: () => "Desktop" },
   Preview: { kind: "preview", button: "Open preview", tab: true, label: (t) => "Preview of port " + t },
   SshAccess: { kind: "ssh", button: "Show SSH command", label: () => "SSH access" },
@@ -1955,7 +1955,7 @@ function wbAccessOpen() {
 
 function wbAccess(node, ctx) {
   const spec = WB_ACCESS[node.type], p = node.props;
-  const target = node.type === "Desktop" || node.type === "SshAccess" ? "" : wbTarget(node);
+  const target = node.type === "Terminal" || node.type === "Desktop" || node.type === "SshAccess" ? "" : wbTarget(node);
   const key = spec.kind + ":" + target;
   const inline = node.type === "Preview" && p.inline === true;
   const grantBadge = el("span", { class: "wb-badge" });
@@ -1965,6 +1965,7 @@ function wbAccess(node, ctx) {
   const card = el("section", { class: "wb-access", "data-access": key }, [
     el("div", { class: "wb-access-head" }, [el("strong", null, p.label || spec.label(target)), grantBadge]),
     el("div", { class: "wb-access-row" }, [button, say]),
+    spec.kind === "terminal" ? el("p", { class: "small muted" }, "Each open starts a fresh shell. For persistent work, run tmux and reattach after reopening. Access may take about a minute to close after expiry or revocation.") : null,
     extra,
   ]);
   const doc = () => card.ownerDocument || document;

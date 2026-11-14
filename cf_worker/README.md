@@ -270,7 +270,7 @@ SELECT inviter.handle AS inviter, v.code_words, invitee.handle AS invitee,
 ## Users, Handles, and Homes
 
 A User (`users`) is a two-word Handle (`src/handles.ts`), an opaque
-`identity_hash` that keys their VoiceSession and TerminalRelay Durable Objects
+`identity_hash` that keys their VoiceSession Durable Object
 and their Daytona label `identity-v1:<hash>`, Registration provenance, and at
 most one Home number. Registration assigns a random Handle and speaks it twice.
 An unexpired Home (used within 90 days) selects the User, and the shadow Identity
@@ -1024,7 +1024,7 @@ way the page keys them.
 
 ### Access Grants and Human Takeover
 
-Access Elements (`../DOMAIN.md`, Access Grant) are `Terminal(name?)`,
+Access Elements (`../DOMAIN.md`, Access Grant) are `Terminal(label?)`,
 `Desktop()`, `Preview(port)`, `SshAccess()`, and `Download(path)`. Drawing one
 while a call is live grants it on that board's Display for `access_minutes`
 (60 by default, at most 720); the board stores only the grant. A click sends
@@ -1032,30 +1032,45 @@ while a call is live grants it on that board's Display for `access_minutes`
 on a board wakes it), the Durable Object mints a credential for that browser and
 records it under `<board id>:<key>`:
 
-- Terminal: a single-use ticket (60 s) in `terminal_tickets`, returned as
-  `/pair/terminal#t=<identity>.<ticket>`. The terminal page
-  (`src/terminal_page.ts`, vendored xterm.js under `vendor/xterm/`) strips it,
-  opens `/pair/terminal/ws?for=<identity>`, and authenticates in its first
-  message; the `TerminalRelay` Durable Object (its own class, so `VoiceSession`
-  keeps hibernating) has `VoiceSession` redeem the ticket for a reconnect token
-  bounded by the grant (`terminal_tokens`), creates or reuses the toolbox PTY
-  (`human` for the main terminal, `human-<name>` otherwise), hands a new one to
-  `tmux new-session -A -s <pty>`, relays bytes both ways (binary frames; JSON
-  `resize`, `ping`, `exit`, `notice`), and closes it when the grant expires.
+- Terminal: a Daytona signed preview URL for port 22222, opening Daytona's own
+  web terminal without a Daytona login. Each open gets a fresh link and shell;
+  the optional argument is just a label, not a named tmux session. For persistent
+  work, the User runs tmux and reattaches after reopening. Dogwalk hosts no
+  terminal emulator, assets, PTY relay, or terminal-specific credentials.
 - Desktop: starts Daytona computer use and returns a signed noVNC URL for port
   6080 (`vnc.html?autoconnect=1&resize=scale&path=websockify`).
 - Preview: a Daytona signed preview URL for the port (never 8765, the Agent
-  Gateway). Desktop and Preview links last until the grant expires (at most 24 h)
-  and are kept in `signed_links`.
+  Gateway). Terminal, Desktop and Preview links are bounded by the grant's
+  remaining whole seconds and are kept in `signed_links`. The browser receives
+  only that port's signed link, never the API key or Sandbox-wide preview token.
 - SSH Access: `POST /sandbox/{id}/ssh-access?expiresInMinutes=` within the
   grant; the page shows the returned `sshCommand`, kept in `ssh_tokens`.
 - Download: no credential; `/pair/file?...&download=1` checks the grant.
 
 `revoke_access`, a Display ending, a board evicted from its Display's five, or
-Sandbox replacement revoke the grants' credentials: terminals close with 4003,
-signed links are expired, SSH tokens are deleted, and computer use stops once no
-desktop link remains. An open Access Element is not yet made to keep the Sandbox
-awake beyond the traffic it carries.
+Sandbox replacement revoke the grants' credentials: signed links are expired,
+SSH tokens are deleted, and computer use stops once no desktop link remains.
+Provider sockets close on a grace period, not synchronously with revocation or
+expiry. In the isolated-browser PoC on daemon 0.232.2 (2026-11-14), revocation
+blocked new requests with HTTP 401 and closed the live terminal after 3.7 seconds;
+a 60-second link's live connection closed 108 seconds after minting (48 seconds
+after expiry), and a fresh request then returned 401. These observations are not
+a provider SLA. An open Access Element is not yet made to keep the Sandbox awake
+beyond the traffic it carries.
+
+Deploying this change applies Wrangler migration `v3`, deleting the retired
+`TerminalRelay` Durable Object class. A one-time VoiceSession back-patch removes
+`terminal_tickets`, `terminal_tokens`, and old Terminal grants, leaving other
+grants and pairings intact. Redraw any existing Terminal element on the call;
+reload an old Paired Browser tab so it uses `Terminal(label?)`. Existing tmux
+sessions in the Sandbox are not killed; attach manually if needed.
+
+Focused checks from the repository root:
+`node --experimental-strip-types cf_worker/access_grants_test.ts` covers
+short remaining lifetimes, refused opens, and the one-time state back-patch.
+`voice_session_test.py` covers fresh terminal links, Display isolation, board
+eviction, explicit revocation, unpairing, and keeping credentials out of the
+Orchestrator context.
 
 The desktop needs the snapshot's desktop packages (Xvfb, xfce4, x11vnc, noVNC,
 Chromium with `--no-sandbox`); a Sandbox from an older snapshot answers
