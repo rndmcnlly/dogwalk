@@ -770,7 +770,7 @@ end-of-call welcome, a returning caller's composed Opening with caller-ID and
 since-last-call clauses, `session/resume` on reconnect with a cached preview
 URL, the keypad conventions and System Menu, voice-set Earcon Style, browser
 pairing end to end (spoken code allocation, typed claim, single
-use, keypad acceptance, status and file reads over the browser socket, path
+use, spoken acceptance by `accept_browser`, status and file reads over the browser socket, path
 confinement, refusal, and unpairing), and call termination without
 consuming provider traffic.
 
