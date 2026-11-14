@@ -278,7 +278,7 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
 .wb-qr{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin:0;min-width:0}
 .wb-qr svg{display:block;width:min(100%,18rem);height:auto;border-radius:4px}
 .wb-qr figcaption{display:flex;flex-direction:column;gap:2px;max-width:min(100%,32rem)}
-.wb-qr code{font:12px/1.4 var(--mono);color:var(--muted);overflow-wrap:anywhere;-webkit-user-select:all;user-select:all}
+.wb-qr code{font:12px/1.4 var(--mono);color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;-webkit-user-select:all;user-select:all}
 
 /* Access Elements: a card per Terminal, Desktop, Preview, SSH Access or Download, opened only by a click */
 .wb-access{display:flex;flex-direction:column;gap:8px;min-width:0;border:1px solid var(--line);border-left:4px solid var(--info);border-radius:var(--radius);padding:10px 12px;background:var(--paper)}
