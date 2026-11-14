@@ -274,6 +274,12 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
 .wb-doc-body[aria-busy=true],.wb-doc.failed .wb-doc-body{display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:6px;min-height:5em;padding:10px 12px;border:1px dashed var(--line);border-radius:var(--radius);background:var(--paper)}
 .wb-doc .md{max-height:80vh}
 
+/* QR codes: dark on white in any theme, large enough to scan from across a room */
+.wb-qr{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin:0;min-width:0}
+.wb-qr svg{display:block;width:min(100%,18rem);height:auto;border-radius:4px}
+.wb-qr figcaption{display:flex;flex-direction:column;gap:2px;max-width:min(100%,32rem)}
+.wb-qr code{font:12px/1.4 var(--mono);color:var(--muted);overflow-wrap:anywhere;-webkit-user-select:all;user-select:all}
+
 /* Access Elements: a card per Terminal, Desktop, Preview, SSH Access or Download, opened only by a click */
 .wb-access{display:flex;flex-direction:column;gap:8px;min-width:0;border:1px solid var(--line);border-left:4px solid var(--info);border-radius:var(--radius);padding:10px 12px;background:var(--paper)}
 .wb-access.dead{border-left-color:var(--line)}
@@ -1311,6 +1317,7 @@ const WB_SPECS = {
   Button: [["label", "str", 1], ["variant", "variant"], ["value", "str"]],
   Image: [["path", "imagepath", 1], ["alt", "str", 1], ["caption", "str"], ["size", "imagesize"]],
   Document: [["path", "docpath", 1], ["title", "str"]],
+  QrCode: [["text", "qrtext", 1], ["label", "str", 1]],
   // Access Elements: the first argument is the grant's target, or a label for untargeted ones.
   Terminal: [["label", "str"]],
   Desktop: [["label", "str"]],
@@ -1379,6 +1386,13 @@ const WB_KINDS = {
   },
   port: (v, p) => { const n = wbNum(v); if (!(Number.isInteger(n) && n >= 1 && n <= 65535)) { p.push("must be a port number from 1 to 65535"); return undefined; } return n; },
   imagesize: wbEnum(["icon", "small", "medium", "large", "full"]),
+  qrtext: (v, p) => {
+    const s = wbStr(v);
+    if (!s) { p.push("must be the text to encode"); return undefined; }
+    const bytes = new TextEncoder().encode(s).length;
+    if (bytes > QR_MAX_BYTES) { p.push("is " + bytes + " bytes; a QR code here holds at most " + QR_MAX_BYTES); return undefined; }
+    return s;
+  },
 };
 
 function wbComponent(name, args, line, errors) {
@@ -1409,6 +1423,7 @@ function wbComponent(name, args, line, errors) {
     props[prop] = value;
   }
   if (name === "Slider" && !(props.max > props.min)) { errors.push(at + "Slider max must be greater than min (left out)"); return undefined; }
+  if (name === "QrCode" && !props.label.trim()) { errors.push(at + "QrCode label must say what the code opens, for anyone who cannot scan it (left out)"); return undefined; }
   return new WbNode(name, props, line, args);
 }
 
@@ -1529,6 +1544,7 @@ function wbRender(node, ancestors, ctx) {
     case "BarChart": case "LineChart": return wbChart(node, ctx);
     case "Image": return wbImage(node, ctx);
     case "Document": return wbDocument(node, ctx);
+    case "QrCode": return wbQrCode(node);
     case "Terminal": case "Desktop": case "Preview": case "SshAccess": case "Download": return wbAccess(node, ctx);
     case "Choice": {
       const group = "wb" + (++wbUid);
@@ -1711,6 +1727,189 @@ function wbChart(node, ctx) {
     el("tbody", null, labels.map((l, i) => el("tr", null, [el("th", { scope: "row" }, l)].concat(shown.map((s) => el("td", { class: "num" }, wbFormat(at(s, i), p.unit))))))),
   ]))]));
   return figure;
+}
+
+// ---- QR codes (ISO/IEC 18004): byte mode, error correction level M (about 15% of the code can be
+// lost), versions 1 to 10, so at most QR_MAX_BYTES of UTF-8. Larger codes get too dense to scan from
+// across a room. The code carries only the program's literal text: never a credential (DOMAIN.md,
+// Whiteboard). Reed–Solomon over GF(256) with the field polynomial 0x11D, as the standard requires.
+const QR_ECC = [10, 16, 26, 18, 24, 16, 18, 22, 22, 26]; // error correction codewords per block, by version
+const QR_BLOCKS = [1, 1, 1, 2, 2, 4, 4, 4, 5, 5]; // blocks, by version
+const QR_MAX_BYTES = 213;
+// Modules left for codewords once the function patterns are placed.
+function qrRawModules(ver) {
+  let n = (16 * ver + 128) * ver + 64;
+  if (ver >= 2) {
+    const align = Math.floor(ver / 7) + 2;
+    n -= (25 * align - 10) * align - 55;
+    if (ver >= 7) n -= 36;
+  }
+  return n;
+}
+const qrDataCodewords = (ver) => Math.floor(qrRawModules(ver) / 8) - QR_ECC[ver - 1] * QR_BLOCKS[ver - 1];
+function qrMul(x, y) {
+  let z = 0;
+  for (let i = 7; i >= 0; i--) { z = (z << 1) ^ ((z >>> 7) * 0x11D); z ^= ((y >>> i) & 1) * x; }
+  return z;
+}
+// The generator polynomial (x - 2^0)(x - 2^1)...(x - 2^(degree-1)), leading coefficient dropped.
+function qrDivisor(degree) {
+  const r = new Array(degree).fill(0);
+  r[degree - 1] = 1;
+  let root = 1;
+  for (let i = 0; i < degree; i++) {
+    for (let j = 0; j < degree; j++) { r[j] = qrMul(r[j], root); if (j + 1 < degree) r[j] ^= r[j + 1]; }
+    root = qrMul(root, 2);
+  }
+  return r;
+}
+function qrRemainder(data, divisor) {
+  const r = divisor.map(() => 0);
+  for (const b of data) {
+    const factor = b ^ r.shift();
+    r.push(0);
+    divisor.forEach((c, i) => { r[i] ^= qrMul(c, factor); });
+  }
+  return r;
+}
+function qrAlignment(ver) {
+  if (ver === 1) return [];
+  const count = Math.floor(ver / 7) + 2, size = ver * 4 + 17;
+  const step = Math.floor((ver * 4 + count * 2 + 1) / (count * 2 - 2)) * 2;
+  const out = [];
+  for (let i = 0; i < count - 1; i++) out.unshift(size - 7 - i * step);
+  return [6].concat(out);
+}
+const QR_MASKS = [
+  (x, y) => (x + y) % 2 === 0, (x, y) => y % 2 === 0, (x) => x % 3 === 0, (x, y) => (x + y) % 3 === 0,
+  (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0, (x, y) => x * y % 2 + x * y % 3 === 0,
+  (x, y) => (x * y % 2 + x * y % 3) % 2 === 0, (x, y) => ((x + y) % 2 + x * y % 3) % 2 === 0,
+];
+// The standard's penalty: long runs, 2x2 blocks, finder-like patterns, and dark/light imbalance.
+function qrPenalty(m) {
+  const size = m.length, lines = [];
+  for (let i = 0; i < size; i++) { lines.push(m[i]); lines.push(m.map((row) => row[i])); }
+  let score = 0;
+  for (const line of lines) {
+    let run = 1;
+    for (let i = 1; i <= size; i++) {
+      if (i < size && line[i] === line[i - 1]) { run++; continue; }
+      if (run >= 5) score += run - 2;
+      run = 1;
+    }
+    const bits = line.map((d) => d ? "1" : "0").join("");
+    for (const pattern of [/(?=10111010000)/g, /(?=00001011101)/g]) score += 40 * (bits.match(pattern) || []).length;
+  }
+  let dark = 0;
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    if (m[y][x]) dark++;
+    if (x && y && m[y][x] === m[y][x - 1] && m[y][x] === m[y - 1][x] && m[y][x] === m[y - 1][x - 1]) score += 3;
+  }
+  return score + 10 * Math.floor(Math.abs(dark * 20 - size * size * 10) / (size * size));
+}
+// The module matrix (true is dark) for text, or null when it does not fit.
+function qrEncode(text) {
+  const bytes = Array.from(new TextEncoder().encode(text));
+  let ver = 1;
+  while (ver <= 10 && 4 + (ver < 10 ? 8 : 16) + bytes.length * 8 > qrDataCodewords(ver) * 8) ver++;
+  if (ver > 10) return null;
+  // Data: mode, length, bytes, terminator, then the alternating pad codewords.
+  const capacity = qrDataCodewords(ver) * 8, bits = [];
+  const put = (v, n) => { for (let i = n - 1; i >= 0; i--) bits.push((v >>> i) & 1); };
+  put(4, 4);
+  put(bytes.length, ver < 10 ? 8 : 16);
+  for (const b of bytes) put(b, 8);
+  put(0, Math.min(4, capacity - bits.length));
+  put(0, (8 - bits.length % 8) % 8);
+  for (let pad = 0xEC; bits.length < capacity; pad ^= 0xEC ^ 0x11) put(pad, 8);
+  const data = [];
+  for (let i = 0; i < bits.length; i += 8) data.push(bits.slice(i, i + 8).reduce((a, b) => a * 2 + b, 0));
+  // Blocks, each with its own error correction, interleaved codeword by codeword.
+  const blocks = QR_BLOCKS[ver - 1], ecLen = QR_ECC[ver - 1], raw = Math.floor(qrRawModules(ver) / 8);
+  const short = blocks - raw % blocks, shortLen = Math.floor(raw / blocks) - ecLen, divisor = qrDivisor(ecLen);
+  const split = [];
+  for (let i = 0, k = 0; i < blocks; i++) {
+    const part = data.slice(k, k += shortLen + (i < short ? 0 : 1));
+    split.push({ part, ecc: qrRemainder(part, divisor) });
+  }
+  const words = [];
+  for (let i = 0; i <= shortLen; i++) for (const b of split) if (i < b.part.length) words.push(b.part[i]);
+  for (let i = 0; i < ecLen; i++) for (const b of split) words.push(b.ecc[i]);
+  // Function patterns: timing, finders with their separators, alignment, version.
+  const size = ver * 4 + 17;
+  const m = [], fixed = [];
+  for (let y = 0; y < size; y++) { m.push(new Array(size).fill(false)); fixed.push(new Array(size).fill(false)); }
+  const set = (x, y, dark) => { m[y][x] = dark; fixed[y][x] = true; };
+  for (let i = 0; i < size; i++) { set(6, i, i % 2 === 0); set(i, 6, i % 2 === 0); }
+  for (const [cx, cy] of [[3, 3], [size - 4, 3], [3, size - 4]]) {
+    for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+      const x = cx + dx, y = cy + dy, d = Math.max(Math.abs(dx), Math.abs(dy));
+      if (x >= 0 && x < size && y >= 0 && y < size) set(x, y, d !== 2 && d !== 4);
+    }
+  }
+  const align = qrAlignment(ver), last = align.length - 1;
+  align.forEach((ax, i) => align.forEach((ay, j) => {
+    if ((i === 0 && j === 0) || (i === 0 && j === last) || (i === last && j === 0)) return; // under a finder
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) set(ax + dx, ay + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+  }));
+  if (ver >= 7) {
+    let rem = ver;
+    for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1F25);
+    const v = ver << 12 | rem;
+    for (let i = 0; i < 18; i++) {
+      const dark = ((v >>> i) & 1) === 1, a = size - 11 + i % 3, b = Math.floor(i / 3);
+      set(a, b, dark);
+      set(b, a, dark);
+    }
+  }
+  // Format: level M (00) and the mask, BCH-protected, in two copies, plus the one always-dark module.
+  const format = (mask) => {
+    let rem = mask;
+    for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+    const f = (mask << 10 | rem) ^ 0x5412, bit = (i) => ((f >>> i) & 1) === 1;
+    for (let i = 0; i <= 5; i++) set(8, i, bit(i));
+    set(8, 7, bit(6)); set(8, 8, bit(7)); set(7, 8, bit(8));
+    for (let i = 9; i < 15; i++) set(14 - i, 8, bit(i));
+    for (let i = 0; i < 8; i++) set(size - 1 - i, 8, bit(i));
+    for (let i = 8; i < 15; i++) set(8, size - 15 + i, bit(i));
+    set(8, size - 8, true);
+  };
+  format(0); // reserves the format modules before the codewords go in
+  // Codewords: up and down two-column strips from the right, skipping the vertical timing column.
+  let n = 0;
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < size; vert++) for (let j = 0; j < 2; j++) {
+      const x = right - j, y = ((right + 1) & 2) === 0 ? size - 1 - vert : vert;
+      if (!fixed[y][x] && n < words.length * 8) { m[y][x] = ((words[n >>> 3] >>> (7 - (n & 7))) & 1) === 1; n++; }
+    }
+  }
+  // The mask with the lowest penalty wins; XOR is its own inverse, so each trial undoes itself.
+  const flip = (mask) => { for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (!fixed[y][x] && QR_MASKS[mask](x, y)) m[y][x] = !m[y][x]; };
+  let best = 0, bestScore = Infinity;
+  for (let mask = 0; mask < 8; mask++) {
+    flip(mask);
+    format(mask);
+    const score = qrPenalty(m);
+    if (score < bestScore) { best = mask; bestScore = score; }
+    flip(mask);
+  }
+  flip(best);
+  format(best);
+  return m;
+}
+// QrCode(text, label): dark on white whatever the theme, with the four-module quiet zone scanners need.
+// The label is the caption and the accessible name; the text itself is shown too, for anyone who
+// cannot scan (selectable, so a URL can be copied).
+function wbQrCode(node) {
+  const p = node.props, m = qrEncode(p.text), size = m.length, quiet = 4;
+  let path = "";
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (m[y][x]) path += "M" + (x + quiet) + " " + (y + quiet) + "h1v1h-1z";
+  const span = size + quiet * 2;
+  const code = svg("svg", { viewBox: "0 0 " + span + " " + span, role: "img", "aria-label": p.label, "shape-rendering": "crispEdges" }, [
+    svg("rect", { width: span, height: span, fill: "#fff" }), svg("path", { d: path, fill: "#000" }),
+  ]);
+  return el("figure", { class: "wb-qr" }, [code, el("figcaption", null, [wbInline("span", "", p.label), el("code", null, p.text)])]);
 }
 
 // ---- Files a board shows (Image, Document). The program carries only the path; the page reads

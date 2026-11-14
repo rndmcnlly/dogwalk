@@ -1061,6 +1061,14 @@ caller input, never authorization. `boardElements` (`src/board_images.ts`) finds
 the files and Access Elements a program names, keyed `<kind>:<target>` the same
 way the page keys them.
 
+`QrCode(text, label)` encodes the program's literal text (at most 213 UTF-8
+bytes) with an encoder inlined in the page: byte mode, error correction level M,
+versions 1–10, drawn as SVG, dark on white in any theme. There is no QR form of an
+Access Element, so no credential can reach a code (`../DOMAIN.md`, Whiteboard;
+Open Questions). `uv run --script cf_worker/qr_code_test.py` extracts the encoder,
+runs it in Node, and checks that an independent decoder (zxing-cpp) reads every
+version back, multibyte text included.
+
 ### Access Grants and Human Takeover
 
 Access Elements (`../DOMAIN.md`, Access Grant) are `Terminal(label?)`,

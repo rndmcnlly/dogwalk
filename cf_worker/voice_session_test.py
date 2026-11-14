@@ -3224,6 +3224,7 @@ def whiteboard_parser_checks() -> None:
     page = (WORKER_DIR / "src" / "pair_page.ts").read_text()
     resolve = re.search(r"function resolvePath\(.*?\n}\n", page, re.S).group(0)
     parser = page[page.index("// ---- Tokens:"):page.index("// ---- Rendering.")]
+    qr = page[page.index("// ---- QR codes"):page.index("// QrCode(text, label)")]
     cases = [
         'root = Stack([fig, t])\nfig = Image("bayleaf/diagram.svg", "Chain path", "Generated, unverified", "large")\nt = Text("hi")',
         'root = Stack([Image("https://example.com/a.png", "x")])',
@@ -3233,14 +3234,15 @@ def whiteboard_parser_checks() -> None:
         'root = Stack([Image("/home/daytona/icon.png", "", null, "huge")])',
         'root = Stack([Image (path, "Plot")])\npath = alias\nalias = "chart.png"',
         'root = Stack([Terminal(), Terminal("Build shell"), Desktop("Desktop"), SshAccess("SSH")])',
+        'root = Stack([QrCode("https://example.com/talk", "The talk page"), QrCode("x", ""), QrCode("' + "y" * 214 + '", "Too long"), QrCode("solo")])',
     ]
     script = (
-        'const HOME = "/home/daytona";\n' + resolve + parser
+        'const HOME = "/home/daytona";\n' + resolve + parser + qr
         + f"\nconsole.log(JSON.stringify({json.dumps(cases)}.map((source) => {{ const r = wbProgram(source);"
         + " return { errors: r.errors, children: r.root ? r.root.props.children.map((c) => c.props) : null }; })));"
     )
     results = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
-    drawn, url, data, escape, text, size, reference, access = results
+    drawn, url, data, escape, text, size, reference, access, qr_codes = results
     assert not drawn["errors"] and drawn["children"][0] == {
         "path": "/home/daytona/bayleaf/diagram.svg", "alt": "Chain path", "caption": "Generated, unverified", "size": "large",
     }, drawn
@@ -3249,6 +3251,10 @@ def whiteboard_parser_checks() -> None:
     assert size["children"] == [{"path": "/home/daytona/icon.png", "alt": ""}] and "must be one of icon" in size["errors"][0], size
     assert not reference["errors"] and reference["children"] == [{"path": "/home/daytona/chart.png", "alt": "Plot"}], reference
     assert not access["errors"] and access["children"] == [{}, {"label": "Build shell"}, {"label": "Desktop"}, {"label": "SSH"}], access
+    # A QrCode needs its label (the caption and accessible name) and text that fits.
+    assert qr_codes["children"] == [{"text": "https://example.com/talk", "label": "The talk page"}], qr_codes
+    assert [e for e in qr_codes["errors"] if "what the code opens" in e or "214 bytes" in e or "needs label" in e] == qr_codes["errors"], qr_codes
+    assert len(qr_codes["errors"]) == 3, qr_codes
 
 
 def main() -> int:
