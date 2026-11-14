@@ -2206,7 +2206,7 @@ async def run_protocol(identity: str) -> None:
         assert revoked_board["id"] == access_board["id"] and all(grant.get("revoked") for grant in revoked_board["access"].values()), revoked_board
         await recv_type(mirror, "board", 15)
         await wait_for(outputs_back("kB-revoke", "kB-state"), 15)
-        assert OrchestratorMock.tool_output("kB-revoke") == {"ok": True, "display": "main", "grants_revoked": 5}
+        assert OrchestratorMock.tool_output("kB-revoke") == {"ok": True, "display": "main", "grants_revoked": 5}, OrchestratorMock.tool_output("kB-revoke")
         displays = {item["name"]: item for item in OrchestratorMock.tool_output("kB-state")["displays"]}
         assert displays["main"]["access"] == [] and len(displays["projector"]["access"]) == 2, displays
         assert (5173, app_link["token"]) in PROVIDER["expired"], PROVIDER["expired"]

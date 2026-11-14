@@ -283,6 +283,7 @@ interface SignedLink { token: string; grant: string; port: number; expiresAt: nu
 interface SshToken { token: string; grant: string; expiresAt: number }
 // Durable outbox: keep provider revocations across failures and Sandbox replacement.
 interface AccessRevocation { sandboxId: string; port: number | null; token: string; expiresAt: number; retryAt: number }
+interface RetiredAccess { sandboxId: string | null; grants: number; desktop: boolean }
 const TERMINAL_PORT = 22222;
 const DESKTOP_PORT = 6080;
 const GRANT_DEFAULT_MINUTES = 60;
@@ -2112,9 +2113,12 @@ export class VoiceSession {
 
   // Drop these browsers' pairings and close their pages. A Display left with no browser ends.
   private async unpairBrowsers(secretHashes: string[]): Promise<void> {
-    const before = await this.state.storage.get<PairedBrowser[]>("paired_browsers") ?? [];
-    const after = before.filter((item) => !secretHashes.includes(item.secretHash));
-    await this.state.storage.put("paired_browsers", after);
+    const retired = await this.state.storage.transaction(async (tx) => {
+      const before = await tx.get<PairedBrowser[]>("paired_browsers") ?? [];
+      const after = before.filter((item) => !secretHashes.includes(item.secretHash));
+      await tx.put("paired_browsers", after);
+      return this.retireDisplays(tx, endedDisplays(before, after));
+    });
     await this.scheduleAlarm();
     for (const ws of this.state.getWebSockets("browser")) {
       const hash = attachedHash(ws);
@@ -2127,18 +2131,18 @@ export class VoiceSession {
         // already closing
       }
     }
-    await this.endDisplays(endedDisplays(before, after));
+    await this.finishAccessRevocation(retired);
     await this.browserPresenceChanged();
   }
 
-  // A Display's boards and Access Grants go with it.
-  private async endDisplays(names: string[]): Promise<void> {
-    if (!names.length) return;
-    const boards = await this.boards();
+  // A Display's boards and credentials retire in the same transaction as its last pairing.
+  private async retireDisplays(tx: DurableObjectTransaction, names: string[]): Promise<RetiredAccess | null> {
+    if (!names.length) return null;
+    const boards = await tx.get<Board[]>("whiteboard_boards") ?? [];
     const ending = boards.filter((item) => names.includes(item.display));
-    await this.state.storage.put("whiteboard_boards", boards.filter((item) => !names.includes(item.display)));
-    await this.revokeGrants(grantIds(ending));
-    await this.record("display.ended", { displays: names.length, boards: ending.length });
+    const retired = await this.queueGrantRevocations(tx, grantIds(ending));
+    await tx.put("whiteboard_boards", boards.filter((item) => !names.includes(item.display)));
+    return retired;
   }
 
   // Authenticated paired pages currently open.
@@ -2253,12 +2257,17 @@ export class VoiceSession {
         ...(Object.keys(access).length ? { access } : {}),
       };
       // Read after checking, so an answer that arrived meanwhile is kept.
-      const boards = await this.boards();
-      const others = boards.filter((item) => item.display !== display);
-      const mine = [...boards.filter((item) => item.display === display), board];
-      const dropped = mine.slice(0, -MAX_BOARDS);
-      await this.state.storage.put("whiteboard_boards", [...others, ...mine.slice(-MAX_BOARDS)]);
-      await this.revokeGrants(grantIds(dropped));
+      const retired = await this.state.storage.transaction(async (tx) => {
+        const browsers = await tx.get<PairedBrowser[]>("paired_browsers") ?? [];
+        if (!browsers.some((item) => item.display === display && browserExpiresAt(item) > Date.now())) throw new Error("that display ended while drawing; pair a browser again");
+        const boards = await tx.get<Board[]>("whiteboard_boards") ?? [];
+        const others = boards.filter((item) => item.display !== display);
+        const mine = [...boards.filter((item) => item.display === display), board];
+        const retired = await this.queueGrantRevocations(tx, grantIds(mine.slice(0, -MAX_BOARDS)));
+        await tx.put("whiteboard_boards", [...others, ...mine.slice(-MAX_BOARDS)]);
+        return retired;
+      });
+      await this.finishAccessRevocation(retired);
       await this.broadcastDisplay(display, { type: "board", board });
       const pages = await this.displayPages(display);
       await this.record("whiteboard.drawn", {
@@ -2391,7 +2400,7 @@ export class VoiceSession {
   // The revoke_access tool: every live grant on a Display ends now; its elements show revoked.
   private async revokeAccess(input: string): Promise<Record<string, unknown>> {
     const display = await this.targetDisplay(input);
-    const { revoked, changed } = await this.state.storage.transaction(async (tx) => {
+    const { revoked, changed, retired } = await this.state.storage.transaction(async (tx) => {
       const boards = await tx.get<Board[]>("whiteboard_boards") ?? [];
       const revoked: string[] = [];
       const changed: Board[] = [];
@@ -2406,10 +2415,11 @@ export class VoiceSession {
         if (updated) changed.push(board);
       }
       await tx.put("whiteboard_boards", boards);
-      return { revoked, changed };
+      const retired = await this.queueGrantRevocations(tx, revoked);
+      return { revoked, changed, retired };
     });
     for (const board of changed) await this.broadcastDisplay(display, { type: "board", board });
-    const pending = await this.revokeGrants(revoked);
+    const pending = await this.finishAccessRevocation(retired);
     return { ok: pending === 0, display, grants_revoked: revoked.length,
       ...(pending ? { revocation_pending: pending, warning: "The grants ended, but provider access cleanup failed and will retry automatically. Do not say all access has ended yet." } : {}) };
   }
@@ -2417,13 +2427,14 @@ export class VoiceSession {
   // Accepted browsers that have not expired (idle or absolute); expired ones are dropped, and a
   // Display left without a browser ends.
   private async pairedBrowsers(): Promise<PairedBrowser[]> {
-    const now = Date.now();
-    const all = await this.state.storage.get<PairedBrowser[]>("paired_browsers") ?? [];
-    const live = all.filter((item) => browserExpiresAt(item) > now);
-    if (live.length !== all.length) {
-      await this.state.storage.put("paired_browsers", live);
-      await this.endDisplays(endedDisplays(all, live));
-    }
+    const { live, retired } = await this.state.storage.transaction(async (tx) => {
+      const all = await tx.get<PairedBrowser[]>("paired_browsers") ?? [];
+      const live = all.filter((item) => browserExpiresAt(item) > Date.now());
+      if (live.length === all.length) return { live, retired: null };
+      await tx.put("paired_browsers", live);
+      return { live, retired: await this.retireDisplays(tx, endedDisplays(all, live)) };
+    });
+    if (retired) await this.finishAccessRevocation(retired);
     await this.scheduleAlarm();
     return live;
   }
@@ -2454,7 +2465,7 @@ export class VoiceSession {
       const build = typeof message.build === "string" ? message.build.slice(0, 32) : "";
       const stale = build !== PAIR_BUILD;
       ws.serializeAttachment({ secretHash, ...(stale ? { stale: true, reloadsItself: Boolean(build) } : {}) });
-      await this.touchBrowser(browser, browsers, true);
+      if (!await this.touchBrowser(browser, true)) return refuse(4001, "this pairing has expired");
       await this.browserPresenceChanged();
       send({
         type: "hello", display: browser.display, device: browser.device, place: browser.place, build: PAIR_BUILD, stale,
@@ -2469,7 +2480,7 @@ export class VoiceSession {
     }
     const browser = browsers.find((item) => item.secretHash === attached);
     if (!browser) return refuse(4001, "this pairing has expired");
-    await this.touchBrowser(browser, browsers, false);
+    if (!await this.touchBrowser(browser, false)) return refuse(4001, "this pairing has expired");
     const id = message.id;
     try {
       switch (message.type) {
@@ -2508,12 +2519,22 @@ export class VoiceSession {
   }
 
   // lastSeen moves at most once a minute, so pings do not turn into a storage write each.
-  private async touchBrowser(browser: PairedBrowser, browsers: PairedBrowser[], force: boolean): Promise<void> {
+  private async touchBrowser(browser: PairedBrowser, force: boolean): Promise<boolean> {
     const now = Date.now();
-    if (!force && now - browser.lastSeen < 60_000) return;
-    browser.lastSeen = now;
-    await this.state.storage.put("paired_browsers", browsers);
+    // Never write an old pairing snapshot back after a concurrent unpair or expiry.
+    const touched = await this.state.storage.transaction(async (tx) => {
+      const browsers = await tx.get<PairedBrowser[]>("paired_browsers") ?? [];
+      const current = browsers.find((item) => item.secretHash === browser.secretHash && item.display === browser.display);
+      if (!current || browserExpiresAt(current) <= now) return false;
+      if (force || now - current.lastSeen >= 60_000) {
+        current.lastSeen = now;
+        await tx.put("paired_browsers", browsers);
+      }
+      browser.lastSeen = current.lastSeen;
+      return true;
+    });
     await this.scheduleAlarm();
+    return touched;
   }
 
   // Open pages joined to a Display.
@@ -2712,6 +2733,7 @@ export class VoiceSession {
         pending.push({ sandboxId, port: "port" in credential ? credential.port : null, token: credential.token,
           expiresAt: Math.max(credential.expiresAt, Date.now() + 60_000), retryAt: Date.now() });
         await tx.put("access_revocations", pending);
+        await tx.setAlarm(Date.now() + 1);
       }
       return live;
     });
@@ -2735,8 +2757,10 @@ export class VoiceSession {
           if (item.port !== null) await this.daytona(`/sandbox/${sandbox}/ports/${item.port}/signed-preview-url/${encodeURIComponent(item.token)}/expire`, "POST");
           else await this.daytona(`/sandbox/${sandbox}/ssh-access?token=${encodeURIComponent(item.token)}`, "DELETE");
           ended = true;
-        } catch {
-          // No provider error text here: it can contain a credential. Keep the outbox entry.
+        } catch (error) {
+          // Never record provider error text: it can contain a credential.
+          const status = /^Daytona (\d{3}):/.exec(errorMessage(error))?.[1];
+          await this.record("access.revocation_failed", { kind: item.port === null ? "ssh" : "signed", port: item.port, status: status ? Number(status) : null });
         }
       }
       await this.state.storage.transaction(async (tx) => {
@@ -2750,41 +2774,45 @@ export class VoiceSession {
     return (await this.state.storage.get<AccessRevocation[]>("access_revocations") ?? []).length;
   }
 
-  // End every credential minted under these grants: signed links are expired (their sockets
-  // close on Daytona's grace period), SSH tokens revoked, and computer use stops once no desktop link remains.
-  private async revokeGrants(ids: string[]): Promise<number> {
-    if (!ids.length) return this.flushAccessRevocations(true);
-    const gone = (item: { grant: string }) => ids.includes(item.grant);
+  // Transactional outbox pattern: removing authority and capturing its credentials must commit
+  // together. null selects every credential, including orphans, when replacing a Sandbox.
+  private async queueGrantRevocations(tx: DurableObjectTransaction, ids: string[] | null): Promise<RetiredAccess | null> {
+    if (ids?.length === 0) return null;
+    const gone = (item: { grant: string }) => ids === null || ids.includes(item.grant);
     const now = Date.now();
-    const sandboxId = this.sandboxId ?? this.attachedSandboxId;
-    const { links, revokedLinks } = await this.state.storage.transaction(async (tx) => {
-      const links = await tx.get<SignedLink[]>("signed_links") ?? [];
-      const ssh = await tx.get<SshToken[]>("ssh_tokens") ?? [];
-      const pending = await tx.get<AccessRevocation[]>("access_revocations") ?? [];
-      const revokedLinks = links.filter((item) => gone(item) && item.expiresAt > now);
-      const revokedSsh = ssh.filter((item) => gone(item) && item.expiresAt > now);
-      if (sandboxId) {
-        for (const item of [...revokedLinks, ...revokedSsh]) pending.push({ sandboxId,
-          port: "port" in item && typeof item.port === "number" ? item.port : null, token: item.token, expiresAt: item.expiresAt, retryAt: now });
-      }
-      await tx.put({
-        signed_links: links.filter((item) => !gone(item) && item.expiresAt > now),
-        ssh_tokens: ssh.filter((item) => !gone(item) && item.expiresAt > now),
-        access_revocations: pending,
-      });
-      return { links, revokedLinks };
+    const sandboxId = await tx.get<string>("sandbox_id") ?? this.sandboxId ?? this.attachedSandboxId;
+    const links = await tx.get<SignedLink[]>("signed_links") ?? [];
+    const ssh = await tx.get<SshToken[]>("ssh_tokens") ?? [];
+    const pending = await tx.get<AccessRevocation[]>("access_revocations") ?? [];
+    const revokedLinks = links.filter((item) => gone(item) && item.expiresAt > now);
+    const revokedSsh = ssh.filter((item) => gone(item) && item.expiresAt > now);
+    if (!sandboxId && (revokedLinks.length || revokedSsh.length)) throw new Error("cannot retire access without its Sandbox Assignment");
+    for (const item of [...revokedLinks, ...revokedSsh]) pending.push({ sandboxId: sandboxId!,
+      port: "port" in item && typeof item.port === "number" ? item.port : null, token: item.token, expiresAt: item.expiresAt, retryAt: now });
+    await tx.put({
+      signed_links: links.filter((item) => !gone(item) && item.expiresAt > now),
+      ssh_tokens: ssh.filter((item) => !gone(item) && item.expiresAt > now),
+      access_revocations: pending,
     });
+    if (pending.length) await tx.setAlarm(now + 1);
+    return { sandboxId, grants: ids?.length ?? new Set([...links, ...ssh].map((item) => item.grant)).size,
+      desktop: revokedLinks.some((item) => item.port === DESKTOP_PORT) };
+  }
+
+  // Only provider I/O happens after the retirement transaction. A crash here leaves a durable
+  // outbox and an alarm, not credentials whose deleted grant IDs existed only on the stack.
+  private async finishAccessRevocation(retired: RetiredAccess | null): Promise<number> {
     await this.scheduleAlarm();
     const pending = await this.flushAccessRevocations(true);
-    if (sandboxId) {
+    if (retired?.sandboxId === (this.sandboxId ?? this.attachedSandboxId)) {
       // Expiry closes Daytona's sockets only on a best-effort basis; stopping the desktop is certain.
-      if (revokedLinks.some((item) => item.port === DESKTOP_PORT)
-        && !links.some((item) => !gone(item) && item.port === DESKTOP_PORT && item.expiresAt > now)) {
+      const links = await this.state.storage.get<SignedLink[]>("signed_links") ?? [];
+      if (retired?.desktop && !links.some((item) => item.port === DESKTOP_PORT && item.expiresAt > Date.now())) {
         const { toolbox, headers } = await this.workspaceToolbox().catch(() => ({ toolbox: "", headers: {} }));
         if (toolbox) await fetch(`${toolbox}/computeruse/stop`, { method: "POST", headers }).catch(() => undefined);
       }
     }
-    await this.record("access.revoked", { grants: ids.length, links: revokedLinks.length, pending });
+    if (retired) await this.record("access.revoked", { grants: retired.grants, pending });
     return pending;
   }
 
@@ -4994,13 +5022,13 @@ export class VoiceSession {
     this.orchestratorContext = [];
     // End stored authority before awaiting provider cleanup, so a mint finishing during a
     // replacement cannot register under the old boards. The outbox retains the old Sandbox ID.
-    const ids = await this.state.storage.transaction(async (tx) => {
-      const ids = grantIds(await tx.get<Board[]>("whiteboard_boards") ?? []);
+    const retired = await this.state.storage.transaction(async (tx) => {
+      const retired = await this.queueGrantRevocations(tx, null);
       await tx.delete(["managed_sessions", "orchestrator_queue", "orchestrator_context", "paired_browsers",
         "whiteboard_boards", "displays_open"]);
-      return ids;
+      return retired;
     });
-    await this.revokeGrants(ids);
+    await this.finishAccessRevocation(retired);
     // A replaced Sandbox is a different Workspace: browsers paired to the old one are revoked.
     for (const ws of this.state.getWebSockets("browser")) ws.close(4001, "sandbox replaced");
   }

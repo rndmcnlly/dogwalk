@@ -187,6 +187,10 @@ registration, so revocation cannot miss a token still being minted. Failed
 provider revocations are kept in a durable outbox and retried by alarm; explicit
 revocation reports pending cleanup rather than claiming success. The alarm also
 expires unattended browsers and ends a Display when its last browser expires.
+Authority removal and durable credential capture share a transaction for explicit
+revocation, board eviction, Display removal, and Sandbox replacement. The same
+commit arms an alarm, so a crash before provider cleanup cannot forget the
+credentials or leave retries dependent on another caller action.
 
 ### Hangup
 

@@ -1069,6 +1069,11 @@ that all access has ended. The same alarm serves call keepalive and the earliest
 paired-browser expiry, so an unattended Display ends and revokes its links even
 when no page sends another message. Browser activity recomputes the deadline
 without postponing an already-due revocation retry.
+The shared transactional outbox helper captures credentials and arms its retry
+alarm in the same commit that marks grants revoked, evicts boards, removes a
+Display's final browser, or clears a replaced Sandbox's projection. No retired
+grant identity is left only on an interrupted invocation's stack. Replacement
+captures all old credentials, including any orphaned from a missing board.
 
 Deploying this change applies Wrangler migration `v3`, deleting the retired
 `TerminalRelay` Durable Object class. A one-time VoiceSession back-patch removes
@@ -1080,7 +1085,8 @@ sessions in the Sandbox are not killed; attach manually if needed.
 Focused checks from the repository root:
 `node --experimental-strip-types cf_worker/access_grants_test.ts` covers
 short remaining lifetimes, refused opens, mint/revoke races, failed revocation
-retries, unattended Display expiry, and the one-time state back-patch.
+retries, unattended Display expiry, crash recovery after every authority-removal
+commit, and the one-time state back-patch.
 `voice_session_test.py` covers fresh terminal links, Display isolation, board
 eviction, explicit revocation, unpairing, and keeping credentials out of the
 Orchestrator context.
