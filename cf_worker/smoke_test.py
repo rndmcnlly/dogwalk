@@ -1109,6 +1109,15 @@ def seed_user_reap_fixture() -> dict[str, int]:
             f"INSERT INTO audit_log (ts, event, phone_number, call_sid, detail) VALUES ({ts}, 'confirm.speech', "
             f"'{USER_REAP[name][0]}', '{sid}', '{json.dumps({'said': 'yes my name is Ada', 'attempts': 1})}')",
         ]
+    # Nested Agent reasoning, and an operator-code Registration call never linked to the User.
+    statements += [
+        f"INSERT INTO call_activity (call_sid, ts, source, direction, event, detail) VALUES "
+        f"('CA_UREAP_IDLE_0', unixepoch() - {380 * DAY}, 'agent', 'internal', 'agent.turn.stopped', "
+        f"'{json.dumps({'thoughts': {'chunks': 2, 'chars': 40, 'tail': 'the PIN they mentioned'}, 'ts_ms': 98})}')",
+        f"UPDATE users SET registered_call_sid = 'CA_UREAP_IDLE_REG' WHERE identity_hash = 'ureap-idle'",
+        f"INSERT INTO audit_log (ts, event, phone_number, call_sid, detail) VALUES (unixepoch() - {400 * DAY}, 'confirm.speech', "
+        f"'{USER_REAP['idle'][0]}', 'CA_UREAP_IDLE_REG', '{json.dumps({'said': 'yes I am Ada Lovelace', 'attempts': 1})}')",
+    ]
     statements += [
         f"INSERT INTO voice_references (user_id, embedding_space, embedding, enrolled_at) "
         f"VALUES ({ureap_sql('idle')}, 'local-test', '[0.5, 0.5]', unixepoch() - {400 * DAY})",
@@ -1204,12 +1213,13 @@ def user_reap_checks(base_url: str, token: str) -> None:
     deletion = d1_local(f"SELECT user_id, deleted_at FROM sandbox_deletions WHERE provider_id = '{IDLE_PROVIDER}'")
     require(len(deletion) == 1 and deletion[0]["user_id"] == users["idle"] and deletion[0]["deleted_at"], f"Sandbox deletion: {deletion}")
     require(d1_local(f"SELECT forgotten_at FROM users WHERE id = {users['leftover']}")[0]["forgotten_at"], "the leftover was not forgotten")
-    calls = "call_sid IN ('CA_UREAP_IDLE_0', 'CA_UREAP_LEFTOVER_0')"
+    calls = "call_sid IN ('CA_UREAP_IDLE_0', 'CA_UREAP_LEFTOVER_0', 'CA_UREAP_IDLE_REG')"
     rows = d1_local(f"SELECT detail FROM call_activity WHERE {calls}") + d1_local(f"SELECT detail FROM audit_log WHERE {calls}")
-    require(len(rows) == 6, f"forgotten rows: {rows}")
+    require(len(rows) == 8, f"forgotten rows: {rows}")
     for row in rows:
         detail = json.loads(row["detail"])
         require(not {"content_text", "text", "alias", "directory", "said"} & detail.keys(), f"forgotten text kept: {detail}")
+        require("tail" not in (detail.get("thoughts") or {}), f"forgotten Agent reasoning kept: {detail}")
         require(detail.get("ts_ms") or detail.get("attempts"), f"forgetting lost timing: {detail}")
     require(sum(json.loads(row["detail"]) == TIMING for row in rows) == 2, f"the transcript rows lost their timing: {rows}")
     after = user_reap_state()
@@ -2553,7 +2563,8 @@ ON CONFLICT(code_words) DO UPDATE SET expires_at = excluded.expires_at, max_uses
          "SELECT name FROM pragma_table_info('users')"],
         cwd=WORKER_DIR, check=True, capture_output=True, text=True,
     ).stdout)[0]["results"]
-    if columns and "registered_from" not in {column["name"] for column in columns}:
+    names = {column["name"] for column in columns}
+    if columns and "registered_from" not in names:
         subprocess.run(
             [wrangler, "d1", "execute", "dogwalk", "--local", "--file", "migrations/2026-11-19-user-reaping.sql"],
             cwd=WORKER_DIR,

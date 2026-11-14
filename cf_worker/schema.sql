@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS users (
   challenges_completed INTEGER NOT NULL DEFAULT 0,
   -- The number the Registration came from: the Registration cooldown counts it.
   registered_from TEXT,
+  -- The Registration call, which is never linked to the User; forgetting strips its text too.
+  registered_call_sid TEXT,
   forgotten_at INTEGER
 );
 

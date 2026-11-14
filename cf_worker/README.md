@@ -221,7 +221,7 @@ call or compaction in flight) leaves it for the next pass. The pass then removes
 the free-text keys (`FORGOTTEN_TEXT_PATHS`: `content_text`, `text`, `alias`,
 `previous`, `directory`, `message`, `error`, `detail`, `said`, `command`,
 `place`, `device`, `display`) from the `call_activity` and `audit_log` details
-of the User's calls (linked ones, their Registration call by Invitation, and
+of the User's calls (linked ones, their Registration call, and
 Roaming attempts at their Handle), keeping the timing,
 sets `forgotten_at`, and audits `user.forgotten` (`activity_rows`, `audit_rows`)
 or `user.forget.failed` (`message`). The wiped object keeps one `forgotten`

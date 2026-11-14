@@ -670,7 +670,7 @@ const USER_FORGET_BATCH = 10;
 // messages and bodies, a pairing's place and device); forgetting a User removes these keys from
 // their calls' rows and keeps the rest.
 const FORGOTTEN_TEXT_PATHS = ["content_text", "text", "alias", "previous", "directory", "message", "error", "detail", "said",
-  "command", "place", "device", "display"]
+  "command", "place", "device", "display", "thoughts.tail"]
   .map((key) => `'$.${key}'`).join(", ");
 
 interface UserReapCandidate {
@@ -762,7 +762,7 @@ async function forgetReapedUsers(env: Env): Promise<void> {
       // The User's calls, their Registration call (never linked to them), and Roaming attempts at
       // their Handle that were not admitted (pruned after 90 days anyway).
       const calls = `call_sid IN (SELECT call_sid FROM voice_calls WHERE user_id = ?1
-        UNION SELECT onboarding_call_sid FROM invitations WHERE redeemed_by_user_id = ?1 AND onboarding_call_sid IS NOT NULL
+        UNION SELECT registered_call_sid FROM users WHERE id = ?1 AND registered_call_sid IS NOT NULL
         UNION SELECT call_sid FROM roaming_attempts WHERE user_id = ?1)`;
       const [activity, audits] = await env.DB.batch([
         env.DB.prepare(`UPDATE call_activity SET detail = json_remove(detail, ${FORGOTTEN_TEXT_PATHS})

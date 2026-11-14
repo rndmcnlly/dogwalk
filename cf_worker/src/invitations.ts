@@ -331,13 +331,13 @@ export function redemptionStatements(
 ): D1PreparedStatement[] {
   return [
     db.prepare(
-      `INSERT INTO users (handle, identity_hash, invite_code, registered_at, last_seen_at, registered_from)
-       SELECT ?, ?, i.code_words, ?, ?, ?
+      `INSERT INTO users (handle, identity_hash, invite_code, registered_at, last_seen_at, registered_from, registered_call_sid)
+       SELECT ?, ?, i.code_words, ?, ?, ?, ?
          FROM invite_codes i
         WHERE i.code_words = ?
           AND ${USABLE_FOR_PHONE_SQL}
           AND NOT ${COOLING_DOWN_SQL}`,
-    ).bind(handle, identityHash, now, now, phone, codeWords, now, phone, phone, coolingSince),
+    ).bind(handle, identityHash, now, now, phone, callSid, codeWords, now, phone, phone, coolingSince),
     db.prepare(
       `UPDATE users SET home_phone = NULL, home_used_at = NULL
         WHERE home_phone = ? AND EXISTS (SELECT 1 FROM users WHERE identity_hash = ?)`,

@@ -290,7 +290,8 @@ cooldown** stops a number that registered a User in the last 24 hours (deploymen
 configuration) from registering another; the caller hears why before their
 invite words are read back, so the words are not spent, and can register from a
 different phone at once. Invitations remain the real bound (each Registration
-spends one, attributed to its inviter), and the Diagnostics Surface lists numbers
+through an Invitation spends it, attributed to its inviter; operator Invite Codes
+are the operator's own decision), and the Diagnostics Surface lists numbers
 that registered several Users in the last 30 days for the operator to judge.
 
 ### Handle
