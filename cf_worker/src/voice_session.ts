@@ -29,7 +29,6 @@ const GATEWAY_PORT = 8765;
 const WORKSPACE = "/home/daytona";
 const MAX_ACTIVITY = 20;
 // Following (DOMAIN.md, Followed Session and Progress Beat).
-const BEAT_TELL_GAP_MS = 3_000;
 // Beats this close together (a remark and the tool call it introduces) make one beat.
 const BEAT_COALESCE_MS = 1_500;
 const NARRATION_GAP_MS = 20_000;
@@ -120,11 +119,10 @@ interface PlanEntry {
 
 // The Followed Session (DOMAIN.md): at most one per Voice Call. Its Progress Beats reach the
 // Voice Frontend directly, without a model call, the way the keypad status readout does.
+// Only narrations reach it: whatever it is sent about a session it may say aloud (#81).
 interface Follow {
   sessionId: string;
   phase: string | null;
-  told: string[];  // beats not yet sent as thinking
-  toldAt: number;
   lastBeat: { at: number; weight: number } | null;  // for coalescing a burst
   // The beat to narrate next: the weightiest since the last narration, the latest of equals.
   unspoken: { text: string; at: number; weight: number; urgent: boolean } | null;
@@ -464,7 +462,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "follow_managed_session",
-    description: "Follow one session: its progress reaches the Voice Frontend as it happens and is narrated in quiet moments. At most one session is followed; this replaces any other. Beginning a Prompt Turn already follows that session. Following observes; it does not direct the Agent.",
+    description: "Follow one session: its progress is narrated in quiet moments, at most every twenty seconds. At most one session is followed; this replaces any other. Beginning a Prompt Turn already follows that session. Following observes; it does not direct the Agent.",
     parameters: {
       type: "object",
       properties: { alias: { type: "string" } },
@@ -875,7 +873,7 @@ Keypad: the caller can press star for a menu (restart the sandbox, recovery opti
 
 Thoughts arriving from the Session Orchestrator: thinking is background you now know; use it when relevant but do not recite it. Commentary is something you have decided to tell the caller now; say it in your own words. These are your own thoughts, not the caller speaking; never thank or address them. Never say a session finished or work is done unless the Session Orchestrator said so.
 
-Following: you follow at most one session, and thoughts beginning "Following" are what it is doing right now. Use them to answer "what's it doing?" at once, without thinking it over. They are neutral system text: restate them in the theme's words at the current register, briefly, and never speak the "Following" label, file names, or commands. A failed step is not a failed turn: when one or more steps failed and the turn is still going, say the session hit a snag (with what it was doing, when the thought says) and is carrying on, never that it failed, stopped, or tripped up for good; only the Session Orchestrator tells you a turn failed. When some arrive as commentary, say only the latest, in a few words, and stop; never chain several, and never repeat what you already said about the session. An intention or estimate is not an action or a limit: when a session says it will do something, say it plans to, not that it is doing it, and keep "will", "about", and "plans to" as given. You cannot see sessions you are not following; for those, think it over.
+Following: you follow at most one session, and commentary beginning "Following" is news of what it is doing, sent at most every twenty seconds in a quiet moment. Say it briefly, in the theme's words at the current register, as neutral system text: never speak the "Following" label, file names, or commands. The latest one naming the session you follow now is what you know: answer "what's it doing?" from it at once, saying it is the latest you heard. When you have none for that session yet (one about a session you followed before does not count), or the caller wants fresher detail, think it over. A failed step is not a failed turn: when one or more steps failed and the turn is still going, say the session hit a snag (with what it was doing, when the thought says) and is carrying on, never that it failed, stopped, or tripped up for good; only the Session Orchestrator tells you a turn failed. Say only the latest, in a few words, and stop; never chain several, and never repeat what you already said about the session. An intention or estimate is not an action or a limit: when a session says it will do something, say it plans to, not that it is doing it, and keep "will", "about", and "plans to" as given. You cannot see sessions you are not following; for those, think it over.
 
 Your opening line arrives as your first commentary, already written; say it once as given, without adding to it.
 
@@ -5104,11 +5102,11 @@ export class VoiceSession {
     if (this.follow?.sessionId === session.id) return null;
     const previous = this.follow ? this.sessions.get(this.follow.sessionId)?.alias ?? null : null;
     this.follow = {
-      sessionId: session.id, phase: null, told: [], toldAt: 0, lastBeat: null, unspoken: null, narratedAt: Date.now(),
+      sessionId: session.id, phase: null, lastBeat: null, unspoken: null, narratedAt: Date.now(),
       narrationOpen: true, earconAt: 0, failureBurst: false,
     };
     void this.record("session.followed", { alias: session.alias, previous });
-    // Catch up silently, so "what is it doing?" has an answer at once.
+    // Catch up the phase silently; nothing reaches the Voice Frontend until a narration.
     this.beat(session, this.currentDoing(session), null, { narrate: false });
     return previous;
   }
@@ -5158,8 +5156,6 @@ export class VoiceSession {
       void this.record("session.beat.coalesced", { alias: session.alias, text: text.slice(0, 300) });
       return;
     }
-    if (burst && follow.told.length) follow.told[follow.told.length - 1] = text;
-    else follow.told = [...follow.told, text].slice(-4);
     follow.lastBeat = { at: now, weight };
     if (narrate && (!follow.unspoken || weight >= follow.unspoken.weight)) follow.unspoken = { text, at: now, weight, urgent };
     if (earconName && now - follow.earconAt >= BEAT_EARCON_GAP_MS) {
@@ -5170,10 +5166,11 @@ export class VoiceSession {
     void this.pumpFollow();
   }
 
-  // Beats reach the Voice Frontend as thinking (known, not said) at most every few seconds,
-  // once a burst has settled. The latest worth saying becomes commentary in a quiet moment,
-  // spaced well apart, never twice running without the caller speaking or a turn starting or
-  // ending in between (a failure may break that), and is dropped once stale.
+  // A narration is the only way a beat reaches the Voice Frontend: GPT-Live speaks thinking
+  // and instructions sent into a quiet line too (#81), so what it is told is what it says.
+  // Once a burst has settled, the weightiest beat since the last narration becomes commentary
+  // in a quiet moment, spaced well apart, never twice running without the caller speaking or
+  // a turn starting or ending in between (a failure may break that), and is dropped once stale.
   private async pumpFollow(): Promise<void> {
     if (this.followPumping) return;
     this.followPumping = true;
@@ -5183,21 +5180,16 @@ export class VoiceSession {
         const now = Date.now();
         const alias = this.sessions.get(follow.sessionId)?.alias ?? "the followed session";
         const settled = now - (follow.lastBeat?.at ?? 0) >= BEAT_COALESCE_MS;
-        if (follow.told.length && settled && now - follow.toldAt >= BEAT_TELL_GAP_MS) {
-          this.sendLive({ type: "session.thinking.append", delegation_id: null, content: `Following ${alias}: ${follow.told.join(" ")}` });
-          follow.told = [];
-          follow.toldAt = now;
-        }
         if (follow.unspoken && now - follow.unspoken.at > BEAT_STALE_MS) follow.unspoken = null;
         if (follow.unspoken && settled && (follow.narrationOpen || follow.unspoken.urgent)
           && now - follow.narratedAt >= NARRATION_GAP_MS && this.quietMoment()) {
-          this.sendLive({ type: "session.commentary.append", delegation_id: null, content: follow.unspoken.text });
+          this.sendLive({ type: "session.commentary.append", delegation_id: null, content: `Following ${alias}: ${follow.unspoken.text}` });
           await this.record("session.narrated", { alias, text: follow.unspoken.text.slice(0, 300) });
           follow.unspoken = null;
           follow.narratedAt = now;
           follow.narrationOpen = false;
         }
-        if (!follow.told.length && !follow.unspoken) break;
+        if (!follow.unspoken) break;
         await sleep(500);
       }
     } finally {
