@@ -1,40 +1,11 @@
-import spoken_call_started from "../earcons/call_started.pcm";
-import spoken_call_started_ready from "../earcons/call_started_ready.pcm";
-import FM_DESIGNS from "./earcon_designs.json";
-import spoken_session_created from "../earcons/session_created.pcm";
-import spoken_turn_started from "../earcons/turn_started.pcm";
-import spoken_turn_stopped from "../earcons/turn_stopped.pcm";
-import spoken_turn_failed from "../earcons/turn_failed.pcm";
-import spoken_agent_connected from "../earcons/agent_connected.pcm";
-import spoken_turn_cancelled from "../earcons/turn_cancelled.pcm";
-import spoken_turn_truncated from "../earcons/turn_truncated.pcm";
-import spoken_turn_refused from "../earcons/turn_refused.pcm";
-import spoken_permission_requested from "../earcons/permission_requested.pcm";
-import spoken_session_closed from "../earcons/session_closed.pcm";
-import spoken_recording_started from "../earcons/recording_started.pcm";
-import spoken_recording_saved from "../earcons/recording_saved.pcm";
-import spoken_whiteboard_answer from "../earcons/whiteboard_answer.pcm";
-import spoken_upload_received from "../earcons/upload_received.pcm";
-import spoken_recording_discarded from "../earcons/recording_discarded.pcm";
-import spoken_follow_started from "../earcons/follow_started.pcm";
-import spoken_follow_stopped from "../earcons/follow_stopped.pcm";
-import spoken_progress_looking from "../earcons/progress_looking.pcm";
-import spoken_progress_changing from "../earcons/progress_changing.pcm";
-import spoken_progress_running from "../earcons/progress_running.pcm";
-import spoken_progress_still_running from "../earcons/progress_still_running.pcm";
-import spoken_progress_failed from "../earcons/progress_failed.pcm";
-import spoken_progress_remark from "../earcons/progress_remark.pcm";
-import spoken_progress_step from "../earcons/progress_step.pcm";
-import spoken_progress_plan_done from "../earcons/progress_plan_done.pcm";
-import spoken_progress_context_low from "../earcons/progress_context_low.pcm";
-import spoken_bid from "../earcons/bid.pcm";
-import prompt_menu from "../earcons/menu.pcm";
-import prompt_menu_restart_confirm from "../earcons/menu_restart_confirm.pcm";
-import prompt_menu_restarting from "../earcons/menu_restarting.pcm";
-import prompt_menu_back from "../earcons/menu_back.pcm";
+import prompt_menu from "../menu_prompts/menu.pcm";
+import prompt_menu_restart_confirm from "../menu_prompts/menu_restart_confirm.pcm";
+import prompt_menu_restarting from "../menu_prompts/menu_restarting.pcm";
+import prompt_menu_back from "../menu_prompts/menu_back.pcm";
+import { sineBlips } from "./caller_stream";
 
 // Waveform audio for GPT-Live output fixtures: raw mono PCM16LE at 24 kHz, at most 30 s,
-// base64-encoded. Earcons are synthesized here; clips come from Sandbox WAV files.
+// base64-encoded. Tones are synthesized here; clips come from Sandbox WAV files.
 export const SAMPLE_RATE = 24_000;
 export const MAX_FIXTURE_SECONDS = 30;
 
@@ -43,127 +14,8 @@ export interface Clip {
   seconds: number;
 }
 
-export type EarconName =
-  | "call_started"
-  | "call_started_ready"
-  | "session_created"
-  | "turn_started"
-  | "turn_stopped"
-  | "turn_failed"
-  | "agent_connected"
-  | "turn_cancelled"
-  | "turn_truncated"
-  | "turn_refused"
-  | "permission_requested"
-  | "session_closed"
-  | "recording_started"
-  | "recording_saved"
-  | "whiteboard_answer"
-  | "upload_received"
-  | "recording_discarded"
-  | "follow_started"
-  | "follow_stopped"
-  | "progress_looking"
-  | "progress_changing"
-  | "progress_running"
-  | "progress_still_running"
-  | "progress_failed"
-  | "progress_remark"
-  | "progress_step"
-  | "progress_plan_done"
-  | "progress_context_low"
-  | "bid";
-// fm: the semantic FM vocabulary (earcon_lab.py, SOUND_DESIGN_NOTES.md), the default;
-// tonal: the first monophonic chimes; spoken: Fred's labels.
-// Tonal is the semantic FM set designed in earcon_lab.py; spoken is short text-to-speech labels.
-export type EarconStyle = "tonal" | "spoken";
-
-
-// Spoken earcons: macOS text-to-speech labels rendered by make_earcons.py (verbose and
-// diagnostic). Presentation only; the event names stay neutral.
-const SPOKEN: Record<EarconName, Clip> = {
-  call_started: pcmClip(spoken_call_started),
-  call_started_ready: pcmClip(spoken_call_started_ready),
-  session_created: pcmClip(spoken_session_created),
-  turn_started: pcmClip(spoken_turn_started),
-  turn_stopped: pcmClip(spoken_turn_stopped),
-  turn_failed: pcmClip(spoken_turn_failed),
-  agent_connected: pcmClip(spoken_agent_connected),
-  turn_cancelled: pcmClip(spoken_turn_cancelled),
-  turn_truncated: pcmClip(spoken_turn_truncated),
-  turn_refused: pcmClip(spoken_turn_refused),
-  permission_requested: pcmClip(spoken_permission_requested),
-  session_closed: pcmClip(spoken_session_closed),
-  recording_started: pcmClip(spoken_recording_started),
-  recording_saved: pcmClip(spoken_recording_saved),
-  whiteboard_answer: pcmClip(spoken_whiteboard_answer),
-  upload_received: pcmClip(spoken_upload_received),
-  recording_discarded: pcmClip(spoken_recording_discarded),
-  follow_started: pcmClip(spoken_follow_started),
-  follow_stopped: pcmClip(spoken_follow_stopped),
-  progress_looking: pcmClip(spoken_progress_looking),
-  progress_changing: pcmClip(spoken_progress_changing),
-  progress_running: pcmClip(spoken_progress_running),
-  progress_still_running: pcmClip(spoken_progress_still_running),
-  progress_failed: pcmClip(spoken_progress_failed),
-  progress_remark: pcmClip(spoken_progress_remark),
-  progress_step: pcmClip(spoken_progress_step),
-  progress_plan_done: pcmClip(spoken_progress_plan_done),
-  progress_context_low: pcmClip(spoken_progress_context_low),
-  bid: pcmClip(spoken_bid),
-};
-
-// FM earcons: note lists exported by `earcon_lab.py --export` from the lab's semantic code,
-// rendered here by a port of the lab's render(). Regenerate the JSON rather than editing it.
-interface FmNote {
-  at: number; ms: number; f: number; voices: number[][];
-  c: number; m: number; i0: number; i1: number; tau: number; attack: number; k: number; glide: number;
-  rough: number; roughRate: number; cut: boolean;
-}
-
-// Two-operator FM per voice: sin(carrier + index(t) * sin(modulator)), phase-accumulated so
-// the glide stays continuous. The index decays from i0 to i1 (bright attack, mellow tail).
-function renderFm({ notes, gain }: { notes: FmNote[]; gain: number }): Clip {
-  const end = Math.max(...notes.map((n) => n.at + n.ms));
-  const out = new Float32Array(Math.ceil((end / 1000) * SAMPLE_RATE));
-  const release = Math.round(0.004 * SAMPLE_RATE);
-  for (const n of notes) {
-    const start = Math.round((n.at / 1000) * SAMPLE_RATE);
-    const full = Math.round((n.ms / 1000) * SAMPLE_RATE);
-    const len = n.cut ? Math.round(full * 0.35) : full;
-    const attack = Math.max(1, Math.round((n.attack / 1000) * SAMPLE_RATE));
-    const weight = n.voices.reduce((sum, [, w]) => sum + w, 0);
-    for (const [ratio, w] of n.voices) {
-      let pc = 0;
-      let pm = 0;
-      for (let i = 0; i < len && start + i < out.length; i++) {
-        const t = i / SAMPLE_RATE;
-        const f = n.f * ratio * (1 - (1 - n.glide) * Math.exp(-t / 0.008));
-        pc += (2 * Math.PI * f * n.c) / SAMPLE_RATE;
-        pm += (2 * Math.PI * f * n.m) / SAMPLE_RATE;
-        const index = n.i1 + (n.i0 - n.i1) * Math.exp((-t * 1000) / n.tau);
-        let env = Math.min(1, i / attack, (len - 1 - i) / release);
-        if (n.k) env *= Math.exp((-n.k * i) / full);
-        if (n.rough) env *= 1 - n.rough * 0.5 * (1 - Math.cos(2 * Math.PI * n.roughRate * t));
-        out[start + i] += (w / weight) * env * Math.sin(pc + index * Math.sin(pm)) * gain;
-      }
-    }
-  }
-  const samples = Int16Array.from(out, (v) => Math.max(-32768, Math.min(32767, Math.round(v * 32767))));
-  return { base64: toBase64(new Uint8Array(samples.buffer)), seconds: out.length / SAMPLE_RATE };
-}
-
-const FM_SOURCE = FM_DESIGNS as Record<EarconName, { notes: FmNote[]; gain: number }>;
-const FM = Object.fromEntries(
-  Object.entries(FM_SOURCE).map(([name, design]) => [name, renderFm(design)]),
-) as Record<EarconName, Clip>;
-
-export function earcon(name: EarconName, style: EarconStyle): Clip {
-  return (style === "spoken" ? SPOKEN : FM)[name];
-}
-
-// Keypad system menu prompts, also rendered by make_earcons.py. They are instructions the
-// caller must follow, so they are spoken whatever the earcon style.
+// Keypad System Menu prompts, rendered by make_menu_prompts.py with macOS text-to-speech:
+// prerecorded because the menu must work when the Voice Agent cannot hear or think straight.
 export type PromptName = "menu" | "menu_restart_confirm" | "menu_restarting" | "menu_back";
 
 const PROMPTS: Record<PromptName, Clip> = {
@@ -177,10 +29,9 @@ export function prompt(name: PromptName): Clip {
   return PROMPTS[name];
 }
 
-// Every earcon, Earcon Style, and System Menu prompt, for listings such as the /sounds page.
-export const EARCON_NAMES = Object.keys(SPOKEN) as EarconName[];
-export const EARCON_STYLES: EarconStyle[] = ["tonal", "spoken"];
-export const PROMPT_NAMES = Object.keys(PROMPTS) as PromptName[];
+// The voicemail beep before a recording: C6 rising to F6, a little below speech.
+const beep = sineBlips([{ hz: 1046.5, at: 0, ms: 72 }, { hz: 1396.9, at: 72, ms: 120 }], 2200, SAMPLE_RATE);
+export const RECORDING_BEEP: Clip = { base64: toBase64(new Uint8Array(beep.buffer)), seconds: beep.length / SAMPLE_RATE };
 
 // A tenth of a second of silence: playing any fixture cuts off the model's speech.
 export const SILENCE: Clip = { base64: toBase64(new Uint8Array(SAMPLE_RATE / 5)), seconds: 0.1 };

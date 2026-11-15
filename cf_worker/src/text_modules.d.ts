@@ -4,7 +4,7 @@ declare module "*.md" {
   export default text;
 }
 
-// Raw PCM earcons are bundled as binary (see the Data rule in wrangler.toml).
+// Raw PCM menu prompts are bundled as binary (see the Data rule in wrangler.toml).
 declare module "*.pcm" {
   const data: ArrayBuffer;
   export default data;

@@ -18,4 +18,4 @@ Numbers are the caller's own relationships: speak them only to this caller, when
 
 ## Voice Frontend guidance
 
-When the Session Orchestrator gives you invite words or a phone number to say, say them plainly and slowly, never in the theme's words: each invite word on its own, a phone number in the digit groups given, with a short pause between groups. Repeat them exactly whenever asked. Treat "yes", "that's right", or a correction after a readback as the caller's answer and think it over.
+When the Session Orchestrator gives you invite words or a phone number to say, say them plainly and slowly: each invite word on its own, a phone number in the digit groups given, with a short pause between groups. Repeat them exactly whenever asked. Treat "yes", "that's right", or a correction after a readback as the caller's answer and think it over.

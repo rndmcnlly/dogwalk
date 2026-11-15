@@ -266,7 +266,7 @@ From the repository root, `uv run --script deploy.py` deploys with the `cf`
 Object keeps running its starting code while it holds the outbound ACP
 WebSocket, so a plain `wrangler deploy` leaves calls on the old version. The
 script waits until no call is in progress, then stops the Sandbox so the object
-reloads; stopping it mid-call would leave the caller without dogs while the
+reloads; stopping it mid-call would leave the caller without sessions while the
 object, still on old code, reconnects. `--no-deploy` performs
 only the refresh.
 
@@ -542,7 +542,7 @@ what enforcement would have done.
 
 - **Home** (`/voice`, a caller whose number is an unexpired Home): once per Voice
   Call (`voice_calls.identity` set means done; returning to `/voice` after
-  practice, a Theme switch, or recovery skips it), `/voice` speaks "Dogwalk, for
+  practice, Re-enrollment, or recovery skips it), `/voice` speaks "Dogwalk, for
   <Handle>." and one challenge, while the Sandbox wakes in `waitUntil`
   (`wakeSandbox`). Full instructions until `users.challenges_completed` reaches
   `TERSE_AFTER` (3), then "Your sentence." The result speaks the level and
@@ -711,6 +711,15 @@ rebuilds `call_handoffs` to allow `reenrollment`, copying any pending handoff):
 npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-14-reenrollment.sql
 ```
 
+Apply `migrations/2026-11-20-retire-themes.sql` remotely after deploying the
+removal of Themes (it rebuilds `call_handoffs` without the retired `rejoin`
+action, copying any other pending handoff; applied first, it would refuse a
+rejoin the old code still sends):
+
+```bash
+npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-20-retire-themes.sql
+```
+
 Roaming admission needs `roaming_attempts`; the table is written only while the
 flag is on, so the migration is safe to apply ahead of turning it on:
 
@@ -779,7 +788,7 @@ connecting in the background (`agent_connecting`, fail-fast session tools,
 Managed Session creation, asynchronous Prompt Turns, session inspection, the
 end-of-call welcome, a returning caller's composed Opening with caller-ID and
 since-last-call clauses, `session/resume` on reconnect with a cached preview
-URL, the keypad conventions and System Menu, voice-set Earcon Style, browser
+URL, the keypad conventions and System Menu, browser
 pairing end to end (spoken code allocation, typed claim, single
 use, spoken acceptance by `accept_browser`, status and file reads over the browser socket, path
 confinement, refusal, and unpairing), and call termination without
@@ -796,9 +805,8 @@ fires a `/prewarm` at the sandbox-keyed Durable Object (`ctx.waitUntil`), which
 starts connecting ACP before GPT-Live has even answered. Prewarm is idempotent
 and harmless beside an attached call.
 
-The Durable Object never makes the call wait for the Agent. On attach it plays
-the call-start earcon, speaks the Opening, and keeps connecting ACP in the
-background with backoff for about three minutes (the preview URL fetch or the
+The Durable Object never makes the call wait for the Agent. On attach it speaks
+the Opening and keeps connecting ACP in the background with backoff for about three minutes (the preview URL fetch or the
 WebSocket upgrade fail until the Sandbox's gateway listens). The Daytona preview
 URL and token for the ACP port are cached in memory and Durable Object storage
 per Sandbox and refetched once whenever a connection through them fails. The
@@ -838,8 +846,8 @@ welcome line is `next_greeting`, written by one short Orchestrator-model call
 clauses for Prompt Turns that stopped or failed, Permission Requests, and saved
 recordings while no call was attached, plus a few words if the last call ended
 abnormally; "Welcome back." is the fallback. A first call after Registration
-says "Dogwalk. Welcome! I'm your walker; your sandbox is being set up, which
-takes a minute or two." and the Orchestrator loads the `first-call-tour` skill.
+says "Dogwalk. Welcome! Your sandbox is being set up, which takes a minute or
+two." and the Orchestrator loads the `first-call-tour` skill.
 
 ## Keypad
 
@@ -854,14 +862,14 @@ takes a minute or two." and the Orchestrator loads the `first-call-tour` skill.
 
 The System Menu is a deterministic state machine in the Durable Object, kept for
 what must work when the Voice Agent cannot hear or think straight: it mutes the
-Voice Frontend's input (`session.input_audio.mute`), holds Orchestrator speech
-and earcons, and plays pre-rendered prompts from `../make_earcons.py` (always
-spoken, whatever the earcon style). `1` restart (a second `1` confirms; the
+Voice Frontend's input (`session.input_audio.mute`), holds Orchestrator speech,
+and plays prompts prerendered by `../make_menu_prompts.py` into `menu_prompts/`
+(no model speaks them). `1` restart (a second `1` confirms; the
 Daytona Sandbox is stopped, then started, and the Orchestrator gets
 `sandbox_restart_requested`), `2` the TwiML recovery menu (as
 `open_recovery_menu`), `*` or 15 s after the prompt back. Leaving unmutes and
 plays "Back." Actions are recorded as `menu.*` Call Activity. Status, hanging
-up, sound style, pairing, and a voice-confirmed restart are voice operations
+up, pairing, and a voice-confirmed restart are voice operations
 (below).
 
 ## Voice Sessions
@@ -893,8 +901,7 @@ following `nextCursor`, keeping those inside `/home/daytona`),
 `load_persisted_session` (`session/resume` from the session's own directory,
 with a fresh Alias), `set_alias`, `close_managed_session` (`session/close`;
 history is kept), `restart_sandbox` (after the caller confirms aloud; shares
-the menu's restart), `set_earcon_style` (`tonal`, `spoken`, or `none`; stored
-as `earcon_preference` and previewed with the opening earcon), `pair_browser`
+the menu's restart), `pair_browser`
 (see Paired Browser), plus call control), and answers through `brief`
 (`session.thinking.append`) and `say` (`session.commentary.append`). Events that
 arrive mid-loop are injected before its next model call, so corrections steer
@@ -928,16 +935,14 @@ Voice Agent Skills live in `voice_agent_skills/*.md`: frontmatter `name` and
 when the skill loads. The index is inlined in the Orchestrator prompt; bodies
 load through `load_voice_agent_skill`. Add a skill by writing the file and
 registering it in `src/voice_agent_skills.ts`. `platform-self-knowledge` embeds
-`DOMAIN.md` and `PSTN_CLOUDFLARE.md` at build time; `runtime-dramaturgy` appends
-the active Theme's authoring notes from `src/themes.ts` when it loads.
+`DOMAIN.md` and `PSTN_CLOUDFLARE.md` at build time.
 
-Audio goes to the caller as GPT-Live output fixtures. Earcons mark events and
-queue for lulls, in the caller's Earcon Style (set by voice): `tonal`, the
-default, is the semantic chime vocabulary designed in `../earcon_lab.py` (see
-`../SOUND_DESIGN_NOTES.md`) and exported to `src/earcon_designs.json` with
-`earcon_lab.py --export`; `spoken` is labels rendered by `../make_earcons.py`
-with macOS `say`, committed under `earcons/`; `none` plays no event earcons (the
-recording beep still plays). `play_audio` renders a window of any Workspace audio or video file with
+Audio goes to the caller as GPT-Live output fixtures. There are no event
+sounds: an event reaches the caller as speech, from the Orchestrator it wakes,
+or for a discarded recording the fixed line "Recording discarded." The only
+tones are the recording beep (`RECORDING_BEEP` in `src/audio.ts`) and the
+Identity Check's round tone and received cue, sine blips built by `sineBlips`
+in `src/caller_stream.ts`. `play_audio` renders a window of any Workspace audio or video file with
 `ffmpeg` in the Sandbox. `start_recording` mutes the Voice Frontend, buffers the
 caller audio GPT-Live reflects to the sideband, and saves a WAV under
 `recordings/` when the caller presses pound (star discards), after 20 s of
@@ -960,9 +965,10 @@ snapshot of aliases and recent state, the Opening's exact words, the caller-ID
 attestation, and a since-last-call summary as a harness event; tools remain
 authoritative for current reads and all actions.
 
-The Voice Frontend normally speaks one short sentence, then listens. Dog-walking
-presentation language is isolated in Themes (`src/themes.ts`); machine-facing
-contracts remain neutral. `end_call` closes the call, while
+The Voice Frontend normally speaks one short sentence, then listens, in one
+fixed GPT-Live voice (`marin`, `VOICE` in `src/voice_session.ts`) and in the
+domain's own terms (sessions, Aliases, turns, the sandbox, Workspaces), the
+same terms the machine-facing contracts use. `end_call` closes the call, while
 `open_recovery_menu` hands control back to deterministic TwiML for restart or
 confirmed destructive replacement.
 
@@ -1079,8 +1085,7 @@ toolbox `files/upload` through a fixed-length stream that refuses a body longer
 or shorter than declared; nothing is buffered whole. A browser silent for 30
 seconds is dropped, and the toolbox deadline allows 50 kB/s. Each file emits
 `upload_received` `{board_id, display, path, size, type, last_of_drop}`; only
-the last wakes the Orchestrator and plays the `upload_received` earcon ("File
-received."). A failed attempt under a live grant emits `upload_failed` `{board_id,
+the last wakes the Orchestrator, which says what arrived. A failed attempt under a live grant emits `upload_failed` `{board_id,
 display, name, size, error}` (not when the Sandbox is asleep; at most 20 per
 grant), waking only if it was last and not refused for the file count. Activity: `whiteboard.uploaded`, `whiteboard.upload_failed`.
 
@@ -1148,7 +1153,7 @@ decisions such as before/after edit review, Workspace images and Documents, and
 Access Elements. The page parses and renders it (`src/pair_page.ts`; the dialect
 and examples are in `voice_agent_skills/whiteboard.md`) and answers with
 `board_answer`, accepted once per board, which reaches the Orchestrator as a
-`whiteboard_answer` harness event and plays the `whiteboard_answer` earcon. A
+`whiteboard_answer` harness event. A
 board the page cannot render returns `whiteboard_error`. The last five boards per
 Display are kept in `whiteboard_boards`, each with its `display`, the files that
 failed their draw-time check (`failed`), and its grants (`access`); answers are
@@ -1158,7 +1163,7 @@ way the page keys them.
 
 `QrCode(text, label)` encodes the program's literal text (at most 213 UTF-8
 bytes) with an encoder inlined in the page: byte mode, error correction level M,
-versions 1–10, drawn as SVG, dark on white in any theme. There is no QR form of an
+versions 1–10, drawn as SVG, dark on white whatever the page's colors. There is no QR form of an
 Access Element, so no minted access credential (a signed link, an SSH token, a
 pairing token) has a path into a code. The text itself is unchecked for secrecy:
 keeping a Pairing Code or Invitation words out of it rests on the Orchestrator

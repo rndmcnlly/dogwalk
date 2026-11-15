@@ -15,7 +15,6 @@ import { type ActivityRow, type CallRow, logsRequest, openRecordedSpanIds, produ
 import { observeTwilio, processTwilioJobs } from "./provider_timing";
 import { LANDING_HTML } from "./landing";
 import { PAIR_HTML } from "./pair_page";
-import { handleSounds } from "./sounds_page";
 import {
   PAIRING_MAX_ATTEMPTS, PAIRING_GLOBAL_ATTEMPTS_PER_MINUTE, normalizePairingCode,
   describeBrowser, describePlace, sha256Hex, splitCredential,
@@ -26,8 +25,7 @@ import {
   USABLE_FOR_PHONE_SQL,
 } from "./invitations";
 import { availableHandles } from "./handles";
-import { frontendInstructions, VoiceSession } from "./voice_session";
-import { DEFAULT_THEME, THEMES } from "./themes";
+import { FRONTEND_INSTRUCTIONS, VOICE, VoiceSession } from "./voice_session";
 import { handleVoiceVerify, warmSpeaker } from "./voice_verify";
 import { handlePracticeHeard, handlePracticeResult, handlePracticeStream, practiceReceived, practiceStreamStop, practiceTone, startPractice } from "./challenge_practice";
 import { noteReturn } from "./challenge_rounds";
@@ -1313,11 +1311,6 @@ export default {
       return handlePair(req, env, url);
     }
 
-    if (url.pathname === "/sounds" || url.pathname.startsWith("/sounds/")) {
-      const sounds = await handleSounds(req, url);
-      if (sounds) return sounds;
-    }
-
     if (url.pathname === "/voice" && req.method === "POST") {
       return handleVoice(req, env, ctx);
     }
@@ -1522,8 +1515,6 @@ async function handleAfterLive(req: Request, env: Env, ctx: ExecutionContext): P
   ).bind(callSid, from).first<{ action: string }>();
   await env.DB.prepare("DELETE FROM call_handoffs WHERE call_sid = ?").bind(callSid).run();
   if (handoff?.action === "hangup") return twiml(Hangup());
-  // A theme switch: back through /voice to a fresh GPT-Live session with the new voice.
-  if (handoff?.action === "rejoin") return twiml(Redirect("/voice"));
   if (handoff?.action === "donation") return twiml(Redirect("/voice/donation"));
   if (handoff?.action === "practice") return twiml(Redirect("/voice/practice"));
   if (handoff?.action === "reenrollment") return twiml(Redirect("/voice/reenrollment"));
@@ -1690,17 +1681,14 @@ async function handleOpenAiLiveWebhook(req: Request, env: Env): Promise<Response
     await decideLiveCall(env, liveSessionId, "reject", { status_code: prepare.status === 409 ? 486 : 500 });
     return new Response(null, { status: 204 });
   }
-  // The caller's Theme casts the voice and presents the Voice Frontend's instructions.
-  const prepared = await prepare.json<{ theme?: string }>().catch(() => ({ theme: undefined }));
-  const theme = THEMES.find((item) => item.id === prepared.theme) ?? DEFAULT_THEME;
   // Client delegation: GPT-Live only converses. The VoiceSession Durable Object runs the
   // Session Orchestrator and answers each delegation through the sideband.
   const accepted = await decideLiveCall(env, liveSessionId, "accept", {
     session: {
       type: "live",
       model: env.OPENAI_LIVE_MODEL ?? "gpt-live-1",
-      instructions: frontendInstructions(theme),
-      audio: { output: { voice: theme.voice } },
+      instructions: FRONTEND_INSTRUCTIONS,
+      audio: { output: { voice: VOICE } },
       delegation: { type: "client", acknowledgement_delay_ms: 400 },
     },
   });

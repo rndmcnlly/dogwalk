@@ -13,7 +13,7 @@ type = "Text"
 globs = ["**/*.md"]
 fallthrough = true
 
-# Spoken earcons rendered by make_earcons.py are bundled as binary.
+# Keypad menu prompts rendered by make_menu_prompts.py are bundled as binary.
 [[rules]]
 type = "Data"
 globs = ["**/*.pcm"]

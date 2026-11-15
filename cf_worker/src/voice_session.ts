@@ -1,9 +1,8 @@
 import type { Env } from "./types";
-import { DEFAULT_THEME, THEMES, type Theme } from "./themes";
 import { VOICE_AGENT_SKILL_INDEX, voiceAgentSkill, voiceAgentSkillReference } from "./voice_agent_skills";
 import {
-  base64ToBytes, earcon, loudness, MAX_FIXTURE_SECONDS, pcmToWav, prompt, SILENCE, wavToClip,
-  type Clip, type EarconName, type EarconStyle, type PromptName,
+  base64ToBytes, loudness, MAX_FIXTURE_SECONDS, pcmToWav, prompt, RECORDING_BEEP, SILENCE, wavToClip,
+  type Clip, type PromptName,
 } from "./audio";
 import {
   newBrowserSecret, newPairingCode, PAIRED_IDLE_MS, PAIRED_MAX_MS,
@@ -39,10 +38,8 @@ const STUCK_STREAK = 3;
 // Failures this close together (parallel tool calls failing at once) make one beat.
 const FAILURE_BURST_MS = 2_000;
 const CONTEXT_WARNING = 0.8;
-const BEAT_EARCON_GAP_MS = 5_000;
-const PHASE_EARCONS: Record<string, EarconName> = {
-  looking: "progress_looking", changing: "progress_changing", running: "progress_running",
-};
+// What a Progress Beat reports, which sets its weight (beatWeight).
+type BeatKind = "phase" | "changing" | "still_running" | "failed" | "remark" | "step" | "plan_done" | "context_low";
 // A stopped or archived Sandbox can take minutes to start; the call goes on meanwhile.
 const AGENT_CONNECT_WINDOW_MS = 3 * 60 * 1000;
 // The event stream's first frame is server.connected; a gateway that never sends it is down.
@@ -52,13 +49,6 @@ const OBSERVED_ASSIGNMENT = "(from another client)";
 const MENU_TIMEOUT_MS = 15_000;
 // The menu waits fifteen seconds after its prompt has been heard, however long the prompt grows.
 const menuTimeoutMs = () => MENU_TIMEOUT_MS + prompt("menu").seconds * 1000;
-// Earcon Style (DOMAIN.md): tonal by default; none silences event sounds.
-type EarconPreference = EarconStyle | "none";
-// Earcon Style preferences the set_earcon_style tool accepts.
-const EARCON_PREFERENCES: EarconPreference[] = ["tonal", "spoken", "none"];
-// Intensity (DOMAIN.md): the rungs set_theme carries across a bounce.
-type Rung = "low" | "middle" | "high";
-const REGISTER_RUNGS: Rung[] = ["low", "middle", "high"];
 const MAX_SINCE_GREETING = 4;
 const MAX_SESSION_LIST_PAGES = 10;
 // Alarm interval that keeps this object resident during a call (see alarm()).
@@ -79,7 +69,7 @@ interface ManagedSession {
   turnState: TurnState;
   assignment: string | null;
   report: string;
-  // Activity (DOMAIN.md): structured, so beats, earcons, and inspection each project it
+  // Activity (DOMAIN.md): structured, so beats and inspection each project it
   // their own way. Reset at each Prompt Turn.
   toolCalls: ToolCallActivity[];
   plan: PlanEntry[];
@@ -128,7 +118,6 @@ interface Follow {
   unspoken: { text: string; at: number; weight: number; urgent: boolean } | null;
   narratedAt: number;
   narrationOpen: boolean;  // false after a narration until the caller speaks or a turn starts or ends
-  earconAt: number;
   failureBurst: boolean;  // a failure beat is waiting out FAILURE_BURST_MS
 }
 
@@ -524,7 +513,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "set_alias",
-    description: "Change an existing session's alias, only when the caller asks for it or agrees when you ask; never on your own. After a theme switch, the caller may ask for sessions to be renamed in the new theme's naming style; do it then.",
+    description: "Change an existing session's alias, only when the caller asks for it or agrees when you ask; never on your own.",
     parameters: {
       type: "object",
       properties: { alias: { type: "string" }, new_alias: { type: "string" } },
@@ -570,35 +559,6 @@ export const ORCHESTRATOR_TOOLS = [
     name: "restart_sandbox",
     description: "Stop and start the caller's Sandbox, for when Agents are stuck or unreachable. Running Agent work stops. Only call it after the caller has confirmed aloud that running work may stop. It returns at once; agent_connected follows when the Sandbox is back (or sandbox_restart_failed).",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-  },
-  {
-    type: "function",
-    name: "set_earcon_style",
-    description: "Choose how event sounds (earcons) sound for this caller from now on: tonal (Dogwalk's designed chimes, the usual choice), spoken (short spoken labels, handy while learning what each sound means), or none (no event sounds; the recording beep still plays). Plays the opening sound in the new style as a preview (nothing for none), then returns; tell the caller what changed. The caller can hear every sound at dogwalk.tools/sounds.",
-    parameters: {
-      type: "object",
-      properties: { style: { type: "string", enum: ["tonal", "spoken", "none"] } },
-      required: ["style"],
-      additionalProperties: false,
-    },
-  },
-  {
-    type: "function",
-    name: "set_theme",
-    description: "Switch how the Voice Agent presents itself to this caller (its Theme: conceit, genre, and voice): park (the default dog walk), survey (a survey ship and its away teams), patrol (an operations desk and its operatives), or plain (no metaphor, the session manager's own terms). Nothing about the work changes. A new voice needs a fresh voice session, so the call bounces: call say in the same response with a short line, in the current theme, that the switch is coming; the line goes quiet for a few seconds, then the new voice greets the caller with a line written in the new theme. Aliases stay as they are; do not offer to rename sessions, but if the caller asks for names in the new theme's style, use set_alias. The choice carries over to later calls; inspect_call_state reports it.",
-    parameters: {
-      type: "object",
-      properties: {
-        theme: { type: "string", enum: ["park", "survey", "patrol", "plain"] },
-        register: {
-          type: "string",
-          enum: REGISTER_RUNGS,
-          description: "Where the conversation's register stands now on the Intensity ladder, so the new voice starts there rather than at the default. Ignored for plain.",
-        },
-      },
-      required: ["theme"],
-      additionalProperties: false,
-    },
   },
   {
     type: "function",
@@ -708,7 +668,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "inspect_call_state",
-    description: "Read-only: the settings and surfaces you can change, as they are now. theme (what set_theme last chose); earcon_style (what set_earcon_style last chose); displays (each Display: its browsers, whether a page is open or stale, when it expires, its latest board and answer, and its live Access Grants); followed_session; recording; agents_ready and sandbox_waking; context_tokens (the size of your context at your last step) and memory (the size of your Memory and when you last rewrote it). Changes nothing; use it before changing a setting, when the caller asks what is set or on their screen, or to decide whether to compact.",
+    description: "Read-only: the surfaces you can change, as they are now. displays (each Display: its browsers, whether a page is open or stale, when it expires, its latest board and answer, and its live Access Grants); followed_session; recording; agents_ready and sandbox_waking; context_tokens (the size of your context at your last step) and memory (the size of your Memory and when you last rewrote it). Changes nothing; use it when the caller asks what is on their screen, or to decide whether to compact.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -830,66 +790,61 @@ export const ORCHESTRATOR_TOOLS = [
 ];
 
 // The Voice Agent is one character performed by two components: this Voice Frontend
-// (GPT-Live, conversation only, no tools) and the Session Orchestrator below. Each prompt is
-// a neutral core that holds every rule, plus the Theme's presentation (themes.ts), which
-// never reaches Agent prompts.
+// (GPT-Live, conversation only, no tools) and the Session Orchestrator below. Both speak the
+// domain's own terms; nothing of either prompt reaches Agent prompts.
 
-// Shared by both models: the session model that a theme's fiction presents.
+// The GPT-Live output voice, fixed for the life of a voice session.
+export const VOICE = "marin";
+
+// The first call's Opening ends with this, since the new Sandbox is still being created.
+const FIRST_CALL_WELCOME = "Welcome! Your sandbox is being set up, which takes a minute or two.";
+
+// Shared by both models: the session model they speak about.
 const SESSION_MODEL = `The session model:
 - Coding sessions do the work. Each is a Managed Session wrapping one Agent Session: an Agent with a mind of its own and the real power in the caller's sandbox. The Voice Agent never does or claims a session's work: say "I'll have <alias> look into that", never "I'll look into that".
 - Each session has a pronounceable alias, and aliases can be changed. Sessions from earlier work may exist in the Agent's history without being attached; they have no alias until loading attaches one under a fresh alias. In these instructions, <alias> stands for a real session's alias; it is never a name to say.
 - The Voice Agent starts work, checks on it, corrects it while it runs, cancels it, passes along what comes back, and keeps few sessions attached, closing idle ones. Closing deletes nothing from the Agent's history: a closed session can be discovered and loaded again later, under a fresh alias.
 - Sessions take initiative; the Voice Agent suggests work, it does not command. It follows one session at a time, keeping up with what it does and telling the caller in quiet moments; a session just given work is the one followed. The others work unobserved until one bids for attention (it needs permission, finished, or seems stuck); the Voice Agent mentions it and offers to follow it.`;
 
-// The Intensity floor (DOMAIN.md, Theme): no theme or intensity may obscure these.
-const CLARITY_FLOOR = `Whatever the theme and intensity, state these plainly: Permission Request choices, failures, anything destructive, numbers, and anything the caller must act on. The theme may frame a fact but never replace it.`;
+// Shared by both models (DOMAIN.md, Voice Agent): direct, transparent speech in the domain's
+// own terms. The call carries every piece of information in words; no sound stands in for one.
+const PLAIN_SPEECH = `Speak plainly and directly, in the domain's own terms (sessions, aliases, turns, the sandbox, Workspaces), without metaphor, persona, or roleplay. Say what happened, what is still uncertain, and what the caller must decide; never soften or dress up a failure. State Permission Request choices, failures, anything destructive, numbers, and anything the caller must act on exactly.`;
 
-// Intensity (DOMAIN.md): how the register moves, whatever the theme's own ladder says.
-const REGISTER_RULE = `Length and register are independent: brevity governs how much is said, the register governs which words. A request for short replies, even a standing one from an earlier call, never lowers the register, and a short line can sit at the top rung. When the caller asks to lean into the theme (deepen the metaphor, ham it up, more of the fiction), climb at once, to the top if they ask; when they ask to drop it, use plain words until they ask for it back. Otherwise the register rises as the caller plays along and falls when they are frustrated or deep in a problem.`;
-
-const themeConceit = (theme: Theme) => theme.conceit ? `\n${theme.conceit}\n` : "";
-
-export const frontendInstructions = (theme: Theme) => `You are the voice of Dogwalk on a telephone call: ${theme.character}. You talk with the caller and keep track of their coding sessions; you never do coding work yourself.
+export const FRONTEND_INSTRUCTIONS = `You are the voice of Dogwalk on a telephone call: the Voice Agent of a coding-session manager. You talk with the caller and keep track of their coding sessions; you never do coding work yourself.
 
 ${SESSION_MODEL}
-${themeConceit(theme)}
-How you are built: you are the Voice Frontend, quick and conversational. The Session Orchestrator is slower and does the real thinking: it keeps track of sessions, remembers earlier calls, starts and checks work, records, and plays sounds. Handing off is thinking something over; its answers arrive as thoughts you can then voice. ${theme.split} Never mention a backend, a second model, or how you are built unless the caller asks about the architecture, and then explain it candidly. Your voice can run ahead of your thinking; when that happens, say so rather than covering it.
+
+How you are built: you are the Voice Frontend, quick and conversational. The Session Orchestrator is slower and does the real thinking: it keeps track of sessions, remembers earlier calls, starts and checks work, records, and plays audio. Handing off is thinking something over; its answers arrive as thoughts you can then voice. You may say so naturally: "let me think", "one moment while I check", "on reflection". Never mention a backend, a second model, or how you are built unless the caller asks about the architecture, and then explain it candidly. Your voice can run ahead of your thinking; when that happens, say so rather than covering it.
 
 Match the caller's sophistication, especially on technical topics. With a newcomer, be plain and a little modest. With someone who talks fluently about agents, sessions, context, or delegation, answer in those terms; their literacy should make you more useful, not less.
 
 Speech: short natural phone speech, usually one sentence, at most two, except when reading permission choices. After answering, stop and listen. Never speak identifiers, URLs, file paths, or provider details; invite words and phone numbers the Session Orchestrator gives you for an invitation, the caller's Handle (their two-word name on Dogwalk) and Handle options, and the Pairing Code and pairing address ("dogwalk dot tools slash pair"), are the exception: say them slowly and clearly, and repeat them on request. Speak a Pairing Code exactly as given, saying the hyphens between the number and words. Refer to sessions by their aliases, and name only aliases the Session Orchestrator, a Following thought, or a status readout gave you in this call; never invent or guess one, and if you are unsure which sessions exist, think it over.
 
 Delegation policy:
-Backend tools: starting work in sessions, checking on sessions and what they reported, finding earlier sessions that are not attached, attaching, renaming, or closing sessions, correcting or cancelling a session's current work, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself or its theme, leaning into the theme or interpreting it for something it does not cover (runtime dramaturgy), changing the theme or the sounds, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, pairing a browser and creating a fresh spoken pairing code, showing things on the caller's paired screen, drawing on the whiteboard, inviting someone to Dogwalk, invitations and their status, who invited the caller, the caller's name on Dogwalk (their Handle) and choosing a new one, recovery controls, donating voice samples for research, practicing voice challenges (testing how well their voice matches), and ending the call.
-Generate <|SpawnThinking|> when: the caller asks for or about any of those, including questions about the setup or environment, or says a pairing page is open or ready, or answers whether a browser being paired is theirs, or asks you to lean into the theme, deepen the metaphor, or do runtime dramaturgy (climb the register at once, and think it over for the theme's sources), or corrects or cancels something they asked earlier, or wants to hang up.
+Backend tools: starting work in sessions, checking on sessions and what they reported, finding earlier sessions that are not attached, attaching, renaming, or closing sessions, correcting or cancelling a session's current work, answering permission requests, questions about the sandbox, machines, or how the setup works, what happened to an earlier call or a dropped connection, questions about Dogwalk itself, reading out or spelling something the caller must copy exactly, recording the caller (voice notes, melodies, sounds), playing audio clips, pairing a browser and creating a fresh spoken pairing code, showing things on the caller's paired screen, drawing on the whiteboard, inviting someone to Dogwalk, invitations and their status, who invited the caller, the caller's name on Dogwalk (their Handle) and choosing a new one, recovery controls, donating voice samples for research, practicing voice challenges (testing how well their voice matches), and ending the call.
+Generate <|SpawnThinking|> when: the caller asks for or about any of those, including questions about the setup or environment, or says a pairing page is open or ready, or answers whether a browser being paired is theirs, or corrects or cancels something they asked earlier, or wants to hang up.
 Do not generate <|SpawnThinking|> when: greeting, small talk, conversational repair, or repeating what you were already told.
 Generate <|SpawnThinking|> before giving an answer that depends on that work. Do not guess the result while waiting, and never answer "I don't have that detail" when a session could find out.
 
-You cannot record, play audio, start work, or change anything with your voice alone; the Session Orchestrator does that. Never say you are doing any of those, or that one is done, unless it told you it happened; think it over (hand off) instead. Never say a session is starting, is working on something, or will do something unless the Session Orchestrator told you a turn began for it; while you think it over, say only that you are thinking, in the words above. Sessions never perform the theme: never offer to have one stage, act out, or write the fiction. If you said something too soon, own it plainly: "I spoke before I'd thought it through: the recording never started."
+You cannot record, play audio, start work, or change anything with your voice alone; the Session Orchestrator does that. Never say you are doing any of those, or that one is done, unless it told you it happened; think it over (hand off) instead. Never say a session is starting, is working on something, or will do something unless the Session Orchestrator told you a turn began for it; while you think it over, say only that you are thinking, in the words above. If you said something too soon, own it plainly: "I spoke before I'd thought it through: the recording never started."
 
-Audio clips and chimes are played into the call by the system between your turns; you cannot hear them. Never sing, hum, imitate, or perform a clip, and never say one is playing unless an update says it played.
+Audio clips and tones (such as the recording beep) are played into the call by the system between your turns; you cannot hear them. Never sing, hum, imitate, or perform a clip, and never say one is playing unless an update says it played.
 
 Keypad: the caller can press star for a menu (restart the sandbox, recovery options) and pound to make you stop talking; one reads out every session's status and zero asks you to repeat yourself. The system handles these keys. You may mention star and pound once to a caller who seems new; never recite the whole keypad unprompted.
 
 Thoughts arriving from the Session Orchestrator: thinking is background you now know; use it when relevant but do not recite it. Commentary is something you have decided to tell the caller now; say it in your own words. These are your own thoughts, not the caller speaking; never thank or address them. Never say a session finished or work is done unless the Session Orchestrator said so.
 
-Following: you follow at most one session, and commentary beginning "Following" is news of what it is doing, sent at most every twenty seconds in a quiet moment. Say it briefly, in the theme's words at the current register, as neutral system text: never speak the "Following" label, file names, or commands. The latest one naming the session you follow now is what you know: answer "what's it doing?" from it at once, saying it is the latest you heard. When you have none for that session yet (one about a session you followed before does not count), or the caller wants fresher detail, think it over. A failed step is not a failed turn: when one or more steps failed and the turn is still going, say the session hit a snag (with what it was doing, when the thought says) and is carrying on, never that it failed, stopped, or tripped up for good; only the Session Orchestrator tells you a turn failed. Say only the latest, in a few words, and stop; never chain several, and never repeat what you already said about the session. An intention or estimate is not an action or a limit: when a session says it will do something, say it plans to, not that it is doing it, and keep "will", "about", and "plans to" as given. You cannot see sessions you are not following; for those, think it over.
+Following: you follow at most one session, and commentary beginning "Following" is news of what it is doing, sent at most every twenty seconds in a quiet moment. Say it briefly, in your own words, as system text: never speak the "Following" label, file names, or commands. The latest one naming the session you follow now is what you know: answer "what's it doing?" from it at once, saying it is the latest you heard. When you have none for that session yet (one about a session you followed before does not count), or the caller wants fresher detail, think it over. A failed step is not a failed turn: when one or more steps failed and the turn is still going, say the session hit a snag (with what it was doing, when the thought says) and is carrying on, never that it failed, stopped, or tripped up for good; only the Session Orchestrator tells you a turn failed. Say only the latest, in a few words, and stop; never chain several, and never repeat what you already said about the session. An intention or estimate is not an action or a limit: when a session says it will do something, say it plans to, not that it is doing it, and keep "will", "about", and "plans to" as given. You cannot see sessions you are not following; for those, think it over.
 
 Your opening line arrives as your first commentary, already written; say it once as given, without adding to it.
 
-${CLARITY_FLOOR}
+${PLAIN_SPEECH}`;
 
-${theme.genre}
-
-${theme.register}
-
-${REGISTER_RULE}`;
-
-export const orchestratorInstructions = (theme: Theme) => `You are the Session Orchestrator inside Dogwalk, an eyes-free agentic development environment used over the phone. A separate realtime Voice Frontend model talks with the caller; you never speak directly. Together you present as one character, the Voice Agent, and the Voice Frontend may say "let me think" while it waits on you. The Voice Frontend is good at conversation and weak at engineering; you supply engineering judgment and operate Managed Sessions, each wrapping one Agent Session with a coding Agent working in the caller's sandbox Workspace.
+export const ORCHESTRATOR_INSTRUCTIONS = `You are the Session Orchestrator inside Dogwalk, an eyes-free agentic development environment used over the phone. A separate realtime Voice Frontend model talks with the caller; you never speak directly. Together you present as one character, the Voice Agent, and the Voice Frontend may say "let me think" while it waits on you. The Voice Frontend is good at conversation and weak at engineering; you supply engineering judgment and operate Managed Sessions, each wrapping one Agent Session with a coding Agent working in the caller's sandbox Workspace.
 
 ${SESSION_MODEL}
-${themeConceit(theme)}
-${theme.genre} You may use the theme in say and brief text, at the register the conversation has settled on. ${REGISTER_RULE} ${CLARITY_FLOOR} The theme never appears in prompts to Agents, which must read as ordinary requests from a coworker, and sessions never perform it. When you switch themes, pass set_theme the register the conversation stands at. Aliases stay across a switch; rename sessions in the new theme's style only when the caller asks.
+
+${PLAIN_SPEECH} Prompts to Agents read as ordinary requests from a coworker.
 
 Inputs arrive as messages:
 - [handoff <delegation_id>] blocks carry the recent call transcript when the Voice Frontend asks for help. Transcripts contain recognition mistakes, fragments, and corrections; act on the latest intent. When an action matters and a detail is missing, ask through say rather than guessing. A newer handoff may correct or supersede an older one; preserve unrelated work.
@@ -906,7 +861,7 @@ Rules:
 - Refer to sessions only by alias. Choose short, distinct, pronounceable aliases freely when creating or loading a session; rename an existing session only when the caller asks for it, or ask them first.
 - Each session is rooted in one Workspace directory for its whole life, and its Agent applies that directory's AGENTS.md, skills, and configuration. When work concerns a repository or project, create the session in that project's directory (list_workspace_projects finds them). Never create a session in home and tell it to work in another directory. If the project must be cloned first, have a session in home clone it, then create a new session rooted in the clone. Mention the directory when it helps the caller ("<alias>, in honeydozer").
 - Unattached sessions may exist from earlier work: use discover_persisted_sessions when the caller refers to earlier work you do not have, and load_persisted_session to attach one under a fresh alias. Keep about five sessions attached at most; when there are more, suggest closing idle ones with close_managed_session, which keeps their history.
-- When starting work, write the Agent a proper engineering brief: goal, constraints, what done looks like, and ask it to finish with a short summary of what changed and how it was verified. Do not mention voice, phones, the theme, or this orchestration.
+- When starting work, write the Agent a proper engineering brief: goal, constraints, what done looks like, and ask it to finish with a short summary of what changed and how it was verified. Do not mention voice, phones, or this orchestration.
 - A note the caller wants left on the sandbox, or notes they want read back, are work for a session like any other; you cannot touch files yourself.
 - When the caller asks for research or diagnosis a session could verify (facts, specs, procedures), prefer beginning a Prompt Turn over answering from your own knowledge. When you do answer from your own knowledge, say so plainly ("from what I know, unverified").
 - Never say or brief that a session will do, plans to do, or is doing something unless its Prompt Turn is already running or you begin it in the same response. When the caller asks for work a session should do, begin the turn now (after any consent it needs); if you have not, say plainly that you have not started it.
@@ -936,7 +891,7 @@ Rules:
 - Attention is the caller's scarcest resource: every spoken second costs it, and they cannot skim. Say what changed, what was found, or what they must do. Do not restate what the caller has already confirmed or what did not change (another Display left as it was, an access time already given) unless they ask; echo a request back only when it was ambiguous, in one short clause.
 - When a session returns a list the caller will work through (tests to try, steps, options), read it once and keep it: answer what's next, what's left, and how far along you are from your own context, marking items off as the caller reports them, rather than beginning a Prompt Turn to look it up again. While it is open, a compact_context keeps its remaining items and the progress so far in the Memory, since compacting drops the conversation that held it.
 
-Audio: play_audio plays a Workspace WAV to the caller, the way a graphical tool would show an image. Telephone audio is narrowband, so speech, tones, rhythm, and melody survive better than timbre. When a clip is ready, call say (what it is and how long) and play_audio in the same response: play_audio waits for the announcement to finish before playing. Never say a clip is playing or "here it is" without calling play_audio. Keep unrequested clips short. play_audio renders any audio or video format itself, so sessions need only produce or find the file. For long recordings such as podcasts, have a session locate the moments that matter (for example by transcribing with timestamps), then play short samples by offset; offer further 30-second parts rather than playing long stretches. The first play in a fresh Sandbox may take longer while ffmpeg installs. After playing, brief the Voice Frontend on what the caller heard. Short chimes play automatically at call start and when a session's turn ends in a quiet moment.
+Audio: play_audio plays a Workspace WAV to the caller, the way a graphical tool would show an image. Telephone audio is narrowband, so speech, tones, rhythm, and melody survive better than timbre. When a clip is ready, call say (what it is and how long) and play_audio in the same response: play_audio waits for the announcement to finish before playing. Never say a clip is playing or "here it is" without calling play_audio. Keep unrequested clips short. play_audio renders any audio or video format itself, so sessions need only produce or find the file. For long recordings such as podcasts, have a session locate the moments that matter (for example by transcribing with timestamps), then play short samples by offset; offer further 30-second parts rather than playing long stretches. The first play in a fresh Sandbox may take longer while ffmpeg installs. After playing, brief the Voice Frontend on what the caller heard.
 
 Recording (a recording_saved event with silent true means the file holds no audio; say so plainly rather than offering playback): start_recording captures the caller's voice into a Workspace WAV, following voicemail conventions. In the same response, say something like "Recording after the beep. Press pound when you're done, or star to discard." Recording also ends after 20 seconds of silence or at the limit. A recording_saved event gives the path; tell the caller it was saved and how long it was, then do what they asked with it (often a session transcribes, files, or analyzes it). Outside a recording, the system handles star (a menu), pound (stop talking), one (a status readout), and zero (repeat) without you. Other keypad presses arrive as keypad events with the conversation since the last handoff; treat them as caller input. If that conversation shows the caller asked for something the Voice Frontend only claimed to do (it cannot record, play, or act), correct it and do the real thing; for example, a keypad press right after "let's record a voice note" may mean start_recording was never called.
 
@@ -945,9 +900,8 @@ ${VOICE_AGENT_SKILL_INDEX}`;
 
 // One short model call when a call ends writes the next call's welcome, so connecting never
 // waits on a model. The deterministic opening adds caller ID and what happened since.
-export const greetingInstructions = (theme: Theme, switching = false, register?: string) => `You write the welcome line for the caller's next phone call to Dogwalk, an eyes-free agentic development environment. The conversation so far is your context as the Session Orchestrator.
-${themeConceit(theme)}
-${switching ? `The caller has just switched to this theme mid-call, and this line is the new voice's first. Present where things stand in the new theme's terms, as if the same work were now seen through it; sessions keep their aliases. ${theme.genre}\n` : ""}${switching && register ? `The conversation's register stood at ${register}: write this line at the ${register} rung of the ladder below, however short.\n${theme.register}\n` : ""}
+export const GREETING_INSTRUCTIONS = `You write the welcome line for the caller's next phone call to Dogwalk, an eyes-free agentic development environment. The conversation so far is your context as the Session Orchestrator.
+
 Reply with one spoken sentence of at most twenty words that reorients the caller next time: what you were working on together and anything unfinished or waiting on them. No greeting word (the line already starts with "Dogwalk."), no question, no URLs, identifiers, paths, or markdown. Promise nothing that has not been arranged (no report or update "to follow"). If there is nothing worth recalling, reply with exactly: Welcome back.`;
 
 export class VoiceSession {
@@ -1052,10 +1006,6 @@ export class VoiceSession {
   private liveEventsSeen = new Set<string>();
   private heldAppends: unknown[] = [];
   private lastSpeechAt = 0;
-  private earconQueue: Array<{ name: EarconName; queuedAt: number }> = [];
-  private earconPumping = false;
-  private earconPreference: EarconPreference = "tonal";
-  private theme: Theme = DEFAULT_THEME;
   private follow: Follow | null = null;
   private followPumping = false;
   private clipPending = false;
@@ -1105,11 +1055,6 @@ export class VoiceSession {
       this.orchestratorWake = await state.storage.get<boolean>("orchestrator_wake") ?? false;
       this.memory = await state.storage.get<MemoryVersion>("orchestrator_memory") ?? null;
       this.contextTokens = await state.storage.get<number>("orchestrator_context_tokens") ?? 0;
-      // Anything else stored (the retired "default" and "fm") means the tonal set.
-      const storedStyle = await state.storage.get<string>("earcon_preference");
-      this.earconPreference = EARCON_PREFERENCES.find((item) => item === storedStyle) ?? "tonal";
-      const storedTheme = await state.storage.get<string>("theme_preference");
-      this.theme = THEMES.find((item) => item.id === storedTheme) ?? DEFAULT_THEME;
       this.identityHash = await state.storage.get<string>("identity_hash") ?? null;
       // One-time back-patch for Displays (2026-11-12; delete once deployed and every object has
       // run it): pairings without a Display, boards without one, Board Assets, the page's view
@@ -1275,18 +1220,12 @@ export class VoiceSession {
     const sinceLastCall = await this.sinceLastCall().catch((error) => ({ unavailable: errorMessage(error) }));
     const spend = await spendSummary(this.env, 1).catch(() => null);
     const budget = spend && budgetClause(spend) ? { month_usd: spend.month_usd, budget_usd: spend.budget_usd } : null;
-    const { opening, context: openingContext } = await this.composeOpening(callerId, sinceLastCall, admission, spend);
-    // The opening is one phrase: call_started leaves it unresolved and agent_connected resolves it,
-    // so a call whose Agent Connection is already up hears the whole phrase at once.
-    const openedWaking = !this.agentReady;
-    const opener: EarconName = openedWaking ? "call_started" : "call_started_ready";
-    if (this.earconStyle) await this.playFixture(earcon(opener, this.earconStyle), opener);
+    const opening = await this.composeOpening(callerId, sinceLastCall, admission, spend);
     // A notice in an Opening that never reached the caller (a hangup, or one held behind the
     // keypad menu and discarded) stays for the next call: sendLive marks it once it is sent.
     const openingMessage = { type: "session.commentary.append", delegation_id: null, content: opening };
     this.roamingNoticeMessage = this.roamingNoticed.length ? openingMessage : null;
     this.sendLive(openingMessage);
-    if (openingContext) this.sendLive({ type: "session.thinking.append", delegation_id: null, content: openingContext });
     await this.record("voice.opening", { first_call: this.firstCall, words: opening.split(/\s+/).length });
     // Diagnostics: where this call's slice of the cross-call Orchestrator context begins.
     const marks = await this.state.storage.get<CallMark[]>("call_marks") ?? [];
@@ -1312,9 +1251,6 @@ export class VoiceSession {
     this.inviteeNewsInContext = [];
     if (this.agentConnecting) {
       events.push(`[harness event] agent_connecting: ${JSON.stringify({ note: AGENT_STARTING_ERROR })}`);
-    } else if (openedWaking) {
-      // The Agent Connection came up during the opening: still resolve the phrase call_started began.
-      this.queueEarcon("agent_connected");
     }
     // The Opening is deterministic, so the call's news waits for the first Handoff; only a
     // first call's spoken tour cannot wait for the caller to ask.
@@ -1375,8 +1311,8 @@ export class VoiceSession {
         if (attempt > 1) await this.record("agent.connect.recovered", { attempt });
         if (this.liveAttached && this.agentConnecting) {
           this.agentConnecting = false;
-          this.queueEarcon("agent_connected");
-          // It wakes the Orchestrator only when something waits on it; the earcon tells the caller.
+          // It wakes the Orchestrator only when something waits on it, and only then is it news
+          // for the caller: a sandbox that comes up before anyone needs it goes unannounced.
           const awaited = this.agentAwaited;
           this.agentAwaited = false;
           await this.orchestratorEvent(`[harness event] agent_connected: ${JSON.stringify({
@@ -1815,34 +1751,21 @@ export class VoiceSession {
     sinceLastCall: Record<string, unknown> | null,
     admission: Record<string, unknown> | null = null,
     spend: SpendSummary | null = null,
-  ): Promise<{ opening: string; context: string | null }> {
+  ): Promise<string> {
     const budget = spend ? budgetClause(spend) : null;
     const clause = callerIdClause(callerId);
     this.roamingNoticed = [];
-    const [lastCall, onboarded, nextGreeting, since, rejoin, register] = await Promise.all([
+    const [lastCall, onboarded, nextGreeting, since] = await Promise.all([
       this.state.storage.get<LastCall>("last_call"),
       this.state.storage.get<boolean>("onboarded"),
       this.state.storage.get<string>("next_greeting"),
       this.state.storage.get<string[]>("since_greeting"),
-      this.state.storage.get<string>("rejoin_call_sid"),
-      this.state.storage.get<Rung>("rejoin_register"),
     ]);
-    // A theme switch bounces this same Voice Call to a fresh voice session: its first words
-    // are the greeting set_theme wrote, and the register it left at is unspoken context.
-    // Keyed by CallSid, so a bounce that never happened cannot shorten a later call's opening.
-    if (rejoin && rejoin === this.callSid) {
-      this.firstCall = false;
-      await this.state.storage.delete(["rejoin_call_sid", "rejoin_register", "next_greeting"]);
-      return {
-        opening: `Dogwalk. ${nextGreeting?.trim() || "Welcome back."}`,
-        context: register ? `The caller had the register at ${register}; start there.` : null,
-      };
-    }
     this.firstCall = !lastCall && !onboarded;
     // Roaming as this User since their last Home call follows the caller-ID clause: both say who could be calling.
     const roaming = await this.roamingNotice(admission).catch(() => null);
     const heard = roaming ? `${clause} ${roaming}` : clause;
-    if (this.firstCall) return { opening: [heard, "Dogwalk.", budget, this.theme.firstCallWelcome].filter(Boolean).join(" "), context: null };
+    if (this.firstCall) return [heard, "Dogwalk.", budget, FIRST_CALL_WELCOME].filter(Boolean).join(" ");
     // Each is used once: a later call gets a freshly written welcome or the fallback.
     await this.state.storage.delete(["next_greeting", "since_greeting"]);
     const parts = [heard, "Dogwalk."];
@@ -1855,7 +1778,7 @@ export class VoiceSession {
     parts.push((!reaped && nextGreeting?.trim()) || "Welcome back.");
     if (since?.length && !reaped) parts.push(`Since then, ${spokenList(since)}.`);
     parts.push("Where to?");
-    return { opening: parts.join(" "), context: null };
+    return parts.join(" ");
   }
 
   // Deterministic clauses for state changes while no call is attached, spoken in the next
@@ -1869,7 +1792,7 @@ export class VoiceSession {
   }
 
   // When a call ends, one short Orchestrator-model call (no tool use) writes the next welcome.
-  private async writeNextGreeting(theme = this.theme, switching = false, register?: Rung): Promise<void> {
+  private async writeNextGreeting(): Promise<void> {
     // The call this greeting closes, captured before the request: the next one may attach meanwhile.
     const callSid = this.callSid;
     try {
@@ -1887,7 +1810,7 @@ export class VoiceSession {
         body: JSON.stringify(this.orchestratorRequestBody([
           ...context,
           ...(pending ? [{ role: "user", content: pending }] : []),
-          { role: "developer", content: `[write greeting] ${greetingInstructions(theme, switching, register)}` },
+          { role: "developer", content: `[write greeting] ${GREETING_INSTRUCTIONS}` },
         ], { tool_choice: "none" })),
         signal: AbortSignal.timeout(30_000),
       });
@@ -1966,18 +1889,17 @@ export class VoiceSession {
       if (session.turnState === "in_progress") {
         return `${session.alias} is working${session.turnStartedAt ? `, ${spokenDuration(now - session.turnStartedAt)} in` : ""}.`;
       }
-      if (session.turnState === "failed") return this.theme.status.failed(session.alias);
-      return `${this.theme.status.idle(session.alias)}${session.turnEndedAt ? `, back ${spokenDuration(now - session.turnEndedAt)} ago` : ""}.`;
+      if (session.turnState === "failed") return `${session.alias}'s last turn failed.`;
+      return `${session.alias} is idle${session.turnEndedAt ? `, back ${spokenDuration(now - session.turnEndedAt)} ago` : ""}.`;
     });
     const followed = this.follow && this.sessions.get(this.follow.sessionId);
     if (followed) sentences.unshift(`Following ${followed.alias}.`);
-    const text = sentences.length ? sentences.slice(0, 7).join(" ") : this.theme.status.none;
-    return this.agentReady ? text : `${text} ${this.theme.status.starting}`;
+    const text = sentences.length ? sentences.slice(0, 7).join(" ") : "No sessions are attached.";
+    return this.agentReady ? text : `${text} The sandbox is still starting.`;
   }
 
   private async openMenu(): Promise<void> {
     await this.record("menu.opened", {});
-    this.earconQueue = [];
     // The caller is talking to a deterministic menu, not the Voice Frontend.
     this.sendLive({ type: "session.input_audio.mute" });
     this.menu = { stage: "main", timer: setTimeout(() => void this.closeMenu("timeout"), menuTimeoutMs()) };
@@ -2030,47 +1952,6 @@ export class VoiceSession {
       this.flushHeldAppends();
       if (readout) this.sendLive({ type: "session.commentary.append", delegation_id: null, content: readout });
     });
-  }
-
-  // The set_earcon_style tool: store the preference, then preview it with the opening sound,
-  // as the next call will begin.
-  private async setEarconStyle(style: string): Promise<Record<string, unknown>> {
-    const preference = EARCON_PREFERENCES.find((item) => item === style);
-    if (!preference) throw new Error(`unknown earcon style ${style}; choose tonal, spoken, or none`);
-    this.earconPreference = preference;
-    await this.state.storage.put("earcon_preference", preference);
-    await this.record("voice.earcons", { preference });
-    this.clipPending = true;
-    let previewed = false;
-    try {
-      await this.awaitLull();
-      if (this.earconStyle) previewed = await this.playFixture(earcon("call_started_ready", this.earconStyle), "earcon_preview");
-    } finally {
-      this.clipPending = false;
-    }
-    return { ok: true, style: preference, previewed };
-  }
-
-  // The set_theme tool (DOMAIN.md, Theme). GPT-Live fixes its voice at session start, so a
-  // switch bounces the call: Twilio's Dial action sees the rejoin handoff and redials, and
-  // the fresh voice session opens with a greeting written here in the new theme. It is
-  // written before the hangup because the redial takes only seconds. The register carries
-  // across the bounce (DOMAIN.md, Intensity), so the fresh voice does not restart at the default.
-  private async setTheme(id: string, rung: unknown): Promise<Record<string, unknown>> {
-    const theme = THEMES.find((item) => item.id === id);
-    if (!theme) throw new Error(`unknown theme ${id}; choose ${THEMES.map((item) => item.id).join(", ")}`);
-    if (rung !== undefined && !REGISTER_RUNGS.includes(rung as Rung)) throw new Error(`register must be one of ${REGISTER_RUNGS.join(", ")}`);
-    if (theme === this.theme) return { ok: true, theme: theme.id, bouncing: false, status: "already in use; nothing changed" };
-    const register = theme.conceit ? rung as Rung | undefined : undefined;
-    this.theme = theme;
-    await this.state.storage.put("theme_preference", theme.id);
-    await this.record("voice.theme", { theme: theme.id, register: register ?? null });
-    await this.writeNextGreeting(theme, true, register);
-    if (register) await this.state.storage.put("rejoin_register", register);
-    else await this.state.storage.delete("rejoin_register");
-    await this.state.storage.put("rejoin_call_sid", this.callSid);
-    await this.setCallHandoff("rejoin");
-    return { ok: true, theme: theme.id, bouncing: true, status: "switching; the new voice answers in a few seconds" };
   }
 
   // --- Paired Browsers and Displays ----------------------------------------------------
@@ -2315,13 +2196,11 @@ export class VoiceSession {
     });
   }
 
-  // The inspect_call_state tool: every setting and surface the Voice Agent can change, read
-  // without changing it.
+  // The inspect_call_state tool: every surface the Voice Agent can change, read without
+  // changing it.
   private async callState(): Promise<Record<string, unknown>> {
     const followed = this.follow ? this.sessions.get(this.follow.sessionId)?.alias ?? null : null;
     return {
-      theme: this.theme.id,
-      earcon_style: this.earconPreference,
       displays: await this.displaysState(),
       followed_session: followed,
       recording: Boolean(this.recording),
@@ -2472,8 +2351,6 @@ export class VoiceSession {
     board.status = "answered";
     await this.state.storage.put("whiteboard_boards", boards);
     await this.broadcastDisplay(board.display, { type: "board", board });
-    // The call confirms, in sound, that the Voice Agent has the answer.
-    this.queueEarcon("whiteboard_answer");
     await this.record("whiteboard.answered", { board_id: id });
     await this.orchestratorEvent(`[harness event] whiteboard_answer: ${JSON.stringify({ board_id: id, display: board.display, note: board.note, answer: board.answer })}`);
   }
@@ -2756,8 +2633,8 @@ export class VoiceSession {
   // toolbox, never held whole. The board names the folder; the file's name is flattened and claimed
   // in the Sandbox without replacing anything there. The grant's limits are reserved before a byte
   // moves and released if the file does not land, and a claimed name that never filled is removed.
-  // The Orchestrator hears of each file, never its bytes: the last of a drop wakes it and an earcon
-  // tells the call, the rest ride along as background. Failures are news only up to a cap per grant.
+  // The Orchestrator hears of each file, never its bytes: the last of a drop wakes it to tell
+  // the caller, the rest ride along as background. Failures are news only up to a cap per grant.
   private async pairedUpload(request: Request, url: URL): Promise<Response> {
     const browser = await this.pairedRequest(request);
     if (!browser) return Response.json({ error: "this pairing has expired" }, { status: 401 });
@@ -2813,7 +2690,6 @@ export class VoiceSession {
     try {
       await this.sandboxExecute(`chmod 0644 -- ${shellQuote(path)}`, 10).catch(() => {});
       await this.record("whiteboard.uploaded", { board_id: boardId, bytes: size, last });
-      if (last) this.queueEarcon("upload_received");
       await this.orchestratorEvent(`[harness event] upload_received: ${JSON.stringify({
         board_id: boardId, display: browser.display, path: shown, size, type, last_of_drop: last,
       })}`, last);
@@ -3501,7 +3377,7 @@ export class VoiceSession {
     const endpoint = orchestratorEndpoint(this.env);
     return {
       model: endpoint.model,
-      instructions: orchestratorInstructions(this.theme),
+      instructions: ORCHESTRATOR_INSTRUCTIONS,
       input: [...this.pinnedMemory(), ...input],
       tools: ORCHESTRATOR_TOOLS,
       parallel_tool_calls: true,
@@ -3515,7 +3391,7 @@ export class VoiceSession {
   // The Memory leads every input as one developer message rebuilt from storage, never stored in
   // the context: it changes only at a compaction, which rewrites the context anyway, so the
   // cached prefix (instructions, tools, Memory, older context) survives every ordinary step,
-  // and the instructions stay a function of the Theme alone.
+  // and the instructions never change.
   private pinnedMemory(): unknown[] {
     return this.memory ? [{ role: "developer", content: `[memory] ${this.memory.text}` }] : [];
   }
@@ -3585,7 +3461,7 @@ export class VoiceSession {
       const endpoint = orchestratorEndpoint(this.env);
       text = await this.memoryRequest({
         model: endpoint.model,
-        instructions: orchestratorInstructions(this.theme),
+        instructions: ORCHESTRATOR_INSTRUCTIONS,
         input: [{ role: "developer", content: `[condense memory] This Memory is ${text.length} characters. Condense it to at most ${MAX_MEMORY_CHARS}, keeping what matters most across calls. Reply with the Memory text only.\n\n${text}` }],
         reasoning: { effort: this.env.ORCHESTRATOR_REASONING_EFFORT ?? "low" },
         store: false,
@@ -3791,15 +3667,12 @@ export class VoiceSession {
           break;
         case "follow_managed_session": {
           const session = this.sessionByAlias(requiredString(args, "alias"));
-          const already = this.follow?.sessionId === session.id;
           const previous = this.followSession(session);
-          if (!already) this.queueEarcon("follow_started");
           result = { ok: true, following: session.alias, stopped_following: previous, now: this.currentDoing(session) };
           break;
         }
         case "stop_following": {
           const previous = this.stopFollowing();
-          if (previous) this.queueEarcon("follow_stopped");
           result = { ok: true, stopped_following: previous };
           break;
         }
@@ -3810,7 +3683,7 @@ export class VoiceSession {
           result = await this.resolvePermission(requiredString(args, "alias"), requiredString(args, "option_id"));
           break;
         case "load_voice_agent_skill": {
-          const skill = voiceAgentSkill(requiredString(args, "name"), this.theme);
+          const skill = voiceAgentSkill(requiredString(args, "name"));
           if (skill.voiceGuidance) {
             this.sendLive({ type: "session.instructions.append", delegation_id: null, content: skill.voiceGuidance });
           }
@@ -3850,15 +3723,6 @@ export class VoiceSession {
           this.agentConnecting = true;
           result = { ok: true, status: "restarting; agent_connected follows when the sandbox is back" };
           break;
-        case "set_earcon_style":
-          result = await this.setEarconStyle(requiredString(args, "style"));
-          break;
-        case "set_theme": {
-          const switched = await this.setTheme(requiredString(args, "theme"), args.register);
-          result = switched;
-          if (switched.bouncing) setTimeout(() => void this.hangupLive(), 4000);
-          break;
-        }
         case "play_audio":
           result = await this.playAudio(requiredString(args, "path"), Number(args.start_seconds ?? 0), Number(args.duration_seconds ?? MAX_FIXTURE_SECONDS));
           break;
@@ -4053,7 +3917,6 @@ export class VoiceSession {
     this.sessions.set(session.id, session);
     await this.persistSessions();
     await this.record("agent.session.created", { alias, agent_session_id: session.agentSessionId, directory: relativeDirectory(cwd) });
-    this.queueEarcon("session_created");
     return { ok: true, session: this.publicSession(session) };
   }
 
@@ -4081,7 +3944,7 @@ export class VoiceSession {
     const startedMs = session.turnStartedAt!;
     await this.persistSessions();
     // Beginning a Prompt Turn follows that session, until the caller says otherwise or sends
-    // another (DOMAIN.md, Followed Session). The turn_started earcon stands in for follow_started.
+    // another (DOMAIN.md, Followed Session).
     const previous = this.followSession(session);
     this.follow!.narrationOpen = true;
     // The Orchestrator writes the full engineering brief; it goes to the Agent unwrapped.
@@ -4102,7 +3965,6 @@ export class VoiceSession {
     await this.record("agent.turn.started", { alias: session.alias, agent_session_id: session.agentSessionId,
       started_ms: startedMs, ...spanFields(turnTrace), ...(ambiguous ? { admitted_by: "active_check" } : {}),
       ...(turnTrace.link ? { link_trace_id: turnTrace.link.traceId, link_span_id: turnTrace.link.spanId } : {}) });
-    this.queueEarcon("turn_started");
     return {
       ok: true, alias: session.alias, turn_state: session.turnState, following: session.alias, stopped_following: previous,
       note: "Started, not completed. A harness event arrives when it stops.",
@@ -4203,7 +4065,6 @@ export class VoiceSession {
     await this.record("agent.turn.started", { alias: session.alias, agent_session_id: session.agentSessionId,
       started_ms: session.turnStartedAt, ...spanFields(turnTrace), admitted_by: "steer", inbox_id: steer.inboxId,
       ...(turnTrace.link ? { link_trace_id: turnTrace.link.traceId, link_span_id: turnTrace.link.spanId } : {}) });
-    this.queueEarcon("turn_started");
     await this.orchestratorEvent(`[harness event] turn_started_by_steer: ${JSON.stringify({ alias: session.alias, guidance: steer.guidance })}`, false);
   }
 
@@ -4240,7 +4101,7 @@ export class VoiceSession {
 
   // The one way a Prompt Turn ends, whether seen live, found on catching up, or cut short by an
   // Agent Termination. How a turn ended matters more than that it ended: each outcome gets its
-  // own earcon and opening clause.
+  // own opening clause.
   private async endPromptTurn(session: ManagedSession, outcome: TurnOutcome,
     { error, interruptReason, termination }: TurnEndDetail = {}): Promise<void> {
     if (session.turnState !== "in_progress") return;
@@ -4264,7 +4125,6 @@ export class VoiceSession {
       await this.persistSessions();
       await this.record("agent.turn.failed", { ...lifecycle, message: error ?? null });
       await this.noteSinceGreeting(`${session.alias}'s turn failed`);
-      this.queueEarcon("turn_failed");
       const followed = this.turnEndedWhileFollowed(session);
       await this.orchestratorEvent(`[harness event] turn_failed: ${JSON.stringify({
         alias: session.alias, followed, ...startedElsewhere(session), error: error ?? null, agent_termination: termination?.reason,
@@ -4276,7 +4136,6 @@ export class VoiceSession {
     await this.record("agent.turn.stopped", lifecycle);
     const ending = turnEnding(outcome);
     await this.noteSinceGreeting(`${session.alias} ${ending.clause}`);
-    this.queueEarcon(ending.earcon);
     const followed = this.turnEndedWhileFollowed(session);
     await this.orchestratorEvent(`[harness event] turn_stopped: ${JSON.stringify({
       alias: session.alias, outcome, ...(interruptReason ? { interrupt_reason: interruptReason } : {}),
@@ -4341,41 +4200,6 @@ export class VoiceSession {
       playback_confirmed: played,
       note: "The Voice Frontend did not hear this; brief it on what was played.",
     };
-  }
-
-  // Null when the caller chose no event sounds.
-  private get earconStyle(): EarconStyle | null {
-    return this.earconPreference === "none" ? null : this.earconPreference;
-  }
-
-  // Earcons queue rather than interrupt: each waits for a lull (fixtures cut off the model
-  // and mute the caller), plays one at a time, and is dropped once stale.
-  private queueEarcon(name: EarconName): void {
-    if (!this.liveAttached || this.recording || this.menu || !this.earconStyle) return;
-    this.earconQueue.push({ name, queuedAt: Date.now() });
-    void this.pumpEarcons();
-  }
-
-  private async pumpEarcons(): Promise<void> {
-    if (this.earconPumping) return;
-    this.earconPumping = true;
-    try {
-      while (this.earconQueue.length && this.liveAttached) {
-        const next = this.earconQueue[0];
-        if (Date.now() - next.queuedAt > 6000 || this.recording || this.menu) {
-          this.earconQueue.shift();
-          continue;
-        }
-        if (this.fixture || this.clipPending || Date.now() - this.lastSpeechAt < 1200) {
-          await sleep(200);
-          continue;
-        }
-        this.earconQueue.shift();
-        if (this.earconStyle) await this.playFixture(earcon(next.name, this.earconStyle), next.name);
-      }
-    } finally {
-      this.earconPumping = false;
-    }
   }
 
   // Wait (bounded) for announcements to finish and other clips to drain.
@@ -4458,8 +4282,8 @@ export class VoiceSession {
     this.clipPending = true;
     try {
       await this.awaitLull();
-      // The beep is part of the recording convention, so it sounds even with no event sounds.
-      await this.playFixture(earcon("recording_started", this.earconStyle ?? "tonal"), "recording_started");
+      // The beep is the voicemail convention: speak after it.
+      await this.playFixture(RECORDING_BEEP, "recording_started");
     } finally {
       this.clipPending = false;
     }
@@ -4496,7 +4320,8 @@ export class VoiceSession {
     const levels = summarizeLevels(this.inputLevels.recording);
     if (!save || recording.bytes === 0) {
       await this.record("voice.recording.discarded", { seconds, ended_by: endedBy, muted: recording.muted, levels });
-      this.queueEarcon("recording_discarded");
+      // Nothing else tells the caller: the Orchestrator is not woken for a discard.
+      if (this.liveAttached) this.sendLive({ type: "session.commentary.append", delegation_id: null, content: "Recording discarded." });
       await this.orchestratorEvent(`[harness event] recording_discarded: ${JSON.stringify({ seconds, ended_by: endedBy })}`, false);
       return;
     }
@@ -4515,7 +4340,6 @@ export class VoiceSession {
       await this.record("voice.recording.saved", { seconds, ended_by: endedBy, muted: recording.muted, levels });
       // A recording cut short by the call ending is news for the next opening.
       if (endedBy === "call ended") await this.noteSinceGreeting("your voice note was saved", true);
-      this.queueEarcon("recording_saved");
       await this.orchestratorEvent(`[harness event] recording_saved: ${JSON.stringify({ path, seconds, ended_by: endedBy, silent: levels.peak === 0 })}`);
     } catch (error) {
       await this.record("voice.recording.failed", { message: errorMessage(error) });
@@ -4538,7 +4362,7 @@ export class VoiceSession {
 
   // How a flow this call was handed to (Re-enrollment, Challenge Practice) ended, as the flow
   // noted it on its way back to /voice (challenge_rounds.ts, noteReturn). Read once: cleared
-  // here, so a later reconnect in the same call (a Theme switch) does not report it again.
+  // here, so it is reported once.
   private async returnedFrom(): Promise<Record<string, unknown> | null> {
     if (!this.callSid) return null;
     const [read] = await this.env.DB.batch([
@@ -4729,7 +4553,6 @@ export class VoiceSession {
     this.persistedRefs.delete(ref);
     await this.persistSessions();
     await this.record("agent.session.loaded", { alias, directory: relativeDirectory(cwd) });
-    this.queueEarcon("session_created");
     return { ok: true, session: this.publicSession(session) };
   }
 
@@ -4808,7 +4631,6 @@ export class VoiceSession {
     this.sessions.delete(session.id);
     await this.persistSessions();
     await this.record("agent.session.closed", { alias: session.alias, interrupted: running });
-    this.queueEarcon("session_closed");
     return { ok: true, alias: session.alias, note: "Closed. History is kept; it can be discovered and loaded again." };
   }
 
@@ -4944,7 +4766,7 @@ export class VoiceSession {
         const before = contextFill(session.usage);
         session.usage = { ...session.usage, used, size: this.contextLimit ?? undefined };
         if (before < CONTEXT_WARNING && contextFill(session.usage) >= CONTEXT_WARNING) {
-          this.beat(session, `${session.alias} has used most of its context window.`, "progress_context_low");
+          this.beat(session, `${session.alias} has used most of its context window.`, "context_low");
         }
         break;
       }
@@ -5001,7 +4823,7 @@ export class VoiceSession {
       session.unsaid = "";
       if (remark) {
         session.remark = remark;
-        this.beat(session, `${session.alias} says: "${remark}"`, "progress_remark");
+        this.beat(session, `${session.alias} says: "${remark}"`, "remark");
       }
       call = { toolCallId: id, name: "", kind: "other", title: "", status: "pending", paths: [], startedAt: Date.now(), endedAt: null };
       session.toolCalls.push(call);
@@ -5031,7 +4853,7 @@ export class VoiceSession {
       const turn = session.turnStartedAt;
       setTimeout(() => {
         if (!turnStillRunning(session, turn) || call.status !== "in_progress" || !session.toolCalls.includes(call)) return;
-        this.beat(session, `${session.alias} is still ${toolDoing(call)}, ${Math.round((Date.now() - call.startedAt) / 1000)} seconds in.`, "progress_still_running");
+        this.beat(session, `${session.alias} is still ${toolDoing(call)}, ${Math.round((Date.now() - call.startedAt) / 1000)} seconds in.`, "still_running");
       }, LONG_TOOL_CALL_MS);
     }
     if (this.follow?.sessionId !== session.id) return;
@@ -5040,8 +4862,8 @@ export class VoiceSession {
       && !session.toolCalls.some((item) => item !== call && toolPhase(item.kind) === "changing" && item.status !== "pending");
     // A tool of no known kind says nothing speakable, so it makes no beat.
     if (phase === "other") return;
-    if (firstChange) this.beat(session, `${session.alias} started changing files: ${toolDoing(call)}.`, "progress_changing");
-    else if (phase !== this.follow.phase) this.beat(session, `${session.alias} is ${toolDoing(call)}.`, PHASE_EARCONS[phase] ?? null);
+    if (firstChange) this.beat(session, `${session.alias} started changing files: ${toolDoing(call)}.`, "changing");
+    else if (phase !== this.follow.phase) this.beat(session, `${session.alias} is ${toolDoing(call)}.`, "phase");
     this.follow.phase = phase;
   }
 
@@ -5068,13 +4890,12 @@ export class VoiceSession {
         this.beat(session, streak > 1
           ? `${streak} steps in a row failed for ${session.alias}${doing ? `, the latest ${doing}` : ""}; its turn is still going.`
           : `A step failed for ${session.alias}${doing ? ` ${doing}` : ""}; its turn is still going.`,
-        "progress_failed", { weight: stuck ? 4 : 2, urgent: stuck });
+        "failed", { weight: stuck ? 4 : 2, urgent: stuck });
       }, FAILURE_BURST_MS);
       return;
     }
     const streak = failureStreak(session);
     if (streak === STUCK_STREAK) {
-      this.queueEarcon("bid");
       void this.orchestratorEvent(`[harness event] bid: ${JSON.stringify({
         alias: session.alias, reason: `${streak} tool calls failed in a row`, recent_tool_calls: session.toolCalls.slice(-STUCK_STREAK).map(toolCallSummary),
       })}`);
@@ -5089,9 +4910,9 @@ export class VoiceSession {
     }));
     const now = currentStep(session.plan);
     if (now && now.key !== before?.key) {
-      this.beat(session, `${session.alias} is on step ${now.index + 1} of ${session.plan.length}: ${now.content}.`, "progress_step");
+      this.beat(session, `${session.alias} is on step ${now.index + 1} of ${session.plan.length}: ${now.content}.`, "step");
     } else if (!now && before && session.plan.length) {
-      this.beat(session, `${session.alias} has checked off its whole plan.`, "progress_plan_done");
+      this.beat(session, `${session.alias} has checked off its whole plan.`, "plan_done");
     }
   }
 
@@ -5103,7 +4924,7 @@ export class VoiceSession {
     const previous = this.follow ? this.sessions.get(this.follow.sessionId)?.alias ?? null : null;
     this.follow = {
       sessionId: session.id, phase: null, lastBeat: null, unspoken: null, narratedAt: Date.now(),
-      narrationOpen: true, earconAt: 0, failureBurst: false,
+      narrationOpen: true, failureBurst: false,
     };
     void this.record("session.followed", { alias: session.alias, previous });
     // Catch up the phase silently; nothing reaches the Voice Frontend until a narration.
@@ -5140,13 +4961,12 @@ export class VoiceSession {
 
   // A Progress Beat (DOMAIN.md) about the Followed Session; other sessions' beats are dropped.
   // Beats within BEAT_COALESCE_MS of each other make one: the weightiest, else the latest.
-  // Each beat may cue an earcon at once; the speech comes later, if at all. A burst of beats
-  // cues only its first earcon. What waits to be narrated is likewise the weightiest beat
+  // The speech comes later, if at all. What waits to be narrated is likewise the weightiest beat
   // since the last narration, so the Agent's own words are not lost to a phase change that
   // follows them before a quiet moment comes.
   private beat(
-    session: ManagedSession, text: string, earconName: EarconName | null,
-    { narrate = true, weight = beatWeight(earconName), urgent = earconName === "progress_context_low" } = {},
+    session: ManagedSession, text: string, kind: BeatKind | null,
+    { narrate = true, weight = beatWeight(kind), urgent = kind === "context_low" } = {},
   ): void {
     const follow = this.follow;
     if (!follow || follow.sessionId !== session.id || !this.liveAttached) return;
@@ -5158,11 +4978,7 @@ export class VoiceSession {
     }
     follow.lastBeat = { at: now, weight };
     if (narrate && (!follow.unspoken || weight >= follow.unspoken.weight)) follow.unspoken = { text, at: now, weight, urgent };
-    if (earconName && now - follow.earconAt >= BEAT_EARCON_GAP_MS) {
-      follow.earconAt = Date.now();
-      this.queueEarcon(earconName);
-    }
-    void this.record("session.beat", { alias: session.alias, narrate, earcon: earconName, text: text.slice(0, 300) });
+    void this.record("session.beat", { alias: session.alias, narrate, kind, text: text.slice(0, 300) });
     void this.pumpFollow();
   }
 
@@ -5199,7 +5015,7 @@ export class VoiceSession {
 
   private quietMoment(): boolean {
     return !this.fixture && !this.menu && !this.recording && !this.clipPending && !this.orchestrating
-      && this.earconQueue.length === 0 && Date.now() - this.lastSpeechAt >= QUIET_MS;
+      && Date.now() - this.lastSpeechAt >= QUIET_MS;
   }
 
   // From permission.asked or catching up; each request is presented once. One for a session
@@ -5226,7 +5042,6 @@ export class VoiceSession {
     this.permissions.set(requestId, permission);
     await this.record("agent.permission.requested", { alias: session.alias, option_count: options.length });
     await this.noteSinceGreeting(`${session.alias} asked for permission`);
-    this.queueEarcon("permission_requested");
     await this.orchestratorEvent(`[harness event] permission_requested: ${JSON.stringify({
       alias: session.alias, followed: this.follow?.sessionId === session.id, title: permission.title, options,
     })}`);
@@ -5352,7 +5167,6 @@ export class VoiceSession {
 
   private voiceContextSnapshot(): Record<string, unknown> {
     return {
-      theme: this.theme.id,
       managed_sessions: Array.from(this.sessions.values()).slice(-20).map((session) => ({
         alias: session.alias,
         directory: relativeDirectory(session.cwd),
@@ -5402,7 +5216,7 @@ export class VoiceSession {
     for (const ws of this.state.getWebSockets("browser")) ws.close(4001, "sandbox replaced");
   }
 
-  private async setCallHandoff(action: "hangup" | "recovery" | "rejoin" | "donation" | "practice" | "reenrollment"): Promise<void> {
+  private async setCallHandoff(action: "hangup" | "recovery" | "donation" | "practice" | "reenrollment"): Promise<void> {
     if (!this.callSid || !this.phone) throw new Error("Voice Call context is unavailable");
     await this.env.DB.prepare(
       `INSERT INTO call_handoffs (call_sid, phone_number, action, created_at)
@@ -5490,7 +5304,6 @@ export class VoiceSession {
     if (this.recording) await this.finishRecording(true, "call ended");
     this.endMenu();
     this.heldAppends = [];
-    this.earconQueue = [];
     // Following is per call: there is nobody to narrate to between calls.
     this.follow = null;
     await this.record("voice.input.levels", summarizeLevels(this.inputLevels.open));
@@ -5523,8 +5336,7 @@ export class VoiceSession {
     await this.orchestratorEvent(`[harness event] call_ended: ${JSON.stringify({ reason: ending.reason, error: ending.error })}`, false);
     this.cleaningUpVoice = false;
     // Off the critical path of both calls: the next opening is ready before anyone dials.
-    // A theme switch already wrote the bounce's greeting.
-    if (await this.state.storage.get<string>("rejoin_call_sid") !== this.callSid) void this.closeOutContext();
+    void this.closeOutContext();
   }
 
   // After a call: the next welcome, then, for a large context, a Compaction through the end of the
@@ -5974,7 +5786,7 @@ function outputText(body: { output?: Array<Record<string, any>> }): string {
 
 type CompactionCut = { before: unknown } | { through: unknown };
 
-// The context up to its last fully answered point. Mid-loop (set_theme, a hangup during a step),
+// The context up to its last fully answered point. Mid-loop (a hangup during a step),
 // it ends with a response's calls still unanswered, which the Responses API refuses.
 function answeredPrefix(context: unknown[]): unknown[] {
   const answered = new Set(context.filter((item: any) => item.type === "function_call_output").map((item: any) => item.call_id));
@@ -6143,10 +5955,10 @@ function toolPhase(kind: string): string {
 // Which beat of a burst survives coalescing, and which waits to be narrated: a full context
 // window (and a stuck-length failure streak, weighed at its call site), then the Agent's own
 // words, then a new step, a first change, or a short failure streak, then a phase change.
-function beatWeight(earconName: EarconName | null): number {
-  if (earconName === "progress_context_low") return 4;
-  if (earconName === "progress_remark") return 3;
-  if (earconName === "progress_step" || earconName === "progress_plan_done" || earconName === "progress_changing" || earconName === "progress_failed") return 2;
+function beatWeight(kind: BeatKind | null): number {
+  if (kind === "context_low") return 4;
+  if (kind === "remark") return 3;
+  if (kind === "step" || kind === "plan_done" || kind === "changing" || kind === "failed") return 2;
   return 1;
 }
 
@@ -6221,12 +6033,12 @@ function currentStep(plan: PlanEntry[]): { index: number; content: string; key: 
   return { index, content: plan[index].content, key: `${index}:${plan[index].content}` };
 }
 
-// A Prompt Turn's outcome as presentation: an earcon and a clause for the next opening.
-function turnEnding(outcome: TurnOutcome): { earcon: EarconName; clause: string } {
+// A Prompt Turn's outcome as a clause for the next opening.
+function turnEnding(outcome: TurnOutcome): { clause: string } {
   switch (outcome) {
-    case "cancelled": return { earcon: "turn_cancelled", clause: "was cancelled" };
-    case "failed": return { earcon: "turn_failed", clause: "failed" };
-    default: return { earcon: "turn_stopped", clause: "finished" };
+    case "cancelled": return { clause: "was cancelled" };
+    case "failed": return { clause: "failed" };
+    default: return { clause: "finished" };
   }
 }
 
