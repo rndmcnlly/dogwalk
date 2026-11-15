@@ -1205,6 +1205,11 @@ def beats() -> str:
     return "\n".join(detail.get("text", "") for detail in sorted(found, key=lambda detail: detail.get("ts_ms", 0)))
 
 
+def following_said(mocks) -> list[str]:
+    """The narrations sent to the Voice Frontend, in order: the only way a beat reaches it."""
+    return [m["content"] for m in mocks.seen if m.get("type") == "session.commentary.append" and m["content"].startswith("Following ")]
+
+
 def operator_timing_page(call_sid: str, after: int = 0) -> dict:
     credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
     request = urllib.request.Request(
@@ -1543,7 +1548,7 @@ async def run_protocol(identity: str) -> None:
             # A remark keeps the Agent's words and tense: a plan and an estimate, not an action.
             "Juniper says: \"I'll check the tests next, which should take about a minute.\"",
         ]
-        await wait_for(lambda: all(fragment in beats() for fragment in expected_beats), 10)
+        await wait_for(lambda: (lambda text: all(fragment in text for fragment in expected_beats))(beats()), 10)
         assert not any(m.get("type") == "session.thinking.append" and m["content"].startswith("Following")
                        for m in mocks.seen), "a beat went to the Voice Frontend as thinking"
         # The burst made one beat: the remark outweighed the command started with it, and the
@@ -1874,7 +1879,7 @@ async def run_protocol(identity: str) -> None:
         await wait_for(lambda: "Juniper is working with Git." in beats(), 10)
         await wait_for(lambda: "3 steps in a row failed for Juniper, the latest while looking something up on the web; its turn is still going." in beats(), 10)
         await wait_for(lambda: any(item.get("type") == "function_call_output" and item.get("call_id") == "f-inspect" for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-        failed_at = len(beats())
+        failed_at, said_at = len(beats()), len(following_said(mocks))
         # The compaction the first call's hangup did not wait for leads the second call's context.
         second = next(payload["input"] for _, payload in OrchestratorMock.requests
                       if any("[handoff del-f]" in str(item.get("content")) for item in payload["input"]))
@@ -1886,6 +1891,8 @@ async def run_protocol(identity: str) -> None:
         assert [(c["kind"], c["status"]) for c in failed["recent_tool_calls"]] == [("execute", "failed")] + [("fetch", "failed")] * 3, failed
         await asyncio.sleep(4)
         assert not re.search(r"running|working with|still|failed for", beats()[failed_at:]), beats()[failed_at:]
+        # Nor is a beat from before the failure narrated after it: the turn end cleared it.
+        assert not re.search(r"running|working with|still", " ".join(following_said(mocks)[said_at:])), following_said(mocks)[said_at:]
 
         # An out-of-memory kill reaches the Orchestrator as a sayable reason, and the
         # Agent Connection comes back.
@@ -3106,7 +3113,7 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     # Dogwalk caused that answer, so it is not reported as answered elsewhere. The interrupt
     # aborts the running command, which is not a failed step: no failure beat.
     await agent.next_request(lambda item: item["body"] == {"text": REDIRECT_PROMPT})
-    redirected_at = len(beats())
+    redirected_at, said_at = len(beats()), len(following_said(mocks))
     await agent.tool(sid, "call_profile1", "bash", {"command": "py-spy record"}, end=None)
     await agent.ask_permission(sid, "per_profile1", "bash", ["py-spy record"], [])
     redirect = await agent.next_request(lambda item: item["path"] == f"/api/session/{sid}/interrupt")
@@ -3118,6 +3125,7 @@ async def run_turn_control(mocks: SocketMocks, sid: str, beats) -> None:
     assert sid in agent.active and harness_count(stopped) == ended, "the Redirect ended the turn"
     await asyncio.sleep(2.5)  # past the failure burst
     assert "failed" not in beats()[redirected_at:], beats()[redirected_at:]
+    assert not any("failed" in said for said in following_said(mocks)[said_at:]), following_said(mocks)[said_at:]
     timed = [json.loads(row["detail"]) for row in await asyncio.to_thread(call_activity_rows, "CA_VOICE_TEST2", True)
              if row["event"] == "voice.timing"]
     # The Redirect aborted only the step under way.
