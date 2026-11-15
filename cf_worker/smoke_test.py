@@ -87,6 +87,9 @@ class DaytonaMock(BaseHTTPRequestHandler):
     def reply(self, value: dict) -> None:
         body = json.dumps(value).encode()
         self.send_response(200)
+        # This HTTP/1.0 server closes every connection, but workerd pools it unless told, and a
+        # fetch right after a reply then gets the closed one ("Network connection lost.").
+        self.send_header("connection", "close")
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
@@ -127,6 +130,7 @@ class DaytonaMock(BaseHTTPRequestHandler):
             if answer is not None:
                 status, body, kind = answer
                 self.send_response(status)
+                self.send_header("connection", "close")
                 self.send_header("content-type", kind)
                 self.send_header("content-length", str(len(body)))
                 self.end_headers()

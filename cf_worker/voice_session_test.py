@@ -904,8 +904,8 @@ BOARD_PROGRAM = (
     'shell = Terminal()\ndocs = Preview(3000, "The docs")'
 )
 # Every file here fails its draw-time check, each for its own reason. huge.png comes last: the
-# Worker cancels its capped download, and against this HTTP/1.0 mock the next toolbox fetch in
-# the same draw has failed with "Network connection lost." (reported, not yet explained).
+# Worker cancels its capped download. The HTTP/1.0 mocks say Connection: close, since workerd
+# otherwise reused the socket they had closed and the next fetch failed ("Network connection lost.").
 CHECKS_PROGRAM = (
     'root = Stack([Image("notes.png", "a"), Image("wide.png", "c"), Image("pixels.png", "d"), '
     'Image("escape.png", "e"), Image("missing.png", "f"), Image("https://example.com/a.png", "g"), '
