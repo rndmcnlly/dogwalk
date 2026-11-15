@@ -1193,6 +1193,18 @@ def call_activity(call_sid: str) -> list[str]:
     return [row["event"] for row in call_activity_rows(call_sid)]
 
 
+def beats() -> str:
+    """Every Progress Beat's text so far, across calls, in order. Beats are read from activity:
+    only narrations reach the Voice Frontend (#81)."""
+    credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
+    request = urllib.request.Request(f"http://127.0.0.1:{WORKER_PORT}/admin/api/calls?verbose=1&limit=10",
+                                     headers={"authorization": f"Basic {credentials}"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        calls = json.load(response)
+    found = [json.loads(item["detail"]) for call in calls for item in call["activity"] if item["event"] == "session.beat"]
+    return "\n".join(detail.get("text", "") for detail in sorted(found, key=lambda detail: detail.get("ts_ms", 0)))
+
+
 def operator_timing_page(call_sid: str, after: int = 0) -> dict:
     credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
     request = urllib.request.Request(
@@ -1522,22 +1534,18 @@ async def run_protocol(identity: str) -> None:
         assert begun["turn_state"] == "in_progress" and begun["following"] == "Juniper", begun
         assert '"followed":true' in stopped
 
-        # Sending Juniper off followed it: progress beats reach the Voice Frontend as
-        # thinking, built from Agent events without a model call.
-        # Beats a few seconds apart are joined into one append; beats in one burst make one beat.
-        def beats() -> str:
-            return "\n".join(
-                m["content"] for m in mocks.seen
-                if m.get("type") == "session.thinking.append" and m["content"].startswith("Following Juniper:")
-            )
-
+        # Sending Juniper off followed it: progress beats are built from Agent events without a
+        # model call. Beats in one burst make one beat. Only a narration reaches the Voice
+        # Frontend (#81: it speaks thinking sent into a quiet line), so none goes as thinking.
         expected_beats = [
             "Juniper is working", "step 1 of 2: Find the parser.", "Juniper is reading parser.py.",
             'Juniper says: "The parser lives in src."', "started changing files: editing artifact.txt.",
             # A remark keeps the Agent's words and tense: a plan and an estimate, not an action.
             "Juniper says: \"I'll check the tests next, which should take about a minute.\"",
         ]
-        await wait_for(lambda: all(fragment in beats() for fragment in expected_beats))
+        await wait_for(lambda: all(fragment in beats() for fragment in expected_beats), 10)
+        assert not any(m.get("type") == "session.thinking.append" and m["content"].startswith("Following")
+                       for m in mocks.seen), "a beat went to the Voice Frontend as thinking"
         # The burst made one beat: the remark outweighed the command started with it, and the
         # tool of no known kind made none, so its name never reached the Voice Frontend.
         assert "running a command" not in beats() and UNKNOWN_TOOL not in beats(), beats()
