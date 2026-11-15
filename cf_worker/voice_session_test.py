@@ -999,6 +999,10 @@ class OrchestratorMock(BaseHTTPRequestHandler):
     def respond(self, value: dict, extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(value).encode()
         self.send_response(200)
+        # This HTTP/1.0 server closes every connection, but workerd pools it unless told: the
+        # Memory writer, fetching 1 ms after a step's reply, got the closed one ("Network
+        # connection lost.").
+        self.send_header("connection", "close")
         for key, header in (extra_headers or {}).items():
             self.send_header(key, header)
         self.send_header("content-type", "application/json")
