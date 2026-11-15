@@ -147,7 +147,7 @@ video{display:block;width:100%;max-height:75vh;background:#000;border-radius:var
 .html-stage:-webkit-full-screen iframe{height:100%}
 
 
-/* Whiteboard (the paired screen, or a tab of its own): boards the walker draws in openui-lang. Tones and chart series take the page's palette. */
+/* Whiteboard (the paired screen, or a tab of its own): boards the Voice Agent draws in openui-lang. Tones and chart series take the page's palette. */
 .whiteboard{margin:18px 0 0;--wb-1:var(--info);--wb-2:var(--leash);--wb-3:var(--grass);--wb-4:var(--role-orchestrator);--wb-5:var(--warn);--wb-6:var(--bad)}
 #wbAway{margin-top:18px}
 .wb-board{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:var(--radius);padding:12px 14px;min-width:0}
@@ -314,7 +314,7 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
 
 <section id="pairScreen" hidden>
   <ol class="steps">
-    <li>In the call, ask the walker to pair a browser.</li>
+    <li>In the call, ask Dogwalk to pair a browser.</li>
     <li>Type the spoken code below: a number from 1 to 999, then two words.</li>
     <li>Select Pair browser. The call describes this browser and asks whether it is yours: say yes to pair it.</li>
   </ol>
@@ -322,7 +322,7 @@ textarea.wb-input{resize:vertical;min-height:4.5em}
     <label class="wb-field" for="pairCode"><span>Pairing code</span>
       <input id="pairCode" name="code" class="wb-input" type="text" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="pairHelp status" placeholder="123-adroitness-aardvark">
     </label>
-    <p id="pairHelp" class="small muted">Use spaces or hyphens between the number and words. The code expires after 90 seconds. Ask the walker to repeat it or give you a new code if needed.</p>
+    <p id="pairHelp" class="small muted">Use spaces or hyphens between the number and words. The code expires after 90 seconds. Ask Dogwalk to repeat it or give you a new code if needed.</p>
     <div class="row"><button id="claimCode" type="submit" class="primary">Pair browser</button></div>
   </form>
 </section>
@@ -431,7 +431,7 @@ async function claim(code) {
     return waitForAnswer(body.ticket);
   }
   if (response.status === 404) {
-    return claimFailed("That code is unknown or expired. Ask the walker in the call for a new code.");
+    return claimFailed("That code is unknown or expired. Ask Dogwalk in the call for a new code.");
   }
   claimFailed("Claim failed (" + response.status + "): " + (body.error || response.statusText) + ". Check the code and try again.");
 }
@@ -1139,7 +1139,7 @@ function markdownBlock(source) {
   return box;
 }
 
-// ==== WHITEBOARD START: boards the walker draws in openui-lang on this browser's Display, answered on this page ====
+// ==== WHITEBOARD START: boards the Voice Agent draws in openui-lang on this browser's Display, answered on this page ====
 // Protocol: the server sends {"type":"board","board":{"id","at","display","program","note","status":"open"|"answered",
 // "answer","failed"?,"access"?}} for a new or updated board, and {"type":"boards","boards":[...]} on connecting,
 // both only for this Display. failed maps a path, as the program writes it, to why it failed the draw-time
@@ -1153,7 +1153,7 @@ function markdownBlock(source) {
 // An Upload sends each file as POST /pair/upload?board=&folder= (folder as the program writes it) with the
 // file as the body and x-dogwalk-file-name (percent-encoded), -size, -type and -upload-last ("1" on the
 // last file of a drop) headers -> {"ok","path","size"} or {"error","asleep"?}.
-// An answer is the caller's input to the walker, like keypad digits; it never authorizes anything.
+// An answer is the caller's input to the Voice Agent, like keypad digits; it never authorizes anything.
 // The dialect is OpenChamber's openui-lang (voice_agent_skills/whiteboard.md): one "name = Component(args)"
 // statement per line, positional arguments, root = Stack([...]). Upstream extras kept because they are
 // cheap: null skips an optional argument, the last definition of a name wins, a call may sit inline,
@@ -2297,7 +2297,7 @@ function wbAccess(node, ctx) {
     setTimeout(() => URL.revokeObjectURL(url), 60000);
     finish("");
   }
-  // Each file goes on its own, in order; the last one sent says so, so the walker hears one drop as one
+  // Each file goes on its own, in order; the last one sent says so, so the Voice Agent hears one drop as one
   // piece of news. A file over the grant's per-file limit is not sent at all.
   async function upload(files) {
     if (!files.length || busy) return;
@@ -2381,7 +2381,7 @@ function wbBoardNode(board) {
     ctx.errors.length ? el("div", { class: "wb-callout tone-error wb-errors", role: "note" }, [
       el("strong", null, body ? "Part of this board could not be drawn" : "This board could not be drawn"),
       el("ul", null, ctx.errors.slice(0, 12).map((e) => el("li", null, e))),
-      el("p", { class: "small" }, "The walker has been told and may draw it again."),
+      el("p", { class: "small" }, "Dogwalk has been told and may draw it again."),
     ]) : null,
     body,
   ]);
@@ -2417,7 +2417,7 @@ function wbBoardNode(board) {
   if (!ctx.fields.length && !ctx.buttons.length) return wbBuilt(node, ctx);
 
   let sent = false;
-  const note = el("textarea", { class: "wb-input", rows: 2, placeholder: "Anything the walker should know" });
+  const note = el("textarea", { class: "wb-input", rows: 2, placeholder: "Anything Dogwalk should know" });
   const noteField = el("label", { class: "wb-field", hidden: true }, [el("span", null, "Note (optional)"), note]);
   const noteToggle = el("button", { type: "button", class: "link small", onclick: () => { noteField.hidden = false; noteToggle.hidden = true; note.focus(); } }, "Add a note");
   const tally = el("span", { class: "small muted" });

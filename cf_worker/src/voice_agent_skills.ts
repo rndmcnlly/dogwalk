@@ -2,8 +2,7 @@
 // Distinct from skills Agents keep in the Sandbox; these are read-only at runtime and
 // change only through this repository. Each file has `name` and `description` (the trigger)
 // frontmatter, an Orchestrator body, and an optional "## Voice Frontend guidance" section that
-// is pushed to the Voice Frontend when the skill loads. A themed skill also appends a body
-// rendered from the active Theme when it loads.
+// is pushed to the Voice Frontend when the skill loads.
 //
 // Progressive disclosure (agentskills.io): the index (name, description) is always in the
 // Orchestrator's instructions, a body loads when its trigger matches, and a skill's reference
@@ -16,11 +15,9 @@ import firstCallTour from "../voice_agent_skills/first-call-tour.md";
 import pairBrowser from "../voice_agent_skills/pair-browser.md";
 import whiteboard from "../voice_agent_skills/whiteboard.md";
 import inviteSomeone from "../voice_agent_skills/invite-someone.md";
-import runtimeDramaturgy from "../voice_agent_skills/runtime-dramaturgy.md";
 import deviceAuthorization from "../voice_agent_skills/device-authorization.md";
 import domainDoc from "../../DOMAIN.md";
 import architectureDoc from "../../PSTN_CLOUDFLARE.md";
-import type { Theme } from "./themes";
 
 export interface VoiceAgentSkill {
   name: string;
@@ -30,7 +27,6 @@ export interface VoiceAgentSkill {
 }
 
 interface SkillSource extends VoiceAgentSkill {
-  themed?: (theme: Theme) => string;
   references?: Record<string, string>;
 }
 
@@ -69,24 +65,6 @@ function parse(source: string, appendix = ""): VoiceAgentSkill {
   };
 }
 
-// Runtime Dramaturgy (DOMAIN.md): the active Theme's authoring notes, so the skill differs
-// per theme and cannot drift from themes.ts.
-function authoringNotes(theme: Theme): string {
-  if (!theme.conceit) {
-    return `# The ${theme.name} theme\n\n${theme.name} has no conceit to interpret: it speaks the domain's own terms. Answer plainly, and if the caller wants a fiction, tell them the other themes are a switch away.`;
-  }
-  const { notes } = theme;
-  return [
-    `# The ${theme.name} theme's authoring notes`,
-    `Genre: ${notes.genre}`,
-    `Tropes (genre sources):\n${notes.tropes.map((trope) => `- ${trope.name} (${trope.url}): ${trope.use}`).join("\n")}`,
-    `Why the caller and the Voice Agent talk: ${notes.whyTalk}`,
-    `The Voice Agent's authority: ${notes.authority}`,
-    `A closer look: ${notes.closerLook}`,
-    `Power: ${notes.power}`,
-  ].join("\n\n");
-}
-
 function withReferences(skill: VoiceAgentSkill, references: Record<string, string>): SkillSource {
   return { ...skill, references,
     body: `${skill.body}\n\n## References\n\nRead a section with read_voice_agent_skill_reference (skill, file, and the heading's exact text); a heading also covers the headings nested under it.\n\n${contents(references)}` };
@@ -101,18 +79,17 @@ const VOICE_AGENT_SKILLS: SkillSource[] = [
   parse(whiteboard),
   parse(inviteSomeone),
   parse(deviceAuthorization),
-  { ...parse(runtimeDramaturgy), themed: authoringNotes },
 ];
 
 export const VOICE_AGENT_SKILL_INDEX = VOICE_AGENT_SKILLS
   .map((skill) => `- ${skill.name}: ${skill.description}`)
   .join("\n");
 
-export function voiceAgentSkill(name: string, theme: Theme): VoiceAgentSkill {
+export function voiceAgentSkill(name: string): VoiceAgentSkill {
   const skill = VOICE_AGENT_SKILLS.find((item) => item.name === name.trim());
   if (!skill) throw new Error(`unknown Voice Agent Skill ${name}; choose one from the index`);
-  const { themed, references: _references, ...rest } = skill;
-  return themed ? { ...rest, body: `${rest.body}\n\n${themed(theme)}` } : rest;
+  const { references: _references, ...rest } = skill;
+  return rest;
 }
 
 // One section of a skill's reference file: its heading through the line before the next heading

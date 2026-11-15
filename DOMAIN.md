@@ -19,28 +19,27 @@ Dogwalk is an eyes-free coding-agent client and multi-session coding manager. It
 
 The Voice Agent is the realtime conversational interface through which the User supervises coding work. It translates conversational intent into precise, neutrally named session-manager operations. Coding work is performed by Agents such as OpenCode, not by the Voice Agent.
 
-The Voice Agent is one character performed by two components: a Voice Frontend that holds the conversation and a Session Orchestrator that exercises engineering judgment and operates Managed Sessions. The User experiences a single character. The Voice Frontend may refer to the Session Orchestrator through its Theme's fiction for that split (in Park, its own head or mind: "let me think"), which keeps an account of its limits honest without naming models; when the User asks about the architecture, it explains the split candidly.
+The Voice Agent is one character performed by two components: a Voice Frontend that holds the conversation and a Session Orchestrator that exercises engineering judgment and operates Managed Sessions. The User experiences a single character. The Voice Frontend speaks of the Session Orchestrator as its own thinking ("let me think"), which keeps an account of its limits honest without naming models; when the User asks about the architecture, it explains the split candidly.
 
 Dogwalk presents as an agentic development environment driven by a coworker. Agents should see ordinary requests from a colleague: they need not know they are supervised by voice, and anything specific to calls or speech stays inside Dogwalk.
 
 ## Modeling Principles
 
 - Dogwalk's session-management vocabulary is its own, historically anchored in ACP (see Agent References). The Agent's API terms (executions, inbox, delivery) stop at the Agent Integration boundary, except where one determines a domain rule, which then says so.
-- Dogwalk is a product codename, not the source of its domain vocabulary.
-- Theme language (such as Park's canine fiction) is optional presentation in UI copy, Voice Agent narration, and deterministic speech. It must not appear in tool names, operation names, harness events, earcon names, protocol payloads, persisted schemas, or prompts sent to Agents.
-- Every Voice Agent rule is stated in neutral terms. A Theme presents rules and never carries one: removing the Theme must remove no behavior.
+- Dogwalk is a product codename, not the source of its domain vocabulary, and it implies no fiction: the Voice Agent speaks the domain's own terms, plainly and directly.
+- A Voice Call is complete in words. Every piece of information reaches the User as speech; no sound stands in for one. The only tones are ritual cues that carry nothing speech does not also say: the recording beep follows a spoken "after the beep", the Identity Check's round tone follows the spoken instructions, and its received cue fills the wait for a spoken verdict.
 - Dogwalk depends on OpenCode deliberately: its UX, AX, and AI/HCI research moves faster than standards do, and it already depends on specific providers. The Agent Implementation is therefore a chosen dependency, pinned and upgraded explicitly. Model providers, the voice transport, and Daytona remain adapters.
 - An Agent entity, an application projection, and its spoken presentation are different things even when they currently have a one-to-one relationship.
 - Derived state must not be presented as Agent-defined state. Dogwalk may infer that a session is ready or that a turn needs attention, but those are Client projections.
 - Opaque Agent identifiers stay out of speech. The Voice Agent refers to work by purpose, recency, and pronounceable Alias.
-- Whatever the Voice Agent can change, it can also sense without changing it: every setter (a preference, a pairing, what a Display shows, an Access Grant, which session is followed) has a read-only counterpart, and the state that matters at the start of a Voice Call (including each Display, whether a browser has it open, what it showed recently, and its live Access Grants) arrives with the call.
+- Whatever the Voice Agent can change, it can also sense without changing it: every setter (a pairing, what a Display shows, an Access Grant, which session is followed) has a read-only counterpart, and the state that matters at the start of a Voice Call (including each Display, whether a browser has it open, what it showed recently, and its live Access Grants) arrives with the call.
 - The current process topology is an implementation choice. One Agent service in the Sandbox serves all of a User's sessions and any number of clients.
 
 ## Bounded Contexts
 
 ### Voice Interaction
 
-Owns the live conversation, Voice Agent personality, spoken reference resolution, optional narration flavor, earcons, interruption, muting, and speech-safe summaries. A Theme's language may appear here as an acknowledged metaphor, but is never canonical domain language.
+Owns the live conversation, Voice Agent personality, spoken reference resolution, interruption, muting, and speech-safe summaries.
 
 ### Session Management
 
@@ -136,7 +135,7 @@ The human principal whose intent, authorization, and attention govern the work. 
 
 **Context:** Voice Interaction
 
-The single character the User talks to: socially fluent, a little modest about engineering detail, and authoritative about session state. It presents itself through a Theme (DOMAIN.md, Themes), at an Intensity it adjusts to the User. It is composed of a Voice Frontend and a Session Orchestrator.
+The single character the User talks to: socially fluent, a little modest about engineering detail, and authoritative about session state. It speaks plainly and directly in the domain's own terms, without metaphor or persona: it says what happened, what is still uncertain, and what the User must decide, and never softens a failure. Permission Request choices, failures, destructive actions, numbers, and anything the User must act on are stated exactly. It mirrors the User's sophistication, especially on technical topics: modest and plain with a newcomer, fluent with someone who already speaks about agents, sessions, and delegation, so existing agentic literacy amplifies the experience. It keeps power where it is: Agents act in the Sandbox and often take initiative; the User holds authority (intent and Permission Requests); the Voice Agent holds attention and translation, suggests work, and never claims an Agent's work as its own. It is composed of a Voice Frontend and a Session Orchestrator, and speaks with one GPT-Live voice.
 
 **Not:** An Agent, coding harness, Agent host, or a single model.
 
@@ -160,7 +159,7 @@ Its context is bounded by its own judgment: it compacts by rewriting its Memory,
 
 It **snoozes**: it thinks only when woken, by a Handoff or its Continuation, or by a harness event that plausibly requires steering the Voice Frontend or the Sandbox again. Waking events are caller input (keypad digits, a Whiteboard Answer, the last file of an Upload drop, whether it landed or failed), a browser claiming a Pairing Code (the User is waiting to be asked whether it is theirs), a Whiteboard error to redraw, a Permission Request or Elicitation, a Prompt Turn's end or failure, a Bid, a recording saved or failed, the Agent becoming unavailable or a Sandbox restart failing, the Agent Connection arriving when work waits on it (a session operation failed fast while it was starting, or the Orchestrator restarted the Sandbox itself), a Pairing Code that lapsed unclaimed, the first call's tour, and the outcome of a Compaction the User asked about (one given a focus). Every other event (a call starting or ending, earlier files of an Upload drop, a browser connecting or going stale, a Permission Request answered elsewhere, a turn begun elsewhere or by Steering, a discarded recording, the Agent Connection starting, a keypad restart, a voluntary Compaction's outcome) is appended in order and reaches it with the next woken step, as background that may be stale. A woken run ends when a step makes no tool call, or only speech requests, none of which declares that more follows.
 
-Its context is **append-only**: each model call is its instructions (a function of the Theme alone), its pinned Memory, then its conversation, and every step only appends to what the previous one sent, so the provider's prompt cache serves everything before. Earlier items, including the provider's opaque reasoning items, are never rewritten, reordered, or removed between steps; only a Compaction or the backstop cuts the conversation, and each starts a fresh cache. Every model call the Orchestrator makes (a step, the Memory writer, the next call's welcome line) shares this prefix and differs only in what follows the context.
+Its context is **append-only**: each model call is its instructions (fixed), its pinned Memory, then its conversation, and every step only appends to what the previous one sent, so the provider's prompt cache serves everything before. Earlier items, including the provider's opaque reasoning items, are never rewritten, reordered, or removed between steps; only a Compaction or the backstop cuts the conversation, and each starts a fresh cache. Every model call the Orchestrator makes (a step, the Memory writer, the next call's welcome line) shares this prefix and differs only in what follows the context.
 
 **Not:** An Agent, the Session Manager, or a store of record.
 
@@ -193,73 +192,6 @@ The coding harness that owns conversation context, processes prompts, uses model
 OpenCode is the Agent Implementation, through its native server API. Replacing it is possible but would mean a new adapter, and is not a design goal.
 
 **Not:** A model, subprocess, session, Prompt Turn, or task.
-
-## Themes (provisional)
-
-### Theme
-
-**Context:** Voice Interaction
-
-A presentation of the neutral session model for the voice surface. A Theme is a **conceit** (the mapping from domain concepts to the Theme's words, including how the Voice Frontend speaks of the Session Orchestrator) played in a **genre** (the storyteller's stance toward that material), at a **register** that moves along an Intensity ladder, **cast** with a GPT-Live voice and **scored** with earcons. It also words the deterministic speech (the first-call welcome, the keypad status readout).
-
-Themes exist only above Agent Integration; prompts sent to Agents, tools, schemas, harness events, and anything in the Sandbox never use them. A Theme carries no rules, so the Voice Agent behaves the same under any Theme. Each Theme keeps authoring notes outside the standing prompts, recording the intent its surface must keep serving, for its authors and for Runtime Dramaturgy: why the User and the Voice Agent are distinct, what authority the Voice Agent holds over sessions and Workspaces, what a closer look (Paired Browser, Whiteboard, Human Takeover) means in the conceit, how power stays where it is, and which tropes it draws on. `cf_worker/src/themes.ts` holds the Themes and their notes.
-
-| Theme | Conceit | Genre |
-|---|---|---|
-| Park (default) | a dog walk: sessions are dogs, the Voice Agent is the walker | magical realism, delivered deadpan: the impossible made mundane |
-| Survey | a survey ship in orbit: sessions are away teams, Workspaces are planets, the User is the captain | space opera and planetary romance, in measured wonder: the mundane made marvelous |
-| Patrol | a present-day cyber operation under mission command: sessions are operatives, tool calls are their drones, the User is Actual | military science fiction, laconic over hyperviolent vocabulary aimed only at code: the mundane made lethal |
-| Plain | none: the domain vocabulary shows through | plain |
-
-Plain is both a User choice and the regression fixture that shows the rules never live in a Theme. Park is the default. The User switches by asking, and the choice is kept with their Sandbox's Voice Session state like the Earcon Style. GPT-Live fixes a voice for the life of a voice session, so a switch bounces the Voice Call: the Session Orchestrator writes the new voice's first line in the new Theme, re-presenting where things stand, then the voice session ends and the same Voice Call reconnects to a fresh one, which opens with that line and no identity clause. The register carries across the bounce: the Session Orchestrator names the rung the conversation stood at, the line is written at it, and the fresh Voice Frontend is told to start there. Aliases stay across a switch; the User may ask for sessions to be renamed in the new conceit's naming style, and the Voice Agent does so only then. The public pages stay Park for now.
-
-**Not:** A rule set, a persona with its own capabilities, or a visual color scheme.
-
-### Intensity
-
-**Context:** Voice Interaction
-
-The ladder a Theme's register moves along, from plain words to the conceit at full strength, and the Voice Agent's current position on it. The Voice Agent chooses it rather than the User setting it: it rises when the User plays along and falls when the User is frustrated or deep in a problem. An explicit request to lean into the Theme climbs at once, and a request to drop it goes to plain words. Intensity is independent of length: brevity governs how much is said and the register governs which words, so a standing preference for short replies never lowers the register, and a short line can sit at the top rung. The clarity floor holds at every rung: Permission Request choices, failures, destructive actions, numbers, and anything the User must act on are stated plainly; the conceit may frame a fact but never replace it.
-
-Moving the register along the ladder is drama management.
-
-**Not:** A setting, or the Voice Agent's matching of the User's technical sophistication, which is independent of Intensity.
-
-### Runtime Dramaturgy
-
-**Context:** Voice Interaction
-
-The performing Voice Agent consulting its Theme's genre sources (the tropes the Theme draws on) and authoring notes during a live Voice Call, to interpret the conceit faithfully: how a moment the conceit never anticipated should be presented, or what a closer look means in this fiction. Only the Session Orchestrator can consult; the Voice Frontend asks it by thinking it over, like any other work, when the User asks to lean into the Theme or a moment falls outside the conceit. It arrives as the `runtime-dramaturgy` Voice Agent Skill, rendered from the active Theme's authoring notes (Plain has no conceit to interpret). The Session Orchestrator may ask a Managed Session for ordinary research on a genre source, such as summarizing a trope page, as a coworker would, without mentioning the Theme; Agents never perform the Theme.
-
-**Not:** Drama management, which adapts the register to the audience (Intensity). Dramaturgy answers to the work; drama management answers to the User.
-
-### Park
-
-Park's conceit, kept here because it grew up with the domain model: the dogs are not ordinary dogs, but the walker finds them perfectly normal and never explains the magic. Nothing here is committed yet: a `?` marks a mapping still under exploration, and none of these words are canonical domain terms.
-
-| Fiction | Domain concept | Status |
-|---|---|---|
-| Dog | Managed Session (wrapping one Agent Session) | likely |
-| Tag | Alias; tags can be changed | likely |
-| Untagged dog the walker knows about | Persisted Session discovered through the Agent but not loaded | ? |
-| On the leash | Managed Sessions the Voice Agent is actively attending | ? |
-| Letting a dog go | Close Managed Session; its history remains and it can be leashed again with a new tag | ? |
-| Archived dog | perhaps simply "known but not on the leash"; Dogwalk has no archive operation | ? |
-| Collar | the Orchestrator's per-session card (tag, errand, last result) that bounds its context, or the limit on dogs per leash | ? |
-| The walker's voice | Voice Frontend: quick, conversational, can run ahead of its head and should say so | likely |
-| The walker's head (mind) | Session Orchestrator: thinks, remembers, holds the leash; handing off is "thinking it over" | likely |
-| Walker | the Voice Agent as a whole; it sends, checks, and recalls dogs and never claims to do their work | likely |
-| Walker skill | Voice Agent Skill, as opposed to a dog's own skills in the Sandbox | likely |
-| Sniffing, digging, fetching | Agent work inside a Prompt Turn, done by dogs, not the walker | likely |
-| Following a dog | Followed Session: the walker keeps up with one dog and narrates it; observing, not commanding | likely |
-| Ranging | a working Managed Session that is not followed: out of earshot until it bids for attention or comes back | likely |
-| Pulling at the leash | Bid: a ranging dog asking for the walker's attention | likely |
-| Waiting at a gate | Permission Request: a dog waiting for the User's say-so | likely |
-| Looking back to ask which way | Elicitation: a dog asking the User for information | ? |
-
-Every Theme must keep power where it is, and Park shows how: dogs (Agents) act in the Sandbox and often take initiative; the User holds authority (intent and Permission Requests); the walker holds attention and translation. The walker suggests errands and follows dogs; it does not command them, and a dog may pull it along.
-
-The Voice Agent mirrors the caller's sophistication, especially on technical topics: modest and plain with a newcomer, fluent with someone who already speaks about agents, sessions, and delegation, so existing agentic literacy amplifies the experience.
 
 ## Core Concepts
 
@@ -312,10 +244,9 @@ whose longer words survive narrowband audio and whose unique three-letter
 prefixes tolerate speech-recognition errors, minus grim words, every word of
 the Invite Code vocabulary (the PGP word list), and the Identity Check's escape
 words. Two words against three, from disjoint vocabularies, lets one transcript
-tell a Handle from an Invite Code. A Handle is neutral and survives every Theme
-switch; a Theme may say it warmly but never supplies its words.
+tell a Handle from an Invite Code.
 
-**Not:** A credential, a Theme name, an Alias, or an Invite Code.
+**Not:** A credential, an Alias, or an Invite Code.
 
 ### Home
 
@@ -434,8 +365,8 @@ Memory. A caller who says they are someone else without naming a Handle is asked
 who is calling: a Handle, an Invite Code, or donating; anything else ends the
 call politely. A caller who names the Handle they are already being checked as
 hears the same sentence again. The check runs once per Voice Call: returning to
-the Voice Agent later in the call (after Challenge Practice, a Theme switch, or
-recovery) does not repeat it.
+the Voice Agent later in the call (after Challenge Practice, a dropped voice
+connection, or recovery) does not repeat it.
 
 The **name path** makes daily use smoother: a Home call within a configured
 window of the User's last Voice Call (as that User, from any phone: Home or an
@@ -497,8 +428,8 @@ answer is captured, then the verdict. The received cue (two falling blips, unlik
 the single tone) tells the caller their answer arrived, so the seconds spent
 judging it are not silence. It follows every captured answer, scored or a wrong
 phrase, so the ritual never changes shape, and never silence or a request to
-repeat, which are not answers. Like the recording beep, it belongs to the ritual
-rather than to the Earcon Style, so it plays even when earcons are off. Fresh
+repeat, which are not answers. Like the recording beep, it belongs to the ritual:
+the spoken verdict that follows says in words what the cue anticipates. Fresh
 phrases defeat replayed recordings, not voice cloning. The
 similarity threshold is configuration, not a domain rule. It starts at a cosine
 of 0.5: synthetic impostors through a telephone path scored at most 0.40, and
@@ -675,7 +606,7 @@ default and requires an explicit, session-only opt-in to reveal verbose details.
 
 The Session Orchestrator may read the current User's recent Call Activity to explain interruptions, and each call begins with a since-last-call summary (how the previous call ended, including provider errors such as moderation, recovery actions, failed Prompt Turns, and its last words) as context for the Opening.
 
-A caller who passes the Identity Check talks first: the Voice Call connects to the Voice Agent at once while the Sandbox is started in parallel, and the Agent Connection is established in the background. Until it is ready, Session Management answers inspection and listing from its persisted projection, operations that need the Agent fail fast with a neutral "still starting" error rather than waiting, and the Session Orchestrator keeps conversing and acts on held requests once the connection is ready. Losing the Agent Connection mid-call makes Managed Sessions unavailable but does not end the Voice Call. Only a Sandbox the provider reports broken sends the caller to deterministic recovery before the Voice Agent. A provider ending the voice connection is not a User hanging up, and neither cancels Prompt Turns; Agent work continues without the Agent Connection, and only an Agent Termination or a Sandbox restart or replacement interrupts it. A Voice Call may contain several voice sessions (after a drop, the recovery path can start another, and a Theme switch bounces to a fresh one with the new voice). A voice session ends at the first of the provider's close event or the loss of the control sideband; the Voice Call ends only when the telephony provider reports it complete, and that report also closes out any voice session whose end was never observed. Each voice session's transcript is saved as it grows, so one whose end was never observed (the Durable Object reset mid-call) still files its transcript and last words when the telephony report arrives or the next voice session attaches.
+A caller who passes the Identity Check talks first: the Voice Call connects to the Voice Agent at once while the Sandbox is started in parallel, and the Agent Connection is established in the background. Until it is ready, Session Management answers inspection and listing from its persisted projection, operations that need the Agent fail fast with a neutral "still starting" error rather than waiting, and the Session Orchestrator keeps conversing and acts on held requests once the connection is ready. Losing the Agent Connection mid-call makes Managed Sessions unavailable but does not end the Voice Call. Only a Sandbox the provider reports broken sends the caller to deterministic recovery before the Voice Agent. A provider ending the voice connection is not a User hanging up, and neither cancels Prompt Turns; Agent work continues without the Agent Connection, and only an Agent Termination or a Sandbox restart or replacement interrupts it. A Voice Call may contain several voice sessions (after a drop, the recovery path can start another, and Challenge Practice or Re-enrollment returns to a fresh one). A voice session ends at the first of the provider's close event or the loss of the control sideband; the Voice Call ends only when the telephony provider reports it complete, and that report also closes out any voice session whose end was never observed. Each voice session's transcript is saved as it grows, so one whose end was never observed (the Durable Object reset mid-call) still files its transcript and last words when the telephony report arrives or the next voice session attaches.
 
 ### Opening
 
@@ -704,15 +635,9 @@ Telephone keypad presses have fixed meanings that depend on the mode of the Voic
 
 **Context:** Voice Interaction, with Agent Hosting actions
 
-A deterministic in-call menu opened with star: no model interprets it, the Voice Frontend does not hear the caller while it is open, and pre-rendered prompts speak it. It holds only what must work when the Voice Agent cannot hear the User or cannot think straight: one restarts the Sandbox after a second press of one confirms that running work stops; two hands the call to the deterministic recovery menu; star, or fifteen seconds without a key after the prompt, returns to the conversation. Preferences and routine operations go by voice instead: status (also keypad one outside the menu), hanging up, the Theme, the Earcon Style, pairing a browser, and a restart the User confirms aloud (the Session Orchestrator's restart tool, which shares the menu's restart). The recovery menu covers GPT-Live being unavailable and is the only route to replacing a Sandbox; a dead Sandbox alone is a voice matter, since the Session Orchestrator runs without it. The Session Orchestrator learns of a keypad restart through a harness event. Menu actions are recorded as Call Activity.
+A deterministic in-call menu opened with star: no model interprets it, the Voice Frontend does not hear the caller while it is open, and pre-rendered prompts speak it. It holds only what must work when the Voice Agent cannot hear the User or cannot think straight: one restarts the Sandbox after a second press of one confirms that running work stops; two hands the call to the deterministic recovery menu; star, or fifteen seconds without a key after the prompt, returns to the conversation. Routine operations go by voice instead: status (also keypad one outside the menu), hanging up, pairing a browser, and a restart the User confirms aloud (the Session Orchestrator's restart tool, which shares the menu's restart). The recovery menu covers GPT-Live being unavailable and is the only route to replacing a Sandbox; a dead Sandbox alone is a voice matter, since the Session Orchestrator runs without it. The Session Orchestrator learns of a keypad restart through a harness event. Menu actions are recorded as Call Activity.
 
 **Not:** The recovery menu outside the Voice Agent, which is reached when realtime voice is unavailable.
-
-### Earcon Style
-
-**Context:** Voice Interaction
-
-The User's choice of how earcons sound, kept with their Sandbox's Voice Session state: tonal, spoken, or none. Tonal, the semantic chime set designed in `earcon_lab.py`, is what a User gets without choosing; spoken plays a short spoken label for each event; none plays no event sounds, though the recording beep still plays. Tonal and spoken mark the same events; the System Menu's own prompts are always spoken. The User changes it by asking; the Session Orchestrator stores the preference and previews it with the opening sound (no preview for none). The public soundboard at `/sounds` plays every earcon in both sounding styles, as a cheat sheet.
 
 ### Agent Implementation
 
@@ -883,7 +808,7 @@ Pairing uses a spoken **Pairing Code** and the User's spoken confirmation. On re
 
 A pairing attempt never ends in silence. If no browser claims the code before its ninety-second expiry, the Session Orchestrator is woken by a `pairing_unclaimed` harness event, tells the User that it expired, and offers a fresh code. Code text is kept out of diagnostic events, Memory, and Workspace files; only its hash and Nameplate are stored for claim verification, apart from unavoidable spoken and model conversation content.
 
-Ending or disconnecting the call expires its outstanding code and any waiting browser claim. A later call cannot approve that claim, including a voice-session reconnection after a Theme switch. Already accepted browser credentials survive as before.
+Ending or disconnecting the call expires its outstanding code and any waiting browser claim. A later call cannot approve that claim, including a voice-session reconnection within the same call. Already accepted browser credentials survive as before.
 
 The two words are selected independently from the complete alternating PGP wordlists (three syllables, then two), providing sixteen secret bits; the Nameplate contributes no secret entropy. Claims travel over HTTPS. At most five guesses may target an outstanding code across all browsers and source addresses, and a shared service-wide budget allows 120 claim requests per fixed minute. Exhausting a code's guess budget retires it; the caller may ask for a fresh code. These controls limit online guessing, not denial of service or someone who overhears the code, and the User's confirmation remains necessary even after a correct guess (though, as above, it is not a boundary against someone near enough to hear the code).
 
@@ -913,7 +838,7 @@ The Session Orchestrator draws on a Display by name, and senses every Display wi
 
 A board the Session Orchestrator draws on a Display in a small declarative UI language (openui-lang): a quick diagram, table, chart, comparison, or form, or a set of small decisions such as proposed edits shown as before and after, each to accept or reject. It is the escape hatch for moments that outgrow voice, so the User can keep moving until they reach a full computer.
 
-A Whiteboard can be answered on the page (choices, text, buttons). A **Whiteboard Answer** is caller input, like keypad digits or the answer to an Elicitation: the Session Orchestrator takes it into account, and an earcon confirms in the call that it arrived. It is never authorization: it cannot resolve a Permission Request, and the Session Orchestrator confirms consequential answers aloud before acting on them. The User may always answer by voice instead, and that counts the same. The Voice Agent says aloud what it drew, so the call remains complete without the page.
+A Whiteboard can be answered on the page (choices, text, buttons). A **Whiteboard Answer** is caller input, like keypad digits or the answer to an Elicitation: the Session Orchestrator takes it into account and is woken by it, so the call hears in words that it arrived. It is never authorization: it cannot resolve a Permission Request, and the Session Orchestrator confirms consequential answers aloud before acting on them. The User may always answer by voice instead, and that counts the same. The Voice Agent says aloud what it drew, so the call remains complete without the page.
 
 A board may show an image an Agent left in the Workspace (PNG, JPEG, GIF, WebP, or SVG), named by its Workspace path: the program carries the path, never the bytes or a URL. The Sandbox is the only store of Workspace content: Dogwalk keeps a board's program, not copies of the files it shows. A browser reads each image through its pairing when it shows the board, and only while the Sandbox is running; while it sleeps, an image not already loaded shows its description and that a call wakes the Sandbox. A page left open keeps what it has loaded. The image is the file as it is when loaded, so it can differ from what the Voice Agent described if the file has changed since. When the Session Orchestrator draws a board, Dogwalk checks each path (present, inside the Workspace, the image its name says, not too large), and the Orchestrator learns which images failed from the draw itself; a failed image shows its description and the reason, and the rest of the board still works. Images are a presentation of ordinary files, outside Agent Integration; no Agent learns that a board showed one.
 
@@ -972,7 +897,7 @@ A tool Dogwalk offers the Agent through OpenCode's client-hosted MCP (an MCP ser
 
 **Context:** Voice Interaction
 
-Waveform audio played into a Voice Call: a short synthesized earcon for an event (call start, a Prompt Turn stopping during a lull) or a Workspace file an Agent produced, played on request. It is the eyes-free analogue of showing an image. Earcons sound in the caller's Earcon Style: tonal chimes, or short spoken labels (synthesized speech naming the event); they queue for lulls rather than interrupting speech. The caller cannot interrupt a clip and the Voice Frontend does not hear it, so clips are short or announced, and the Session Orchestrator tells the Voice Frontend what was played. Telephone audio is narrowband.
+Waveform audio played into a Voice Call: a Workspace file an Agent produced, played on request, or one of the few ritual tones (the recording beep). It is the eyes-free analogue of showing an image. No event is marked by a sound alone (see Modeling Principles). The caller cannot interrupt a clip and the Voice Frontend does not hear it, so clips are short or announced, and the Session Orchestrator tells the Voice Frontend what was played. Telephone audio is narrowband.
 
 ### Voice Recording
 
@@ -984,7 +909,7 @@ The caller's own audio captured during a Voice Call into a Workspace file, such 
 
 **Context:** Voice Interaction
 
-Version-controlled guidance the Session Orchestrator loads on demand when a request matches the skill's description (its trigger), such as precise transcription or self-knowledge about Dogwalk. A skill has a body for the Orchestrator and may carry speech guidance applied to the Voice Frontend for the rest of the call. Voice Agent Skills change only through Dogwalk's repository; nothing at runtime writes them. They disclose progressively: the index (name and trigger) is always in the Session Orchestrator's instructions, a body loads when its trigger matches, and a skill's reference files are read one section at a time, since whatever the Orchestrator reads stays in its context. Self-knowledge rests on the project's own documents, bundled as references rather than paraphrased; the Voice Agent cannot inspect the deployment it runs on, so for questions the documents do not answer it has a Managed Session read the public source repository, the code that most likely powers the deployment, and says so. A themed skill (Runtime Dramaturgy) renders the active Theme's authoring notes when it loads.
+Version-controlled guidance the Session Orchestrator loads on demand when a request matches the skill's description (its trigger), such as precise transcription or self-knowledge about Dogwalk. A skill has a body for the Orchestrator and may carry speech guidance applied to the Voice Frontend for the rest of the call. Voice Agent Skills change only through Dogwalk's repository; nothing at runtime writes them. They disclose progressively: the index (name and trigger) is always in the Session Orchestrator's instructions, a body loads when its trigger matches, and a skill's reference files are read one section at a time, since whatever the Orchestrator reads stays in its context. Self-knowledge rests on the project's own documents, bundled as references rather than paraphrased; the Voice Agent cannot inspect the deployment it runs on, so for questions the documents do not answer it has a Managed Session read the public source repository, the code that most likely powers the deployment, and says so.
 
 **Not:** A skill held by an Agent in the Sandbox, which the Agent may create and maintain itself, or a Client-Provided Tool.
 
@@ -1031,13 +956,13 @@ Assignment is interaction language, not an Agent lifecycle entity.
 
 **Context:** Session Management
 
-The first prompt content Dogwalk constructs from the User's Assignment plus role, safety, workspace, and reporting context. It uses neutral session vocabulary and does not brief the Agent into the Theme's narration. Subsequent prompts continue the same Managed Session without recreating the brief unless required by an Agent adapter.
+The first prompt content Dogwalk constructs from the User's Assignment plus role, safety, workspace, and reporting context. It uses neutral session vocabulary and says nothing of voice, phones, or the Voice Agent. Subsequent prompts continue the same Managed Session without recreating the brief unless required by an Agent adapter.
 
 ### Activity
 
 **Context:** Session Management and Voice Interaction
 
-A concise, User-safe projection of current Agent events: tool calls (kind, status, locations, timing), the Agent Plan, the Agent's interim remarks (message text between tool calls), and Steering or prompts that arrived from a co-present client. Activity is observable progress, not private reasoning and not a second Agent turn; thought chunks are never projected. Dogwalk keeps Activity structured and turns it into speech, earcons, or inspection results at the point of use.
+A concise, User-safe projection of current Agent events: tool calls (kind, status, locations, timing), the Agent Plan, the Agent's interim remarks (message text between tool calls), and Steering or prompts that arrived from a co-present client. Activity is observable progress, not private reasoning and not a second Agent turn; thought chunks are never projected. Dogwalk keeps Activity structured and turns it into speech or inspection results at the point of use.
 
 ### Followed Session
 
@@ -1053,7 +978,7 @@ Following observes; it never directs the Agent.
 
 **Context:** Voice Interaction
 
-One sentence about a Followed Session's Activity, built deterministically without a model: a change of phase (looking around, changing files, running something), the first change of a turn, a failed step (failures within two seconds of each other, such as parallel tool calls failing together, make one beat carrying the latest streak), a long-running command, a new plan step, an interim remark, or a nearly full context window. Beats within a second and a half of each other make one beat (the weightiest: a full context window or a failure streak long enough to bid, then the Agent's own words, then a step, a first change, or a shorter failure streak, then a phase change; else the latest), and the beat waiting to be spoken is the weightiest since the last narration, so the Agent's own words are not displaced by a phase change that follows them. A failure beat says what the latest failed step was doing when its kind is known. The Agent's own words between tool calls are the richest source of beats; the Sandbox's global OpenCode rules ask it to write one before each tool call or batch, because Dogwalk relays its text and never its tool arguments. A tool of no known kind makes no beat, and neither a tool's own name nor a command's text appears in one: a command is named by its phase (running the tests, installing packages, building, working with Git). A failed step is not a failed turn: its beat says the turn is still going. A step interrupted on purpose (by a Redirect, a cancel, or a rejected Permission Request) is not a failed step: it makes no failure beat and does not count toward a streak. When a Prompt Turn ends or fails, its unfinished tool calls end with it, and no beat about that turn (a failed step, a long-running command) comes after; the turn event speaks instead. An interim remark keeps the Agent's words and tense, quoted, so a plan stays a plan. A beat reaches the Voice Frontend only as a narration, since whatever the Voice Frontend is told about a session it may say aloud: once a burst settles, the weightiest beat waiting is spoken in a quiet moment, spaced well apart (twenty seconds or more), never twice running without the User speaking or a Prompt Turn starting or ending in between (a failure may break that), and dropped when stale. The latest narration is what the Voice Frontend knows of the session, so it answers "what's it doing?" from that at once and hands off for anything fresher. A beat's text is neutral; the Voice Frontend restates it in the Theme's words at the current register, never reciting it or chaining several.
+One sentence about a Followed Session's Activity, built deterministically without a model: a change of phase (looking around, changing files, running something), the first change of a turn, a failed step (failures within two seconds of each other, such as parallel tool calls failing together, make one beat carrying the latest streak), a long-running command, a new plan step, an interim remark, or a nearly full context window. Beats within a second and a half of each other make one beat (the weightiest: a full context window or a failure streak long enough to bid, then the Agent's own words, then a step, a first change, or a shorter failure streak, then a phase change; else the latest), and the beat waiting to be spoken is the weightiest since the last narration, so the Agent's own words are not displaced by a phase change that follows them. A failure beat says what the latest failed step was doing when its kind is known. The Agent's own words between tool calls are the richest source of beats; the Sandbox's global OpenCode rules ask it to write one before each tool call or batch, because Dogwalk relays its text and never its tool arguments. A tool of no known kind makes no beat, and neither a tool's own name nor a command's text appears in one: a command is named by its phase (running the tests, installing packages, building, working with Git). A failed step is not a failed turn: its beat says the turn is still going. A step interrupted on purpose (by a Redirect, a cancel, or a rejected Permission Request) is not a failed step: it makes no failure beat and does not count toward a streak. When a Prompt Turn ends or fails, its unfinished tool calls end with it, and no beat about that turn (a failed step, a long-running command) comes after; the turn event speaks instead. An interim remark keeps the Agent's words and tense, quoted, so a plan stays a plan. A beat reaches the Voice Frontend only as a narration, since whatever the Voice Frontend is told about a session it may say aloud: once a burst settles, the weightiest beat waiting is spoken in a quiet moment, spaced well apart (twenty seconds or more), never twice running without the User speaking or a Prompt Turn starting or ending in between (a failure may break that), and dropped when stale. The latest narration is what the Voice Frontend knows of the session, so it answers "what's it doing?" from that at once and hands off for anything fresher. A beat's text is system text; the Voice Frontend restates it briefly in its own words, never reciting it or chaining several.
 
 ### Bid
 
@@ -1283,8 +1208,8 @@ These consequences constrain responsibilities and naming. They do not prescribe 
 
 The following language appears in Git history and is not canonical for production interfaces:
 
-- **Walker:** An early proper name for the Voice Agent. Production code uses Voice Agent; "dog walker" may survive as opening copy or a joke.
-- **Dog:** An early persona for a Managed Session, Agent process, or task. Production code uses the precise concept instead.
+- **Walker:** An early proper name for the Voice Agent, later the Park Theme's. Production code uses Voice Agent; the landing page still draws the walker until its follow-up redesign.
+- **Dog:** An early persona for a Managed Session, Agent process, or task, later the Park Theme's. Production code uses the precise concept instead.
 - **Pack:** An early spoken label for a set of sessions. Production tools list Managed Sessions.
 - **Sic, relay, revive, and call off:** Early Voice Agent tool verbs. Production tools use create, prompt, load, cancel, and close.
 - **Working/resting Dog:** Optional narration over Prompt Turn activity and session readiness, not lifecycle state.
@@ -1293,14 +1218,19 @@ The following language appears in Git history and is not canonical for productio
 - **Ephemeral Service:** A registered Sandbox port reachable through a texted signed preview link. Retired 2026-11-07 with SMS for a voice-only focus.
 - **Scoped Diagnostic View:** A texted, per-call read-only caller lens on the Diagnostics Surface. Retired 2026-11-07 with SMS for a voice-only focus.
 - **ACP Client, ACP Agent, ACP Session, ACP Gateway, stop reason:** Dogwalk spoke the Agent Client Protocol until 2026-11-11 (issue #28). Production uses Agent Client, Agent, Agent Session, Agent Gateway, and outcome.
+- **Theme, Intensity, Runtime Dramaturgy:** Presentations of the session model as a fiction (Park's dog walk, Survey's away teams, Patrol's operatives, and Plain), a register ladder within one, and consulting a fiction's genre sources mid-call. Retired 2026-11-14 for a phase of direct, transparent speech; Git keeps `themes.ts` and the notes behind them.
+- **Earcon, Earcon Style:** Short sounds marking events (a turn ending, a Permission Request, a Progress Beat), as FM chimes or spoken labels, with a public soundboard at `/sounds`. Retired 2026-11-14: the call must be complete without sounds, so their information is spoken.
 - **Delegated backend:** The September 2026 arrangement where GPT-Live's managed Responses delegation ran session tools. Superseded by the Session Orchestrator under client delegation.
 
 ## Open Questions
 
 - Resolved: Dogwalk does not offer queued follow-up prompts. OpenCode runs a queued prompt inside the same execution as the turn before it, so the Session Orchestrator begins a follow-up Prompt Turn once the current one ends, and Steering covers input during a turn.
-- Proactive speech about Activity is now limited to the Followed Session's Progress Beats, and attention from other sessions arrives as Bids. Still open: which beats deserve an earcon or a per-session sound instead of speech, whether a failure streak is a good enough sign that a session is stuck, and whether the beat thresholds (4 s of quiet, 20 s between narrations) hold up in playtests. Also open: whether the production model's reasoning text (the Agent's reasoning events, counted per turn as `thoughts`) is worth narrating.
+- Proactive speech about Activity is now limited to the Followed Session's Progress Beats, and attention from other sessions arrives as Bids. Still open: now that no sound marks a beat between narrations, whether the narration cadence should loosen, whether a failure streak is a good enough sign that a session is stuck, and whether the beat thresholds (4 s of quiet, 20 s between narrations) hold up in playtests. Also open: whether the production model's reasoning text (the Agent's reasoning events, counted per turn as `thoughts`) is worth narrating.
 - How should the Voice Agent resolve ambiguous spoken "stop" among stopping speech, cancelling one Prompt Turn, closing one Managed Session, stopping all Agent work, and ending the voice call?
 - Which parts of Assignment history belong to Dogwalk versus the Agent's retained session context?
+- With Themes retired (2026-11-14), what personality remains in plain speech: how much warmth or humor a direct Voice Agent should keep, and whether a Theme could ever return as presentation without making any information depend on it.
+- With earcons retired, some events have no spoken trace: a Prompt Turn begun by Steering just after a turn ended, Progress Beats between narrations, and the Sandbox finishing its start when nothing waits on it. Playtests should show whether any of these needs a spoken line.
+- The public landing page still presents the architecture through Park's dog-walk scene; a follow-up replaces it with a plain account.
 
 - Should the Session Orchestrator ever act without a live User utterance, for example starting a follow-up Prompt Turn after a failure? That is an authorization question first, and the current answer is no.
 - Resolved: the Session Orchestrator learns how Re-enrollment or Challenge Practice ended when the call returns to it (the outcome's name, never a level or score).
@@ -1308,7 +1238,7 @@ The following language appears in Git history and is not canonical for productio
 - Snoozing (Session Orchestrator): news carried by a returning call's call_started (invitees, a Challenge Practice outcome) now reaches the User at their first request rather than at connection. Should any of it wake the Orchestrator, and should events whose spoken effect needs no judgment (an unclaimed Pairing Code) be spoken by the harness, as Progress Beats are, instead of waking it?
 - When a newer Handoff arrives while work for an older one is in flight, which supersession rules belong in deterministic code rather than Orchestrator judgment?
 
-- Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through an Agent (a dog writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
+- Notes: a caller may call in only to leave a note on the Sandbox or to hear notes other sessions left. Notes go through an Agent (a session writes or reads them in a Prompt Turn); where they live, such as a Workspace folder or a long-lived note-keeping session, is undecided.
 - Invitations: should a successful Registration by Invitation continue straight into the new User's first call rather than hanging up? Should the Diagnostics Surface draw the invitation graph, and should an operator be able to raise or lower a User's active-Invitation limit?
 - Resolved: a spoken Handle plus Identity Challenges lets a User call from any telephone (see Roaming). Also resolved: an inactive User is reaped after 365 days (see Identity and Hosting Lifecycle), and Users per phone are not capped; a Registration cooldown slows one phone minting Users (see Registration). Still open: how many failed Identity Check attempts pause a Handle, and for how long.
 - Challenge Practice tells a caller how their voice scores, round after round, so it is also an oracle for tuning an impersonation (a recording or voice converter) before a real Identity Check. Today only the User reaches it, from inside an admitted call; should practice rounds count toward the same attempt limits once enforcement exists?
@@ -1338,7 +1268,7 @@ The following language appears in Git history and is not canonical for productio
 - Whiteboard images and Documents are read when shown, only while the Sandbox runs (resolved: Board Assets, draw-time snapshots kept by Dogwalk, are retired; the Sandbox is the only store of Workspace content; a board does not watch for files changing after it is drawn). Export or sharing of a board with its images is not supported.
 - QR codes carry only literal text the program writes (#64). Should an Access Element gain a QR form, for opening a Preview, a Download, or an Upload on a phone? One sketch is a Handoff Link: a short Dogwalk URL shown only after a click, usable once, for a few minutes, and only within its grant, which on use mints that kind's credential (a provider link to redirect to, a file, an upload page). It would let a device outside the pairing in, and anyone who can see the screen could scan it first, so it needs `ACCESS_THREAT_MODEL.md` reopened before it is built. For an Upload no QR form is needed: a phone paired to the same Display (Paired Browser) mirrors its boards and gets the drop zone and file picker under the same grant, with no credential leaving the pairing.
 - Access Grants (resolved: an hour by default, up to twelve on request; no Whiteboard activity wakes the Sandbox; SSH Access needs no extra confirmation; Preview addresses are not stable). Should an open Access Element keep the Sandbox awake for the whole grant, or should a forgotten tab let it stop after some idle time? Should an Upload grant, the one write path, end with the call, so no file arrives unheard between calls (currently accepted; see `ACCESS_THREAT_MODEL.md`)?
-- Human Takeover: should the Session Orchestrator learn that a takeover happened (and hand off to it, "the desktop is ready for you"), or summon one ("a dog is stuck on a CAPTCHA; open the desktop on your laptop")? Should Agents drive the same desktop through the provider's computer-use API, so human and Agent take turns on one screen? Should a Terminal idle out before its grant ends?
+- Human Takeover: should the Session Orchestrator learn that a takeover happened (and hand off to it, "the desktop is ready for you"), or summon one ("a session is stuck on a CAPTCHA; open the desktop on your laptop")? Should Agents drive the same desktop through the provider's computer-use API, so human and Agent take turns on one screen? Should a Terminal idle out before its grant ends?
 
 ## Agent References
 

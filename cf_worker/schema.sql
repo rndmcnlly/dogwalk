@@ -195,7 +195,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_call_activity_twilio_event_key
 CREATE TABLE IF NOT EXISTS call_handoffs (
   call_sid TEXT PRIMARY KEY,
   phone_number TEXT NOT NULL,
-  action TEXT NOT NULL CHECK (action IN ('hangup', 'recovery', 'rejoin', 'donation', 'practice', 'reenrollment')),
+  action TEXT NOT NULL CHECK (action IN ('hangup', 'recovery', 'donation', 'practice', 'reenrollment')),
   created_at INTEGER NOT NULL
 );
 

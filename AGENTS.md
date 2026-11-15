@@ -39,7 +39,7 @@ Core distinctions:
 - Permission Requests authorize actions. Elicitations ask for information. Do not collapse them into one protocol response type.
 - OpenCode is a deliberate, pinned dependency (issue #28): its API terms (executions, inbox, delivery) stop at the Agent Integration boundary. OpenAI GPT-Live and Daytona are adapters or deployment choices, not domain concepts.
 - Co-present clients (an OpenCode TUI, OpenChamber) may act on the same Agent Sessions; none may become required.
-- Dogwalk is a product codename. A Theme (currently Park, the canine fiction) may flavor UI copy and Voice Agent speech, but it is not domain vocabulary and carries no rules: every Voice Agent rule is stated neutrally in the core prompts, and `themes.ts` only presents it.
+- Dogwalk is a product codename and implies no fiction. The Voice Agent speaks plainly and directly in the domain's own terms, and a call is complete in words: no sound alone carries information. Themes and earcons were retired on 2026-11-14 (Git keeps them).
 - Voice Agent tool names, payloads, logs, schemas, tests, prompts sent to Agents, and sandbox internals use neutral session-management terms.
 
 When introducing or changing a domain concept, use the canonical term from `DOMAIN.md` in core code and tests, update `DOMAIN.md` in the same change, and record unresolved ambiguity under Open Questions rather than silently choosing a new meaning.

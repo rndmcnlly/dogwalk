@@ -19,7 +19,7 @@ uv run --script delegation_probe.py --analyze /tmp/dwprobe/runs/<slug>        # 
 
 It reads `OPENAI_API_KEY` from `.env` and spends real GPT-Live minutes (about 20 s a session). Run it in the background for batches, one session at a time: parallel sessions skew each other's timing. Raw events, one JSON per session with `lines` (ground truth) and `events` (`recv_ms` on the audio clock, 0 = first frame), stay under `/tmp/dwprobe/runs/`, never in the repository.
 
-What the harness keeps true to production: the Voice Frontend prompt and voice come from `frontendInstructions(DEFAULT_THEME)`, bundled with esbuild (`.md` as text, `.pcm` and `.wasm` as binary, `cloudflare:*` external), and the delegation config matches `index.ts` (`client`, 400 ms acknowledgement delay). Audio is G.711 mu-law at 8 kHz, band-limited to 300–3400 Hz, paced as 20 ms frames with silence included. A stand-in Orchestrator sends a `brief` at once and a `say` after `--reply-ms`.
+What the harness keeps true to production: the Voice Frontend prompt and voice come from `FRONTEND_INSTRUCTIONS` and `VOICE`, bundled with esbuild (`.md` as text, `.pcm` and `.wasm` as binary, `cloudflare:*` external), and the delegation config matches `index.ts` (`client`, 400 ms acknowledgement delay). Audio is G.711 mu-law at 8 kHz, band-limited to 300–3400 Hz, paced as 20 ms frames with silence included. A stand-in Orchestrator sends a `brief` at once and a `say` after `--reply-ms`.
 
 ## Add a scenario
 

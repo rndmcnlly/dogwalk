@@ -194,7 +194,7 @@ def pick_call(calls: list[dict], selector: str) -> dict:
 
 def call_bounds(conversation: dict, call: dict, calls: list[dict]) -> tuple[int, int]:
     """This call's part of the cross-call Orchestrator context, as (start, end) indices. Each voice
-    session (a Theme change starts one) adds a mark, so a call spans its marks up to another call's."""
+    session (a return from Challenge Practice or Re-enrollment starts one) adds a mark, so a call spans its marks up to another call's."""
     context, marks = conversation.get("orchestrator_context", []), conversation.get("call_marks", [])
     own = [i for i, mark in enumerate(marks) if mark["call_sid"] == call["call_sid"]]
     if own:
@@ -231,7 +231,7 @@ def saved_transcripts(conversation: dict, call: dict) -> list[dict]:
 
 def transcript_lines(conversation: dict, call: dict, items: list) -> tuple[str, list[str]]:
     saved = saved_transcripts(conversation, call)
-    if saved:  # one per voice session; a Theme change starts a new one
+    if saved:  # one per voice session; a returning flow starts a new one
         lines = []
         for number, session in enumerate(saved, 1):
             if len(saved) > 1:
@@ -277,23 +277,15 @@ def orchestrator_lines(items: list) -> list[str]:
 
 
 def boundary_lines(items: list) -> list[str]:
-    """Theme words and phone numbers must never cross into Agent prompts or steering (DOMAIN.md, Themes; Invitation)."""
-    source = (ROOT / "cf_worker/src/themes.ts").read_text()
-    lexicon = {word: theme for theme, body in re.findall(r'\bid:\s*"(\w+)".*?\blexicon:\s*\[([^\]]*)\]', source, re.DOTALL)
-               for word in re.findall(r'"([^"]+)"', body)}
+    """Phone numbers must never cross into Agent prompts or steering (DOMAIN.md, Invitation)."""
     prompts = [loads(i.get("arguments")) for i in items
                if i.get("type") == "function_call" and i.get("name") in ("begin_prompt_turn", "steer_prompt_turn")]
     out = []
     for args in prompts:
         prompt, alias = str(args.get("prompt", args.get("guidance", ""))), args.get("alias")
-        for word, theme in lexicon.items():
-            for match in re.finditer(rf"\b{re.escape(word)}(?:s|es|ed|ing)?\b", prompt, re.IGNORECASE):
-                out.append(f"!! {theme} word {match.group(0)!r} in prompt to {alias}: "
-                           f"…{prompt[max(0, match.start() - 50): match.end() + 50]}…")
         for match in [*PHONE.finditer(prompt), *SPOKEN_DIGITS.finditer(prompt)]:
             out.append(f"!! phone number {match.group(0)} in prompt to {alias}")
-    return [f"{len(prompts)} prompts scanned for {len(lexicon)} Theme words (themes.ts) and phone numbers: "
-            f"{len(out)} hits"] + out
+    return [f"{len(prompts)} prompts scanned for phone numbers: {len(out)} hits"] + out
 
 
 COMPONENTS = {"voice_frontend": "voice", "orchestrator": "orchestrator", "sandbox_agents": "agents", "baseline": "carried in"}
@@ -347,13 +339,12 @@ def stats_lines(call: dict, items: list) -> list[str]:
     errors = sum(1 for i in items if i.get("type") == "function_call_output" and failed(loads(i.get("output"))))
     closes = [f"{detail(r).get('reason')} {(detail(r).get('usage') or {}).get('seconds')}s"
               for r in activity if r["event"] == "voice.live.closed"]
-    themes = [detail(r).get("theme") for r in activity if r["event"] == "voice.theme"]
     minutes = ((call.get("ended_at") or (activity[-1]["ts"] if activity else t0)) - t0) / 60
     out = [
         f"timeline: sandbox ready {first('sandbox.ready')}, voice attached {first('voice.live.attached')}, "
         f"ended +{(call.get('ended_at') or (activity[-1]['ts'] if activity else t0)) - t0}s ({call.get('status')})",
         f"voice sessions: {sum(1 for r in activity if r['event'] == 'voice.live.attached')}; "
-        f"closes: {', '.join(closes) or 'none'}" + (f"; theme changes: {', '.join(map(str, themes))}" if themes else ""),
+        f"closes: {', '.join(closes) or 'none'}",
         f"handoffs: {len(handoffs)}; first say accepted after handoff (not heard): {', '.join(waits) or 'n/a'}",
         f"model calls: {len(model_ms)}"
         + (f" ({len(model_ms) / minutes:.1f}/min of call)" if minutes else "")

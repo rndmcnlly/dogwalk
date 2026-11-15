@@ -106,7 +106,7 @@ class AgentGatewayMock:
         self.events: list[web.WebSocketResponse] = []
         self.events_connected = asyncio.Event()
         self.events_connections = 0
-        # The service answers late, so the call starts before the dogs are ready.
+        # The service answers late, so the call starts before the sandbox is ready.
         self.hello_delay = 1.5
         # While set, /events upgrades are refused, as while the service restarts.
         self.refuse_events = False
@@ -558,13 +558,6 @@ class SocketMocks:
 
 CALL_BRIEF = "Call started with no Managed Sessions."
 READY_BRIEF = "The sandbox is ready."
-# Every theme's lexicon in src/themes.ts: words that would show a theme leaking into an Agent prompt.
-THEME_LEXICON = [
-    word
-    for words in re.findall(r"lexicon: \[(.*?)\]", (Path(__file__).parent / "src" / "themes.ts").read_text())
-    for word in re.findall(r'"([^"]+)"', words)
-]
-assert "dog" in THEME_LEXICON and "callsign" in THEME_LEXICON
 KEYPAD_SAY = "Seven noted."
 NEXT_GREETING = "Last time Juniper built a tiny verified artifact."
 # Roaming as the caller since their last call from home follows the caller-ID clause, even on a
@@ -572,7 +565,7 @@ NEXT_GREETING = "Last time Juniper built a tiny verified artifact."
 ROAMING_CLAUSE = ("Since your last call from home, someone got in as you from another phone once, "
                   "and someone failed the voice check as you from another phone twice.")
 FIRST_OPENING = (
-    f"Caller ID unverified. {ROAMING_CLAUSE} Dogwalk. Welcome! I'm your walker; your sandbox is "
+    f"Caller ID unverified. {ROAMING_CLAUSE} Dogwalk. Welcome! Your sandbox is "
     "being set up, which takes a minute or two."
 )
 RETURN_OPENING = (
@@ -587,10 +580,9 @@ AGENT_PROMPT = (
 STARTED_SAY = "Juniper is on it."
 FINISHED_SAY = "Juniper finished; it reports the artifact is verified."
 REPORTED_SAY = "Juniper says the artifact is verified."
-SWITCH_SAY = "Switching themes; a new voice will pick up in a moment."
 PERSISTED_SESSION_ID = "ses_earlier0parser"
 PERSISTED_TITLE = "Earlier parser work"
-LEASH_SAY = "Rowan has gone home; Juniper is still with us."
+CLOSE_SAY = "Rowan is closed; Juniper is still attached."
 # Prompt Turns the Agent Gateway holds open for the test to drive (AgentGatewayMock.hold_turn).
 AWAY_PROMPT = "Tidy the honeydozer build and report what changed."
 AWAY_REPORT = "The honeydozer build is tidy."
@@ -721,7 +713,7 @@ ORCHESTRATOR_SCRIPT = [
     # A chapter closes as the first call winds down: the Orchestrator compacts, and the Memory
     # writer is still running when the caller asks to hang up.
     ("[handoff del-3]", lambda ctx: [
-        call("h3-say", "say", text=LEASH_SAY, delegation_id="del-3"),
+        call("h3-say", "say", text=CLOSE_SAY, delegation_id="del-3"),
         call("h3-compact", "compact_context", focus=EARLY_FOCUS),
     ]),
     # Dozer is sent off just before hanging up; its turn ends while nobody is listening.
@@ -798,8 +790,7 @@ ORCHESTRATOR_SCRIPT = [
     ("[handoff del-r1]", lambda ctx: [call("r1-offer4", "offer_handles")]),
     ("[handoff del-r1]", lambda ctx: [call("r1-set", "set_handle", handle=tool_result(ctx, "r1-offer")["options"][1].upper())]),
     ("[handoff del-r1]", lambda ctx: [call("r1-who", "inspect_registration")]),
-    # Preferences and pairing are voice operations; keypad digits stand in for asking here.
-    ('"key":"6"', lambda ctx: [call("k6-style", "set_earcon_style", style="tonal")]),
+    # Pairing is a voice operation; keypad digits stand in for asking here.
     ('"key":"8"', lambda ctx: [call("k8-pair", "pair_browser")]),
     ('"key":"8"', lambda ctx: [call("k8-say", "say", text=f"Pairing code {tool_result(ctx, 'k8-pair')['code']}", delegation_id=None)]),
     # No browser claimed the first spoken code: offer a fresh one after expiry.
@@ -855,17 +846,8 @@ ORCHESTRATOR_SCRIPT = [
     ("[handoff del-pair-no]", lambda ctx: [call("rf-refuse", "refuse_browser")]),
     ("[handoff del-pair-disconnect]", lambda ctx: [call("dc-pair", "pair_browser")]),
     ("[handoff del-pair-disconnect]", lambda ctx: [call("dc-say", "say", text=f"Pairing code {tool_result(ctx, 'dc-pair')['code']}", delegation_id="del-pair-disconnect")]),
-    ('"key":"3"', lambda ctx: [
-        call("k3-say", "say", text=SWITCH_SAY, delegation_id=None),
-        call("k3-theme", "set_theme", theme="survey", register="high"),
-    ]),
-    # The rejoined call cannot accept the claim the disconnect expired.
+    # The reconnected call cannot accept the claim the disconnect expired.
     ("[handoff del-pair-late]", lambda ctx: [call("dl-accept", "accept_browser")]),
-    # After the bounce, Runtime Dramaturgy renders the active theme's authoring notes.
-    ('"key":"2"', lambda ctx: [{
-        **call("k2-dramaturgy", "load_voice_agent_skill"),
-        "arguments": json.dumps({"name": "runtime-dramaturgy"}),
-    }]),
     # Asking to donate voice samples hands the call to the deterministic Voice Donation flow.
     ('"key":"C"', lambda ctx: [call("kC-donate", "start_voice_donation")]),
     # Asking to test their voice hands the call to deterministic Challenge Practice.
@@ -928,10 +910,10 @@ STEP_IDS = [
     "s3-begin", "s3-steer", "s4-begin", "s4-steer", "d-begin", "g-begin", "g2-begin", "g3-begin",
     "x-cancel", "x-close", "x-inspect", "k7-say", "i1-create", "i1-who", "i1-foreign", "i2-readback", "i2-create", "i3-create", "i4-limit",
     "i3-abroad", "i3-bare", "i-say", "i-leak", "i3-bind", "i-list", "i3-revoke", "i1-hide", "i-relist",
-    "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k6-style", "k8-pair", "pu-say", "pu-early", "pu-pair", "pc-say", "pc-accept", "k4-state", "k5-board", "k5-checks", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5",
+    "r1-offer", "r1-bogus", "r1-offer2", "r1-offer3", "r1-offer4", "r1-set", "r1-who", "k8-pair", "pu-say", "pu-early", "pu-pair", "pc-say", "pc-accept", "k4-state", "k5-board", "k5-checks", "cc-long", "cc-memory", "kA-evict-1", "kA-evict-2", "kA-evict-3", "kA-evict-4", "kA-evict-5",
     "wb-pair", "wb-say", "wb-accept", "wb-unnamed", "wb-ghost", "wb-slides", "wm-pair", "wm-say", "wm-accept", "we-rename", "we-preview", "we-say",
-    "k9-access", "k9-state", "kB-revoke", "kB-state", "we-unpair", "we-state", "we-say2", "k3-say", "k3-theme",
-    "k8-say", "pu-code-say", "rf-pair", "rf-say", "rf-refuse", "dc-pair", "dc-say", "dl-accept", "k2-dramaturgy", "kC-donate", "kD-practice",
+    "k9-access", "k9-state", "kB-revoke", "kB-state", "we-unpair", "we-state", "we-say2",
+    "k8-say", "pu-code-say", "rf-pair", "rf-say", "rf-refuse", "dc-pair", "dc-say", "dl-accept", "kC-donate", "kD-practice",
     "sk-load", "sk-read", "sk-bad",
 ]
 
@@ -1460,11 +1442,11 @@ async def run_protocol(identity: str) -> None:
         frontend = session["instructions"]
         assert "Match the caller's sophistication" in frontend
         assert "press star for a menu" in frontend and "pound to make you stop talking" in frontend
-        # A neutral core holds the rules; the Park theme only presents them. The voice
-        # defers to its head and names no backend except in GPT-Live's delegation-policy
-        # label and the one sentence forbidding it.
-        assert "The session model:" in frontend and "Whatever the theme and intensity" in frontend
-        assert "The walk (Park theme)" in frontend and "your head (your mind)" in frontend
+        # Plain, direct speech in the domain's own terms, with no fiction. The voice names no
+        # backend except in GPT-Live's delegation-policy label and the one sentence forbidding it.
+        assert "The session model:" in frontend and "Speak plainly and directly" in frontend
+        assert not re.search(r"\b(theme|dogs?|walker|leash)\b", frontend, re.IGNORECASE), frontend
+        assert session["audio"]["output"]["voice"] == "marin", session["audio"]
         # Examples narrate a placeholder, never a plausible alias the voice might repeat.
         assert "<alias>" in frontend and not any(name in frontend for name in ("Cedar", "Biscuit", "Kappa", "Dozer")), frontend
         assert "name only aliases the Session Orchestrator" in frontend
@@ -1608,8 +1590,6 @@ async def run_protocol(identity: str) -> None:
         acked = [row for row in timed if row["event"] == "live.received" and row["type"] == "session.thinking.appended"
                  and row.get("client_event_id") == work_brief["event_id"]]
         assert acked and acked[0]["command_delegation_id"] == "del-1" and acked[0]["start_ms"] == 600, acked
-        assert any(row["event"] == "live.received" and row["type"] == "session.output_audio.fixture.playing"
-                   and row.get("command_type") == "session.output_audio.fixture.play" for row in timed)
         details = {row["event"]: json.loads(row["detail"]) for row in rows}
         rejected_append = details["voice.live.command.rejected"]
         assert rejected_append["type"] == "session.thinking.append" and rejected_append["delegation_id"] == "del-1", rejected_append
@@ -1698,7 +1678,7 @@ async def run_protocol(identity: str) -> None:
         tools = [row for row in timed if row["event"] == "agent.received" and row.get("tool_call_id")]
         assert tools and any(row.get("tool_status") == "completed" for row in tools), tools
 
-        # Handoff 3: leash earlier work, retag it, let it go home, and list what remains.
+        # Handoff 3: load earlier work, rename it, close it, and list what remains.
         await mocks.send_live(transcript("input", "Pick up that parser work from yesterday ", 7000, 8000))
         await mocks.send_live(transcript("input", "as Birch, call it Rowan, then let it go.", 8000, 8800))
         OrchestratorMock.memory_gate.clear()
@@ -1710,8 +1690,8 @@ async def run_protocol(identity: str) -> None:
         listed = await agent.next_request(lambda item: item["path"] == "/api/session" and item["method"] == "GET")
         assert listed["query"] == {"limit": "50", "order": "desc", "cursor": "2"}, listed
         await agent.next_request(lambda item: item["path"] == f"/api/session/{PERSISTED_SESSION_ID}")
-        leashed = await next_matching(mocks.live_messages, appended("commentary", LEASH_SAY))
-        assert leashed["delegation_id"] == "del-3"
+        closed_say = await next_matching(mocks.live_messages, appended("commentary", CLOSE_SAY))
+        assert closed_say["delegation_id"] == "del-3"
         discovered = OrchestratorMock.tool_output("h3-discover")
         assert discovered["ok"] is True
         assert discovered["sessions"] == [
@@ -1851,7 +1831,7 @@ async def run_protocol(identity: str) -> None:
         status = await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append" and "Juniper" in item.get("content", ""))
         # The Permission Request asked between calls is still pending with the Agent, so catching
         # up kept it.
-        assert status["content"].startswith("Juniper needs permission. Dozer is resting") and status["delegation_id"] is None, status
+        assert status["content"].startswith("Juniper needs permission. Dozer is idle") and status["delegation_id"] is None, status
         # GPT-Live rejects the silence fixture by its event_id: the held instruction goes out
         # at once, well inside the 2.1 s unconfirmed-playback fallback.
         mocks.reject_next_fixture = True
@@ -1907,11 +1887,17 @@ async def run_protocol(identity: str) -> None:
         await wait_for(lambda: agent_connected_count() >= 3, 15)
         await run_turn_control(mocks, juniper_id, beats)
 
-        # Star opens the System Menu: muted input, a prompt clip, star goes back. Status and
-        # sound style are no longer in it.
+        # Star opens the System Menu: muted input, a prompt clip, star goes back. Status is not in it.
         await mocks.send_live(dtmf("*"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
-        await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
+        menu_play = await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
+        # Sideband correlation (#29) covers fixtures too: GPT-Live's playing ack names this play command.
+        assert isinstance(menu_play.get("event_id"), str), menu_play
+        await wait_for(lambda: any(
+            detail["event"] == "live.received" and detail["type"] == "session.output_audio.fixture.playing"
+            and detail.get("client_event_id") == menu_play["event_id"]
+            and detail.get("command_type") == "session.output_audio.fixture.play"
+            for detail in (json.loads(row["detail"]) for row in call_activity_rows("CA_VOICE_TEST2", True) if row["event"] == "voice.timing")), 10)
         await mocks.send_live(dtmf("*"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.unmute"))
         # Menu one asks for a second press before restarting; anything else backs out.
@@ -1926,10 +1912,6 @@ async def run_protocol(identity: str) -> None:
         await next_matching(mocks.live_messages, appended("commentary", KEYPAD_SAY))
         bound_invitee = await run_invitations(mocks)
 
-        # Sound style is a voice tool: it stores the preference and previews the opening sound.
-        await mocks.send_live(dtmf("6"))
-        await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"), 15)
-        await wait_for(lambda: "k6-style" in {item.get("call_id") for _, payload in OrchestratorMock.requests for item in payload["input"] if item.get("type") == "function_call_output"}, 10)
 
         # The tool returns a spoken code, never an audio fixture. Read its result through the
         # Orchestrator's actual tool-response lane, not from internal VoiceSession storage.
@@ -2110,7 +2092,7 @@ async def run_protocol(identity: str) -> None:
         assert [item["device"] for item in main_display["browsers"]] == ["Chrome on a Mac"], main_display
         assert main_display["boards"] == 0 and main_display["latest"] is None and main_display["access"] == [], main_display
         assert 55 <= main_display["expires_in_minutes"] <= 60, main_display
-        assert state["earcon_style"] == "tonal", state
+        assert "theme" not in state and "earcon_style" not in state, state
         assert state["context_tokens"] == MOCK_USAGE["input_tokens"] and state["memory"]["chars"] == len(EARLY_MEMORY) and "compacting" not in state["memory"], state
         # The Orchestrator draws a board; the caller answers it on the page; it hears the answer.
         await mocks.send_live(dtmf("5"))
@@ -2358,14 +2340,10 @@ async def run_protocol(identity: str) -> None:
         status, again = await asyncio.to_thread(upload, b"second draft", "../Talk slides.pdf", access_board["id"], last=True)
         assert status == 200 and again["path"] == "~/uploads/talk-slides/Talk slides (2).pdf", (status, again)
         assert UPLOADED["/home/daytona/uploads/talk-slides/Talk slides (2).pdf"] == b"second draft"
-        # The last file of a drop wakes the Orchestrator and tells the call with an earcon.
+        # The last file of a drop wakes the Orchestrator, which tells the caller in words.
         await wait_for(lambda: any(
             item.get("role") == "user" and "[harness event] upload_received" in str(item["content"]) and '"last_of_drop":true' in str(item["content"])
             for _, payload in OrchestratorMock.requests for item in payload["input"]), 15)
-        def upload_earcons() -> list[dict]:
-            return [json.loads(row["detail"]) for row in call_activity_rows("CA_VOICE_TEST2")
-                    if row["event"].startswith("voice.fixture.") and json.loads(row["detail"]).get("label") == "upload_received"]
-        await wait_for(upload_earcons, 15)
         assert "second draft" not in json.dumps([payload["input"] for _, payload in OrchestratorMock.requests]), "the Orchestrator never sees the bytes"
         landed_board = (await recv_type(browser, "board", 15))["board"]
         assert landed_board["access"]["upload:talk-slides"]["upload"]["files"] >= 1, landed_board["access"]
@@ -2457,8 +2435,6 @@ async def run_protocol(identity: str) -> None:
             await recv_type(browser, "error")
         assert (await asyncio.to_thread(file, "/home/daytona/chart.png", icons[-1]["id"], mirror_token, **{"as": "image"}))[0] in (200, 503), "still paired"
 
-        # A theme switch bounces the call: the new theme's greeting is written before the
-        # GPT-Live leg hangs up, then the same CallSid returns with the new voice and conceit.
         # A browser the caller disowns is refused: nothing pairs, and its page learns so.
         await mocks.send_live(transcript("input", "Pair another browser.", 128000, 128800))
         await mocks.send_live(delegation("del-pair-refuse", 128850))
@@ -2475,7 +2451,7 @@ async def run_protocol(identity: str) -> None:
         assert (await asyncio.to_thread(pair_http, "POST", "/pair/claim", {"code": refused_code}))[0] == 404, "a refused code is spent"
         # A waiting pairing claim must expire at disconnect, not remain available
         # for a later call to accept without a fresh announcement.
-        await mocks.send_live(transcript("input", "Pair a browser before switching themes.", 130000, 131000))
+        await mocks.send_live(transcript("input", "Pair a browser, then the line drops.", 130000, 131000))
         await mocks.send_live(delegation("del-pair-disconnect", 131050))
         disconnect_code = await next_pairing_code("dc-pair")
         await next_matching(mocks.live_messages, appended("commentary", f"Pairing code {disconnect_code}"))
@@ -2484,18 +2460,7 @@ async def run_protocol(identity: str) -> None:
         pending_ticket = {"authorization": f"Bearer {pending['ticket']}"}
         assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, pending_ticket))[1] == {"state": "waiting"}
         await wait_for(lambda: heard("pairing_claimed") and '"place"' in latest_user_text(), 10)
-        greetings = len(OrchestratorMock.greeting_requests)
-        await mocks.send_live(dtmf("3"))
-        await next_matching(mocks.live_messages, appended("commentary", SWITCH_SAY))
-        await wait_for(lambda: len(OrchestratorMock.greeting_requests) > greetings, 10)
-        switch_request = OrchestratorMock.greeting_requests[-1]
-        switch_instructions = str(switch_request["input"][-1]["content"])
-        assert switch_instructions.startswith("[write greeting]"), switch_instructions
-        assert "The survey (Survey theme)" in switch_instructions and "switched to this theme mid-call" in switch_instructions
-        assert "at the high rung" in switch_instructions, switch_instructions
-        assert OrchestratorMock.greeting_requests[-1]["input"][0]["content"] == f"[memory] {MEMORY_TEXT}"
-        await wait_for(lambda: any(path == "/live/sessions/live-test-2/hangup" for path, _ in DaytonaMock.openai_requests), 10)
-        assert OrchestratorMock.tool_output("k3-theme")["bouncing"] is True
+        # The GPT-Live leg drops mid-call; the same CallSid comes back on a fresh one.
         await mocks.live.close()
         mocks.live_connected.clear()
         for _ in range(100):
@@ -2527,22 +2492,13 @@ async def run_protocol(identity: str) -> None:
         early = [detail for event, detail in leg if event == "voice.timing" and detail.get("before_call")]
         assert any(row["event"] == "agent.sent" and row["route"] == "/api/info" for row in early), early
         assert all(connected["started_ms"] <= row["ts_ms"] < attached["ts_ms"] for row in early), early
-        rejoined = next(payload for path, payload in DaytonaMock.openai_requests if path == "/live/sessions/live-test-3/accept")
-        assert rejoined["session"]["audio"]["output"]["voice"] == "sage", rejoined["session"]["audio"]
-        assert "The survey (Survey theme)" in rejoined["session"]["instructions"]
-        await next_matching(mocks.live_messages, appended("commentary", f"Dogwalk. {NEXT_GREETING}"))
-        # The register carries across the bounce as unspoken context for the new voice.
-        await next_matching(mocks.live_messages, appended("thinking", "The caller had the register at high; start there."))
+        await next_matching(mocks.live_messages, lambda item: item.get("type") == "session.commentary.append" and "Dogwalk." in str(item.get("content")))
         await mocks.send_live(transcript("input", "Yes, pair that browser.", 2000, 2800))
         await mocks.send_live(delegation("del-pair-late", 2850))
         await wait_for(outputs_back("dl-accept"), 15)
         late = OrchestratorMock.tool_output("dl-accept")
         assert late["ok"] is False and "no browser is waiting to pair" in late["error"], late
-        assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, pending_ticket))[1] == {"state": "expired"}, "a rejoined call cannot approve the old claim"
-        await mocks.send_live(dtmf("2"))
-        await wait_for(lambda: '"call_id": "k2-dramaturgy"' in json.dumps([p["input"] for _, p in OrchestratorMock.requests]), 10)
-        dramaturgy = OrchestratorMock.tool_output("k2-dramaturgy")["guidance"]
-        assert "Planetary Romance" in dramaturgy and "Survey theme" in dramaturgy, dramaturgy
+        assert (await asyncio.to_thread(pair_http, "GET", "/pair/claim/status", None, pending_ticket))[1] == {"state": "expired"}, "a reconnected call cannot approve the old claim"
 
         # start_voice_donation leaves a donation handoff and ends the GPT-Live leg, so the Dial
         # action sends the call to the Voice Donation flow.
@@ -2675,18 +2631,16 @@ async def run_protocol(identity: str) -> None:
         turn = next(row for row in observed if row["event"] == "agent.turn.stopped")
         assert turn["detail"]["agent_session_id"] and turn["detail"]["ms"] >= 0
         for expected in ("menu.opened", "menu.closed", "menu.restart.requested", "menu.recovery", "voice.keypad.stop", "voice.keypad.status",
-                         "voice.earcons", "voice.theme", "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted", "pairing.refused", "pairing.page_stale",
+                         "pairing.started", "pairing.unclaimed", "pairing.claimed", "pairing.accepted", "pairing.refused", "pairing.page_stale",
                          "whiteboard.drawn", "whiteboard.uploaded", "whiteboard.upload_failed", "access.opened", "access.revoked", "display.renamed", "display.ended"):
             assert expected in events, (expected, events)
         handoff_rows = OrchestratorMock.user_message('"key":"7"')
         assert '"key":"1"' not in handoff_rows and '"key":"*"' not in handoff_rows
 
-        # Themes and phone numbers stay above the Agent: no Agent prompt uses the theme's words or
-        # any number Access Control knows.
+        # Phone numbers stay above the Agent: no Agent prompt uses any number Access Control knows.
         prompts = [m["body"]["text"] for m in mocks.agent.seen if m["path"].endswith("/prompt")]
         assert len(prompts) > 10, prompts
         for text in map(str.lower, prompts):
-            assert not any(word in text for word in THEME_LEXICON), text
             digits = re.sub(r"\D", "", text)
             assert not any(number[-10:] in digits for number in TEST_NUMBERS), text
 
@@ -2715,7 +2669,7 @@ async def run_protocol(identity: str) -> None:
             assert set(pairing_tool["parameters"].get("properties", {})) == {"display"}, pairing_tool
             assert not pairing_tool["parameters"].get("required"), pairing_tool
             names = {tool["name"] for tool in payload["tools"]}
-            assert {"draw_on_whiteboard", "rename_display", "unpair_display", "revoke_access"} <= names and "show_in_browser" not in names, names
+            assert {"draw_on_whiteboard", "rename_display", "unpair_display", "revoke_access"} <= names and not {"show_in_browser", "set_theme", "set_earcon_style"} & names, names
             assert "start_voice_donation together in the same response" in payload["instructions"]
             assert "start_challenge_practice together in the same response" in payload["instructions"]
             assert "start_reenrollment together in the same response" in payload["instructions"]
@@ -2727,9 +2681,8 @@ async def run_protocol(identity: str) -> None:
             assert not any(name in payload["instructions"] for name in ("Cedar", "Biscuit", "Kappa", "Dozer"))
             assert "rename an existing session only when the caller asks" in payload["instructions"]
             assert "where something is written down, update the Memory" in payload["instructions"]
-        # The Orchestrator presents the caller's theme: Park until the switch, Survey after it.
-        assert "The walk (Park theme)" in requests[0][1]["instructions"]
-        assert "The survey (Survey theme)" in requests[-1][1]["instructions"]
+        # The Orchestrator's instructions never change, so the provider's prompt cache holds.
+        assert len({payload["instructions"] for _, payload in requests}) == 1
         fed_back = {
             item["call_id"]
             for _, payload in requests

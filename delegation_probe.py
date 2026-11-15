@@ -74,9 +74,8 @@ def frontend() -> dict:
         entry, bundle = Path(tmp, "emit.ts"), Path(tmp, "emit.mjs")
         src = ROOT / "cf_worker" / "src"
         entry.write_text(
-            f'import {{ frontendInstructions }} from "{src}/voice_session";\n'
-            f'import {{ DEFAULT_THEME }} from "{src}/themes";\n'
-            'process.stdout.write(JSON.stringify({ instructions: frontendInstructions(DEFAULT_THEME), voice: DEFAULT_THEME.voice }));\n')
+            f'import {{ FRONTEND_INSTRUCTIONS, VOICE }} from "{src}/voice_session";\n'
+            'process.stdout.write(JSON.stringify({ instructions: FRONTEND_INSTRUCTIONS, voice: VOICE }));\n')
         subprocess.run(["npx", "--yes", "esbuild", str(entry), "--bundle", "--platform=node", "--format=esm",
                         "--loader:.md=text", "--loader:.pcm=binary", "--loader:.wasm=binary", "--loader:.bin=binary",
                         "--external:cloudflare:*", f"--outfile={bundle}", "--log-level=error"],

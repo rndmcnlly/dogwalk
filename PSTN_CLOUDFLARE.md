@@ -7,8 +7,10 @@ normative domain language; `cf_worker/README.md` is the operational runbook.
 
 Dogwalk is a PSTN interface to a multi-session ACP Client. A deliberately
 engineering-weak Voice Agent lets a User supervise concurrent ACP Agents without
-looking at a screen. Dog-walking language is optional presentation flavor, not
-part of the protocol, tool, storage, or session-management vocabulary.
+looking at a screen. The name is a codename and implies no fiction: the Voice
+Agent speaks in the same session-management terms as the protocol, tools, and
+storage, and a call is complete in words, with no sound alone carrying
+information.
 
 ## Topology
 
@@ -44,8 +46,8 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 - Accepts GPT-Live sessions with a bounded state snapshot and routes their
   sidebands to the Durable Object keyed by Sandbox assignment.
 - Provides deterministic TwiML recovery when realtime voice is unavailable.
-- Serves the read-only Diagnostics surface, the public landing page and
-  earcon soundboard (`/sounds`), and the Paired Browser page (`/pair`); consumes
+- Serves the read-only Diagnostics surface, the public landing page, and the
+  Paired Browser page (`/pair`); consumes
   claimed Pairing Codes and routes browser sockets by credential identity.
 - Scores audio against Voice References through the `SPEAKER` Service Binding to
   `dogwalk-speaker` (`speaker_worker/`), a stateless WASM speaker-embedding Worker
