@@ -106,7 +106,7 @@ class AgentGatewayMock:
         self.events: list[web.WebSocketResponse] = []
         self.events_connected = asyncio.Event()
         self.events_connections = 0
-        # The service answers late, so the call starts before the dogs are ready.
+        # The service answers late, so the call starts before the sandbox is ready.
         self.hello_delay = 1.5
         # While set, /events upgrades are refused, as while the service restarts.
         self.refuse_events = False
@@ -582,7 +582,7 @@ FINISHED_SAY = "Juniper finished; it reports the artifact is verified."
 REPORTED_SAY = "Juniper says the artifact is verified."
 PERSISTED_SESSION_ID = "ses_earlier0parser"
 PERSISTED_TITLE = "Earlier parser work"
-LEASH_SAY = "Rowan has gone home; Juniper is still with us."
+CLOSE_SAY = "Rowan is closed; Juniper is still attached."
 # Prompt Turns the Agent Gateway holds open for the test to drive (AgentGatewayMock.hold_turn).
 AWAY_PROMPT = "Tidy the honeydozer build and report what changed."
 AWAY_REPORT = "The honeydozer build is tidy."
@@ -713,7 +713,7 @@ ORCHESTRATOR_SCRIPT = [
     # A chapter closes as the first call winds down: the Orchestrator compacts, and the Memory
     # writer is still running when the caller asks to hang up.
     ("[handoff del-3]", lambda ctx: [
-        call("h3-say", "say", text=LEASH_SAY, delegation_id="del-3"),
+        call("h3-say", "say", text=CLOSE_SAY, delegation_id="del-3"),
         call("h3-compact", "compact_context", focus=EARLY_FOCUS),
     ]),
     # Dozer is sent off just before hanging up; its turn ends while nobody is listening.
@@ -1678,7 +1678,7 @@ async def run_protocol(identity: str) -> None:
         tools = [row for row in timed if row["event"] == "agent.received" and row.get("tool_call_id")]
         assert tools and any(row.get("tool_status") == "completed" for row in tools), tools
 
-        # Handoff 3: leash earlier work, retag it, let it go home, and list what remains.
+        # Handoff 3: load earlier work, rename it, close it, and list what remains.
         await mocks.send_live(transcript("input", "Pick up that parser work from yesterday ", 7000, 8000))
         await mocks.send_live(transcript("input", "as Birch, call it Rowan, then let it go.", 8000, 8800))
         OrchestratorMock.memory_gate.clear()
@@ -1690,8 +1690,8 @@ async def run_protocol(identity: str) -> None:
         listed = await agent.next_request(lambda item: item["path"] == "/api/session" and item["method"] == "GET")
         assert listed["query"] == {"limit": "50", "order": "desc", "cursor": "2"}, listed
         await agent.next_request(lambda item: item["path"] == f"/api/session/{PERSISTED_SESSION_ID}")
-        leashed = await next_matching(mocks.live_messages, appended("commentary", LEASH_SAY))
-        assert leashed["delegation_id"] == "del-3"
+        closed_say = await next_matching(mocks.live_messages, appended("commentary", CLOSE_SAY))
+        assert closed_say["delegation_id"] == "del-3"
         discovered = OrchestratorMock.tool_output("h3-discover")
         assert discovered["ok"] is True
         assert discovered["sessions"] == [
@@ -1890,10 +1890,12 @@ async def run_protocol(identity: str) -> None:
         # Star opens the System Menu: muted input, a prompt clip, star goes back. Status is not in it.
         await mocks.send_live(dtmf("*"))
         await next_matching(mocks.live_messages, of_type("session.input_audio.mute"))
-        await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
-        # Sideband correlation (#29) covers fixtures too: GPT-Live's playing ack names the play command.
+        menu_play = await next_matching(mocks.live_messages, of_type("session.output_audio.fixture.play"))
+        # Sideband correlation (#29) covers fixtures too: GPT-Live's playing ack names this play command.
+        assert isinstance(menu_play.get("event_id"), str), menu_play
         await wait_for(lambda: any(
             detail["event"] == "live.received" and detail["type"] == "session.output_audio.fixture.playing"
+            and detail.get("client_event_id") == menu_play["event_id"]
             and detail.get("command_type") == "session.output_audio.fixture.play"
             for detail in (json.loads(row["detail"]) for row in call_activity_rows("CA_VOICE_TEST2", True) if row["event"] == "voice.timing")), 10)
         await mocks.send_live(dtmf("*"))

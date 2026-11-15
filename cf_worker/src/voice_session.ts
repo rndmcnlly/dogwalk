@@ -1915,7 +1915,7 @@ export class VoiceSession {
       return this.closeMenu("restart not confirmed");
     }
     // The menu holds only what must work when the Voice Agent cannot hear or think straight;
-    // status, hanging up, sound style, and pairing go by voice (DOMAIN.md, System Menu).
+    // status, hanging up, and pairing go by voice (DOMAIN.md, System Menu).
     switch (key) {
       case "1":
         await this.record("menu.restart.requested", {});
@@ -4320,8 +4320,9 @@ export class VoiceSession {
     const levels = summarizeLevels(this.inputLevels.recording);
     if (!save || recording.bytes === 0) {
       await this.record("voice.recording.discarded", { seconds, ended_by: endedBy, muted: recording.muted, levels });
-      // Nothing else tells the caller: the Orchestrator is not woken for a discard.
-      if (this.liveAttached) this.sendLive({ type: "session.commentary.append", delegation_id: null, content: "Recording discarded." });
+      // Nothing else tells the caller: the Orchestrator is not woken for a discard. A call that
+      // ended has nobody to tell.
+      if (this.liveAttached && endedBy !== "call ended") this.sendLive({ type: "session.commentary.append", delegation_id: null, content: "Recording discarded." });
       await this.orchestratorEvent(`[harness event] recording_discarded: ${JSON.stringify({ seconds, ended_by: endedBy })}`, false);
       return;
     }
@@ -4950,7 +4951,7 @@ export class VoiceSession {
   }
 
   private currentDoing(session: ManagedSession): string {
-    if (session.turnState !== "in_progress") return `${session.alias} is resting.`;
+    if (session.turnState !== "in_progress") return `${session.alias} is idle.`;
     const running = [...session.toolCalls].reverse().find((item) => item.status === "in_progress");
     const step = currentStep(session.plan);
     const parts = [`${session.alias} is ${running ? toolDoing(running) : "working"}${session.turnStartedAt ? `, ${spokenDuration(Date.now() - session.turnStartedAt)} in` : ""}.`];
