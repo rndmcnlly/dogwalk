@@ -41,7 +41,7 @@ Compare new runs to these; a shift means the provider changed.
 - Pauses of 450–700 ms mid-request drew an early delegation in 4 of 6 runs, with no second delegation for the rest. A 250 ms pause never did.
 - Chitchat drew no delegation (0 of 3).
 - The Voice spoke the stand-in's `brief` text aloud in 3 of 12 runs (unresolved).
-- 2026-11-14, `idle_beats` (9 sessions, 6 Following beats 5 s apart into a quiet line): counting a beat as spoken when Voice transcript speech starts within 3 s of its acknowledged send: `thinking` with `delegation_id` null, as production, 18 of 18, first speech 600–1450 ms after the send, often chaining beats into one run (so a later beat's window can hold speech about an earlier one; the paraphrases did cover every beat's content); `thinking-quiet` ("Background for later questions, not to be said now:" prefix) 15 of 18; `instructions` 0 of 18 (not yet checked whether the Voice can still answer "what's it doing?" from them).
+- 2026-11-14, `idle_beats` (9 sessions, 6 Following beats 5 s apart into a quiet line): counting a beat as spoken when any Voice transcript delta arrives within 3 s of its acknowledged send (speech already under way counts): `thinking` with `delegation_id` null, as production, 18 of 18, first speech 600–1450 ms after the send, often chaining beats into one run (so a later beat's window can hold speech about an earlier one; the paraphrases did cover every beat's content); `thinking-quiet` ("Background for later questions, not to be said now:" prefix) 15 of 18; `instructions` 0 of 18 (not yet checked whether the Voice can still answer "what's it doing?" from them).
 
 ## Limits
 
