@@ -39,7 +39,22 @@ SCENARIOS = {
     "long": ["Okay so, I want a new session in dogwalk,", 450, "and it should look at the transcript code in the voice session,", 450,
              "the part that cuts the transcript for a handoff,", 450, "and tell me whether the grace period makes sense.", 12000],
     "chitchat": ["Hi there, how is it going today?", 8000],
+    # Progress Beats into a quiet line: does the Voice speak background it was not asked about?
+    "idle_beats": ["Have Scout look at the recent commits and suggest what to test.", 45000],
 }
+
+# Progress Beats for scenarios in BEATS, worded as voice_session.ts words them (beat(), toolDoing()),
+# sent BEAT_LEAD_MS after the stand-in's say and BEAT_GAP_MS apart, through --beat-lane.
+BEATS = {"idle_beats": [
+    'Scout says: "I\'ll read the last dozen commits and the test layout before suggesting anything."',
+    "Scout is working with Git.",
+    'Scout says: "Most of the recent commits touch the transcript handoff, so I\'ll check which of those paths the existing tests cover."',
+    "Scout is reading files.",
+    'Scout says: "The pairing changes have no tests at all. I\'ll sketch a short list of cases before writing any."',
+    "Scout started changing files: editing files.",
+]}
+BEAT_LEAD_MS, BEAT_GAP_MS = 6000, 5000
+QUIET_PREFIX = "Background for later questions, not to be said now:"
 
 
 def frontend() -> dict:
@@ -105,6 +120,23 @@ async def run(client: AsyncOpenAI, name: str, rep: int, fe: dict, args, cache: P
             await conn.session.thinking.append(delegation_id=delegation_id, content="Working on it; nothing has started yet.")
             await asyncio.sleep(args.reply_ms / 1000)
             await conn.session.commentary.append(delegation_id=delegation_id, content="Tell the caller that's handled and nothing else needs their attention.")
+            if replies[0] is not asyncio.current_task():
+                return  # one beat stream per session, from the first delegation
+            for i, text in enumerate(BEATS.get(name, [])):
+                await asyncio.sleep((BEAT_LEAD_MS if i == 0 else BEAT_GAP_MS) / 1000)
+                # As production sends them: unattached to any delegation (delegation_id null).
+                content = f"Following Scout: {text}"
+                if args.beat_lane == "thinking-quiet":
+                    content = f"{QUIET_PREFIX} {content}"
+                # A beat counts only once the provider acknowledges its event_id (beats() joins them).
+                event_id = f"beat-{i}"
+                events.append({"recv_ms": now(), "type": "probe.beat.sent", "index": i, "variant": args.beat_lane,
+                               "event_id": event_id, "text": content})
+                lane = conn.session.instructions if args.beat_lane == "instructions" else conn.session.thinking
+                try:
+                    await lane.append(delegation_id=None, content=content, event_id=event_id)
+                except Exception as exc:
+                    events.append({"recv_ms": now(), "type": "probe.beat.failed", "event_id": event_id, "error": str(exc)[:200]})
 
         async def stream():
             nonlocal t0
@@ -136,7 +168,7 @@ async def run(client: AsyncOpenAI, name: str, rep: int, fe: dict, args, cache: P
         sender.cancel()
         for task in replies:
             task.cancel()
-    result = {"scenario": name, "rep": rep, "lines": lines, "events": events}
+    result = {"scenario": name, "rep": rep, "beat_lane": args.beat_lane, "lines": lines, "events": events}
     path = args.out / f"{name}-{rep}.json"
     path.write_text(json.dumps(result, indent=1))
     return result
@@ -175,6 +207,42 @@ def analyze(result: dict) -> list[dict]:
     return rows
 
 
+def beats(result: dict, window_ms: int = 3000) -> list[dict]:
+    """One row per Progress Beat sent: did Voice speech arrive within window_ms, and what did it say before the next beat?
+
+    The Voice often narrates several beats as one continuous run of speech, so a beat counts as
+    spoken on any output transcript within the window, and continued marks speech already under
+    way (a delta within 1.5 s before the beat). Check said against the beat text to attribute it.
+    A beat the provider never acknowledged (no *.appended with its event_id) is undelivered: it is
+    reported but left out of beat_summary, so a failed send never reads as silence."""
+    out = [e for e in result["events"] if e["type"] == "session.output_transcript.delta"]
+    sent = [e for e in result["events"] if e["type"] == "probe.beat.sent"]
+    acked = {e.get("client_event_id") for e in result["events"] if str(e.get("type", "")).endswith(".appended")}
+    rows = []
+    for i, b in enumerate(sent):
+        until = sent[i + 1]["recv_ms"] if i + 1 < len(sent) else b["recv_ms"] + BEAT_GAP_MS
+        hit = next((e for e in out if b["recv_ms"] < e["recv_ms"] <= b["recv_ms"] + window_ms), None)
+        rows.append({"scenario": result["scenario"], "rep": result["rep"], "variant": b["variant"], "beat": b["index"],
+                     "delivered": b.get("event_id") in acked,
+                     "spoken": hit is not None, "latency_ms": hit["recv_ms"] - b["recv_ms"] if hit else None,
+                     "continued": any(b["recv_ms"] - 1500 <= e["recv_ms"] <= b["recv_ms"] for e in out),
+                     "said": "".join(e.get("delta", "") for e in out if b["recv_ms"] < e["recv_ms"] <= until).strip() or None})
+    return rows
+
+
+def beat_summary(rows: list[dict]) -> dict:
+    out = {}
+    for r in rows:
+        s = out.setdefault(r["variant"], {"sent": 0, "spoken": 0, "undelivered": 0, "latencies_ms": []})
+        if not r["delivered"]:
+            s["undelivered"] += 1
+            continue
+        s["sent"] += 1
+        if r["spoken"]:
+            s["spoken"] += 1; s["latencies_ms"].append(r["latency_ms"])
+    return out
+
+
 def calibration(result: dict) -> list[dict]:
     """Transcript timestamps against ground truth: do start_ms and end_ms share our audio clock?"""
     inputs = [e for e in result["events"] if e["type"] == "session.input_transcript.delta"]
@@ -196,6 +264,8 @@ async def main():
     p.add_argument("--ack-ms", type=int, default=400)
     p.add_argument("--reply-ms", type=int, default=2500)
     p.add_argument("--caller-voice", default="Samantha")
+    p.add_argument("--beat-lane", choices=["thinking", "thinking-quiet", "instructions"], default="thinking",
+                   help="how idle_beats sends Progress Beats: thinking as production, thinking with a do-not-say prefix, or instructions")
     p.add_argument("--out", type=Path, default=Path("/tmp/dwprobe/runs") / time.strftime("%Y%m%d-%H%M%S"))
     p.add_argument("--analyze", type=Path, help="re-analyze a previous --out directory without calling the API")
     args = p.parse_args()
@@ -214,7 +284,9 @@ async def main():
                 print(f"running {name} #{rep}", file=sys.stderr)
                 results.append(await run(client, name, rep, fe, args, cache))
         print(f"raw events: {args.out}", file=sys.stderr)
+    beat_rows = [r for res in results for r in beats(res)]
     print(json.dumps({"delegations": [r for res in results for r in analyze(res)],
+                      **({"beats": beat_rows, "beat_summary": beat_summary(beat_rows)} if beat_rows else {}),
                       "calibration": [dict(c, scenario=res["scenario"], rep=res["rep"]) for res in results for c in calibration(res)]}, indent=1))
 
 

@@ -904,8 +904,8 @@ BOARD_PROGRAM = (
     'shell = Terminal()\ndocs = Preview(3000, "The docs")'
 )
 # Every file here fails its draw-time check, each for its own reason. huge.png comes last: the
-# Worker cancels its capped download, and against this HTTP/1.0 mock the next toolbox fetch in
-# the same draw has failed with "Network connection lost." (reported, not yet explained).
+# Worker cancels its capped download. The HTTP/1.0 mocks say Connection: close, since workerd
+# otherwise reused the socket they had closed and the next fetch failed ("Network connection lost.").
 CHECKS_PROGRAM = (
     'root = Stack([Image("notes.png", "a"), Image("wide.png", "c"), Image("pixels.png", "d"), '
     'Image("escape.png", "e"), Image("missing.png", "f"), Image("https://example.com/a.png", "g"), '
@@ -999,6 +999,10 @@ class OrchestratorMock(BaseHTTPRequestHandler):
     def respond(self, value: dict, extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(value).encode()
         self.send_response(200)
+        # This HTTP/1.0 server closes every connection, but workerd pools it unless told: the
+        # Memory writer, fetching 1 ms after a step's reply, got the closed one ("Network
+        # connection lost.").
+        self.send_header("connection", "close")
         for key, header in (extra_headers or {}).items():
             self.send_header(key, header)
         self.send_header("content-type", "application/json")
