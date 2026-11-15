@@ -128,11 +128,15 @@ async def run(client: AsyncOpenAI, name: str, rep: int, fe: dict, args, cache: P
                 content = f"Following Scout: {text}"
                 if args.beat_lane == "thinking-quiet":
                     content = f"{QUIET_PREFIX} {content}"
-                events.append({"recv_ms": now(), "type": "probe.beat.sent", "index": i, "variant": args.beat_lane, "text": content})
-                if args.beat_lane == "instructions":
-                    await conn.session.instructions.append(delegation_id=None, content=content)
-                else:
-                    await conn.session.thinking.append(delegation_id=None, content=content)
+                # A beat counts only once the provider acknowledges its event_id (beats() joins them).
+                event_id = f"beat-{i}"
+                events.append({"recv_ms": now(), "type": "probe.beat.sent", "index": i, "variant": args.beat_lane,
+                               "event_id": event_id, "text": content})
+                lane = conn.session.instructions if args.beat_lane == "instructions" else conn.session.thinking
+                try:
+                    await lane.append(delegation_id=None, content=content, event_id=event_id)
+                except Exception as exc:
+                    events.append({"recv_ms": now(), "type": "probe.beat.failed", "event_id": event_id, "error": str(exc)[:200]})
 
         async def stream():
             nonlocal t0
@@ -208,14 +212,18 @@ def beats(result: dict, window_ms: int = 3000) -> list[dict]:
 
     The Voice often narrates several beats as one continuous run of speech, so a beat counts as
     spoken on any output transcript within the window, and continued marks speech already under
-    way (a delta within 1.5 s before the beat). Check said against the beat text to attribute it."""
+    way (a delta within 1.5 s before the beat). Check said against the beat text to attribute it.
+    A beat the provider never acknowledged (no *.appended with its event_id) is undelivered: it is
+    reported but left out of beat_summary, so a failed send never reads as silence."""
     out = [e for e in result["events"] if e["type"] == "session.output_transcript.delta"]
     sent = [e for e in result["events"] if e["type"] == "probe.beat.sent"]
+    acked = {e.get("client_event_id") for e in result["events"] if str(e.get("type", "")).endswith(".appended")}
     rows = []
     for i, b in enumerate(sent):
         until = sent[i + 1]["recv_ms"] if i + 1 < len(sent) else b["recv_ms"] + BEAT_GAP_MS
         hit = next((e for e in out if b["recv_ms"] < e["recv_ms"] <= b["recv_ms"] + window_ms), None)
         rows.append({"scenario": result["scenario"], "rep": result["rep"], "variant": b["variant"], "beat": b["index"],
+                     "delivered": b.get("event_id") in acked,
                      "spoken": hit is not None, "latency_ms": hit["recv_ms"] - b["recv_ms"] if hit else None,
                      "continued": any(b["recv_ms"] - 1500 <= e["recv_ms"] <= b["recv_ms"] for e in out),
                      "said": "".join(e.get("delta", "") for e in out if b["recv_ms"] < e["recv_ms"] <= until).strip() or None})
@@ -225,7 +233,10 @@ def beats(result: dict, window_ms: int = 3000) -> list[dict]:
 def beat_summary(rows: list[dict]) -> dict:
     out = {}
     for r in rows:
-        s = out.setdefault(r["variant"], {"sent": 0, "spoken": 0, "latencies_ms": []})
+        s = out.setdefault(r["variant"], {"sent": 0, "spoken": 0, "undelivered": 0, "latencies_ms": []})
+        if not r["delivered"]:
+            s["undelivered"] += 1
+            continue
         s["sent"] += 1
         if r["spoken"]:
             s["spoken"] += 1; s["latencies_ms"].append(r["latency_ms"])
