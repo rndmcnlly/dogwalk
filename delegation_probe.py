@@ -20,7 +20,7 @@ Usage: uv run --script delegation_probe.py [--reps N] [--only name,...] [--out D
 Reads OPENAI_API_KEY from .env. Costs real GPT-Live minutes: about 20 s per run.
 """
 
-import argparse, asyncio, base64, json, os, subprocess, sys, tempfile, time
+import argparse, asyncio, base64, json, os, re, subprocess, sys, tempfile, time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -41,6 +41,9 @@ SCENARIOS = {
     "chitchat": ["Hi there, how is it going today?", 8000],
     # Progress Beats into a quiet line: does the Voice speak background it was not asked about?
     "idle_beats": ["Have Scout look at the recent commits and suggest what to test.", 45000],
+    # Beats whose state changes, then the caller asks: does the Voice answer at once, from the latest beat?
+    "ask_after_beats": ["Have Scout look at the parser tests and fix whatever is failing.", 30000,
+                        "What's Scout doing right now?", 12000],
 }
 
 # Progress Beats for scenarios in BEATS, worded as voice_session.ts words them (beat(), toolDoing()),
@@ -52,7 +55,15 @@ BEATS = {"idle_beats": [
     "Scout is reading files.",
     'Scout says: "The pairing changes have no tests at all. I\'ll sketch a short list of cases before writing any."',
     "Scout started changing files: editing files.",
+], "ask_after_beats": [
+    'Scout says: "I\'ll read the parser tests first to see which ones fail."',
+    "Scout is running the tests.",
+    'Scout says: "Three tests fail on nested brackets. I\'m done reading; I\'ll change the bracket handling in the parser."',
+    "Scout started changing files: editing parser.py.",
 ]}
+# Scenarios whose last caller line asks about the work: an answer reflects the latest beat when it
+# matches latest, and mentions an earlier state when it matches stale (both: possibly mixed; read the text).
+ASKS = {"ask_after_beats": {"latest": r"edit|chang|modif|updat|writ|parser\.py|the parser\b(?! tests)", "stale": r"read|running|run the|look"}}
 BEAT_LEAD_MS, BEAT_GAP_MS = 6000, 5000
 QUIET_PREFIX = "Background for later questions, not to be said now:"
 
@@ -116,11 +127,13 @@ async def run(client: AsyncOpenAI, name: str, rep: int, fe: dict, args, cache: P
         replies: list[asyncio.Task] = []
 
         async def reply(delegation_id: str):
+            if name in ASKS and replies[0] is not asyncio.current_task():
+                return  # leave a delegated question unanswered, so whatever the Voice says is its own
             # Stand-in for the Orchestrator: a brief at once, a say after --reply-ms.
             await conn.session.thinking.append(delegation_id=delegation_id, content="Working on it; nothing has started yet.")
             await asyncio.sleep(args.reply_ms / 1000)
             await conn.session.commentary.append(delegation_id=delegation_id, content="Tell the caller that's handled and nothing else needs their attention.")
-            if replies[0] is not asyncio.current_task():
+            if replies[0] is not asyncio.current_task() or args.beat_lane == "none":
                 return  # one beat stream per session, from the first delegation
             for i, text in enumerate(BEATS.get(name, [])):
                 await asyncio.sleep((BEAT_LEAD_MS if i == 0 else BEAT_GAP_MS) / 1000)
@@ -230,6 +243,31 @@ def beats(result: dict, window_ms: int = 3000) -> list[dict]:
     return rows
 
 
+def ask(result: dict) -> dict | None:
+    """For a scenario ending in a question: did the Voice delegate it or answer at once, how soon after
+    the true end of the question did it speak, and did the answer reflect the latest delivered beat?
+    narrated counts beats the Voice spoke unprompted (speech within 3 s, before the question began)."""
+    rule = ASKS.get(result["scenario"])
+    if not rule:
+        return None
+    ev, q = result["events"], result["lines"][-1]
+    out = [e for e in ev if e["type"] == "session.output_transcript.delta"]
+    acked = {e.get("client_event_id") for e in ev if str(e.get("type", "")).endswith(".appended")}
+    before = [e for e in ev if e["type"] == "probe.beat.sent" and e["event_id"] in acked and e["recv_ms"] < q["start_ms"]]
+    answer = "".join(e.get("delta", "") for e in out if e["recv_ms"] > q["end_ms"]).strip()
+    first = next((e["recv_ms"] for e in out if e["recv_ms"] > q["end_ms"]), None)
+    return {"scenario": result["scenario"], "rep": result["rep"], "lane": result["beat_lane"],
+            "beats_before_question": len(before),
+            "narrated": sum(any(b["recv_ms"] < e["recv_ms"] <= min(b["recv_ms"] + 3000, q["start_ms"]) for e in out) for b in before),
+            "speaking_at_question": any(q["start_ms"] - 1500 <= e["recv_ms"] <= q["start_ms"] for e in out),
+            "delegated": any(e["type"] == "session.delegation.created" and e["recv_ms"] > q["start_ms"] for e in ev),
+            "latency_ms": first - q["end_ms"] if first is not None else None,
+            "latest_beat": before[-1]["text"] if before else None,
+            "reflects_latest": bool(re.search(rule["latest"], answer, re.I)) if before else None,
+            "mentions_earlier": bool(re.search(rule["stale"], answer, re.I)) if before else None,
+            "answer": answer or None}
+
+
 def beat_summary(rows: list[dict]) -> dict:
     out = {}
     for r in rows:
@@ -264,8 +302,8 @@ async def main():
     p.add_argument("--ack-ms", type=int, default=400)
     p.add_argument("--reply-ms", type=int, default=2500)
     p.add_argument("--caller-voice", default="Samantha")
-    p.add_argument("--beat-lane", choices=["thinking", "thinking-quiet", "instructions"], default="thinking",
-                   help="how idle_beats sends Progress Beats: thinking as production, thinking with a do-not-say prefix, or instructions")
+    p.add_argument("--beat-lane", choices=["thinking", "thinking-quiet", "instructions", "none"], default="thinking",
+                   help="how scenarios in BEATS send Progress Beats: thinking as production, thinking with a do-not-say prefix, instructions, or none at all")
     p.add_argument("--out", type=Path, default=Path("/tmp/dwprobe/runs") / time.strftime("%Y%m%d-%H%M%S"))
     p.add_argument("--analyze", type=Path, help="re-analyze a previous --out directory without calling the API")
     args = p.parse_args()
@@ -285,8 +323,10 @@ async def main():
                 results.append(await run(client, name, rep, fe, args, cache))
         print(f"raw events: {args.out}", file=sys.stderr)
     beat_rows = [r for res in results for r in beats(res)]
+    asks = [a for res in results if (a := ask(res))]
     print(json.dumps({"delegations": [r for res in results for r in analyze(res)],
                       **({"beats": beat_rows, "beat_summary": beat_summary(beat_rows)} if beat_rows else {}),
+                      **({"asks": asks} if asks else {}),
                       "calibration": [dict(c, scenario=res["scenario"], rep=res["rep"]) for res in results for c in calibration(res)]}, indent=1))
 
 
