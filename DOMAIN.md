@@ -27,7 +27,7 @@ Dogwalk presents as an agentic development environment driven by a coworker. Age
 
 - Dogwalk's session-management vocabulary is its own, historically anchored in ACP (see Agent References). The Agent's API terms (executions, inbox, delivery) stop at the Agent Integration boundary, except where one determines a domain rule, which then says so.
 - Dogwalk is a product codename, not the source of its domain vocabulary, and it implies no fiction: the Voice Agent speaks the domain's own terms, plainly and directly.
-- A Voice Call is complete in words. Every piece of information reaches the User as speech; no sound stands in for one. The only tones are ritual cues whose meaning is said aloud before they play (the recording beep, the Identity Check's round and received cues).
+- A Voice Call is complete in words. Every piece of information reaches the User as speech; no sound stands in for one. The only tones are ritual cues that carry nothing speech does not also say: the recording beep follows a spoken "after the beep", the Identity Check's round tone follows the spoken instructions, and its received cue fills the wait for a spoken verdict.
 - Dogwalk depends on OpenCode deliberately: its UX, AX, and AI/HCI research moves faster than standards do, and it already depends on specific providers. The Agent Implementation is therefore a chosen dependency, pinned and upgraded explicitly. Model providers, the voice transport, and Daytona remain adapters.
 - An Agent entity, an application projection, and its spoken presentation are different things even when they currently have a one-to-one relationship.
 - Derived state must not be presented as Agent-defined state. Dogwalk may infer that a session is ready or that a turn needs attention, but those are Client projections.
@@ -428,8 +428,8 @@ answer is captured, then the verdict. The received cue (two falling blips, unlik
 the single tone) tells the caller their answer arrived, so the seconds spent
 judging it are not silence. It follows every captured answer, scored or a wrong
 phrase, so the ritual never changes shape, and never silence or a request to
-repeat, which are not answers. Like the recording beep, it belongs to the ritual
-and is explained aloud before the round. Fresh
+repeat, which are not answers. Like the recording beep, it belongs to the ritual:
+the spoken verdict that follows says in words what the cue anticipates. Fresh
 phrases defeat replayed recordings, not voice cloning. The
 similarity threshold is configuration, not a domain rule. It starts at a cosine
 of 0.5: synthetic impostors through a telephone path scored at most 0.40, and
