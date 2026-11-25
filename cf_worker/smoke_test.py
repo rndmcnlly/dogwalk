@@ -15,6 +15,7 @@ import os
 import shutil
 import signal
 import socket
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,9 @@ class DaytonaMock(BaseHTTPRequestHandler):
     # A provider state to report instead of the normal creating-then-started sequence.
     force_state: str | None = None
     start_count = 0
+    # Starts to refuse with 409, as Daytona does just after a stop.
+    refuse_starts = 0
+    run_limits: list = []
     preview_reads = 0
     # Toolbox commands seen, and optional handlers that answer some of them.
     executed: list[str] = []
@@ -74,15 +78,29 @@ class DaytonaMock(BaseHTTPRequestHandler):
     # Optional handlers for other POSTs: (path, payload, raw body) -> a JSON reply, or None to fall through.
     post_hooks: list = []
 
-    def sandbox(self, state: str = "started") -> dict:
+    def sandbox(self, status: str = "running") -> dict:
         return {
             "id": f"mock-sandbox-{self.generation}",
             "name": f"dogwalk-mock-{self.generation}",
-            "state": state,
-            "desiredState": "started",
-            "errorReason": None,
-            "toolboxProxyUrl": f"http://127.0.0.1:{DAYTONA_MOCK_PORT}/toolbox",
+            "status": status,
+            "error": None,
+            "ssh_gateway_host": "ssh.preview.test",
+            "ssh_gateway_port": 2222,
+            "toolbox_proxy_url": f"http://127.0.0.1:{DAYTONA_MOCK_PORT}/toolbox",
         }
+
+    @staticmethod
+    def process(answer: dict) -> dict:
+        return {"id": "p_mock", "state": "terminal", "exitCode": answer["exitCode"],
+                "logs": {"frames": [{"channel": "stdout", "data": answer["result"]}], "eof": True}}
+
+    def do_PATCH(self) -> None:
+        payload = json.loads(self.rfile.read(int(self.headers.get("content-length", "0"))) or b"{}")
+        if self.path == f"/api/sandboxes/mock-sandbox-{self.generation}/lifecycle-policy":
+            DaytonaMock.run_limits.append(payload.get("timeout_seconds"))
+            self.reply({"id": f"mock-sandbox-{self.generation}", "lifecycle_policy": payload})
+            return
+        self.send_error(404)
 
     def reply(self, value: dict) -> None:
         body = json.dumps(value).encode()
@@ -96,33 +114,22 @@ class DaytonaMock(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        if (
-            self.path
-            == f"/api/sandbox/mock-sandbox-{self.generation}/ports/8765/preview-url"
-        ):
-            DaytonaMock.preview_reads += 1
+        if self.path.startswith("/api/sandboxes/search?"):
             self.reply(
-                {
-                    "url": f"http://127.0.0.1:{PORT_BASE + 4}",
-                    "token": "local-preview-token",
-                }
+                {"sandboxes": [self.sandbox()] if self.exists else [], "next_cursor": None}
             )
             return
-        if self.path.startswith("/api/sandbox?"):
-            self.reply(
-                {"items": [self.sandbox()] if self.exists else [], "nextCursor": None}
-            )
-            return
-        if self.path == f"/api/sandbox/mock-sandbox-{self.generation}":
+        if self.path.split("?")[0] == f"/api/sandboxes/mock-sandbox-{self.generation}":
+            # A deleted Sandbox stays readable, as deleted.
             if not self.exists:
-                self.send_error(404)
+                self.reply(self.sandbox("deleted"))
                 return
             DaytonaMock.detail_reads += 1
             if self.force_state:
                 self.reply(self.sandbox(self.force_state))
                 return
             self.reply(
-                self.sandbox("creating" if self.detail_reads == 1 else "started")
+                self.sandbox("pending" if self.detail_reads == 1 else "running")
             )
             return
         for hook in DaytonaMock.get_hooks:
@@ -152,35 +159,38 @@ class DaytonaMock(BaseHTTPRequestHandler):
                 time.sleep(DaytonaMock.live_accept_delay)
             self.reply({})
             return
-        if self.path == "/api/sandbox":
+        if self.path == f"/api/sandboxes/mock-sandbox-{self.generation}/ports/8765/preview-url":
+            DaytonaMock.preview_reads += 1
+            self.reply({"url": f"http://127.0.0.1:{PORT_BASE + 4}", "token": "local-preview-token"})
+            return
+        if self.path == "/api/sandboxes":
             DaytonaMock.exists = True
             DaytonaMock.detail_reads = 0
             DaytonaMock.generation += 1
             DaytonaMock.create_count += 1
             DaytonaMock.last_create_payload = payload
-            self.reply(self.sandbox("creating"))
+            self.reply(self.sandbox("pending"))
             return
-        if self.path == f"/api/sandbox/mock-sandbox-{self.generation}/start":
+        if self.path == f"/api/sandboxes/mock-sandbox-{self.generation}/start":
+            if DaytonaMock.refuse_starts:
+                DaytonaMock.refuse_starts -= 1
+                self.send_error(409)
+                return
             DaytonaMock.start_count += 1
-            self.reply(self.sandbox("starting"))
+            self.reply(self.sandbox("assigned"))
             return
-        if self.path == f"/api/sandbox/mock-sandbox-{self.generation}/stop":
+        if self.path == f"/api/sandboxes/mock-sandbox-{self.generation}/restart":
             self.reply(self.sandbox("stopping"))
             return
-        if self.path == f"/toolbox/mock-sandbox-{self.generation}/process/execute":
-            command = str(payload.get("command", ""))
+        if self.path.split("?")[0] == f"/toolbox/mock-sandbox-{self.generation}/processes":
+            command = shlex.join(payload.get("argv", []))
             DaytonaMock.executed.append(command)
             for hook in DaytonaMock.execute_hooks:
                 answer = hook(command)
                 if answer is not None:
-                    self.reply(answer)
+                    self.reply(self.process(answer))
                     return
-            result = (
-                "ready"
-                if payload.get("command") == "printf ready"
-                else ("uptime_seconds=9000\nmemory_percent=25\ndisk_percent=12\n")
-            )
-            self.reply({"result": result, "exitCode": 0})
+            self.reply(self.process({"result": "uptime_seconds=9000\nmemory_percent=25\ndisk_percent=12\n", "exitCode": 0}))
             return
         for hook in DaytonaMock.post_hooks:
             answer = hook(self.path, payload, raw)
@@ -194,14 +204,14 @@ class DaytonaMock(BaseHTTPRequestHandler):
         for hook in DaytonaMock.delete_hooks:
             status = hook(self.path)
             if status == 200:
-                self.reply({"id": self.path.rsplit("/", 1)[-1], "state": "destroying"})
+                self.reply({"id": self.path.rsplit("/", 1)[-1], "status": "deleting"})
                 return
             if status is not None:
                 self.send_error(status)
                 return
-        if self.exists and self.path == f"/api/sandbox/mock-sandbox-{self.generation}":
+        if self.exists and self.path == f"/api/sandboxes/mock-sandbox-{self.generation}":
             DaytonaMock.exists = False
-            self.reply(self.sandbox("destroying"))
+            self.reply(self.sandbox("deleting"))
             return
         self.send_error(404)
 
@@ -440,12 +450,19 @@ def run_tests(
             "initial sandbox was not created exactly once",
         )
         require(
-            DaytonaMock.last_create_payload.get("snapshot") == "dogwalk-test-snapshot",
-            "sandbox snapshot was not configured",
+            DaytonaMock.last_create_payload.get("image") == "dogwalk-test-image",
+            "sandbox image was not configured",
+        )
+        policy = DaytonaMock.last_create_payload.get("lifecycle_policy", {})
+        require(
+            DaytonaMock.last_create_payload.get("persistent") is True
+            and (policy.get("on_idle_timeout"), policy.get("on_timeout"), policy.get("timeout_seconds")) == ("pause", "pause", 86400)
+            and policy.get("wake_on_request") is False,
+            f"sandbox lifecycle: {DaytonaMock.last_create_payload}",
         )
         require(
-            DaytonaMock.last_create_payload.get("secrets") == [{"OPENAI_API_KEY": "dogwalk-test-agent-secret"}],
-            "Agent inference secret was not mapped by name",
+            DaytonaMock.last_create_payload.get("secrets") == ["DOGWALK_TEST_AGENT_SECRET"],
+            "Agent inference secret was not attached by name",
         )
         # The prewarm reaches the VoiceSession, which asks Daytona for the Agent Gateway preview URL.
         deadline = time.time() + 10
@@ -471,9 +488,10 @@ def run_tests(
         require(elapsed < 2.5, f"the verifier warm delayed TwiML: {elapsed:.2f} s")
         d1_local(f"DELETE FROM voice_references WHERE user_id IN (SELECT id FROM users WHERE home_phone = '{TEST_PHONE}')")
 
-        # A stopped Sandbox is started without waiting, and the call is dialed at once.
+        # A stopped Sandbox is started without waiting, through a moment of refusals, and the call is dialed at once.
         time.sleep(3.1)
         DaytonaMock.force_state = "stopped"
+        DaytonaMock.refuse_starts = 2
         status, body = post(
             base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_STOPPED"}, token
         )
@@ -483,9 +501,30 @@ def run_tests(
             f"stopped sandbox not started and dialed: {status} {body}",
         )
 
+        # One caught pausing is started once it has paused, without holding up the call.
+        time.sleep(3.1)
+        DaytonaMock.force_state = "pausing"
+        status, body = post(
+            base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_PAUSING"}, token
+        )
+        DaytonaMock.force_state = None
+        deadline = time.time() + 5
+        while DaytonaMock.start_count < 2 and time.time() < deadline:
+            time.sleep(0.1)
+        require(status == 200 and "<Dial" in body and DaytonaMock.start_count == 2, f"pausing sandbox not started: {status} {body}")
+
+        # One already running has its wall-clock limit restarted, so it outlasts the call.
+        time.sleep(3.1)
+        DaytonaMock.run_limits.clear()
+        post(base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_RUNNING"}, token)
+        deadline = time.time() + 5
+        while not DaytonaMock.run_limits and time.time() < deadline:
+            time.sleep(0.1)
+        require(DaytonaMock.run_limits == [86400], f"run limit not renewed: {DaytonaMock.run_limits}")
+
         # A broken Sandbox still goes to deterministic recovery.
         time.sleep(3.1)
-        DaytonaMock.force_state = "error"
+        DaytonaMock.force_state = "failed"
         status, body = post(
             base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_BROKEN"}, token
         )
@@ -699,7 +738,7 @@ def run_tests(
         f"SSE state missing registration: {state}",
     )
     live_calls = state.get("live_calls", [])
-    expected_live_calls = 5 if replacement_call else 2
+    expected_live_calls = 7 if replacement_call else 2
     require(
         len(live_calls) == expected_live_calls,
         f"SSE state missing live calls: {live_calls}",
@@ -718,7 +757,7 @@ def run_tests(
 
     call_sids = ["CA_TEST1", "CA_TEST2"]
     if replacement_call:
-        call_sids += ["CA_STOPPED", "CA_BROKEN", replacement_call]
+        call_sids += ["CA_STOPPED", "CA_PAUSING", "CA_RUNNING", "CA_BROKEN", replacement_call]
     for call_sid in call_sids:
         status, body = post(
             base_url,
@@ -957,7 +996,7 @@ def reap_delete_checks(base_url: str, token: str, users: dict[str, int]) -> None
     require(reaped[users["idle"]]["already_gone"] is False and reaped[users["gone"]]["already_gone"] is True
             and reaped[users["pending"]]["already_gone"] is True, f"404 not tolerated as already gone: {events}")
     require(set(failed) == {users["flaky"]} and failed[users["flaky"]]["attempts"] == 1, f"refused deletion: {events}")
-    require(sorted(DaytonaMock.deleted) == sorted(f"/api/sandbox/{p}" for p in (idle_provider, "mock-reap-gone", "mock-reap-pending", "mock-reap-flaky")),
+    require(sorted(DaytonaMock.deleted) == sorted(f"/api/sandboxes/{p}" for p in (idle_provider, "mock-reap-gone", "mock-reap-pending", "mock-reap-flaky")),
             f"provider deletions: {DaytonaMock.deleted}")
     after, deletions = reap_assignments(), reap_deletions()
     for name in ("idle", "gone"):
@@ -1002,7 +1041,7 @@ def reap_pending_call_checks(base_url: str, token: str, users: dict[str, int], r
     post(base_url, "/voice/status", {"From": phone, "CallSid": "CA_REAP_WAITING", "CallStatus": "completed"}, token)
 
     # Both come due: the waiting Sandbox is deleted; flaky fails a third time and is flagged.
-    DaytonaMock.delete_hooks.insert(0, lambda path: 200 if path == f"/api/sandbox/{doomed}" else None)
+    DaytonaMock.delete_hooks.insert(0, lambda path: 200 if path == f"/api/sandboxes/{doomed}" else None)
     d1_local(f"""UPDATE sandbox_deletions SET next_attempt_at = unixepoch() - 60 WHERE provider_id = '{doomed}';
         UPDATE sandbox_deletions SET attempts = 2, next_attempt_at = unixepoch() - 60 WHERE provider_id = 'mock-reap-flaky'""")
     DaytonaMock.deleted.clear()
@@ -1010,7 +1049,7 @@ def reap_pending_call_checks(base_url: str, token: str, users: dict[str, int], r
     require(set(by_event(events, "sandbox.reaped")) == {users["waiting"]}, f"pending deletion after a call: {events}")
     require(set(by_event(events, "sandbox.reap.stuck")) == {users["flaky"]}
             and by_event(events, "sandbox.reap.failed")[users["flaky"]]["attempts"] == 3, f"stuck deletion: {events}")
-    require(f"/api/sandbox/{doomed}" in DaytonaMock.deleted, f"old Sandbox not deleted: {DaytonaMock.deleted}")
+    require(f"/api/sandboxes/{doomed}" in DaytonaMock.deleted, f"old Sandbox not deleted: {DaytonaMock.deleted}")
     require(reap_assignments()[users["waiting"]]["provider_id"] == fresh["provider_id"], "deleting the old Sandbox touched the new one")
     require(reap_assignments()[users["flaky"]] == {"user_id": users["flaky"], "provider_id": None, "state": "reaped"},
             "a stuck Sandbox returned to service")
@@ -1031,11 +1070,11 @@ def diagnostics_race_checks(base_url: str, users: dict[str, int]) -> None:
     reached, release = threading.Event(), threading.Event()
 
     def slow_detail(path):
-        if path != "/api/sandbox/mock-diag-old":
+        if path != "/api/sandboxes/mock-diag-old":
             return None
         reached.set()
         release.wait(8)
-        return 200, json.dumps({"id": "mock-diag-old", "state": "started", "desiredState": "started"}).encode(), "application/json"
+        return 200, json.dumps({"id": "mock-diag-old", "status": "running"}).encode(), "application/json"
 
     DaytonaMock.get_hooks.append(slow_detail)
     credentials = base64.b64encode(f"adam:{LOCAL_ADMIN_PASSWORD}".encode()).decode()
@@ -1191,7 +1230,7 @@ def user_reap_checks(base_url: str, token: str) -> None:
     users = seed_user_reap_fixture()
     before = user_reap_state()
     handle = d1_local(f"SELECT handle FROM users WHERE id = {users['idle']}")[0]["handle"]
-    DaytonaMock.delete_hooks.insert(0, lambda path: 200 if path == f"/api/sandbox/{IDLE_PROVIDER}" else None)
+    DaytonaMock.delete_hooks.insert(0, lambda path: 200 if path == f"/api/sandboxes/{IDLE_PROVIDER}" else None)
     DaytonaMock.deleted.clear()
     events = run_reap_pass(base_url, users, lambda found: len(by_event(found, "user.forgotten")) >= 2
                            and by_event(found, "sandbox.reaped"), USER_EVENTS)
@@ -1203,7 +1242,7 @@ def user_reap_checks(base_url: str, token: str) -> None:
     require(set(by_event(events, "user.forgotten")) == {users["idle"], users["leftover"]}, f"Users forgotten: {events}")
     reaped = by_event(events, "sandbox.reaped")
     require(set(reaped) == {users["idle"]} and reaped[users["idle"]]["already_gone"] is False, f"reaped Sandbox: {events}")
-    require(f"/api/sandbox/{IDLE_PROVIDER}" in DaytonaMock.deleted, f"the same pass did not delete the Sandbox: {DaytonaMock.deleted}")
+    require(f"/api/sandboxes/{IDLE_PROVIDER}" in DaytonaMock.deleted, f"the same pass did not delete the Sandbox: {DaytonaMock.deleted}")
 
     idle = d1_local(f"SELECT handle, home_phone, home_used_at, reaped_at, forgotten_at FROM users WHERE id = {users['idle']}")[0]
     require(idle["handle"] is None and idle["home_phone"] is None and idle["home_used_at"] is None
@@ -2727,9 +2766,11 @@ def start_worker(wrangler: str, registry: str, *overrides: str) -> subprocess.Po
             "--var",
             f"DAYTONA_API_BASE:http://127.0.0.1:{DAYTONA_MOCK_PORT}/api",
             "--var",
-            "DAYTONA_SNAPSHOT:dogwalk-test-snapshot",
+            "DAYTONA_IMAGE:dogwalk-test-image",
             "--var",
-            "DAYTONA_AGENT_SECRET:dogwalk-test-agent-secret",
+            "DAYTONA_REGION:test-region",
+            "--var",
+            "DAYTONA_AGENT_SECRET:DOGWALK_TEST_AGENT_SECRET",
             "--var",
             f"ADMIN_PASSWORD:{LOCAL_ADMIN_PASSWORD}",
             "--test-scheduled",

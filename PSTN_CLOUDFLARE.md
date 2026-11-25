@@ -79,10 +79,10 @@ SRTP. Ending a call does not cancel Prompt Turns or close ACP Sessions.
 
 - Provides the filesystem, process, network, and credential isolation required
   by coding Agents.
-- Runs the Agent Gateway and OpenCode 2 from an immutable versioned snapshot.
-- Receives Agent inference credentials only as Daytona Secret placeholders.
-- Auto-stops after idle time and auto-archives after extended inactivity, but is
-  never automatically deleted.
+- Runs the Agent Gateway and OpenCode 2 from an immutable versioned image.
+- Receives Agent inference credentials only as Daytona secret placeholders.
+- Is a persistent Daytona v2 virtual machine: it pauses after idle time, keeping memory, and
+  is never automatically deleted by Daytona.
 - Retains files and Agent-held session history across calls and restarts.
 
 The Agent Gateway is deliberately narrow glue: it keeps the Sandbox's shared

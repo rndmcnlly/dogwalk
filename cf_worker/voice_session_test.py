@@ -1328,29 +1328,35 @@ def sandbox_files(path: str):
     return None
 
 
-# What Access Grants minted and revoked at Daytona: signed preview links, their expiries, SSH
-# tokens and their deletions. Terminal, Desktop and Preview share the signed-link path.
-PROVIDER: dict[str, list] = {"signed": [], "expired": [], "ssh": []}
-
-
-def provider_gets(path: str):
-    match = re.fullmatch(r"/api/sandbox/mock-sandbox-1/ports/(\d+)/signed-preview-url\?expiresInSeconds=(\d+)", path)
-    if not match:
-        return None
-    token = f"signed-token-{len(PROVIDER['signed']) + 1}"
-    PROVIDER["signed"].append({"port": int(match[1]), "seconds": int(match[2]), "token": token})
-    return 200, json.dumps({"url": f"https://{match[1]}-{token}.preview.test/", "token": token}).encode(), "application/json"
+# What Access Grants minted and ended at Daytona: signed preview links, sandbox-wide revocations
+# (how many links existed at each), and SSH tokens. Terminal, Desktop and Preview share the link path.
+PROVIDER: dict[str, list] = {"signed": [], "revoked": [], "ssh": []}
 
 
 def provider_posts(path: str, payload: dict, _raw: bytes):
-    if match := re.fullmatch(r"/api/sandbox/mock-sandbox-1/ports/(\d+)/signed-preview-url/([^/]+)/expire", path):
-        PROVIDER["expired"].append((int(match[1]), match[2]))
+    if match := re.fullmatch(r"/api/sandboxes/mock-sandbox-1/ports/(\d+)/signed-preview-urls", path):
+        token = f"signed-token-{len(PROVIDER['signed']) + 1}"
+        PROVIDER["signed"].append({"port": int(match[1]), "seconds": payload["expires_in_seconds"], "token": token})
+        return {"url": f"https://{match[1]}-{token}.preview.test/", "token": token, "expires_at": "2026-11-25T12:00:00Z"}
+    if path == "/api/sandboxes/mock-sandbox-1/signed-preview-urls/revoke":
+        PROVIDER["revoked"].append(len(PROVIDER["signed"]))
         return {}
-    if match := re.fullmatch(r"/api/sandbox/mock-sandbox-1/ssh-access\?expiresInMinutes=(\d+)", path):
+    if path == "/api/sandboxes/mock-sandbox-1/access-token":
+        assert payload["operations"] == ["ssh"] and payload["ports"] == [], payload
         token = f"ssh-token-{len(PROVIDER['ssh']) + 1}"
-        PROVIDER["ssh"].append({"minutes": int(match[1]), "token": token})
-        return {"token": token, "sshCommand": f"ssh {token}@ssh.preview.test", "expiresAt": "2026-11-12T12:00:00Z"}
+        PROVIDER["ssh"].append({"seconds": payload["ttl_seconds"], "token": token})
+        expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + payload["ttl_seconds"]))
+        return {"access_token": token, "expires_at": expires, "operations": ["ssh"], "ports": []}
     return None
+
+
+def revoked(link: dict) -> bool:
+    """Whether a revocation came after this link was minted."""
+    return any(count > PROVIDER["signed"].index(link) for count in PROVIDER["revoked"])
+
+
+def takeovers_ended(port: int) -> int:
+    return sum("pkill -f" in command and f" {port} " in command for command in DaytonaMock.executed)
 
 
 # Files a Paired Browser uploaded, by sandbox path, as the toolbox received them.
@@ -1394,10 +1400,6 @@ def upload_destination(command: str) -> dict | None:
         name, index = f"{stem} ({index}){extension}", index + 1
     CLAIMED.add(f"{folder}/{name}")
     return {"result": f"{folder}/{name}", "exitCode": 0}
-
-
-def provider_deletes(path: str):
-    return 200 if path.startswith("/api/sandbox/mock-sandbox-1/ssh-access?token=") else None
 
 
 def dtmf(key: str) -> dict:
@@ -2183,16 +2185,17 @@ async def run_protocol(identity: str) -> None:
         assert f'src="data:image/png;base64,{base64.b64encode(PNG_BYTES).decode()}"' in html and "srcset" not in html, html[:400]
         assert 'src="https://example.com/a.png"' in html and 'src="data:image/gif;base64,R0lG"' in html, html
         assert 'src="/etc/x.png" alt="Outside (image not shown: only files under /home/daytona can be read)"' in html, html
-        # Human Takeover: Terminal opens Daytona's web terminal with a grant-bounded signed link.
+        # Human Takeover: Terminal starts the image's ttyd and opens it with a grant-bounded signed link.
         opened = await ask(browser, {"type": "open", "id": 7, "board_id": board["id"], "key": "terminal:"})
         terminal_link = PROVIDER["signed"][-1]
-        assert terminal_link["port"] == 22222 and 3500 <= terminal_link["seconds"] <= 3600, terminal_link
-        assert opened == {"type": "opened", "id": 7, "url": f"https://22222-{terminal_link['token']}.preview.test"}, opened
+        assert terminal_link["port"] == 7681 and 3500 <= terminal_link["seconds"] <= 3600, terminal_link
+        assert opened == {"type": "opened", "id": 7, "url": f"https://7681-{terminal_link['token']}.preview.test"}, opened
+        assert any("ttyd --writable --port 7681" in command for command in DaytonaMock.executed)
         # Every open gets its own link, not a reusable Sandbox-wide preview token.
         reopened = await ask(browser, {"type": "open", "id": 10, "board_id": board["id"], "key": "terminal:"})
         terminal_reopened = PROVIDER["signed"][-1]
-        assert terminal_reopened["port"] == 22222 and terminal_reopened["token"] != terminal_link["token"], terminal_reopened
-        assert reopened["url"] == f"https://22222-{terminal_reopened['token']}.preview.test", reopened
+        assert terminal_reopened["port"] == 7681 and terminal_reopened["token"] != terminal_link["token"], terminal_reopened
+        assert reopened["url"] == f"https://7681-{terminal_reopened['token']}.preview.test", reopened
         # A Preview opens as a provider-signed link, bounded by its grant.
         opened = await ask(browser, {"type": "open", "id": 8, "board_id": board["id"], "key": "preview:3000"})
         docs_link = PROVIDER["signed"][-1]
@@ -2225,8 +2228,8 @@ async def run_protocol(identity: str) -> None:
         assert diagnostics["memory"]["text"] == MEMORY_TEXT and diagnostics["memory_versions"][-1]["chars"] == len(MEMORY_TEXT), diagnostics["memory_versions"]
         assert diagnostics["context_archives"][-1]["reason"] == "compaction", diagnostics["context_archives"]
         assert not any(item.get("call_id") == "h1-create" for item in diagnostics["orchestrator_context"])
-        assert (3000, docs_link["token"]) in PROVIDER["expired"], "a dropped board's signed link is expired"
-        assert all((22222, link["token"]) in PROVIDER["expired"] for link in (terminal_link, terminal_reopened)), "a dropped board expires every terminal link it minted"
+        assert all(revoked(link) for link in (docs_link, terminal_link, terminal_reopened)), "a dropped board's links are revoked"
+        assert takeovers_ended(7681) > 0, "a dropped board's terminal pages are closed"
         assert (await asyncio.to_thread(file, "REPORT.md", board["id"]))[0] == 404, "a dropped board's files are no longer read"
 
         # A second Display: pairing it leaves the first paired and its page open.
@@ -2288,7 +2291,7 @@ async def run_protocol(identity: str) -> None:
         assert opened["url"] == f"https://5173-{projector_link['token']}.preview.test", opened
         opened = await ask(slides, {"type": "open", "id": 2, "board_id": projector_board["id"], "key": "terminal:"})
         projector_terminal = PROVIDER["signed"][-1]
-        assert projector_terminal["port"] == 22222 and opened["url"] == f"https://22222-{projector_terminal['token']}.preview.test", opened
+        assert projector_terminal["port"] == 7681 and opened["url"] == f"https://7681-{projector_terminal['token']}.preview.test", opened
         refused = await ask(browser, {"type": "open", "id": 11, "board_id": projector_board["id"], "key": "terminal:"})
         assert refused["type"] == "error" and "no longer on this display" in refused["error"], refused
         # Access Elements: drawn in the call, they are granted on that Display for the minutes asked.
@@ -2315,8 +2318,8 @@ async def run_protocol(identity: str) -> None:
         assert opened["url"] == f"https://5173-{app_link['token']}.preview.test", opened
         opened = await ask(mirror, {"type": "open", "id": 2, "board_id": access_board["id"], "key": "ssh:"})
         ssh_access = PROVIDER["ssh"][-1]
-        assert opened["ssh"]["command"] == f"ssh {ssh_access['token']}@ssh.preview.test" and "url" not in opened, opened
-        assert ssh_access["minutes"] in (89, 90) and opened["ssh"]["expires_at"] <= access_board["access"]["ssh:"]["expires_at"], (ssh_access, opened)
+        assert opened["ssh"]["command"] == f"ssh -p 2222 'mock-sandbox-1#{ssh_access['token']}@ssh.preview.test'" and "url" not in opened, opened
+        assert ssh_access["seconds"] == 300 and opened["ssh"]["expires_at"] <= time.time() * 1000 + 300_000, (ssh_access, opened)
         # A desktop reports why it could not start (the mock has no computer use).
         refused = await ask(browser, {"type": "open", "id": 3, "board_id": access_board["id"], "key": "desktop:"})
         assert refused["type"] == "error" and "desktop" in refused["error"], refused
@@ -2366,26 +2369,30 @@ async def run_protocol(identity: str) -> None:
         # A Terminal's optional argument is only a label; it never selects a named shell.
         opened = await ask(browser, {"type": "open", "id": 5, "board_id": access_board["id"], "key": "terminal:"})
         build_link = PROVIDER["signed"][-1]
-        assert build_link["port"] == 22222 and 5300 <= build_link["seconds"] <= 5400, build_link
-        assert opened["url"] == f"https://22222-{build_link['token']}.preview.test", opened
+        assert build_link["port"] == 7681 and 5300 <= build_link["seconds"] <= 5400, build_link
+        assert opened["url"] == f"https://7681-{build_link['token']}.preview.test", opened
         # No credential reaches the Orchestrator.
         context = json.dumps([payload["input"] for _, payload in OrchestratorMock.requests])
         for secret in (app_link["token"], projector_link["token"], projector_terminal["token"], ssh_access["token"], build_link["token"], terminal_link["token"], terminal_reopened["token"], "preview.test"):
             assert secret not in context, secret
         # Revoking ends every live grant on the Display at once; the boards stay, marked revoked.
+        ended_before = takeovers_ended(7681)
         await mocks.send_live(dtmf("B"))
         revoked_board = (await recv_type(browser, "board", 15))["board"]
         assert revoked_board["id"] == access_board["id"] and all(grant.get("revoked") for grant in revoked_board["access"].values()), revoked_board
         await recv_type(mirror, "board", 15)
         await wait_for(outputs_back("kB-revoke", "kB-state"), 15)
-        assert OrchestratorMock.tool_output("kB-revoke") == {"ok": True, "display": "main", "grants_revoked": 6}, OrchestratorMock.tool_output("kB-revoke")
+        revoke_result = OrchestratorMock.tool_output("kB-revoke")
+        assert "cannot be revoked" in revoke_result.pop("ssh_warning"), revoke_result
+        assert revoke_result == {"ok": True, "display": "main", "grants_revoked": 6}, revoke_result
         displays = {item["name"]: item for item in OrchestratorMock.tool_output("kB-state")["displays"]}
         assert displays["main"]["access"] == [] and len(displays["projector"]["access"]) == 2, displays
-        assert (5173, app_link["token"]) in PROVIDER["expired"], PROVIDER["expired"]
-        assert (5173, projector_link["token"]) not in PROVIDER["expired"], "another Display's grant stands"
-        assert (22222, projector_terminal["token"]) not in PROVIDER["expired"], "another Display's terminal grant stands"
-        assert f"/api/sandbox/mock-sandbox-1/ssh-access?token={ssh_access['token']}" in DaytonaMock.deleted, DaytonaMock.deleted
-        assert (22222, build_link["token"]) in PROVIDER["expired"], "revoke_access expires terminal links too"
+        assert revoked(app_link) and revoked(build_link), PROVIDER
+        assert takeovers_ended(7681) > ended_before, "revoke_access closes terminal pages too"
+        # Revocation is sandbox-wide, so the projector's links went too: it is still granted, and opens another.
+        opened = await ask(slides, {"type": "open", "id": 3, "board_id": projector_board["id"], "key": "terminal:"})
+        projector_terminal = PROVIDER["signed"][-1]
+        assert not revoked(projector_terminal) and opened["url"] == f"https://7681-{projector_terminal['token']}.preview.test", opened
         refused = await ask(mirror, {"type": "open", "id": 7, "board_id": access_board["id"], "key": "terminal:"})
         assert refused["type"] == "error" and "revoked" in refused["error"], refused
         refused = await ask(mirror, {"type": "open", "id": 6, "board_id": access_board["id"], "key": "preview:5173"})
@@ -2396,14 +2403,14 @@ async def run_protocol(identity: str) -> None:
         assert status == 400 and "revoked" in refused["error"], (status, refused)
         assert not any(path.endswith("/late.txt") for path in UPLOADED)
         # Unpairing a Display ends it: its browsers, boards, and grants.
+        ended_before = takeovers_ended(7681)
         await mocks.send_live(transcript("input", "Unpair the projector.", 106000, 107000))
         await mocks.send_live(delegation("del-wb-end2", 107050))
         await recv_type(slides, "unpaired", 15)
         await wait_for(outputs_back("we-unpair", "we-state"), 15)
         assert OrchestratorMock.tool_output("we-unpair") == {"ok": True, "display": "projector", "browsers_unpaired": 1}
         assert [item["name"] for item in OrchestratorMock.tool_output("we-state")["displays"]] == ["main"]
-        assert (5173, projector_link["token"]) in PROVIDER["expired"], "an ended Display's grants are revoked"
-        assert (22222, projector_terminal["token"]) in PROVIDER["expired"], "an ended Display's terminal links are revoked"
+        assert revoked(projector_terminal) and takeovers_ended(7681) > ended_before, "an ended Display's terminal links and pages end"
         await wait_for(lambda: heard('browser_disconnected: {"display":"projector"}'), 10)
         await slides.close()
         assert (await asyncio.to_thread(file, "chart.png", slide["board_id"], slides_token, **{"as": "image"}))[0] == 401
@@ -3439,9 +3446,8 @@ def main() -> int:
     DaytonaMock.preview_reads = 0
     DaytonaMock.executed = []
     DaytonaMock.execute_hooks = [upload_destination, sandbox_toolbox]
-    DaytonaMock.get_hooks = [sandbox_files, provider_gets]
+    DaytonaMock.get_hooks = [sandbox_files]
     DaytonaMock.post_hooks = [provider_posts, upload_posts]
-    DaytonaMock.delete_hooks = [provider_deletes]
     daytona = ThreadingHTTPServer(("127.0.0.1", DAYTONA_MOCK_PORT), DaytonaMock)
     thread = threading.Thread(target=daytona.serve_forever, daemon=True)
     thread.start()

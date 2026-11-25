@@ -40,14 +40,16 @@ Keys page (monthly spend per key) say what costs what (issue #57):
 |---|---|---|
 | `dogwalk-voice-frontend` | Worker secret `OPENAI_API_KEY` | GPT-Live accept, sideband, hangup |
 | `dogwalk-orchestrator` | Worker secret `ORCHESTRATOR_API_KEY` | Session Orchestrator, Memory writer, next-call greeting |
-| `dogwalk-sandbox-agents` | org Daytona Secret `dogwalk-openai` | OpenCode in every Sandbox |
+| `dogwalk-sandbox-agents` | Daytona project secret `DOGWALK_OPENAI_API_KEY` | OpenCode in every Sandbox |
 | `dogwalk-dev-laptop` | `OPENAI_API_KEY` in the repository-root `.env` | `delegation_probe.py`, `orchestrator_spike.py`, voice research |
 
 Both Worker secrets are required: the Orchestrator never falls back to the Voice Frontend's key.
-To rotate the Sandbox key, update the secret's value in place (Daytona SDK
-`daytona.secret.update(id, UpdateSecretParams(value=...))`); rotated values reach running
-Sandboxes' outbound requests within seconds, with no restart. Laptop copies of the new keys
-live in `~/.tokens/dogwalk-openai/` (mode 0600, not in the repository).
+To rotate the Sandbox key, write the secret again with its allowed host (Daytona SDK
+`daytona.v2.secrets.set("DOGWALK_OPENAI_API_KEY", value, allowed_domains=["api.openai.com"])`).
+Daytona secrets belong to the whole project, which other work shares, and a write to an
+existing name replaces it without asking: that is why this one is not `OPENAI_API_KEY`.
+Laptop copies of the new keys live in `~/.tokens/dogwalk-openai/` (mode 0600, not in the
+repository).
 
 The Dogwalk project has a hard monthly spend limit of $80 (Platform: Project Settings, Limits),
 below the organization's limit, so Dogwalk running out cannot stop other projects; requests then
@@ -75,50 +77,46 @@ Set `OPENAI_PROJECT_ID` in `wrangler.toml`. In the matching OpenAI project,
 subscribe `https://dogwalk.tools/openai/live` to `live.transport.incoming` and
 store its `whsec_...` signing secret as `OPENAI_WEBHOOK_SECRET`.
 
-`DAYTONA_SNAPSHOT` is currently `dogwalk-acp-20261108-v2` (see `wrangler.toml`). It contains the ACP
-Gateway, OpenCode `2.2.5`, tmux and Daytona's computer-use desktop (Xvfb, xfce4,
-x11vnc, noVNC, Chromium with `--no-sandbox`) for Human Takeover, passwordless sandbox-local `sudo`, and network
-diagnostic utilities. The OpenCode config selects `openai/gpt-6.1-sol`. `build_sandbox_snapshot.py` now
-builds `dogwalk-agent-20261112-v1` instead: OpenCode `2.2.7` and the Agent Gateway, which
-supervises the shared OpenCode service and serves its native API rather than ACP. The
-Worker on this branch speaks only that API, so adopting it is an ordered cut-over (below).
+`DAYTONA_IMAGE` names the Daytona image Sandboxes boot from, in `DAYTONA_REGION` (the one
+region that holds it). `build_sandbox_image.py` builds it: OpenCode `2.2.7`, the Agent
+Gateway as entrypoint, tmux, a desktop (xfce4, noVNC, Chromium) and ttyd for Human Takeover,
+passwordless sandbox-local `sudo`, and network diagnostic utilities. The OpenCode config
+selects `openai/gpt-6.1-sol`. Every Sandbox is a virtual machine, so Chromium keeps its own
+sandbox.
 
 From the repository root, build a new immutable version rather than replacing
-this snapshot in place:
+this image in place, then verify it before changing `wrangler.toml` and deploying:
 
 ```bash
 set -a; source ~/.tokens/daytona-api; set +a
-uv run --script build_sandbox_snapshot.py --name dogwalk-agent-YYYYMMDD-vN
+uv run --script build_sandbox_image.py --name dogwalk-agent-YYYYMMDD-vN
 ```
 
-Verify the new snapshot before changing `wrangler.toml` and deploying the Worker.
+`src/daytona.ts` is the only code that knows the provider's HTTP shapes, and its header
+lists what was measured where the published docs differ. Two choices there matter most.
+Sandboxes are created `persistent`, which Daytona's Linux API accepts and its docs do not
+describe: treat it as provider behavior that could change. And the lifecycle policy is
+always explicit, because a persistent Sandbox otherwise pauses after 300 seconds.
 
-The Worker submits this mapping at sandbox creation:
-
-```json
-{
-  "snapshot": "configured-snapshot-name",
-  "secrets": [{ "OPENAI_API_KEY": "dogwalk-openai" }]
-}
-```
-
-`dogwalk-openai` is an org Daytona Secret allowlisted to `api.openai.com`,
-named by `DAYTONA_AGENT_SECRET`. The Worker sends only its name. Daytona's
-egress proxy substitutes the value into HTTPS headers, so the Sandbox holds a
-`dtn_secret_` placeholder; see `../SANDBOX_AGENT_GATEWAY.md`. A Sandbox created
-before the secret existed must be replaced (or restarted after
-`update_secrets`) to receive it.
+`DAYTONA_AGENT_SECRET` names the project secret attached at creation, allowlisted to
+`api.openai.com`. Daytona names the variable after the secret; the gateway (for the Agent)
+and `/etc/profile.d/dogwalk.sh` (for shells) alias it to `OPENAI_API_KEY`. The Worker sends
+only the name. Daytona's egress proxy substitutes the value into HTTPS headers, so the
+Sandbox holds a `dtns_` placeholder; see `../SANDBOX_AGENT_GATEWAY.md`.
 
 If a sandbox is deleted directly in Daytona, D1 temporarily retains a stale
-provider ID. On the next registered call, a Daytona 404 atomically clears that
+provider ID. Daytona keeps answering for a deleted Sandbox, with status `deleted`,
+which the adapter reads as 404. On the next registered call that atomically clears the
 reference and starts idempotent replacement provisioning. The Registration is
-retained; the deleted sandbox's files and ACP Session history are not.
+retained; the deleted sandbox's files and Agent-held session history are not.
 
-Normal user sandboxes are not disposable. They auto-stop after 15 idle minutes,
-auto-archive after 7 days, and never auto-delete in Daytona. A call starts or
-restores that same Sandbox, preserving its filesystem and Agent-held session
-history until Dogwalk reaps it (below). Replacement otherwise occurs only after
-explicit provider-side deletion or the caller's confirmed recovery replacement.
+Normal user sandboxes are not disposable. They pause after 15 idle minutes (an open
+Agent event WebSocket counts as activity), keeping memory as well as disk, and are never
+deleted by Daytona. Daytona also limits a run to 24 hours, then pauses; each call restarts
+that limit. Nothing but a call wakes one (`wake_on_request` is off). A call resumes that same
+Sandbox, usually within a few seconds, with the Agent's processes, files, and session
+history, until Dogwalk reaps it (below). Replacement otherwise occurs only after explicit
+provider-side deletion or the caller's confirmed recovery replacement.
 
 ### Sandbox Reaping
 
@@ -137,8 +135,7 @@ inserts the Sandbox into `sandbox_deletions` and clears the assignment
 (`provider_id` NULL, state `reaped`), auditing `sandbox.reap.started`. The old
 Sandbox is out of service from that moment: the User's next call provisions a
 fresh one through the ordinary path, and discovery by label skips every
-provider ID in `sandbox_deletions` (and anything Daytona lists as destroying or
-destroyed). A call never deletes anything.
+provider ID in `sandbox_deletions`. A call never deletes anything.
 
 Only the scheduled pass sends Daytona DELETE. In the same pass, and every later
 one, it works through due `sandbox_deletions` rows (20 per pass, oldest due
@@ -147,7 +144,7 @@ first). On success or 404 it sets `deleted_at` and audits `sandbox.reaped` once
 `attempts`, and backs off (`next_attempt_at` 1, 2, 4, 8, then 16 days on). At
 the third failure it also audits `sandbox.reap.stuck` for operator attention,
 and keeps retrying. A stuck Sandbox never returns to service. Rows stay after
-deletion: as tombstones, because Daytona's label listing is eventually
+deletion: as tombstones, because Daytona's label search is eventually
 consistent, and as the notice the User's next Opening consumes (`noticed_at`),
 which says the sandbox was cleared exactly once, independent of when the
 deletion finished. The VoiceSession drops the old projection when the fresh
@@ -281,77 +278,28 @@ export CLOUDFLARE_ACCOUNT_ID=890753ccd6f0bbbfbe2c030cc44f6a87
 export CLOUDFLARE_API_TOKEN=$(python3 -c 'import json,pathlib;print(json.loads((pathlib.Path.home()/"Library/Preferences/cloudflare/config/personal.json").read_text())["oauth_token"])')
 ```
 
-A deploy is refused unless `DAYTONA_SNAPSHOT` names a `dogwalk-agent-*` snapshot and
-every managed Sandbox either was created from one or carries the
-`dogwalk.dev/agent-api=native` label that an in-place migration sets; an ACP-era
-Sandbox would fail every call. `--allow-legacy-sandboxes` overrides the second check
-(it still warns), for example when the operator's Sandbox is about to be deleted anyway.
+A deploy is refused unless `DAYTONA_IMAGE` is a ready image and `DAYTONA_AGENT_SECRET`
+exists: without either, no new Sandbox could be created.
 
-### Cutting Over to the Native API
+### Cutting Over to Daytona v2
 
-The Worker talks to OpenCode's native API through the Agent Gateway's `/events` and
-`/api/*`. An ACP-era Sandbox (`dogwalk-acp-*`) boots `sandbox_acp_gateway.py` with
-`opencode acp` from its image entrypoint and serves neither, so every Sandbox must move
-before the Worker does. Run these in order, from the repository root unless noted, with
-no call in progress. From step 2 to step 5 calls fail in both directions (the old Worker
-cannot talk to a migrated Sandbox either), so do steps 2–5 in one sitting:
+Daytona v2 is a separate platform: nothing on v0 is migrated, and every User's next call
+gets a fresh Sandbox. Their Memory, Registration, and Voice Donations live in Cloudflare
+and stay. With no call in progress:
 
-1. Build and verify the snapshot. The build runs the gateway self-test and starts
-   `opencode serve --service` once to check `/api/info` reports `2.2.7`:
+1. Build the image (above) and store the secret (OpenAI Keys and Budget).
+2. Deploy: `uv run --script deploy.py`. `DAYTONA_API_KEY` is unchanged: Daytona syncs it.
+3. Immediately apply the migration that forgets v0 assignments, so a call in between at
+   worst finds its Sandbox missing and provisions a fresh one:
 
    ```bash
-   set -a; source ~/.tokens/daytona-api; set +a
-   uv run --script build_sandbox_snapshot.py --name dogwalk-agent-20261112-v1
+   (cd cf_worker && npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-25-daytona-v2.sql)
    ```
 
-2. Migrate each existing Sandbox in place. A dry run first, then apply:
-
-   ```bash
-   uv run --script deploy.py --no-deploy --patch-sandboxes          # lists what would change
-   uv run --script deploy.py --no-deploy --patch-sandboxes --apply
-   ```
-
-   Since the image entrypoint cannot change, the patch uploads OpenCode `2.2.7` (fetched
-   on the laptop, so the Sandbox needs no egress to GitHub) and renames it over
-   `/usr/local/bin/opencode`, writes the Agent Gateway and the other snapshot files,
-   and replaces `/opt/dogwalk/sandbox_acp_gateway.py` with a shim that execs the Agent
-   Gateway, mapping `opencode acp` to `opencode serve --service`. It checks the gateway's
-   self-test, the new OpenCode serving `/api/info` under a scratch HOME (the live
-   database is left to the new version's first real start), and the shim; any failure
-   restores every file and the old binary from the `.dogwalk-backup-<stamp>` copies.
-   Success labels the Sandbox `dogwalk.dev/agent-api=native`, and the refresh stops it
-   so the next start boots the shim. The Workspace, `~/.local/share/opencode` (session
-   history), Terminal state, and the Sandbox's Daytona identity all survive.
-   It keeps the old image's other packages, which matched this snapshot at the cut-over.
-
-   Recreation is the fallback when a migration fails twice: delete the Sandbox in
-   Daytona and let the next call provision one from the new snapshot. That loses its
-   Workspace files and all Agent-held session history; the User's Memory, Registration,
-   and Voice Donations live in Cloudflare and stay.
-
-3. Apply the D1 migration to remote D1, immediately before the deploy. It narrows
-   `call_activity.source` to exclude `acp`, which the old Worker still writes, so do not
-   leave a gap where the old Worker serves calls:
-
-   ```bash
-   (cd cf_worker && npx wrangler d1 execute dogwalk --remote --file migrations/2026-11-17-agent-activity.sql)
-   ```
-
-4. Set `DAYTONA_SNAPSHOT = "dogwalk-agent-20261112-v1"` in `wrangler.toml`, so Sandboxes
-   created from now on start from the new snapshot.
-
-5. Deploy: `uv run --script deploy.py`. It refuses if step 2 or 4 was skipped, then
-   refreshes the Durable Object.
-
-6. Verify with a call: the Opening, `agent_connected` in the call timeline, a short
-   Prompt Turn that reads a Workspace file, and a session from before the cut-over
-   still listed. `uv run --script playtest.py` shows `agent.*` activity for that call.
-   In the Sandbox, `curl -s localhost:8765/healthz` should report `"service": "resolved"`
-   with a `child_pid`.
-
-To roll back before step 3, restore the backups (`cp -p` each `.dogwalk-backup-<stamp>`
-file over its original, `sudo` for the binary), remove the label, and stop the Sandbox.
-After step 3, the old Worker also needs the migration reversed, which has no script.
+4. Verify with a call: the Opening, `agent_connected` in the call timeline, a short Prompt
+   Turn, then a Terminal and a Desktop on a paired browser.
+5. Delete the old Sandboxes, snapshots, and the `dogwalk-openai` secret at
+   <https://app.daytona.io> when nobody needs them. This Worker cannot reach them.
 
 ## Invite Codes
 
@@ -774,7 +722,7 @@ reference is checkable). It
 gives wrangler a private dev registry (`WRANGLER_REGISTRY_PATH`), so another
 worktree's `wrangler dev` never binds to the mock.
 
-It checks registration, retry limits, the unregistered greeting, snapshot and
+It checks registration, retry limits, the unregistered greeting, image and
 credential-free configuration, sandbox creation, immediate dialing while a
 Sandbox is provisioning or stopped (with a start request), recovery for a broken
 Sandbox, deletion recovery, the prewarm reaching the Durable Object, status
@@ -821,15 +769,15 @@ signal or exit, closes each `/events` WebSocket with 1011 and the reason as comp
 `{reason, signal, exit_status, limit_bytes}`, and restarts the service with backoff
 (`../SANDBOX_AGENT_GATEWAY.md`); the Durable Object puts it in `failure`, `turn_failed`, and
 `agent_unavailable` (`agent_termination`, `failed_turns`). The gateway is baked
-into the snapshot at `/opt/dogwalk/sandbox_agent_gateway.py`, so a change reaches
-a Sandbox through a new snapshot (new Sandboxes only) or a back-patch:
-`uv run --script deploy.py --no-deploy --patch-sandboxes` lists which snapshot-owned
-files (`SNAPSHOT_FILES` in `build_sandbox_snapshot.py`: gateway, OpenCode config,
+into the image at `/opt/dogwalk/sandbox_agent_gateway.py`, so a change reaches
+a Sandbox through a new image (new Sandboxes only) or a back-patch:
+`uv run --script deploy.py --no-deploy --patch-sandboxes` lists which image-owned
+files (`IMAGE_FILES` in `build_sandbox_image.py`: gateway, OpenCode config,
 rules, plugin) differ in each managed Sandbox, and `--apply` writes them with
 backups, self-tests a patched gateway inside the Sandbox (restoring everything on
 failure), and stops the Sandbox so the next call boots them. It also installs
-OpenCode at the snapshot's version when a Sandbox has another (see Cutting Over to the
-Native API); other packages still need a new snapshot. On reconnect, Managed Sessions are restored with
+OpenCode at the image's version when a Sandbox has another; other packages still need a
+new image. On reconnect, Managed Sessions are restored with
 `session/resume` when the Agent advertises `sessionCapabilities.resume` in
 `initialize`, otherwise `session/load`, always from the session's recorded
 directory (OpenCode rejects a reload from any other). A record without a
@@ -1063,7 +1011,7 @@ Element) and `read` (a Document's text). Files reach it only through boards:
 sandboxed, `nosniff`, `private, no-store`) serves a path only if a board on the
 requester's Display names it (Image with `&as=image`, Document, or Download with
 `&download=1` and a live grant), and only while Daytona reports the Sandbox
-`started` (checked without waking it, cached 15 s); otherwise `503 {asleep:
+`running` (checked without waking it, cached 15 s); otherwise `503 {asleep:
 true}`. Reads resolve symlinks in the Sandbox (`realpath`) and refuse anything
 that leads outside `/home/daytona`. `as=image` reads at most 1.5 MB, typed by
 sniffing the bytes (a name that disagrees is refused), and serves SVG with
@@ -1182,19 +1130,20 @@ while a call is live grants it on that board's Display for `access_minutes`
 on a board wakes it), the Durable Object mints a credential for that browser and
 records it under `<board id>:<key>`:
 
-- Terminal: a Daytona signed preview URL for port 22222, opening Daytona's own
-  web terminal without a Daytona login. Each open gets a fresh link and shell;
-  the optional argument is just a label, not a named tmux session. For persistent
-  work, the User runs tmux and reattaches after reopening. Dogwalk hosts no
-  terminal emulator, assets, PTY relay, or terminal-specific credentials.
-- Desktop: starts Daytona computer use and returns a signed noVNC URL for port
-  6080 (`vnc.html?autoconnect=1&resize=scale&path=websockify`).
-- Preview: a Daytona signed preview URL for the port (never 8765, the Agent
-  Gateway). Terminal, Desktop and Preview links are bounded by the grant's
-  remaining whole seconds and are kept in `signed_links`. The browser receives
-  only that port's signed link, never the API key or Sandbox-wide preview token.
-- SSH Access: `POST /sandbox/{id}/ssh-access?expiresInMinutes=` within the
-  grant; the page shows the returned `sshCommand`, kept in `ssh_tokens`.
+- Terminal: starts the image's ttyd on port 7681 (Daytona has no shareable web terminal)
+  and returns a Daytona signed preview URL for it. Each open gets a fresh link and login
+  shell; the optional argument is just a label, not a named tmux session. For persistent
+  work, the User runs tmux and reattaches after reopening. The Worker relays nothing.
+- Desktop: starts Daytona computer use and the image's noVNC on port 6080, and returns a
+  signed URL (`vnc.html?autoconnect=1&resize=scale&path=websockify`).
+- Preview: a Daytona signed preview URL for the port (never 8765, the Agent Gateway; the
+  two takeover ports; or Daytona's own 2280, 2281, and 22220). The app must listen on all
+  interfaces: the proxy does not reach loopback. Terminal, Desktop and Preview links are
+  bounded by the grant's remaining whole seconds and recorded in `signed_links` (grant, port,
+  and expiry, not the token). The browser receives only that port's signed link, never the
+  API key or Sandbox-wide preview token.
+- SSH Access: a Sandbox access token for SSH alone, at most five minutes, shown as a
+  command. Daytona cannot revoke one, so a grant's length comes from opening it again.
 - Download: no credential; `/pair/file?...&download=1` checks the grant.
 - Upload: no credential; `/pair/upload` checks the grant on
   each file, for its whole lifetime (after the call too) while the Sandbox runs.
@@ -1212,23 +1161,24 @@ records it under `<board id>:<key>`:
   counts as an open Access Element, so a stale page does not reload itself.
 
 `revoke_access`, a Display ending, a board evicted from its Display's five, or
-Sandbox replacement revoke the grants' credentials: signed links are expired,
-SSH tokens are deleted, and computer use stops once no desktop link remains.
-Provider sockets close on a grace period, not synchronously with revocation or
-expiry. In the isolated-browser PoC on daemon 0.232.2 (2026-11-14), revocation
-blocked new requests with HTTP 401 and closed the live terminal after 3.7 seconds;
-a 60-second link's live connection closed 108 seconds after minting (48 seconds
-after expiry), and a fresh request then returned 401. These observations are not
-a provider SLA. An open Access Element is not yet made to keep the Sandbox awake
-beyond the traffic it carries.
+Sandbox replacement end what the grants opened. Daytona revokes signed links only for a
+whole Sandbox, and leaves sockets already open connected (measured 2026-11-25: a terminal
+stayed live past 50 seconds, and unexposing the port did not close it either). So the
+Worker does both: it revokes every link, which stops new opens, and ends the ttyd or noVNC
+server inside the Sandbox, which closes live pages within a fraction of a second. Other
+Displays' links end with them; their grants stand, and they open another. When the last
+link to a Terminal or Desktop expires, the alarm ends its server the same way. Ending a
+server in a paused Sandbox waits until it wakes. Two things are not cut: an app already open
+in a Preview keeps its socket, and an SSH session lasts until it disconnects or the Sandbox
+restarts. `revoke_access` returns `ssh_warning` when that may apply. An open Access Element
+is not yet made to keep the Sandbox awake beyond the traffic it carries.
 
 Mint completion rechecks the stored grant, browser membership, and Sandbox
 Assignment in the same transaction that registers the credential. A grant that
 ended while Daytona was minting gets no returned link; that credential is revoked
 instead. Failed provider revocations remain in the durable `access_revocations`
 outbox (including their Sandbox ID, so replacement cannot misdirect a retry).
-The Durable Object alarm retries them every 30 seconds until success or natural
-expiry; `revoke_access` reports incomplete provider cleanup instead of confirming
+The Durable Object alarm retries them every 30 seconds until success or the Sandbox is gone; `revoke_access` reports incomplete provider cleanup instead of confirming
 that all access has ended. The same alarm serves call keepalive and the earliest
 paired-browser expiry, so an unattended Display ends and revokes its links even
 when no page sends another message. Browser activity recomputes the deadline
@@ -1255,11 +1205,9 @@ commit, and the one-time state back-patch.
 eviction, explicit revocation, unpairing, and keeping credentials out of the
 Orchestrator context.
 
-The desktop needs the snapshot's desktop packages (Xvfb, xfce4, x11vnc, noVNC,
-Chromium with `--no-sandbox`); a Sandbox from an older snapshot answers
-"the desktop is not installed on this sandbox yet" until it is back-patched.
-At 1 GiB the desktop with Chromium leaves little room for an Agent; snapshots from
-`dogwalk-acp-20261108-v2` on default to 4 GiB.
+Daytona's runtime brings the display and VNC server (1280x720); the image brings the rest
+of the desktop (xfce4, noVNC, Chromium). A Sandbox has 2 vCPU, up to 4 GiB of memory, and a
+10 GB disk: at 1 GiB the desktop with Chromium leaves little room for an Agent.
 
 ## Diagnostics
 

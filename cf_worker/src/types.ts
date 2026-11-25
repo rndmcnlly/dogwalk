@@ -11,7 +11,9 @@ export interface Env {
   OPENAI_API_KEY: string;
   // Mirrors the OpenAI Dogwalk project's hard monthly limit, for the spend ledger (spend.ts).
   DOGWALK_MONTHLY_BUDGET_USD?: string;
-  DAYTONA_SNAPSHOT: string;
+  // The image Sandboxes boot from and the region holding it.
+  DAYTONA_IMAGE: string;
+  DAYTONA_REGION: string;
   DAYTONA_AGENT_SECRET?: string;
   DAYTONA_API_BASE?: string;
   // Sandbox reaping (index.ts, reapSandboxes): days without a Voice Call, and dry-run or delete.

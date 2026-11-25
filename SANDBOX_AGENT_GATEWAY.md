@@ -1,12 +1,8 @@
 # Sandbox Agent Gateway
 
-Status: replaces the ACP Gateway (issue #28); not yet in production.
-
-`build_sandbox_snapshot.py` builds `dogwalk-agent-20261112-v1` with this gateway and
-OpenCode `2.2.7`. Production still runs `dogwalk-acp-20261108-v2` (the ACP Gateway)
-through `DAYTONA_SNAPSHOT` in `cf_worker/wrangler.toml`, and adopts the new snapshot
-only once the Worker speaks OpenCode's native API. The ACP Gateway's last version is
-`sandbox_acp_gateway.py` in Git history.
+`build_sandbox_image.py` builds this gateway and OpenCode `2.2.7` into the image that
+`DAYTONA_IMAGE` in `cf_worker/wrangler.toml` names. The ACP Gateway it replaced (issue #28)
+is `sandbox_acp_gateway.py` in Git history.
 
 `sandbox_agent_gateway.py` keeps the Sandbox's shared OpenCode service running and
 exposes its native HTTP API to Dogwalk. It is a supervisor and authenticated proxy
@@ -118,14 +114,13 @@ A plain `opencode` started in the Sandbox, for example in a Takeover Terminal's 
 finds the shared service through the same state file, checks it, and attaches to it:
 the TUI and Dogwalk see the same sessions and the same live events, and either can
 prompt. Nothing needs flags or a URL. This works because the gateway and the
-Takeover Terminal run as the same user with the same `HOME`: the snapshot's image
-sets `USER daytona` and `HOME=/home/daytona`, the gateway is the image entrypoint, and
-Daytona's toolbox starts the PTY as the image user (inferred from the image and from
-Sandbox files being `daytona`-owned; not yet checked with `id` in a Takeover Terminal).
+Takeover Terminal run as the same user with the same `HOME`: the image sets `USER daytona`
+and `HOME=/home/daytona`, the gateway is the image entrypoint, and Daytona's toolbox starts
+commands (the Terminal's ttyd among them) as the image user (checked 2026-11-25).
 Neither sets `XDG_STATE_HOME`.
 
 A TUI whose OpenCode version differs from the service's kills and replaces it. The
-snapshot ships one binary (`/usr/local/bin/opencode`), so this happens only if someone
+image ships one binary (`/usr/local/bin/opencode`), so this happens only if someone
 installs another (an `npm i -g opencode-ai`, a self-update). The replaced child then
 shows up as a `killed` Agent Termination and the gateway adopts the new service, but
 the replacement runs whatever version that TUI was.
@@ -149,11 +144,11 @@ are `DOGWALK_AGENT_GATEWAY_HOST`, `DOGWALK_AGENT_GATEWAY_PORT`, `DOGWALK_WORKSPA
 ## Daytona
 
 Expose port 8765 only through a non-public Daytona standard preview URL. The control
-plane sends the fresh `x-daytona-preview-token` returned after each Sandbox start and
+plane sends the port's `x-daytona-preview-token`, which outlives pauses and restarts, and
 `X-Daytona-Skip-Preview-Warning: true`; the gateway strips both before forwarding. Do
 not use a signed browser URL for the gateway.
 
-The snapshot installs OpenCode `2.2.7` from its GitHub release into `/usr/local/bin`.
+The image installs OpenCode `2.2.7` from its GitHub release into `/usr/local/bin`.
 OpenCode 1.x through `1.18.4` served the 2026-07 deployments and `2.2.5` the ACP
 snapshots; 2.x prints `opencode v2.2.7` for `--version`, which the build check accounts
 for. The build also starts `opencode serve --service` as `daytona`, checks `/api/info`
@@ -161,36 +156,26 @@ with the registered password, and stops it; it then deletes the state file and t
 saved password in `~/.config/opencode/service.json` that check created, so each
 Sandbox generates its own.
 
-A Sandbox from an ACP-era snapshot (`dogwalk-acp-*`) still starts
-`/opt/dogwalk/sandbox_acp_gateway.py ... --agent-command "/usr/local/bin/opencode acp"`
-from its image entrypoint, which cannot change. `deploy.py --patch-sandboxes --apply`
-migrates it in place: OpenCode `2.2.7`, this gateway, and a shim at the old path that
-execs this gateway with `opencode serve --service` (`cf_worker/README.md`, Cutting
-Over to the Native API).
-
 OpenCode keeps temporary tool output in `$TMPDIR/opencode` (`/tmp/opencode`;
 `opencode debug paths` shows it) and creates it on first run. The build's
-`opencode --version` check runs as root, so snapshots through
-`dogwalk-acp-20261108-v1` ship a root-owned `/tmp/opencode` the `daytona` user
-cannot write; on 2026-11-08 an Agent script lost a paid transcription response
-to that. The build now deletes it before the image is sealed. The existing
-Sandbox was fixed in place on 2026-11-08 (`sudo chown daytona:daytona
-/tmp/opencode`); a fresh Sandbox needs the next snapshot or the same fix.
+`opencode --version` check runs as root, which would leave a root-owned `/tmp/opencode` the
+`daytona` user cannot write (on 2026-11-08 an Agent script lost a paid transcription
+response to that), so the build deletes it before the image is sealed.
 
 ### Inference
 
 OpenCode uses `openai/gpt-6.1-sol`, with `openai/gpt-6-luna` as its title model,
-through the built-in OpenAI provider. Sandboxes receive `OPENAI_API_KEY` from the
-org Daytona Secret `dogwalk-openai`, allowlisted to `api.openai.com`. Daytona's
+through the built-in OpenAI provider. Sandboxes receive the
+Daytona project secret `DOGWALK_OPENAI_API_KEY`, allowlisted to `api.openai.com`; the
+gateway gives it to OpenCode as `OPENAI_API_KEY` (`agent_environment`). Daytona's
 egress proxy substitutes the real key into HTTPS request headers, so processes in
-the Sandbox, including an Agent with `sudo`, see only a `dtn_secret_` placeholder.
+the Sandbox, including an Agent with `sudo`, see only a `dtns_` placeholder.
 The Agent can still *use* the key against the allowlisted host, so the secret holds
 `dogwalk-sandbox-agents`, a key of its own in the OpenAI Dogwalk project, whose hard
 monthly limit bounds what it can spend (`cf_worker/README.md`, OpenAI Keys and Budget). Daytona already points
 `NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE` at its proxy CA, and OpenCode needed
-no TLS changes. Verified 2026-11-07: a fresh Sandbox from `dogwalk-acp-20261107-v2`
-completed a real Prompt Turn through the ACP Gateway. The shared service inherits the
-gateway's environment, so it receives the same placeholder.
+no TLS changes. Checked 2026-11-25 in a v2 Sandbox: the placeholder reaches OpenCode's
+environment under its usual name, and a request to `api.openai.com` carrying it is accepted.
 
 ### Web search
 
@@ -220,7 +205,7 @@ a few KB: size, `file(1)` type, a 64-byte hex dump with ASCII, and commands to c
 it (`pdftotext`, `pdftoppm`, `ffmpeg` downscaling, `unzip -l`, `tar tf`, `sqlite3`,
 `ffprobe`, `xxd`), each naming its apt package. The guard reads the path itself, so it
 does not consult OpenCode's external-directory permission; the Agent already has shell
-and sudo. The snapshot build adds `file poppler-utils unzip sqlite3 xxd`. The existing
+and sudo. The image build adds `file poppler-utils unzip sqlite3 xxd`. The existing
 Sandbox received the plugin and those packages (except `xxd`, already present) in
 place on 2026-11-08; an `opencode run` there read the 8.3 MiB PDF as a 3.2 KB event, a
 small PNG as an image, and a text file unchanged. Whether 2.2.7's `read` behaves the
@@ -231,26 +216,21 @@ that model left the free lineup.
 
 If a Sandbox is manually deleted, the next call invalidates its stale provider
 ID, searches once more by identity label, and provisions a fresh Sandbox from
-the configured snapshot. The phone Registration remains valid, but deletion is
+the configured image. The phone Registration remains valid, but deletion is
 destructive to the old Workspace and the Agent-held session history.
 
 This is an operator-recovery path, not routine lifecycle. User sandboxes normally
-stop and archive in place, retaining their filesystem and identity indefinitely.
+pause in place, keeping memory, filesystem, and identity.
 
-The snapshot grants the isolated `daytona` user passwordless `sudo` and includes
+The image grants the isolated `daytona` user passwordless `sudo` and includes
 `ping`, DNS, and socket diagnostics.
 
-Since `dogwalk-acp-20261108-v1` it also includes `tmux` and the X11, xfce4,
-x11vnc, and noVNC packages that Daytona's computer-use plugin requires (without
-them its toolbox endpoints answer 503), plus Debian's Chromium.
-`/etc/chromium.d/dogwalk` adds `--no-sandbox --test-type --disable-dev-shm-usage`,
-which Chromium needs inside the container. `POST /computeruse/start` on the
-toolbox launches Xvfb, xfce4, x11vnc on 5901, and noVNC on 6080; the image sets
-`VNC_RESOLUTION=1280x800`, which Daytona reads only when a Sandbox is created.
-The packages add about 0.6 GB on disk. Snapshots from `-20261108-v2` on default to 2 vCPU,
-4 GiB memory, and a 10 GB disk: at 1 GiB a `pnpm install` was OOM-killed, and the desktop,
-ffmpeg, and ImageMagick need the room. Sandboxes created from `-20261107-v2` received the same packages and
-flags file in place, keeping their 1024x768 resolution.
+For Human Takeover it also includes `tmux`, ttyd (pinned by digest), xfce4, noVNC, and
+Debian's Chromium, which keeps its own sandbox because each Sandbox is a virtual machine.
+`POST /computeruse/start` on the toolbox launches Daytona's Xvfb, window manager, and x11vnc
+(port 5900); the Worker starts noVNC on 6080 and ttyd on 7681 only while a grant is open
+(`cf_worker/src/daytona.ts`). Sandboxes get 2 vCPU, up to 4 GiB memory, and a 10 GB disk: at
+1 GiB a `pnpm install` was OOM-killed, and the desktop, ffmpeg, and ImageMagick need the room.
 
 ## Verification
 
@@ -280,7 +260,8 @@ On 2026-11-12 the gateway also ran locally against a real OpenCode `2.2.7`
 (`opencode serve --service` with a temporary `HOME`): `/readyz` turned ready,
 `/api/info` answered through the proxy, `/events` delivered `server.connected`, and
 stopping the gateway stopped its child. The build's service check passed the same way.
-Nothing has yet run in a Daytona Sandbox.
+On 2026-11-25 it ran as the entrypoint of a Daytona v2 Sandbox: `/api/info` and `/events`
+answered through the preview proxy, and again after a pause and a restart.
 
 ## Deliberate Limits
 
@@ -301,5 +282,5 @@ Nothing has yet run in a Daytona Sandbox.
   the Sandbox this is no new exposure, since the same user can read `service.json`
   and talk to the service directly. The password itself never leaves the Sandbox.
 - The native API is a vendor surface (V1 to V2 broke it; `log` and `client-mcp` are
-  experimental), so the OpenCode pin in `build_sandbox_snapshot.py` moves only
+  experimental), so the OpenCode pin in `build_sandbox_image.py` moves only
   deliberately.

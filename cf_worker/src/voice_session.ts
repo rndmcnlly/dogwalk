@@ -20,6 +20,10 @@ import { childOf, formatTraceparent, newRootContext, parseTraceparent, spanField
 import {
   ACCESS_COMPONENTS, type AccessKind, type BoardElement, boardElements, checkRasterSize, UPLOAD_LIMITS, UPLOAD_ROOT, uploadClaimScript, uploadFileName, uploadFolder,
 } from "./board_images";
+import {
+  BROKEN_STATUSES, DAEMON_PORTS, DaytonaApiError, DESKTOP_PORT, execute, getSandbox, isTakeoverPort, previewUrl, restartSandbox,
+  revokeSignedPreviewUrls, signedPreviewUrl, sshCommand, startTakeoverServer, stopTakeoverServer, TERMINAL_PORT, toolboxOf, type Toolbox,
+} from "./daytona";
 import { hostSpeaker } from "./voice_verify";
 import { budgetClause, liveCost, recordSpend, responseUsage, spendSummary, type SpendComponent, type SpendSummary,
   tokenCost } from "./spend";
@@ -271,20 +275,24 @@ interface PairingAttempt {
 // Access Grant (DOMAIN.md): the authority behind an Access Element, created when a board
 // carrying it is drawn in a call, scoped to that board's Display and the element's target.
 // Opening one mints a bearer credential for that open, each bounded by the grant:
-// a Terminal, Desktop or Preview gets a provider-signed link; SSH Access a Daytona SSH token.
-// Each credential records its grant ("<board id>:<key>") so revocation finds it.
+// a Terminal, Desktop or Preview gets a provider-signed link, which records its grant
+// ("<board id>:<key>") so revocation finds it. SSH Access gets a token the provider cannot
+// revoke, so each lasts minutes rather than the grant's length.
 // An Upload mints nothing: its grant carries its limits and what it has received so far.
 interface AccessGrant {
   kind: AccessKind; target: string; expires_at: number; revoked?: true;
   upload?: { limits: typeof UPLOAD_LIMITS; files: number; bytes: number; failures: number };
 }
-interface SignedLink { token: string; grant: string; port: number; expiresAt: number }
-interface SshToken { token: string; grant: string; expiresAt: number }
-// Durable outbox: keep provider revocations across failures and Sandbox replacement.
-interface AccessRevocation { sandboxId: string; port: number | null; token: string; expiresAt: number; retryAt: number }
-interface RetiredAccess { sandboxId: string | null; grants: number; desktop: boolean; displays?: number; boards?: number }
-const TERMINAL_PORT = 22222;
-const DESKTOP_PORT = 6080;
+interface SignedLink { grant: string; port: number; expiresAt: number }
+interface SshToken { grant: string; expiresAt: number }
+// Durable outbox: what must still end at the provider, across failures and Sandbox replacement.
+// Links are refused until they expire anyway (linksUntil), and a takeover port's server is ended.
+interface AccessRevocation { id: string; sandboxId: string; port: number; linksUntil: number; retryAt: number }
+// sshUntil: when the last SSH token that retiring cannot revoke expires, 0 when there is none.
+interface RetiredAccess { sandboxId: string | null; grants: number; sshUntil: number; displays?: number; boards?: number }
+const SSH_TOKEN_SECONDS = 5 * 60;
+// A server in a sleeping Sandbox is frozen with it, so ending it can wait for the next wake.
+const ASLEEP_RETRY_MS = 6 * 3_600_000;
 const GRANT_DEFAULT_MINUTES = 60;
 const GRANT_MAX_MINUTES = 12 * 60;
 
@@ -631,7 +639,7 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     name: "revoke_access",
-    description: "Revoke every live Access Grant on a Display (terminal, desktop and preview links expire, SSH access is revoked). The boards stay, their elements marked revoked. Provider connections may take about a minute to close; do not promise instant disconnection.",
+    description: "Revoke every live Access Grant on a Display (terminal and desktop pages close, links stop opening). The boards stay, their elements marked revoked. Links end for the whole sandbox, so another display must open its own again. An app already open in a preview may stay connected, and a copied SSH command may work for up to five minutes more; an open SSH session lasts until it disconnects or the sandbox restarts. Pass on any ssh_warning.",
     parameters: {
       type: "object",
       properties: { display: { type: "string" } },
@@ -1066,19 +1074,16 @@ export class VoiceSession {
         await state.storage.delete(["board_assets", "browser_views", "browser_connected", "paired_browsers", "whiteboard_boards",
           "takeover_tickets", "takeover_tokens", "desktop_links"]);
       }
-      // One-time back-patch for provider-hosted terminals (2026-11-14; remove once deployed
-      // and every object has run it). Old Terminal elements must be redrawn: names no longer
-      // select tmux sessions. Other grants and browser pairings survive.
-      if (!await state.storage.get("daytona_terminal_migrated")) {
+      // One-time back-patch for Daytona v2 (2026-11-25; remove once deployed and every object has
+      // run it). The old provider's Sandboxes are abandoned, so nothing minted on one can be used
+      // or revoked here, and its grants end with it. Browser pairings survive.
+      if (!await state.storage.get("daytona_v2_migrated")) {
         const boards = await state.storage.get<Board[]>("whiteboard_boards") ?? [];
-        for (const board of boards) {
-          if (!board.access) continue;
-          for (const [key, grant] of Object.entries(board.access)) {
-            if (grant.kind === "terminal") delete board.access[key];
-          }
-        }
-        await state.storage.put({ whiteboard_boards: boards, daytona_terminal_migrated: true });
-        await state.storage.delete(["terminal_tickets", "terminal_tokens"]);
+        for (const board of boards) delete board.access;
+        await state.storage.put({ whiteboard_boards: boards, daytona_v2_migrated: true });
+        await state.storage.delete(["signed_links", "ssh_tokens", "access_revocations", "terminal_tickets", "terminal_tokens", "daytona_terminal_migrated"]);
+        const previews = [...(await state.storage.list({ prefix: "gateway_preview:" })).keys()];
+        for (let at = 0; at < previews.length; at += 100) await state.storage.delete(previews.slice(at, at + 100));
       }
       await this.scheduleAlarm();
     });
@@ -1093,6 +1098,7 @@ export class VoiceSession {
     if (this.forgotten || this.forgetting) return;
     try {
       await this.pairedBrowsers();
+      await this.endExpiredTakeovers();
       await this.flushAccessRevocations();
     } finally {
       await this.scheduleAlarm();
@@ -1106,7 +1112,8 @@ export class VoiceSession {
     const browsers = await this.state.storage.get<PairedBrowser[]>("paired_browsers") ?? [];
     const pending = await this.state.storage.get<AccessRevocation[]>("access_revocations") ?? [];
     const deadlines = browsers.map(browserExpiresAt);
-    for (const item of pending) deadlines.push(Math.min(item.retryAt, item.expiresAt));
+    for (const item of pending) deadlines.push(item.retryAt);
+    for (const link of await this.state.storage.get<SignedLink[]>("signed_links") ?? []) if (isTakeoverPort(link.port)) deadlines.push(link.expiresAt);
     const working = Array.from(this.sessions.values())
       .some((session) => session.turnState === "in_progress");
     // A compaction outlives the call that asked for it: the next call gets its Memory and cut.
@@ -1358,7 +1365,7 @@ export class VoiceSession {
         return stored;
       }
     }
-    const preview = await this.daytona<GatewayPreview>(`/sandbox/${encodeURIComponent(sandboxId)}/ports/${GATEWAY_PORT}/preview-url`);
+    const preview = await previewUrl(this.env, sandboxId, GATEWAY_PORT);
     this.gatewayPreview = { url: preview.url, token: preview.token, sandboxId };
     await this.state.storage.put(key, { url: preview.url, token: preview.token });
     return preview;
@@ -1540,6 +1547,8 @@ export class VoiceSession {
     this.agentEventChain = caughtUp.catch(() => undefined);
     await caughtUp;
     this.agentReady = true;
+    // A takeover whose grant ended while the Sandbox slept woke with it.
+    void this.flushAccessRevocations(true).catch(() => undefined);
     const connected = { session_count: this.sessions.size, agent_version: info?.data?.version ?? info?.version ?? null,
       agent_connection_id: connectionId, started_ms: startedMs, connected_ms: Date.now(), ms: Date.now() - startedMs, attempts };
     if (this.agentConnectionReported) return this.record("agent.connected", connected);
@@ -2142,7 +2151,7 @@ export class VoiceSession {
     if (!names.length) return null;
     const boards = await tx.get<Board[]>("whiteboard_boards") ?? [];
     const ending = boards.filter((item) => names.includes(item.display));
-    const retired = await this.queueGrantRevocations(tx, grantIds(ending)) ?? { sandboxId: null, grants: 0, desktop: false };
+    const retired = await this.queueGrantRevocations(tx, grantIds(ending)) ?? { sandboxId: null, grants: 0, sshUntil: 0 };
     await tx.put("whiteboard_boards", boards.filter((item) => !names.includes(item.display)));
     return { ...retired, displays: names.length, boards: ending.length };
   }
@@ -2330,6 +2339,8 @@ export class VoiceSession {
           const port = Number(target);
           if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Preview takes a port number");
           if (port === GATEWAY_PORT) throw new Error("that port serves the Agent Gateway and is never previewed");
+          if (isTakeoverPort(port)) throw new Error("that port serves a Terminal or Desktop: draw one of those instead");
+          if (DAEMON_PORTS.includes(port)) throw new Error("that port belongs to the sandbox's own services");
         }
         if (kind === "download") this.workspacePath(target);
         if (kind === "upload") uploadFolder(target);
@@ -2420,7 +2431,8 @@ export class VoiceSession {
     for (const board of changed) await this.broadcastDisplay(display, { type: "board", board });
     const pending = await this.finishAccessRevocation(retired);
     return { ok: pending === 0, display, grants_revoked: revoked.length,
-      ...(pending ? { revocation_pending: pending, warning: "The grants ended, but provider access cleanup failed and will retry automatically. Do not say all access has ended yet." } : {}) };
+      ...(pending ? { revocation_pending: pending, warning: "The grants ended, but provider access cleanup failed and will retry automatically. Do not say all access has ended yet." } : {}),
+      ...(retired?.sshUntil ? { ssh_warning: `An SSH command opened on this display cannot be revoked: it still connects until ${new Date(retired.sshUntil).toISOString()}, and an SSH session already open lasts until it disconnects or the sandbox restarts. Say so.` } : {}) };
   }
 
   // Accepted browsers that have not expired (idle or absolute); expired ones are dropped, and a
@@ -2564,8 +2576,8 @@ export class VoiceSession {
     if (!sandboxId) return false;
     const cached = this.sandboxRunningCheck;
     if (cached && Date.now() - cached.at < 15_000) return cached.running;
-    const sandbox = await this.daytona<{ state?: string }>(`/sandbox/${encodeURIComponent(sandboxId)}`).catch(() => null);
-    const running = sandbox?.state === "started";
+    const sandbox = await getSandbox(this.env, sandboxId).catch(() => null);
+    const running = sandbox?.status === "running";
     this.sandboxRunningCheck = { at: Date.now(), running };
     return running;
   }
@@ -2841,42 +2853,42 @@ export class VoiceSession {
     await this.record("access.opened", { kind: grant.kind, device: browser.device, display: browser.display });
     if (grant.kind === "terminal" || grant.kind === "desktop" || grant.kind === "preview") {
       const port = grant.kind === "terminal" ? TERMINAL_PORT : grant.kind === "desktop" ? DESKTOP_PORT : Number(grant.target);
-      if (grant.kind === "desktop") {
-        const { toolbox, headers } = await this.workspaceToolbox();
-        const started = await fetch(`${toolbox}/computeruse/start`, { method: "POST", headers, signal: AbortSignal.timeout(30_000) })
-          .catch((error) => { throw new Error(`the desktop did not start (${errorMessage(error)})`); });
-        if (!started.ok) {
-          throw new Error(started.status === 503 ? "the desktop is not installed on this sandbox yet" : `the desktop did not start (${started.status})`);
-        }
-      }
-      // Daytona closes a signed link's sockets on a provider grace period, not immediately.
-      // Recompute after desktop startup; never round a nearly expired grant up to a minute.
+      if (isTakeoverPort(port)) await this.startTakeover(port);
+      // Recompute after startup; never round a nearly expired grant up to a minute.
       const seconds = Math.min(Math.floor((grant.expires_at - Date.now()) / 1000), 24 * 3600);
       if (seconds < 1) throw new Error("that access has expired");
-      const signed = await this.daytona<{ url: string; token: string }>(
-        `/sandbox/${encodeURIComponent(sandboxId)}/ports/${port}/signed-preview-url?expiresInSeconds=${seconds}`,
-      );
-      await this.retainAccessCredential(browser, boardId, key, sandboxId, "signed_links",
-        { token: signed.token, grant: grantId, port, expiresAt: grant.expires_at });
+      const signed = await signedPreviewUrl(this.env, sandboxId, port, seconds);
+      await this.retainAccessCredential(browser, boardId, key, sandboxId, port,
+        { grant: grantId, port, expiresAt: grant.expires_at });
       const base = signed.url.replace(/\/$/, "");
       return { url: grant.kind === "desktop" ? `${base}/vnc.html?autoconnect=1&resize=scale&path=websockify` : base };
     }
     if (grant.kind === "ssh") {
-      const minutes = Math.max(1, Math.floor(remainingSeconds / 60));
-      const access = await this.daytona<{ token: string; sshCommand: string }>(
-        `/sandbox/${encodeURIComponent(sandboxId)}/ssh-access?expiresInMinutes=${minutes}`, "POST",
-      );
-      await this.retainAccessCredential(browser, boardId, key, sandboxId, "ssh_tokens",
-        { token: access.token, grant: grantId, expiresAt: Date.now() + minutes * 60_000 });
-      return { ssh: { command: access.sshCommand, expires_at: Date.now() + minutes * 60_000 } };
+      const access = await sshCommand(this.env, sandboxId, Math.min(remainingSeconds, SSH_TOKEN_SECONDS));
+      await this.retainAccessCredential(browser, boardId, key, sandboxId, null, { grant: grantId, expiresAt: access.expiresAt });
+      return { ssh: { command: access.command, expires_at: access.expiresAt } };
     }
     throw new Error(grant.kind === "upload" ? "an upload takes files from its card" : "a download opens from its button");
   }
 
-  // Minting awaits a provider. Check the stored authority again and register the token in one
-  // transaction, so a concurrent revoke either prevents this open or finds the retained token.
+  private async startTakeover(port: number): Promise<void> {
+    const box = await this.workspaceToolbox();
+    try {
+      if (port === DESKTOP_PORT) {
+        const started = await fetch(`${box.toolbox}/computeruse/start`, { method: "POST", headers: box.headers, signal: AbortSignal.timeout(30_000) });
+        if (!started.ok) throw new Error(String(started.status));
+      }
+      await startTakeoverServer(box, port);
+    } catch (error) {
+      throw new Error(`the ${port === DESKTOP_PORT ? "desktop" : "terminal"} did not start (${errorMessage(error)})`);
+    }
+  }
+
+  // Minting awaits a provider. Check the stored authority again and register the credential in one
+  // transaction, so a concurrent revoke either prevents this open or finds it. port is null for SSH.
   private async retainAccessCredential(browser: PairedBrowser, boardId: string, key: string, sandboxId: string,
-    store: "signed_links" | "ssh_tokens", credential: SignedLink | SshToken): Promise<void> {
+    port: number | null, credential: SignedLink | SshToken): Promise<void> {
+    const store = port === null ? "ssh_tokens" : "signed_links";
     const retained = await this.state.storage.transaction(async (tx) => {
       const browsers = await tx.get<PairedBrowser[]>("paired_browsers") ?? [];
       const boards = await tx.get<Board[]>("whiteboard_boards") ?? [];
@@ -2887,58 +2899,98 @@ export class VoiceSession {
         try { liveGrant(board!, key); } catch { live = false; }
       }
       if (live) {
-        const credentials = (await tx.get<Array<SignedLink | SshToken>>(store) ?? []).filter((item) => item.expiresAt > Date.now());
-        credentials.push(credential);
-        await tx.put(store, credentials);
-      } else {
-        const pending = await tx.get<AccessRevocation[]>("access_revocations") ?? [];
-        pending.push({ sandboxId, port: "port" in credential ? credential.port : null, token: credential.token,
-          expiresAt: Math.max(credential.expiresAt, Date.now() + 60_000), retryAt: Date.now() });
-        await tx.put("access_revocations", pending);
-        await tx.setAlarm(Date.now() + 1);
+        const credentials = await tx.get<Array<SignedLink | SshToken>>(store) ?? [];
+        // An expired takeover link stays until endExpiredTakeovers has ended its server.
+        await tx.put(store, [...credentials.filter((item) => item.expiresAt > Date.now() || ("port" in item && isTakeoverPort(item.port))), credential]);
+      } else if (port !== null) {
+        await this.queueRevocations(tx, [{ sandboxId, port, linksUntil: Math.max(credential.expiresAt, Date.now() + 60_000) }]);
       }
       return live;
     });
-    if (!retained) {
-      await this.scheduleAlarm();
-      const pending = await this.flushAccessRevocations(true);
-      throw new Error(`that access ended while opening${pending ? "; provider cleanup is pending and will retry automatically" : ""}`);
-    }
+    await this.scheduleAlarm();
+    if (retained) return;
+    // An SSH command minted too late is never shown to anyone, and expires unseen.
+    const pending = await this.flushAccessRevocations(true);
+    throw new Error(`that access ended while opening${pending ? "; provider cleanup is pending and will retry automatically" : ""}`);
   }
 
-  // Outbox entries are removed only after the provider accepts revocation or natural expiry.
+  private async queueRevocations(tx: DurableObjectTransaction, items: Array<{ sandboxId: string; port: number; linksUntil: number }>): Promise<void> {
+    if (!items.length) return;
+    const pending = await tx.get<AccessRevocation[]>("access_revocations") ?? [];
+    for (const item of items) pending.push({ ...item, id: crypto.randomUUID(), retryAt: Date.now() });
+    await tx.put("access_revocations", pending);
+    await tx.setAlarm(Date.now() + 1);
+  }
+
+  // A signed link stops opening when it expires, but a page already open keeps its socket. A
+  // Terminal or Desktop ends with the last link to it: ending its server closes every page.
+  private async endExpiredTakeovers(): Promise<void> {
+    await this.state.storage.transaction(async (tx) => {
+      const links = await tx.get<SignedLink[]>("signed_links") ?? [];
+      const live = links.filter((link) => link.expiresAt > Date.now());
+      if (live.length === links.length) return;
+      const ended = new Set(links.filter((link) => isTakeoverPort(link.port) && link.expiresAt <= Date.now()).map((link) => link.port));
+      for (const link of live) ended.delete(link.port);
+      const sandboxId = await tx.get<string>("sandbox_id") ?? this.sandboxId ?? this.attachedSandboxId;
+      await tx.put("signed_links", live);
+      if (sandboxId) await this.queueRevocations(tx, [...ended].map((port) => ({ sandboxId, port, linksUntil: 0 })));
+    });
+  }
+
+  // Outbox entries are removed only once the provider has revoked the links and a takeover server
+  // has ended, or the Sandbox is gone. Links are revoked for the whole Sandbox, so another
+  // Display's must be opened again; that is never wider access than was granted.
   // Each update rereads storage: another open/revoke can enqueue while a provider request waits.
   private async flushAccessRevocations(force = false): Promise<number> {
     const pending = await this.state.storage.get<AccessRevocation[]>("access_revocations") ?? [];
+    let incomplete = 0;
     for (const item of pending) {
-      if (item.expiresAt > Date.now() && !force && item.retryAt > Date.now()) continue;
-      let ended = item.expiresAt <= Date.now();
-      if (!ended) {
-        const sandbox = encodeURIComponent(item.sandboxId);
-        try {
-          if (item.port !== null) await this.daytona(`/sandbox/${sandbox}/ports/${item.port}/signed-preview-url/${encodeURIComponent(item.token)}/expire`, "POST");
-          else await this.daytona(`/sandbox/${sandbox}/ssh-access?token=${encodeURIComponent(item.token)}`, "DELETE");
-          ended = true;
-        } catch (error) {
-          // Never record provider error text: it can contain a credential.
-          const status = /^Daytona (\d{3}):/.exec(errorMessage(error))?.[1];
-          const failure = status ? "provider_http" : error instanceof SyntaxError ? "invalid_provider_json"
-            : /network|connection|fetch|timeout|abort/i.test(errorMessage(error)) ? "transport" : "unexpected";
-          await this.record("access.revocation_failed", { kind: item.port === null ? "ssh" : "signed", port: item.port, status: status ? Number(status) : null, failure });
-        }
+      if (!force && item.retryAt > Date.now()) continue;
+      let outcome: "ended" | "asleep" | "failed" = "failed";
+      try {
+        outcome = await this.endAccess(item);
+      } catch (error) {
+        // Never record provider error text: it can contain a credential.
+        const status = error instanceof DaytonaApiError ? error.status : null;
+        const failure = status ? "provider_http" : error instanceof SyntaxError ? "invalid_provider_json"
+          : /network|connection|fetch|timeout|abort/i.test(errorMessage(error)) ? "transport" : "unexpected";
+        await this.record("access.revocation_failed", { kind: "signed", port: item.port, status, failure });
       }
+      if (outcome === "failed") incomplete++;
+      const retryAt = Date.now() + (outcome === "asleep" ? ASLEEP_RETRY_MS : KEEPALIVE_MS);
       await this.state.storage.transaction(async (tx) => {
         const current = await tx.get<AccessRevocation[]>("access_revocations") ?? [];
-        const same = (row: AccessRevocation) => row.token === item.token && row.sandboxId === item.sandboxId && row.port === item.port;
-        await tx.put("access_revocations", ended ? current.filter((row) => !same(row))
-          : current.map((row) => same(row) ? { ...row, retryAt: Date.now() + KEEPALIVE_MS } : row));
+        await tx.put("access_revocations", outcome === "ended" ? current.filter((row) => row.id !== item.id)
+          : current.map((row) => row.id === item.id ? { ...row, retryAt } : row));
       });
     }
     await this.scheduleAlarm();
-    return (await this.state.storage.get<AccessRevocation[]>("access_revocations") ?? []).length;
+    return incomplete;
   }
 
-  // Transactional outbox pattern: removing authority and capturing its credentials must commit
+  private async endAccess(item: AccessRevocation): Promise<"ended" | "asleep"> {
+    let sandbox;
+    try {
+      if (item.linksUntil > Date.now()) await revokeSignedPreviewUrls(this.env, item.sandboxId);
+      if (!isTakeoverPort(item.port)) return "ended";
+      sandbox = await getSandbox(this.env, item.sandboxId);
+    } catch (error) {
+      if (error instanceof DaytonaApiError && error.status === 404) return "ended";
+      throw error;
+    }
+    // A stop or failure ended the server; a paused one is frozen with it and ends on the next wake.
+    if (["stopped", "stopping", ...BROKEN_STATUSES].includes(sandbox.status)) return "ended";
+    if (sandbox.status !== "running") return "asleep";
+    const box = toolboxOf(this.env, sandbox);
+    await stopTakeoverServer(box, item.port);
+    if (item.port === DESKTOP_PORT) {
+      const stopped = await fetch(`${box.toolbox}/computeruse/stop`, { method: "POST", headers: box.headers, signal: AbortSignal.timeout(15_000) });
+      if (!stopped.ok) throw new Error(`the desktop did not stop (${stopped.status})`);
+    }
+    return "ended";
+  }
+
+  // Transactional outbox pattern: removing authority and capturing what must end must commit
   // together. null selects every credential, including orphans, when replacing a Sandbox.
   private async queueGrantRevocations(tx: DurableObjectTransaction, ids: string[] | null): Promise<RetiredAccess | null> {
     if (ids?.length === 0) return null;
@@ -2947,20 +2999,17 @@ export class VoiceSession {
     const sandboxId = await tx.get<string>("sandbox_id") ?? this.sandboxId ?? this.attachedSandboxId;
     const links = await tx.get<SignedLink[]>("signed_links") ?? [];
     const ssh = await tx.get<SshToken[]>("ssh_tokens") ?? [];
-    const pending = await tx.get<AccessRevocation[]>("access_revocations") ?? [];
-    const revokedLinks = links.filter((item) => gone(item) && item.expiresAt > now);
-    const revokedSsh = ssh.filter((item) => gone(item) && item.expiresAt > now);
-    if (!sandboxId && (revokedLinks.length || revokedSsh.length)) throw new Error("cannot retire access without its Sandbox Assignment");
-    for (const item of [...revokedLinks, ...revokedSsh]) pending.push({ sandboxId: sandboxId!,
-      port: "port" in item && typeof item.port === "number" ? item.port : null, token: item.token, expiresAt: item.expiresAt, retryAt: now });
+    const ending = links.filter((item) => gone(item) && (item.expiresAt > now || isTakeoverPort(item.port)));
+    if (!sandboxId && ending.length) throw new Error("cannot retire access without its Sandbox Assignment");
+    const ports = new Map<number, number>();
+    for (const item of ending) ports.set(item.port, Math.max(ports.get(item.port) ?? 0, item.expiresAt));
     await tx.put({
-      signed_links: links.filter((item) => !gone(item) && item.expiresAt > now),
+      signed_links: links.filter((item) => !gone(item)),
       ssh_tokens: ssh.filter((item) => !gone(item) && item.expiresAt > now),
-      access_revocations: pending,
     });
-    if (pending.length) await tx.setAlarm(now + 1);
-    return { sandboxId, grants: ids?.length ?? new Set([...links, ...ssh].map((item) => item.grant)).size,
-      desktop: revokedLinks.some((item) => item.port === DESKTOP_PORT) };
+    await this.queueRevocations(tx, [...ports].map(([port, linksUntil]) => ({ sandboxId: sandboxId!, port, linksUntil })));
+    const sshUntil = Math.max(0, ...ssh.filter((item) => gone(item) && item.expiresAt > now).map((item) => item.expiresAt));
+    return { sandboxId, grants: ids?.length ?? new Set([...links, ...ssh].map((item) => item.grant)).size, sshUntil };
   }
 
   // Only provider I/O happens after the retirement transaction. A crash here leaves a durable
@@ -2968,15 +3017,7 @@ export class VoiceSession {
   private async finishAccessRevocation(retired: RetiredAccess | null): Promise<number> {
     await this.scheduleAlarm();
     const pending = await this.flushAccessRevocations(true);
-    if (retired?.sandboxId === (this.sandboxId ?? this.attachedSandboxId)) {
-      // Expiry closes Daytona's sockets only on a best-effort basis; stopping the desktop is certain.
-      const links = await this.state.storage.get<SignedLink[]>("signed_links") ?? [];
-      if (retired?.desktop && !links.some((item) => item.port === DESKTOP_PORT && item.expiresAt > Date.now())) {
-        const { toolbox, headers } = await this.workspaceToolbox().catch(() => ({ toolbox: "", headers: {} }));
-        if (toolbox) await fetch(`${toolbox}/computeruse/stop`, { method: "POST", headers }).catch(() => undefined);
-      }
-    }
-    if (retired) await this.record("access.revoked", { grants: retired.grants, pending });
+    if (retired) await this.record("access.revoked", { grants: retired.grants, pending, ssh_until: retired.sshUntil || undefined });
     if (retired?.displays) await this.record("display.ended", { displays: retired.displays, boards: retired.boards });
     return pending;
   }
@@ -3005,7 +3046,7 @@ export class VoiceSession {
     return real;
   }
 
-  private async workspaceToolbox(): Promise<{ toolbox: string; headers: Record<string, string> }> {
+  private async workspaceToolbox(): Promise<Toolbox> {
     this.sandboxId ??= this.attachedSandboxId;
     try {
       return await this.toolbox();
@@ -3086,18 +3127,12 @@ export class VoiceSession {
     }
     // The Orchestrator chose a voice restart itself; only a keypad restart is news to it.
     if (via === "keypad menu") await this.orchestratorEvent(`[harness event] sandbox_restart_requested: ${JSON.stringify({ via })}`, false);
-    // Stop, wait (bounded) for the provider to report it stopped, then start; the dropped
-    // Agent Connection reconnects in the background and agent_connected follows.
+    // The dropped Agent Connection reconnects in the background and agent_connected follows.
     this.agentConnecting = true;
     try {
-      const path = `/sandbox/${encodeURIComponent(sandboxId)}`;
-      await this.daytona(`${path}/stop`, "POST");
-      for (let poll = 0; poll < 30; poll++) {
-        const sandbox = await this.daytona<{ state?: string }>(path);
-        if (sandbox.state === "stopped") break;
-        await sleep(2000);
-      }
-      await this.daytona(`${path}/start`, "POST");
+      await restartSandbox(this.env, sandboxId);
+      // Not until it has gone down: a request that still reaches the old gateway would look connected.
+      for (let poll = 0; poll < 30 && (await getSandbox(this.env, sandboxId)).status !== "running"; poll++) await sleep(1000);
       await this.record(via === "voice" ? "voice.restart.started" : "menu.restart.started", {});
       this.ensureAgent();
     } catch (error) {
@@ -4149,11 +4184,12 @@ export class VoiceSession {
     if (!path.startsWith(`${WORKSPACE}/`) || path.split("/").includes("..")) throw new Error("path must be inside the Workspace");
     const start = Math.max(0, Number.isFinite(startSeconds) ? startSeconds : 0);
     const duration = Math.min(MAX_FIXTURE_SECONDS, Math.max(0.2, Number.isFinite(durationSeconds) ? durationSeconds : MAX_FIXTURE_SECONDS));
-    const { toolbox, headers } = await this.toolbox();
+    const box = await this.toolbox();
+    const { toolbox, headers } = box;
 
     // Render only the requested window, from any format ffmpeg reads, inside the Sandbox:
     // a long podcast never crosses the network or the Worker's memory. ffmpeg is installed
-    // on first use (sudo is sandbox-local) until the snapshot includes it.
+    // on first use (sudo is sandbox-local) until the image includes it.
     const clipPath = `/tmp/dogwalk-clip-${crypto.randomUUID()}.wav`;
     const command = [
       "set -e",
@@ -4161,25 +4197,14 @@ export class VoiceSession {
       `ffprobe -v error -show_entries format=duration -of csv=p=0 ${shellQuote(path)} || true`,
       `ffmpeg -nostdin -v error -ss ${start} -t ${duration} -i ${shellQuote(path)} -ac 1 -ar 24000 -c:a pcm_s16le -f wav -y ${clipPath}`,
     ].join("; ");
-    const rendered = await fetch(`${toolbox}/process/execute`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ command: `bash -c ${shellQuote(command)}`, timeout: 180, envs: { LC_ALL: "C" } }),
-      signal: AbortSignal.timeout(185_000),
-    });
-    if (!rendered.ok) throw new Error(`could not render ${pathInput} (${rendered.status})`);
-    const execution = await rendered.json<{ result: string; exitCode: number }>();
+    const execution = await execute(box, command, 180);
     if (execution.exitCode !== 0) throw new Error(`could not render ${pathInput}: ${execution.result.slice(-300)}`);
     const sourceSeconds = Number.parseFloat(execution.result.trim().split("\n")[0]);
 
     const response = await fetch(`${toolbox}/files/download?path=${encodeURIComponent(clipPath)}`, {
       headers, signal: AbortSignal.timeout(20_000),
     });
-    void fetch(`${toolbox}/process/execute`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ command: `rm -f ${clipPath}`, timeout: 10 }),
-    }).catch(() => undefined);
+    void execute(box, `rm -f ${clipPath}`, 10).catch(() => undefined);
     if (!response.ok) throw new Error(`could not read the rendered clip (${response.status})`);
     const clip = wavToClip(new Uint8Array(await response.arrayBuffer()));
     if (clip.seconds < 0.1) throw new Error(`nothing to play at ${start}s; the source is ${Number.isFinite(sourceSeconds) ? `${Math.round(sourceSeconds)}s` : "of unknown length"}`);
@@ -4220,25 +4245,13 @@ export class VoiceSession {
     while (this.fixture && Date.now() < deadline + 4000) await sleep(100);
   }
 
-  private async toolbox(): Promise<{ toolbox: string; headers: Record<string, string> }> {
+  private async toolbox(): Promise<Toolbox> {
     if (!this.sandboxId) throw new Error("sandbox ID is unavailable");
-    const sandbox = await this.daytona<{ toolboxProxyUrl?: string }>(`/sandbox/${encodeURIComponent(this.sandboxId)}`);
-    return {
-      toolbox: `${(sandbox.toolboxProxyUrl ?? "https://proxy.app.daytona.io/toolbox").replace(/\/$/, "")}/${encodeURIComponent(this.sandboxId)}`,
-      headers: { authorization: `Bearer ${this.env.DAYTONA_API_KEY}` },
-    };
+    return toolboxOf(this.env, await getSandbox(this.env, this.sandboxId));
   }
 
   private async sandboxExecute(command: string, timeoutSeconds: number): Promise<{ result: string; exitCode: number }> {
-    const { toolbox, headers } = await this.toolbox();
-    const response = await fetch(`${toolbox}/process/execute`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ command: `bash -c ${shellQuote(command)}`, timeout: timeoutSeconds, envs: { LC_ALL: "C" } }),
-      signal: AbortSignal.timeout((timeoutSeconds + 5) * 1000),
-    });
-    if (!response.ok) throw new Error(`the sandbox could not run a command (${response.status})`);
-    return response.json<{ result: string; exitCode: number }>();
+    return execute(await this.toolbox(), command, timeoutSeconds);
   }
 
   // Candidate roots for Managed Sessions: directories holding a git repository or Agent
@@ -4327,13 +4340,10 @@ export class VoiceSession {
       return;
     }
     try {
-      const { toolbox, headers } = await this.toolbox();
+      const box = await this.toolbox();
+      const { toolbox, headers } = box;
       const path = `${WORKSPACE}/recordings/recording-${new Date().toISOString().replace(/[:.]/g, "-")}.wav`;
-      await fetch(`${toolbox}/process/execute`, {
-        method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({ command: `mkdir -p ${WORKSPACE}/recordings`, timeout: 10 }),
-      });
+      await execute(box, `mkdir -p ${WORKSPACE}/recordings`, 10);
       const form = new FormData();
       form.append("file", new Blob([pcmToWav(recording.chunks)], { type: "audio/wav" }), path.split("/").pop());
       const uploaded = await fetch(`${toolbox}/files/upload?path=${encodeURIComponent(path)}`, { method: "POST", headers, body: form });
@@ -5390,18 +5400,6 @@ export class VoiceSession {
     if (!response.ok && response.status !== 404) {
       await this.record("voice.live.hangup.failed", { status: response.status, detail: (await response.text()).slice(0, 200) });
     }
-  }
-
-  private async daytona<T>(path: string, method: "GET" | "POST" | "DELETE" = "GET"): Promise<T> {
-    const base = (this.env.DAYTONA_API_BASE ?? "https://app.daytona.io/api").replace(/\/$/, "");
-    const response = await fetch(`${base}${path}`, {
-      method,
-      headers: { authorization: `Bearer ${this.env.DAYTONA_API_KEY}` },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) throw new Error(`Daytona ${response.status}: ${(await response.text()).slice(0, 200)}`);
-    const text = await response.text();
-    return (text ? JSON.parse(text) : undefined) as T;
   }
 
   /**
