@@ -197,14 +197,15 @@ Daytona v2 revokes less than v0 did (measured 2026-11-25), and Dogwalk makes up 
 
 - **Signed links** are revoked only for a whole Sandbox, and open sockets survive
   revocation. Dogwalk also ends the ttyd or noVNC server, which closes live Terminal and
-  Desktop pages at once, on revocation and when the last link expires. An Agent with `sudo`
+  Desktop pages at once, on revocation and when any link to that server expires. An Agent with `sudo`
   could start its own server on that port, but it needs no grant to serve a shell. Ending one
   Display's links ends every Display's; they reopen under their own grants.
 - **Preview:** new opens are refused, but an app's open socket is not closed (accepted: it
   reaches one port the User showed).
 - **SSH tokens cannot be revoked**, even by rotating the Sandbox's signing key. Each lasts
-  five minutes at most rather than the grant's length, and `revoke_access` says aloud that
-  it may still connect. A session already open lasts until it disconnects or the Sandbox
+  five minutes at most rather than the grant's length, and `revoke_access` and
+  `unpair_display` report that a session may be open, whenever a command has been opened since
+  the last restart. A session already open lasts until it disconnects or the Sandbox
   restarts, whatever happens to its grant: a full shell outliving its authority, accepted
   only with the voice `restart_sandbox` as the certain end.
 - **A paused Sandbox** freezes its takeover servers; they are ended when it next wakes, and

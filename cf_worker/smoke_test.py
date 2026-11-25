@@ -65,6 +65,8 @@ class DaytonaMock(BaseHTTPRequestHandler):
     start_count = 0
     # Starts to refuse with 409, as Daytona does just after a stop.
     refuse_starts = 0
+    # Reads since a forced "pausing"; the wait on it returns early, as a bounded wait can.
+    pausing_reads = 0
     run_limits: list = []
     preview_reads = 0
     # Toolbox commands seen, and optional handlers that answer some of them.
@@ -126,6 +128,7 @@ class DaytonaMock(BaseHTTPRequestHandler):
                 return
             DaytonaMock.detail_reads += 1
             if self.force_state:
+                DaytonaMock.pausing_reads += self.force_state == "pausing"
                 self.reply(self.sandbox(self.force_state))
                 return
             self.reply(
@@ -172,6 +175,10 @@ class DaytonaMock(BaseHTTPRequestHandler):
             self.reply(self.sandbox("pending"))
             return
         if self.path == f"/api/sandboxes/mock-sandbox-{self.generation}/start":
+            # Daytona refuses to start a Sandbox that is still falling asleep.
+            if self.force_state == "pausing" and DaytonaMock.pausing_reads < 3:
+                self.send_error(409)
+                return
             if DaytonaMock.refuse_starts:
                 DaytonaMock.refuse_starts -= 1
                 self.send_error(409)
@@ -504,14 +511,15 @@ def run_tests(
         # One caught pausing is started once it has paused, without holding up the call.
         time.sleep(3.1)
         DaytonaMock.force_state = "pausing"
+        DaytonaMock.pausing_reads = 0
         status, body = post(
             base_url, "/voice", {"From": TEST_PHONE, "CallSid": "CA_PAUSING"}, token
         )
-        DaytonaMock.force_state = None
         deadline = time.time() + 5
         while DaytonaMock.start_count < 2 and time.time() < deadline:
             time.sleep(0.1)
-        require(status == 200 and "<Dial" in body and DaytonaMock.start_count == 2, f"pausing sandbox not started: {status} {body}")
+        DaytonaMock.force_state = None
+        require(status == 200 and "<Dial" in body and DaytonaMock.start_count == 2 and DaytonaMock.pausing_reads >= 3, f"pausing sandbox not started: {status} {body}")
 
         # One already running has its wall-clock limit restarted, so it outlasts the call.
         time.sleep(3.1)

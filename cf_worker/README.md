@@ -288,6 +288,8 @@ gets a fresh Sandbox. Their Memory, Registration, and Voice Donations live in Cl
 and stay. With no call in progress:
 
 1. Build the image (above) and store the secret (OpenAI Keys and Budget).
+   Stop every v0 Sandbox that is running, at <https://app.daytona.io>: an open Agent event
+   WebSocket would keep a Durable Object on the old code, and `deploy.py` sees only v2.
 2. Deploy: `uv run --script deploy.py`. `DAYTONA_API_KEY` is unchanged: Daytona syncs it.
 3. Immediately apply the migration that forgets v0 assignments, so a call in between at
    worst finds its Sandbox missing and provisions a fresh one:
@@ -1166,11 +1168,14 @@ whole Sandbox, and leaves sockets already open connected (measured 2026-11-25: a
 stayed live past 50 seconds, and unexposing the port did not close it either). So the
 Worker does both: it revokes every link, which stops new opens, and ends the ttyd or noVNC
 server inside the Sandbox, which closes live pages within a fraction of a second. Other
-Displays' links end with them; their grants stand, and they open another. When the last
-link to a Terminal or Desktop expires, the alarm ends its server the same way. Ending a
+Displays' links end with them; their grants stand, and they open another. When any
+link to a Terminal or Desktop expires, the alarm ends its server the same way, since which
+page came by which link cannot be told. Ending a
 server in a paused Sandbox waits until it wakes. Two things are not cut: an app already open
 in a Preview keeps its socket, and an SSH session lasts until it disconnects or the Sandbox
-restarts. `revoke_access` returns `ssh_warning` when that may apply. An open Access Element
+restarts. `revoke_access` and `unpair_display` return `ssh_warning` while an SSH command has been
+opened since the last restart (`ssh_opened_until`). Starting and ending a server take turns
+(`inTakeoverTurn`), and a server whose link could not be minted is recorded all the same. An open Access Element
 is not yet made to keep the Sandbox awake beyond the traffic it carries.
 
 Mint completion rechecks the stored grant, browser membership, and Sandbox

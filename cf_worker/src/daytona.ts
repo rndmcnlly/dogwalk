@@ -109,16 +109,17 @@ export async function createSandbox(env: Env, name: string, identity: string): P
   });
 }
 
-/** Start a sleeping Sandbox. Right after it reports asleep, Daytona can still answer 409 for a moment. */
+/** Start a sleeping Sandbox. Daytona answers 409 while it is falling asleep and for a moment after. */
 export async function startSandbox(env: Env, id: string): Promise<DaytonaSandbox> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await daytonaFetch<DaytonaSandbox>(env, `${sandboxPath(id)}/start`, { method: "POST" });
     } catch (error) {
-      if (!(error instanceof DaytonaApiError) || error.status !== 409 || attempt >= 6) throw error;
+      if (!(error instanceof DaytonaApiError) || error.status !== 409 || attempt >= 12) throw error;
     }
     const sandbox = await getSandbox(env, id);
-    if (!ASLEEP_STATUSES.includes(sandbox.status)) return sandbox;  // another request started it
+    // Another request started it, unless it has yet to finish falling asleep.
+    if (!ASLEEP_STATUSES.includes(sandbox.status) && !(sandbox.status in FALLING_ASLEEP)) return sandbox;
     await new Promise((resolve) => setTimeout(resolve, 400));
   }
 }

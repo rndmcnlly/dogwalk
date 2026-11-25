@@ -284,12 +284,10 @@ interface AccessGrant {
   upload?: { limits: typeof UPLOAD_LIMITS; files: number; bytes: number; failures: number };
 }
 interface SignedLink { grant: string; port: number; expiresAt: number }
-interface SshToken { grant: string; expiresAt: number }
 // Durable outbox: what must still end at the provider, across failures and Sandbox replacement.
 // Links are refused until they expire anyway (linksUntil), and a takeover port's server is ended.
 interface AccessRevocation { id: string; sandboxId: string; port: number; linksUntil: number; retryAt: number }
-// sshUntil: when the last SSH token that retiring cannot revoke expires, 0 when there is none.
-interface RetiredAccess { sandboxId: string | null; grants: number; sshUntil: number; displays?: number; boards?: number }
+interface RetiredAccess { sandboxId: string | null; grants: number; displays?: number; boards?: number }
 const SSH_TOKEN_SECONDS = 5 * 60;
 // A server in a sleeping Sandbox is frozen with it, so ending it can wait for the next wake.
 const ASLEEP_RETRY_MS = 6 * 3_600_000;
@@ -2151,7 +2149,7 @@ export class VoiceSession {
     if (!names.length) return null;
     const boards = await tx.get<Board[]>("whiteboard_boards") ?? [];
     const ending = boards.filter((item) => names.includes(item.display));
-    const retired = await this.queueGrantRevocations(tx, grantIds(ending)) ?? { sandboxId: null, grants: 0, sshUntil: 0 };
+    const retired = await this.queueGrantRevocations(tx, grantIds(ending)) ?? { sandboxId: null, grants: 0 };
     await tx.put("whiteboard_boards", boards.filter((item) => !names.includes(item.display)));
     return { ...retired, displays: names.length, boards: ending.length };
   }
@@ -2404,7 +2402,7 @@ export class VoiceSession {
     const display = await this.targetDisplay(input);
     const members = (await this.pairedBrowsers()).filter((item) => item.display === display);
     await this.unpairBrowsers(members.map((item) => item.secretHash));
-    return { ok: true, display, browsers_unpaired: members.length };
+    return { ok: true, display, browsers_unpaired: members.length, ...await this.sshWarning() };
   }
 
   // The revoke_access tool: every live grant on a Display ends now; its elements show revoked.
@@ -2432,7 +2430,16 @@ export class VoiceSession {
     const pending = await this.finishAccessRevocation(retired);
     return { ok: pending === 0, display, grants_revoked: revoked.length,
       ...(pending ? { revocation_pending: pending, warning: "The grants ended, but provider access cleanup failed and will retry automatically. Do not say all access has ended yet." } : {}),
-      ...(retired?.sshUntil ? { ssh_warning: `An SSH command opened on this display cannot be revoked: it still connects until ${new Date(retired.sshUntil).toISOString()}, and an SSH session already open lasts until it disconnects or the sandbox restarts. Say so.` } : {}) };
+      ...await this.sshWarning() };
+  }
+
+  // Nothing ends an SSH session but its own disconnection or a Sandbox restart, and nothing reports
+  // one, so a command opened since the last restart is a shell that may still be open.
+  private async sshWarning(): Promise<{ ssh_warning?: string }> {
+    const until = await this.state.storage.get<number>("ssh_opened_until");
+    if (!until) return {};
+    return { ssh_warning: `SSH cannot be revoked. A command opened on this or another display ${until > Date.now()
+      ? `still connects until ${new Date(until).toISOString()}, and a session` : "no longer connects, but a session"} already open lasts until it disconnects or the sandbox restarts. Say so.` };
   }
 
   // Accepted browsers that have not expired (idle or absolute); expired ones are dropped, and a
@@ -2853,25 +2860,46 @@ export class VoiceSession {
     await this.record("access.opened", { kind: grant.kind, device: browser.device, display: browser.display });
     if (grant.kind === "terminal" || grant.kind === "desktop" || grant.kind === "preview") {
       const port = grant.kind === "terminal" ? TERMINAL_PORT : grant.kind === "desktop" ? DESKTOP_PORT : Number(grant.target);
-      if (isTakeoverPort(port)) await this.startTakeover(port);
-      // Recompute after startup; never round a nearly expired grant up to a minute.
-      const seconds = Math.min(Math.floor((grant.expires_at - Date.now()) / 1000), 24 * 3600);
-      if (seconds < 1) throw new Error("that access has expired");
-      const signed = await signedPreviewUrl(this.env, sandboxId, port, seconds);
-      await this.retainAccessCredential(browser, boardId, key, sandboxId, port,
-        { grant: grantId, port, expiresAt: grant.expires_at });
+      const link: SignedLink = { grant: grantId, port, expiresAt: grant.expires_at };
+      let signed: { url: string };
+      try {
+        if (isTakeoverPort(port)) await this.startTakeover(port);
+        // Recompute after startup; never round a nearly expired grant up to a minute.
+        const seconds = Math.min(Math.floor((grant.expires_at - Date.now()) / 1000), 24 * 3600);
+        if (seconds < 1) throw new Error("that access has expired");
+        signed = await signedPreviewUrl(this.env, sandboxId, port, seconds);
+      } catch (error) {
+        // The server may be running and a link may exist: register them, so they end with the grant.
+        await this.retainAccessCredential(browser, boardId, key, sandboxId, link).catch(() => undefined);
+        throw error;
+      }
+      await this.retainAccessCredential(browser, boardId, key, sandboxId, link);
       const base = signed.url.replace(/\/$/, "");
       return { url: grant.kind === "desktop" ? `${base}/vnc.html?autoconnect=1&resize=scale&path=websockify` : base };
     }
     if (grant.kind === "ssh") {
       const access = await sshCommand(this.env, sandboxId, Math.min(remainingSeconds, SSH_TOKEN_SECONDS));
-      await this.retainAccessCredential(browser, boardId, key, sandboxId, null, { grant: grantId, expiresAt: access.expiresAt });
+      await this.retainAccessCredential(browser, boardId, key, sandboxId, access.expiresAt);
       return { ssh: { command: access.command, expires_at: access.expiresAt } };
     }
     throw new Error(grant.kind === "upload" ? "an upload takes files from its card" : "a download opens from its button");
   }
 
-  private async startTakeover(port: number): Promise<void> {
+  // Starting and ending takeover servers take turns, so an ending already under way cannot close
+  // one opened after it, and the alarm and an explicit revocation never end the same one twice.
+  private takeoverTurn: Promise<unknown> = Promise.resolve();
+
+  private inTakeoverTurn<T>(run: () => Promise<T>): Promise<T> {
+    const result = this.takeoverTurn.then(run);
+    this.takeoverTurn = result.catch(() => undefined);
+    return result;
+  }
+
+  private startTakeover(port: number): Promise<void> {
+    return this.inTakeoverTurn(() => this.startTakeoverNow(port));
+  }
+
+  private async startTakeoverNow(port: number): Promise<void> {
     const box = await this.workspaceToolbox();
     try {
       if (port === DESKTOP_PORT) {
@@ -2885,10 +2913,10 @@ export class VoiceSession {
   }
 
   // Minting awaits a provider. Check the stored authority again and register the credential in one
-  // transaction, so a concurrent revoke either prevents this open or finds it. port is null for SSH.
+  // transaction, so a concurrent revoke either prevents this open or finds it. A number is when an
+  // SSH command's token expires.
   private async retainAccessCredential(browser: PairedBrowser, boardId: string, key: string, sandboxId: string,
-    port: number | null, credential: SignedLink | SshToken): Promise<void> {
-    const store = port === null ? "ssh_tokens" : "signed_links";
+    credential: SignedLink | number): Promise<void> {
     const retained = await this.state.storage.transaction(async (tx) => {
       const browsers = await tx.get<PairedBrowser[]>("paired_browsers") ?? [];
       const boards = await tx.get<Board[]>("whiteboard_boards") ?? [];
@@ -2898,12 +2926,14 @@ export class VoiceSession {
       if (live) {
         try { liveGrant(board!, key); } catch { live = false; }
       }
-      if (live) {
-        const credentials = await tx.get<Array<SignedLink | SshToken>>(store) ?? [];
+      if (live && typeof credential === "number") {
+        await tx.put("ssh_opened_until", Math.max(credential, await tx.get<number>("ssh_opened_until") ?? 0));
+      } else if (live) {
+        const links = await tx.get<SignedLink[]>("signed_links") ?? [];
         // An expired takeover link stays until endExpiredTakeovers has ended its server.
-        await tx.put(store, [...credentials.filter((item) => item.expiresAt > Date.now() || ("port" in item && isTakeoverPort(item.port))), credential]);
-      } else if (port !== null) {
-        await this.queueRevocations(tx, [{ sandboxId, port, linksUntil: Math.max(credential.expiresAt, Date.now() + 60_000) }]);
+        await tx.put("signed_links", [...links.filter((item) => item.expiresAt > Date.now() || isTakeoverPort(item.port)), credential as SignedLink]);
+      } else if (typeof credential !== "number") {
+        await this.queueRevocations(tx, [{ sandboxId, port: credential.port, linksUntil: Math.max(credential.expiresAt, Date.now() + 60_000) }]);
       }
       return live;
     });
@@ -2922,15 +2952,15 @@ export class VoiceSession {
     await tx.setAlarm(Date.now() + 1);
   }
 
-  // A signed link stops opening when it expires, but a page already open keeps its socket. A
-  // Terminal or Desktop ends with the last link to it: ending its server closes every page.
+  // A signed link stops opening when it expires, but a page already open keeps its socket, and
+  // which page came by which link cannot be told. So any Terminal or Desktop link's expiry ends
+  // that server, closing every page; a Display whose grant still stands opens another.
   private async endExpiredTakeovers(): Promise<void> {
     await this.state.storage.transaction(async (tx) => {
       const links = await tx.get<SignedLink[]>("signed_links") ?? [];
       const live = links.filter((link) => link.expiresAt > Date.now());
       if (live.length === links.length) return;
       const ended = new Set(links.filter((link) => isTakeoverPort(link.port) && link.expiresAt <= Date.now()).map((link) => link.port));
-      for (const link of live) ended.delete(link.port);
       const sandboxId = await tx.get<string>("sandbox_id") ?? this.sandboxId ?? this.attachedSandboxId;
       await tx.put("signed_links", live);
       if (sandboxId) await this.queueRevocations(tx, [...ended].map((port) => ({ sandboxId, port, linksUntil: 0 })));
@@ -2941,7 +2971,11 @@ export class VoiceSession {
   // has ended, or the Sandbox is gone. Links are revoked for the whole Sandbox, so another
   // Display's must be opened again; that is never wider access than was granted.
   // Each update rereads storage: another open/revoke can enqueue while a provider request waits.
-  private async flushAccessRevocations(force = false): Promise<number> {
+  private flushAccessRevocations(force = false): Promise<number> {
+    return this.inTakeoverTurn(() => this.flushAccessRevocationsNow(force));
+  }
+
+  private async flushAccessRevocationsNow(force: boolean): Promise<number> {
     const pending = await this.state.storage.get<AccessRevocation[]>("access_revocations") ?? [];
     let incomplete = 0;
     for (const item of pending) {
@@ -2998,18 +3032,13 @@ export class VoiceSession {
     const now = Date.now();
     const sandboxId = await tx.get<string>("sandbox_id") ?? this.sandboxId ?? this.attachedSandboxId;
     const links = await tx.get<SignedLink[]>("signed_links") ?? [];
-    const ssh = await tx.get<SshToken[]>("ssh_tokens") ?? [];
     const ending = links.filter((item) => gone(item) && (item.expiresAt > now || isTakeoverPort(item.port)));
     if (!sandboxId && ending.length) throw new Error("cannot retire access without its Sandbox Assignment");
     const ports = new Map<number, number>();
     for (const item of ending) ports.set(item.port, Math.max(ports.get(item.port) ?? 0, item.expiresAt));
-    await tx.put({
-      signed_links: links.filter((item) => !gone(item)),
-      ssh_tokens: ssh.filter((item) => !gone(item) && item.expiresAt > now),
-    });
+    await tx.put("signed_links", links.filter((item) => !gone(item)));
     await this.queueRevocations(tx, [...ports].map(([port, linksUntil]) => ({ sandboxId: sandboxId!, port, linksUntil })));
-    const sshUntil = Math.max(0, ...ssh.filter((item) => gone(item) && item.expiresAt > now).map((item) => item.expiresAt));
-    return { sandboxId, grants: ids?.length ?? new Set([...links, ...ssh].map((item) => item.grant)).size, sshUntil };
+    return { sandboxId, grants: ids?.length ?? new Set(links.map((item) => item.grant)).size };
   }
 
   // Only provider I/O happens after the retirement transaction. A crash here leaves a durable
@@ -3017,7 +3046,7 @@ export class VoiceSession {
   private async finishAccessRevocation(retired: RetiredAccess | null): Promise<number> {
     await this.scheduleAlarm();
     const pending = await this.flushAccessRevocations(true);
-    if (retired) await this.record("access.revoked", { grants: retired.grants, pending, ssh_until: retired.sshUntil || undefined });
+    if (retired) await this.record("access.revoked", { grants: retired.grants, pending });
     if (retired?.displays) await this.record("display.ended", { displays: retired.displays, boards: retired.boards });
     return pending;
   }
@@ -3131,6 +3160,7 @@ export class VoiceSession {
     this.agentConnecting = true;
     try {
       await restartSandbox(this.env, sandboxId);
+      await this.state.storage.delete("ssh_opened_until");
       // Not until it has gone down: a request that still reaches the old gateway would look connected.
       for (let poll = 0; poll < 30 && (await getSandbox(this.env, sandboxId)).status !== "running"; poll++) await sleep(1000);
       await this.record(via === "voice" ? "voice.restart.started" : "menu.restart.started", {});
@@ -5217,6 +5247,7 @@ export class VoiceSession {
     // End stored authority before awaiting provider cleanup, so a mint finishing during a
     // replacement cannot register under the old boards. The outbox retains the old Sandbox ID.
     const retired = await this.state.storage.transaction(async (tx) => {
+      await tx.delete("ssh_opened_until");
       const retired = await this.queueGrantRevocations(tx, null);
       await tx.delete(["managed_sessions", "orchestrator_queue", "orchestrator_wake", "orchestrator_context", "paired_browsers",
         "whiteboard_boards", "displays_open"]);

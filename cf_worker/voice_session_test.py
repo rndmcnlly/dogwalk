@@ -1341,6 +1341,8 @@ def provider_posts(path: str, payload: dict, _raw: bytes):
     if path == "/api/sandboxes/mock-sandbox-1/signed-preview-urls/revoke":
         PROVIDER["revoked"].append(len(PROVIDER["signed"]))
         return {}
+    if path == "/toolbox/mock-sandbox-1/computeruse/stop":
+        return {"message": "computer use stopped", "status": {}}
     if path == "/api/sandboxes/mock-sandbox-1/access-token":
         assert payload["operations"] == ["ssh"] and payload["ports"] == [], payload
         token = f"ssh-token-{len(PROVIDER['ssh']) + 1}"
@@ -2408,7 +2410,7 @@ async def run_protocol(identity: str) -> None:
         await mocks.send_live(delegation("del-wb-end2", 107050))
         await recv_type(slides, "unpaired", 15)
         await wait_for(outputs_back("we-unpair", "we-state"), 15)
-        assert OrchestratorMock.tool_output("we-unpair") == {"ok": True, "display": "projector", "browsers_unpaired": 1}
+        assert OrchestratorMock.tool_output("we-unpair")["browsers_unpaired"] == 1 and "SSH cannot be revoked" in OrchestratorMock.tool_output("we-unpair")["ssh_warning"]
         assert [item["name"] for item in OrchestratorMock.tool_output("we-state")["displays"]] == ["main"]
         assert revoked(projector_terminal) and takeovers_ended(7681) > ended_before, "an ended Display's terminal links and pages end"
         await wait_for(lambda: heard('browser_disconnected: {"display":"projector"}'), 10)
