@@ -184,6 +184,8 @@ export function toolboxOf(env: Env, sandbox: DaytonaSandbox): Toolbox {
   };
 }
 
+const MAX_LOG_PAGES = 100;
+
 /** Run a bash script to completion. Output interleaves stdout and stderr, as one stream would. */
 export async function execute(
   { toolbox, headers }: Toolbox, script: string, timeoutSeconds: number,
@@ -204,9 +206,10 @@ export async function execute(
   if (process.state !== "terminal") throw new Error("the command did not finish in time");
   let result = "";
   let page = process.logs;
-  for (let pages = 0; page && pages < 100; pages++) {
+  for (let pages = 1; page; pages++) {
     result += page.frames.map((frame) => frame.data).join("");
     if (page.eof !== false || !page.nextCursor) break;
+    if (pages >= MAX_LOG_PAGES) throw new Error("the command printed too much output");
     const more = new URLSearchParams({ cursor: page.nextCursor, encoding: "text" });
     const next = await fetch(`${toolbox}/processes/${encodeURIComponent(process.id)}/logs?${more}`, { headers, signal: AbortSignal.timeout(10_000) });
     if (!next.ok) throw new Error(`the sandbox could not return a command's output (${next.status})`);

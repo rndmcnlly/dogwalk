@@ -1202,6 +1202,7 @@ reload an old Paired Browser tab so it uses `Terminal(label?)`. Existing tmux
 sessions in the Sandbox are not killed; attach manually if needed.
 
 Focused checks from the repository root:
+`node --experimental-strip-types cf_worker/daytona_test.ts` covers the provider adapter, and
 `node --experimental-strip-types cf_worker/access_grants_test.ts` covers
 short remaining lifetimes, refused opens, mint/revoke races, failed revocation
 retries, unattended Display expiry, crash recovery after every authority-removal

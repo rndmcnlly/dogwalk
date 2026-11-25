@@ -145,6 +145,21 @@ try {
   assert.deepEqual(provider.requests, ["revoke sandbox", "get sandbox", "stop sandbox 6080", "fetch sandbox/computeruse/stop"]);
   assert.deepEqual(await state.storage.get("access_revocations"), []);
 
+  // An ending still owed when a page opens comes first, so it cannot close the new server; one that
+  // cannot be done refuses the open.
+  const owed = { id: "owed", sandboxId: "sandbox", port: 7681, linksUntil: 0, retryAt: now + 21_600_000 };
+  await state.storage.put({ whiteboard_boards: [board], signed_links: [], access_revocations: [owed] });
+  for (const grant of Object.values(board.access) as any[]) delete grant.revoked;
+  await state.storage.put("whiteboard_boards", [board]);
+  provider.requests = [];
+  await host.openAccess(browser, "b1", "terminal:");
+  assert.deepEqual(provider.requests, ["get sandbox", "stop sandbox 7681", "start 7681", "sign sandbox 7681 60"]);
+  await state.storage.put({ signed_links: [], access_revocations: [owed] });
+  provider.status = "paused";
+  await assert.rejects(host.openAccess(browser, "b1", "terminal:"), /still being ended/);
+  provider.status = "running";
+  await state.storage.put({ signed_links: [], access_revocations: [] });
+
   // A deleted Sandbox has nothing left to end.
   await state.storage.put({ access_revocations: [{ id: "gone", sandboxId: "sandbox", port: 7681, linksUntil: now + 60_000, retryAt: now }] });
   provider.fail = new ApiError(404);

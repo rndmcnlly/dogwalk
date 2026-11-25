@@ -2863,7 +2863,7 @@ export class VoiceSession {
       const link: SignedLink = { grant: grantId, port, expiresAt: grant.expires_at };
       let signed: { url: string };
       try {
-        if (isTakeoverPort(port)) await this.startTakeover(port);
+        if (isTakeoverPort(port)) await this.startTakeover(sandboxId, port);
         // Recompute after startup; never round a nearly expired grant up to a minute.
         const seconds = Math.min(Math.floor((grant.expires_at - Date.now()) / 1000), 24 * 3600);
         if (seconds < 1) throw new Error("that access has expired");
@@ -2895,8 +2895,17 @@ export class VoiceSession {
     return result;
   }
 
-  private startTakeover(port: number): Promise<void> {
-    return this.inTakeoverTurn(() => this.startTakeoverNow(port));
+  // Endings still owed (one saved while the Sandbox slept, say) come first: run later, they would
+  // close the server this open is about to hand out.
+  private startTakeover(sandboxId: string, port: number): Promise<void> {
+    return this.inTakeoverTurn(async () => {
+      await this.flushAccessRevocationsNow(true);
+      const owed = await this.state.storage.get<AccessRevocation[]>("access_revocations") ?? [];
+      if (owed.some((item) => item.sandboxId === sandboxId && item.port === port)) {
+        throw new Error("earlier access is still being ended; try again shortly");
+      }
+      await this.startTakeoverNow(port);
+    });
   }
 
   private async startTakeoverNow(port: number): Promise<void> {
