@@ -118,7 +118,7 @@ function renderTree(){
   t.append(el("div","managed sessions & prompt turns: telemetry not wired","standby"));
 
   // ROOT: Sandbox Assignments (wired via registrations)
-  const started=DATA.registrations.filter((r)=>r.state==="started").length;
+  const started=DATA.registrations.filter((r)=>r.state==="running").length;
   t.append(node(0,{root:true,icon:"\\u25eb",label:"Sandbox Assignments",count:started+" started",tag:"hosting"}));
   DATA.registrations.filter((r)=>r.provider_id).forEach((r)=>{
     t.append(node(1,{kind:"sandbox",id:r.diagnostic_id,icon:"\\u25eb",cls:"mut",label:userLabel(r)+" \\u00b7 "+sandboxLabel(r),state:r.state||"unknown",onSelect:true}));
@@ -181,7 +181,7 @@ function renderReg(d,r,kind){
   if(!r){d.append(el("div","not found","standby"));return}
   if(kind==="sandbox"){
     head(d,["Sandbox Assignments",userLabel(r)],sandboxLabel(r),"mut",
-      "user "+userLabel(r)+" \\u00b7 state "+(r.state||"unknown")+(r.desired_state?" \\u2192 "+r.desired_state:""));
+      "user "+userLabel(r)+" \\u00b7 state "+(r.state||"unknown"));
   }else{
     head(d,["Access Control",userLabel(r)],userLabel(r),r.reaped_at?"mut":"blu",
       "registered "+when(r.registered_at)+" \\u00b7 last seen "+when(r.last_seen_at));

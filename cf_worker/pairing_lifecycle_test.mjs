@@ -20,7 +20,7 @@ function harness(hash = async () => "ticket-hash", failDelete = false) {
   const pending = [], warnings = [], cleared = [], events = [];
   const context = vm.createContext({
     Response, Date, WebSocket: { OPEN: 1 }, normalizeDisplayName: (input) => input.trim().toLowerCase(),
-    ACCESS_COMPONENTS, UPLOAD_LIMITS, uploadFolder, GATEWAY_PORT: 8765, WORKSPACE_ROOT: "/home/daytona", errorMessage: (error) => error.message,
+    ACCESS_COMPONENTS, UPLOAD_LIMITS, uploadFolder, GATEWAY_PORT: 8765, isTakeoverPort: (port) => port === 7681 || port === 6080, DAEMON_PORTS: [2280, 2281, 22220], WORKSPACE_ROOT: "/home/daytona", errorMessage: (error) => error.message,
     newBrowserSecret: () => "ticket-secret", sha256Hex: hash,
     setTimeout: () => 7, clearTimeout: (id) => cleared.push(id),
     summarizeLevels: () => ({}), newLevels: () => ({}), lastWords: () => [],

@@ -135,7 +135,7 @@ Re-verify these before relying on them; they describe the code at commit
 
 ### Authorization: powers inside the Sandbox
 
-- **Inference key:** `OPENAI_API_KEY` arrives as a Daytona Secret placeholder;
+- **Inference key:** `OPENAI_API_KEY` is a Daytona secret placeholder;
   Daytona's egress proxy substitutes the real key only toward `api.openai.com`.
   The Agent cannot read the key but can spend it. `SANDBOX_AGENT_GATEWAY.md`
   recommends a dedicated OpenAI project with a budget; whether one is configured is
@@ -186,15 +186,35 @@ Narrowing it from the previous design: a grant is scoped to one Display and one
 target, has its own expiry, can be revoked by voice (`revoke_access`,
 `unpair_display`), and nothing on a board wakes a sleeping Sandbox.
 
-Terminal, Desktop and Preview opens use port-scoped, expiring, revocable Daytona
-signed links. A Terminal reaches the provider web terminal on port 22222, not a
-Dogwalk relay. These links are bearer capabilities, not browser-bound credentials:
-anyone who obtains one can use it while it is valid, without a Daytona login.
-The API key and Sandbox-wide preview token stay server-side. Expiry and revocation
-block new access, but existing provider connections close on a grace period,
-not immediately. A 2026-11-14 PoC on daemon 0.232.2 observed a 3.7-second disconnect
-after explicit revocation and a live connection ending 48 seconds after its
-60-second link expired. This is evidence of behavior, not a hard cutoff guarantee.
+Terminal, Desktop and Preview opens use port-scoped, expiring Daytona signed links. A
+Terminal reaches ttyd in the Sandbox (port 7681) and a Desktop noVNC (6080), each a full
+shell or screen with no login of its own, run only while a grant is open and reachable only
+through a signed link (or by a process already in the Sandbox). These links are bearer
+capabilities, not browser-bound credentials: anyone who obtains one can use it while it is
+valid, without a Daytona login. The API key and Sandbox-wide preview token stay server-side.
+
+Daytona v2 revokes less than v0 did (measured 2026-11-25), and Dogwalk makes up what it can:
+
+- **Signed links** are revoked only for a whole Sandbox, and open sockets survive
+  revocation. Dogwalk also ends the ttyd or noVNC server, which closes live Terminal and
+  Desktop pages at once, on revocation and when any link to that server expires. An Agent with `sudo`
+  could start its own server on that port, but it needs no grant to serve a shell. Ending one
+  Display's links ends every Display's; they reopen under their own grants.
+- **Preview:** new opens are refused, but an app's open socket is not closed (accepted: it
+  reaches one port the User showed).
+- **SSH tokens cannot be revoked**, even by rotating the Sandbox's signing key. Each lasts
+  five minutes at most rather than the grant's length, and `revoke_access` and
+  `unpair_display` report that a session may be open, whenever a command has been opened since
+  the last restart. A session already open lasts until it disconnects or the Sandbox
+  restarts, whatever happens to its grant: a full shell outliving its authority, accepted
+  only with the voice `restart_sandbox` as the certain end.
+- **A paused Sandbox** freezes its takeover servers; they are ended when it next wakes, and
+  no link to them is valid meanwhile.
+
+Sandboxes share one Daytona project with the operator's other work, so its API key reaches
+those Sandboxes and theirs could be given Dogwalk's secret by name. Nothing on a board wakes
+a Sandbox: `wake_on_request` is off, so neither does a request to a leaked link.
+
 Mint completion rechecks stored authorization atomically with credential
 registration, so revocation cannot miss a token still being minted. Failed
 provider revocations are kept in a durable outbox and retried by alarm; explicit

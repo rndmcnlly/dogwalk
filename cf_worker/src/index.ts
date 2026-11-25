@@ -24,6 +24,10 @@ import {
   findInviteCode, INVITATION_STATUS_SQL, noteEnrollmentOutcome, noteInviteHeard, redemptionStatements, registrationCoolingDown,
   USABLE_FOR_PHONE_SQL,
 } from "./invitations";
+import {
+  ASLEEP_STATUSES, BROKEN_STATUSES, createSandbox, DaytonaApiError, type DaytonaSandbox, deleteSandbox, execute,
+  FALLING_ASLEEP, findSandboxes, getSandbox, renewRunLimit, restartSandbox, startOnceAsleep, startSandbox, toolboxOf,
+} from "./daytona";
 import { availableHandles } from "./handles";
 import { FRONTEND_INSTRUCTIONS, VOICE, VoiceSession } from "./voice_session";
 import { handleVoiceVerify, warmSpeaker } from "./voice_verify";
@@ -277,18 +281,6 @@ async function usableInviteCodes(env: Env, phone: string): Promise<{ code_words:
 
 // --- Agent Hosting ------------------------------------------------------
 
-const DAYTONA_LABEL_MANAGED = "dogwalk.dev/managed-by";
-const DAYTONA_LABEL_IDENTITY = "dogwalk.dev/identity";
-
-interface DaytonaSandbox {
-  id: string;
-  name: string;
-  state: string;
-  desiredState?: string;
-  errorReason?: string | null;
-  toolboxProxyUrl?: string;
-}
-
 /** A User as Access Control resolves one for a call: by Home today, by Identity Check later. */
 interface User {
   id: number;
@@ -303,28 +295,6 @@ interface SandboxAssignment {
   error: string | null;
   provisioning_started_at: number;
   last_checked_at: number | null;
-}
-
-const daytonaBase = (env: Env) => (env.DAYTONA_API_BASE ?? "https://app.daytona.io/api").replace(/\/$/, "");
-
-class DaytonaApiError extends Error {
-  constructor(readonly status: number, detail: string) {
-    super(`Daytona ${status}: ${detail}`);
-  }
-}
-
-async function daytonaFetch<T>(env: Env, path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${daytonaBase(env)}${path}`, {
-    ...init,
-    headers: {
-      authorization: `Bearer ${env.DAYTONA_API_KEY}`,
-      ...(init.body ? { "content-type": "application/json" } : {}),
-      ...init.headers,
-    },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!response.ok) throw new DaytonaApiError(response.status, (await response.text()).slice(0, 300));
-  return response.json<T>();
 }
 
 // An opaque, stable key for a new User's Durable Objects and provider label. It derives from
@@ -379,23 +349,13 @@ async function updateAssignment(env: Env, user: User, sandbox: DaytonaSandbox, e
       WHERE user_id = ? AND provider_id IS ?`,
   ).bind(
     sandbox.id,
-    sandbox.state,
-    sandbox.errorReason ?? null,
+    sandbox.status,
+    sandbox.error ?? null,
     Math.floor(Date.now() / 1000),
     user.id,
     expected,
   ).run();
   return result.meta.changes === 1;
-}
-
-async function findDaytonaSandboxes(env: Env, hash: string): Promise<DaytonaSandbox[]> {
-  const labels = JSON.stringify({
-    [DAYTONA_LABEL_MANAGED]: "dogwalk",
-    [DAYTONA_LABEL_IDENTITY]: `identity-v1:${hash}`,
-  });
-  const query = new URLSearchParams({ labels, limit: "3" });
-  const result = await daytonaFetch<{ items: DaytonaSandbox[] }>(env, `/sandbox?${query}`);
-  return result.items;
 }
 
 async function ensureSandboxAssignment(env: Env, user: User): Promise<SandboxAssignment> {
@@ -409,15 +369,20 @@ async function ensureSandboxAssignment(env: Env, user: User): Promise<SandboxAss
   if (!assignment) throw new Error("sandbox assignment insert failed");
   if (assignment.provider_id) return assignment;
 
-  // Never adopt a reaped Sandbox, pending deletion or already deleted (Daytona's label listing is
-  // eventually consistent and can show a deleted Sandbox as running for a while), nor one the
-  // provider lists as destroying after a replacement.
+  // Never adopt a reaped Sandbox, pending deletion or already deleted: Daytona's label search is
+  // eventually consistent and can show a deleted Sandbox as running for a while, so each is also
+  // read directly.
   const pending = await env.DB.prepare("SELECT provider_id FROM sandbox_deletions WHERE user_id = ?")
     .bind(user.id).all<{ provider_id: string }>();
   const doomed = new Set(pending.results.map((row) => row.provider_id));
-  const discovered = (await findDaytonaSandboxes(env, hash))
-    .filter((sandbox) => !doomed.has(sandbox.id))
-    .filter((sandbox) => ![sandbox.state, sandbox.desiredState].some((state) => state === "destroying" || state === "destroyed"));
+  const discovered: DaytonaSandbox[] = [];
+  for (const { id } of (await findSandboxes(env, `identity-v1:${hash}`)).filter((sandbox) => !doomed.has(sandbox.id))) {
+    try {
+      discovered.push(await getSandbox(env, id));
+    } catch (error) {
+      if (!(error instanceof DaytonaApiError) || error.status !== 404) throw error;
+    }
+  }
   if (discovered.length > 1) {
     await env.DB.prepare(
       "UPDATE sandbox_assignments SET state = 'conflict', error = ? WHERE user_id = ?",
@@ -439,49 +404,11 @@ async function ensureSandboxAssignment(env: Env, user: User): Promise<SandboxAss
   }
   if (!ownsProvisioning) return assignment;
 
-  if (!env.DAYTONA_SNAPSHOT) throw new Error("Daytona snapshot is not configured");
-
-  const sandbox = await daytonaFetch<DaytonaSandbox>(env, "/sandbox", {
-    method: "POST",
-    body: JSON.stringify({
-      name: `dogwalk-${hash.slice(0, 12)}-${crypto.randomUUID().slice(0, 8)}`,
-      snapshot: env.DAYTONA_SNAPSHOT,
-      // A Daytona Secret name, not a value: the egress proxy substitutes the key into
-      // HTTPS headers to allowlisted hosts, so the sandbox only ever holds a placeholder.
-      ...(env.DAYTONA_AGENT_SECRET ? { secrets: [{ OPENAI_API_KEY: env.DAYTONA_AGENT_SECRET }] } : {}),
-      labels: {
-        [DAYTONA_LABEL_MANAGED]: "dogwalk",
-        [DAYTONA_LABEL_IDENTITY]: `identity-v1:${hash}`,
-      },
-      public: false,
-      autoStopInterval: 15,
-      autoArchiveInterval: 10080,
-      autoDeleteInterval: -1,
-    }),
-  });
+  if (!env.DAYTONA_IMAGE) throw new Error("Daytona image is not configured");
+  const name = `dogwalk-${hash.slice(0, 12)}-${crypto.randomUUID().slice(0, 8)}`;
+  const sandbox = await createSandbox(env, name, `identity-v1:${hash}`);
   await updateAssignment(env, user, sandbox, null);
   return (await getAssignment(env, user))!;
-}
-
-async function getDaytonaSandbox(env: Env, providerId: string): Promise<DaytonaSandbox> {
-  return daytonaFetch<DaytonaSandbox>(env, `/sandbox/${encodeURIComponent(providerId)}`);
-}
-
-async function executeInSandbox(
-  env: Env,
-  sandbox: DaytonaSandbox,
-  command: string,
-  timeout = 10,
-): Promise<{ result: string; exitCode: number }> {
-  const proxy = (sandbox.toolboxProxyUrl ?? "https://proxy.app.daytona.io/toolbox").replace(/\/$/, "");
-  const response = await fetch(`${proxy}/${encodeURIComponent(sandbox.id)}/process/execute`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.DAYTONA_API_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify({ command, timeout, envs: { LC_ALL: "C" } }),
-    signal: AbortSignal.timeout((timeout + 2) * 1000),
-  });
-  if (!response.ok) throw new Error(`Daytona toolbox ${response.status}`);
-  return response.json<{ result: string; exitCode: number }>();
 }
 
 async function resolveSandbox(
@@ -497,13 +424,13 @@ async function resolveSandbox(
   if (
     assignment.last_checked_at &&
     now - assignment.last_checked_at < 3 &&
-    ["creating", "starting", "restoring"].includes(assignment.state)
+    ["queued", "pending", "assigned", "booting"].includes(assignment.state)
   ) {
     return { assignment };
   }
   let sandbox: DaytonaSandbox;
   try {
-    sandbox = await getDaytonaSandbox(env, assignment.provider_id);
+    sandbox = await getSandbox(env, assignment.provider_id);
   } catch (error) {
     if (!(error instanceof DaytonaApiError) || error.status !== 404 || !replaceMissing) throw error;
     const cleared = await env.DB.prepare(
@@ -621,7 +548,7 @@ async function deleteReapedSandboxes(env: Env): Promise<void> {
     const detail = { user_id: row.user_id, provider_id: row.provider_id };
     let alreadyGone = false;
     try {
-      await daytonaFetch(env, `/sandbox/${encodeURIComponent(row.provider_id)}`, { method: "DELETE" });
+      await deleteSandbox(env, row.provider_id);
     } catch (error) {
       if (error instanceof DaytonaApiError && error.status === 404) {
         alreadyGone = true;
@@ -864,14 +791,13 @@ async function diagnosticsSnapshot(env: Env, verbose: boolean): Promise<Record<s
     const providerId = row.provider_id;
     if (typeof providerId !== "string") return;
     try {
-      const sandbox = await getDaytonaSandbox(env, providerId);
+      const sandbox = await getSandbox(env, providerId);
       // Only while the assignment still names this Sandbox: a reap or replacement during the
       // read wins, and the snapshot keeps the row as it was read rather than a stale refresh.
       const user = { id: Number(row.user_id), identity_hash: String(row.identity_hash), handle: null };
       if (!(await updateAssignment(env, user, sandbox, providerId))) return;
-      row.state = sandbox.state;
-      row.error = sandbox.errorReason ?? null;
-      row.desired_state = sandbox.desiredState ?? null;
+      row.state = sandbox.status;
+      row.error = sandbox.error ?? null;
     } catch (error) {
       row.error = error instanceof Error ? error.message : String(error);
     }
@@ -1460,17 +1386,22 @@ async function handleVoice(req: Request, env: Env, ctx: ExecutionContext): Promi
 // waiting for either. "broken" when the provider reports the Sandbox unusable.
 async function wakeSandbox(env: Env, ctx: ExecutionContext, user: User, from: string, callSid: string): Promise<"broken" | "ok"> {
   const { assignment, sandbox } = await resolveSandbox(env, user);
-  if (sandbox && ["error", "build_failed", "destroyed"].includes(sandbox.state)) {
-    await audit(env, "sandbox.unavailable", from, callSid, { state: sandbox.state });
+  if (sandbox && BROKEN_STATUSES.includes(sandbox.status)) {
+    await audit(env, "sandbox.unavailable", from, callSid, { state: sandbox.status });
     return "broken";
   }
-  if (sandbox && ["stopped", "archived", "paused"].includes(sandbox.state)) {
-    const started = await daytonaFetch<DaytonaSandbox>(env, `/sandbox/${encodeURIComponent(sandbox.id)}/start`, { method: "POST" });
+  if (sandbox && ASLEEP_STATUSES.includes(sandbox.status)) {
+    const started = await startSandbox(env, sandbox.id);
     await updateAssignment(env, user, started, sandbox.id);
-    await audit(env, "sandbox.start.requested", from, callSid, { state: sandbox.state });
+    await audit(env, "sandbox.start.requested", from, callSid, { state: sandbox.status });
+  } else if (sandbox && sandbox.status in FALLING_ASLEEP) {
+    await audit(env, "sandbox.start.requested", from, callSid, { state: sandbox.status });
+    ctx.waitUntil(startOnceAsleep(env, sandbox.id, FALLING_ASLEEP[sandbox.status])
+      .catch((error) => audit(env, "sandbox.start.failed", from, callSid, { message: (error instanceof Error ? error.message : String(error)).slice(0, 200) })));
   } else {
-    const state = sandbox?.state ?? assignment.state;
-    await audit(env, state === "started" ? "sandbox.ready" : "sandbox.waking", from, callSid, { state });
+    const state = sandbox?.status ?? assignment.state;
+    await audit(env, state === "running" ? "sandbox.ready" : "sandbox.waking", from, callSid, { state });
+    if (sandbox?.status === "running") ctx.waitUntil(renewRunLimit(env, sandbox.id).catch((error) => console.error("run limit renewal failed", error)));
   }
   // The VoiceSession starts reaching the Agent while Twilio and GPT-Live set up the call.
   if (assignment.provider_id) ctx.waitUntil(prewarmVoiceSession(env, user, from, assignment.provider_id));
@@ -1580,7 +1511,7 @@ async function handleRecovery(req: Request, env: Env): Promise<Response> {
     const assignment = await getAssignment(env, user);
     if (!assignment?.provider_id) return twiml(Redirect("/voice"));
     try {
-      await daytonaFetch(env, `/sandbox/${encodeURIComponent(assignment.provider_id)}/stop`, { method: "POST" });
+      await restartSandbox(env, assignment.provider_id);
       await audit(env, "sandbox.restart.requested", from, callSid, {});
       return twiml(Say("Restarting.") + Pause(5) + Redirect("/voice"));
     } catch {
@@ -1603,7 +1534,7 @@ async function handleRecoveryConfirm(req: Request, env: Env): Promise<Response> 
   const assignment = await getAssignment(env, user);
   if (assignment?.provider_id) {
     try {
-      await daytonaFetch(env, `/sandbox/${encodeURIComponent(assignment.provider_id)}`, { method: "DELETE" });
+      await deleteSandbox(env, assignment.provider_id);
     } catch (error) {
       if (!(error instanceof DaytonaApiError) || error.status !== 404) return recoveryMenu("Replacement failed. ");
     }
@@ -2198,9 +2129,9 @@ async function handleMenu(req: Request, env: Env): Promise<Response> {
     try {
       const assignment = await getAssignment(env, user);
       if (!assignment?.provider_id) return twiml(Redirect("/voice"));
-      const sandbox = await getDaytonaSandbox(env, assignment.provider_id);
-      if (sandbox.state !== "started") return twiml(Redirect("/voice"));
-      const result = await executeInSandbox(env, sandbox, STATUS_COMMAND);
+      const sandbox = await getSandbox(env, assignment.provider_id);
+      if (sandbox.status !== "running") return twiml(Redirect("/voice"));
+      const result = await execute(toolboxOf(env, sandbox), STATUS_COMMAND, 10);
       if (result.exitCode !== 0) throw new Error(`status command exited ${result.exitCode}`);
       const summary = statusSummary(result.result);
       await audit(env, "menu.status", from, callSid, {});

@@ -31,11 +31,12 @@ ORCHESTRATOR_REASONING_EFFORT = "low"
 # measures against it, and the Opening mentions it past 75%. Change both together.
 DOGWALK_MONTHLY_BUDGET_USD = "80"
 PUBLIC_ORIGIN = "https://dogwalk.tools"
-# Name of a pre-built Daytona snapshot containing OpenCode and the Agent Gateway.
-DAYTONA_SNAPSHOT = "dogwalk-agent-20261112-v1"
-# Name of the org Daytona Secret mapped to OPENAI_API_KEY for sandbox Agents; it holds the
-# OpenAI key dogwalk-sandbox-agents in the Dogwalk project.
-DAYTONA_AGENT_SECRET = "dogwalk-openai"
+# The Daytona image (build_sandbox_image.py) Sandboxes boot from, and the region holding it.
+DAYTONA_IMAGE = "dogwalk-agent-20261125-v1"
+DAYTONA_REGION = "us-east-ash-1"
+# The Daytona project secret Sandboxes get, which is also their variable's name; it holds the
+# OpenAI key dogwalk-sandbox-agents in the Dogwalk project. The image aliases it to OPENAI_API_KEY.
+DAYTONA_AGENT_SECRET = "DOGWALK_OPENAI_API_KEY"
 # Stamped on every observation. The integration tests override it; so should a manual `wrangler dev`.
 DEPLOYMENT_ENVIRONMENT = "production"
 # Sandbox reaping (README: Sandbox Reaping): a daily pass over Sandboxes whose User has made no
@@ -92,7 +93,7 @@ new_sqlite_classes = ["VoiceSession"]
 tag = "v2"
 new_sqlite_classes = ["TerminalRelay"]
 
-# Terminal access now opens Daytona's own web terminal through a signed preview URL.
+# The Terminal no longer runs through the Worker: it opens through a signed preview URL.
 [[migrations]]
 tag = "v3"
 deleted_classes = ["TerminalRelay"]

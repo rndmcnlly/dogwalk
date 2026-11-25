@@ -99,6 +99,15 @@ def read_state(path: Path) -> Service | None:
     return Service(url.rstrip("/"), password, pid if isinstance(pid, int) and not isinstance(pid, bool) else None)
 
 
+# The provider names the inference key's variable after its project-wide secret; the Agent and
+# its tools expect the usual name.
+def agent_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    if key := environment.get("DOGWALK_OPENAI_API_KEY"):
+        environment["OPENAI_API_KEY"] = key
+    return environment
+
+
 # Why the Agent process ended, read from cgroup v2. The gateway's own cgroup and its
 # ancestors are checked, because the memory limit may sit on a parent (the container).
 def cgroup_dirs(root: Path, proc_cgroup: Path) -> list[Path]:
@@ -392,6 +401,7 @@ class AgentGateway:
         process = await asyncio.create_subprocess_exec(
             *command_arguments(self.agent_command, self.workspace),
             cwd=self.workspace,
+            env=agent_environment(),
             stdin=asyncio.subprocess.DEVNULL,
         )
         child = Child(process, oom_before, time.monotonic())
