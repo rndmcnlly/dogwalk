@@ -173,6 +173,8 @@ export async function handleReenrollmentHeard(env: Env, ctx: ExecutionContext, u
     && isAccountSid(account)) return toResult;
   if (!row || !subject?.embedding || row.ritual !== ritual || row.user_id !== subject.id || row.state !== "listening" || row.take !== take
     || !isAccountSid(account)) {
+    const done = await committed(env, callSid);
+    if (done) return stop + done;
     return stop + await end(env, callSid, log, { phase: progress.phase, outcome: "lost_round" }, `Re-enrollment stopped. ${UNCHANGED}`);
   }
   if (subject.version !== progress.ref) return stop + await lostReference(env, callSid, log, progress, subject);
@@ -231,6 +233,8 @@ export async function handleReenrollmentResult(env: Env, ctx: ExecutionContext, 
   const subject = await callSubject(env, callSid);
   const { row, wait_ms } = await awaitScore(env, callSid, round);
   if (!subject?.embedding || !row || row.ritual !== ritual || row.user_id !== subject.id || (row.state !== "scoring" && row.state !== "scored")) {
+    const done = await committed(env, callSid);
+    if (done) return done;
     return end(env, callSid, log, { phase: progress.phase, outcome: "lost_round" }, `Re-enrollment stopped. ${UNCHANGED}`);
   }
   if (subject.version !== progress.ref) return lostReference(env, callSid, log, progress, subject);
@@ -281,6 +285,19 @@ const lostReference = (env: Env, callSid: string, log: Log, progress: Progress, 
   end(env, callSid, log, { phase: progress.phase, user_id: subject.id, outcome: "lost_reference" },
     "Your voice profile changed during this call, so I've left it as it is now.");
 
+/**
+ * A replacement this call already committed, from its reenrollment.replaced receipt: a retried
+ * webhook after the rounds were cleared must not tell the caller that nothing changed.
+ */
+async function committed(env: Env, callSid: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    "SELECT json_extract(detail, '$.outcome') AS outcome FROM call_activity WHERE call_sid = ? AND event = 'reenrollment.replaced' LIMIT 1",
+  ).bind(callSid).first<{ outcome: string }>();
+  if (!row) return null;
+  return Say(row.outcome === "transferred" ? "This account now answers to the new voice. Back to Dogwalk."
+    : "Your new voice profile replaces the old one. Back to Dogwalk.") + RETURN;
+}
+
 /** Cosine similarity of two embeddings, or null when they cannot be compared. */
 function cosine(a: number[], b: number[]): number | null {
   if (a.length !== b.length || a.length === 0) return null;
@@ -311,6 +328,11 @@ async function finish(
   }
   if (continuity >= MATCH_COSINE) {
     return replace(env, callSid, log, subject, "reenrolled", `${lead}Thanks. Your new voice profile replaces the old one.`, continuity);
+  }
+  // Handing the account to another voice takes a full enrollment, never the three-answer fallback.
+  if (embeddings.length < ENROLL_ANSWERS) {
+    return end(env, callSid, log, { phase: "enroll", user_id: subject.id, outcome: "enrollment_failed", answers: embeddings.length },
+      `${lead}That sounded like a different voice, and handing over the account needs all ${ENROLL_ANSWERS} sentences. ${UNCHANGED}`);
   }
   // The collected answers stay in challenge_rounds until the confirmation decides.
   await log("reenrollment.transfer", { user_id: subject.id, answers: embeddings.length, continuity });

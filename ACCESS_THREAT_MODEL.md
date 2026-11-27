@@ -138,7 +138,9 @@ Transfer, the once-a-day Voice Reference limit, and the Opening notices (2026-11
   consumable flag (`cf_worker/src/reenrollment.ts`, `voiceProfileNotice` in
   `cf_worker/src/voice_session.ts`).
 - **The Roaming notice** is marked told only on a call whose own voice check matched, so a
-  spoofed Home call hears it but cannot clear it.
+  spoofed Home call without a matching voice check hears it but cannot clear it. Until a
+  matched call, every Home call repeats it (a frequent caller on the name path, whose short
+  answers often go unscored, may hear the same notice several times).
 - **STIR/SHAKEN** attestation is recorded and spoken in the Opening, never enforced.
 - **No speaker re-check after admission.** Admission is keyed to the call
   (`voice_calls.identity`), consistent with decision 2.
