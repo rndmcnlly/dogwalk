@@ -615,11 +615,12 @@ A User asks the Voice Agent to re-enroll their voice (DOMAIN.md, Re-enrollment);
 its `start_reenrollment` tool leaves a `reenrollment` handoff, so
 `/voice/after-live` redirects to `/voice/reenrollment` (`src/reenrollment.ts`).
 Without a Voice Reference it says there is nothing to replace and returns to
-`/voice`; without the `SPEAKER` binding it says it is unavailable. Otherwise it
+`/voice`; with one set in the last day (`REPLACE_INTERVAL_SECONDS`, from
+`enrolled_at`) it says the profile changes once a day (`too_soon`); without the `SPEAKER` binding it says it is unavailable. Otherwise it
 runs on the round engine of `src/challenge_rounds.ts`, with the Identity
 Check's streams and cues (`/voice/identity/stream`, `tone.wav`,
 `received.wav`) and its own Gather actions, `/voice/reenrollment/heard` and
-`/voice/reenrollment/result`, whose URLs carry `phase` (`check` or `enroll`),
+`/voice/reenrollment/result`, whose URLs carry `phase` (`check`, `enroll`, or `confirm`),
 `silent`, `judged`, `start`, and `ref`, a digest of the Voice Reference the check
 began against: if another call replaces it meanwhile, the next webhook ends this
 ritual unchanged (`lost_reference`).
@@ -633,11 +634,21 @@ ritual unchanged (`lost_reference`).
 - **enroll:** `enrollment` rounds, as in first-call enrollment
   (`ENROLL_ANSWERS`, 5; at least `MIN_ENROLL_ANSWERS`, 3, with 1.5 s of speech,
   via `collectedAnswers` in `src/identity_check.ts`), starting after the check's
-  last round with their own budget of ten. The mean embedding must be in the old
-  reference's embedding space and have a cosine of at least `MATCH_COSINE` with
-  it, or nothing changes (`discontinuous`). The `UPDATE` of `voice_references`
-  is conditioned on the old embedding, so a concurrent change is never
-  overwritten.
+  last round with their own budget of ten. A mean embedding in another
+  embedding space ends it unchanged (`discontinuous`); one with a cosine of at
+  least `MATCH_COSINE` to the old reference replaces it (`reenrolled`).
+- **confirm (Voice Transfer):** a lower cosine is a different voice. With all
+  five answers collected (fewer ends `enrollment_failed`), the caller hears what
+  the new voice gets, and one `identity` round against the **old** reference,
+  with a budget of four, decides: a match replaces it (`transferred`), anything
+  else leaves it unchanged.
+
+Every replacement's `UPDATE` is conditioned on the old embedding and on
+`enrolled_at` being over a day old, so a concurrent change is never overwritten,
+and it commits in one batch with a `reenrollment.replaced` Call Activity row
+(`outcome`), which the Opening's three-day profile notice reads and which lets a
+retried webhook after the commit report the replacement rather than
+`lost_round`.
 
 Every end (stop, two silent rounds, a verifier error, running out of rounds,
 too few answers) deletes the call's `challenge_rounds` and returns to `/voice`
@@ -645,8 +656,9 @@ with "Your voice profile is unchanged." unless it was replaced. Call Activity,
 source `access`: `reenrollment.unavailable`, `reenrollment.started`,
 `reenrollment.round` (`phase`, `round`, `outcome`, `cosine` in the check,
 `speech_seconds`, `cold`, `wait_ms`, `speculative`, `head_start_ms`),
-`reenrollment.repeat`, `reenrollment.checked`, `reenrollment.result`
-(`outcome`: `reenrolled`, `failed`, `discontinuous` with `continuity`,
+`reenrollment.repeat`, `reenrollment.checked`, `reenrollment.transfer`
+(`answers`, `continuity`), `reenrollment.replaced`, `reenrollment.result`
+(`outcome`: `reenrolled`, `transferred`, `too_soon`, `failed`, `discontinuous`,
 `enrollment_failed`, `stopped`, `silent`, `unscored`, `undecided`,
 `lost_round`, or `lost_reference`), and `reenrollment.error`. Never a
 transcript, phrase, embedding, or audio. `voice_calls.identity` is untouched:

@@ -3339,6 +3339,16 @@ async def run_unobserved_end(restart) -> None:
     # this Opening says so, once, in place of the welcome written about the old Sandbox.
     await asyncio.to_thread(d1, f"""INSERT INTO sandbox_deletions (provider_id, user_id, reaped_at, next_attempt_at, deleted_at)
         SELECT 'mock-reaped-old', id, unixepoch() - 60, unixepoch(), unixepoch() FROM users WHERE home_phone = '{TEST_PHONE}'""")
+    # Also since the last call: a failed Roaming attempt, and a Voice Transfer yesterday on another
+    # call. This call's voice check never matched (it has none), so the Roaming notice is spoken but
+    # stays untold, and the profile notice is derived, never consumed.
+    await asyncio.to_thread(d1, f"""
+INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at, user_id)
+SELECT 'CA_VOICE_PROFILE', '{TEST_PHONE}', 'completed', unixepoch() - 86500, unixepoch() - 86400, id FROM users WHERE home_phone = '{TEST_PHONE}';
+INSERT INTO call_activity (call_sid, ts, source, direction, event, detail)
+VALUES ('CA_VOICE_PROFILE', unixepoch() - 86460, 'access', 'internal', 'reenrollment.replaced', '{{"outcome":"transferred"}}');
+INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at, failures)
+SELECT 'CA_ROAM_FAIL3', id, '+15555550188', unixepoch() - 60, 1 FROM users WHERE home_phone = '{TEST_PHONE}';""")
     async with mocks.serving():
         body, webhook_identity, signature = signed_webhook("CA_VOICE_TEST3", "live-test-4")
         assert await asyncio.to_thread(post_webhook, body, webhook_identity, signature) == 204
@@ -3348,6 +3358,12 @@ async def run_unobserved_end(restart) -> None:
         assert cleared["content"].endswith(f"{REAPED_CLAUSE} Welcome back. Where to?"), cleared["content"]
         notice = await asyncio.to_thread(d1, "SELECT noticed_at FROM sandbox_deletions WHERE provider_id = 'mock-reaped-old'")
         assert notice[0]["noticed_at"] is not None, "the reap notice was not consumed, so a later Opening would repeat it"
+        assert cleared["content"].startswith("Caller ID unverified. Since your last call from home, someone failed the voice check as you "
+                                              "from another phone once. Your voice profile was given to a different voice yesterday. Dogwalk. "), cleared["content"]
+        untold = await asyncio.to_thread(d1, "SELECT noticed_at FROM roaming_attempts WHERE call_sid = 'CA_ROAM_FAIL3'")
+        assert untold[0]["noticed_at"] is None, "a call whose voice check never matched consumed the Roaming notice"
+        await asyncio.to_thread(d1, "DELETE FROM roaming_attempts WHERE call_sid = 'CA_ROAM_FAIL3'; "
+                                    "DELETE FROM call_activity WHERE call_sid = 'CA_VOICE_PROFILE'; DELETE FROM voice_calls WHERE call_sid = 'CA_VOICE_PROFILE'")
         await mocks.send_live(transcript("input", spoken[0], 0, 1500))
         await mocks.send_live(transcript("output", spoken[1], 1600, 2400))
         async with asyncio.timeout(10):

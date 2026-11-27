@@ -2087,7 +2087,9 @@ def identity_checks(base_url: str, token: str) -> None:
 def reenrollment_checks(base_url: str, token: str) -> None:
     """Re-enrollment: from an admitted call, three matched challenges against the current Voice
     Reference (enforced, though the Identity Check is in shadow mode), then five enrollment
-    answers whose mean replaces it outright, only if it still matches the old one."""
+    answers whose mean replaces it outright when it still matches the old one. A different voice
+    is a Voice Transfer, which the current voice confirms with one more challenge. A reference
+    changes at most once a day."""
     received_cue = re.escape("<Play>https://dogwalk.tools/voice/identity/received.wav</Play>")
     connect = '<Redirect method="POST">/voice</Redirect></Response>'
     user = d1_local(f"SELECT id, home_phone FROM users WHERE home_phone LIKE '{TEST_NUMBERS}' AND reaped_at IS NULL "
@@ -2107,9 +2109,10 @@ def reenrollment_checks(base_url: str, token: str) -> None:
         rows = d1_local(f"SELECT embedding FROM voice_references WHERE user_id = {uid}")
         return rows[0]["embedding"] if rows else None
 
-    def set_reference(embedding: str) -> None:
+    def set_reference(embedding: str, age: int = 2 * 86400) -> None:
+        """A Voice Reference enrolled `age` seconds ago: older than a day unless a test says otherwise."""
         d1_local(f"INSERT OR REPLACE INTO voice_references (user_id, embedding_space, embedding, enrolled_at) "
-                 f"VALUES ({uid}, 'mock-speaker-space', '{embedding}', unixepoch())")
+                 f"VALUES ({uid}, 'mock-speaker-space', '{embedding}', unixepoch() - {age})")
 
     def round_of(body: str, sid: str, number: int, phase: str, ritual: str = "identity") -> tuple[str, str, str]:
         name = f"identity-round-{number:02d}"
@@ -2121,9 +2124,11 @@ def reenrollment_checks(base_url: str, token: str) -> None:
         require(row["ritual"] == ritual and f">{row['phrase']}</Say></Gather>" in body, f"re-enrollment round {number} ritual: {row}")
         return stream[1], action[1].replace("&amp;", "&"), row["phrase"]
 
+    last_result: list[str] = []
+
     def answer(body: str, form: dict, number: int, phase: str, seconds: float, sample: int, retried: bool = False) -> str:
         """A matched answer; `retried` posts its transcript twice, as a Twilio retry would."""
-        stream, action, phrase = round_of(body, form["CallSid"], number, phase, "identity" if phase == "check" else "enrollment")
+        stream, action, phrase = round_of(body, form["CallSid"], number, phase, "enrollment" if phase == "enroll" else "identity")
         redirect = []
         def heard() -> None:
             responses = [post(base_url, action, {**form, "SpeechResult": phrase.lower().rstrip("."), "Confidence": "0.9"}, token)[1]
@@ -2133,13 +2138,14 @@ def reenrollment_checks(base_url: str, token: str) -> None:
                                  rf'<Redirect method="POST">(/voice/reenrollment/result\?[^<]+)</Redirect></Response>', responses[0])
             require(match is not None, f"re-enrollment matched phrase: {responses[0]}")
             redirect.append(match[1].replace("&amp;", "&"))
+            last_result[:] = [redirect[-1]]
         practice_stream(base_url, stream, token, number, steady_audio(seconds, sample), heard)
         status, result = post(base_url, redirect[0], form, token)
         require(status == 200, f"re-enrollment result {number}: {status} {result}")
         return result
 
     def say(body: str, form: dict, number: int, phase: str, words: str) -> str:
-        _, action, _ = round_of(body, form["CallSid"], number, phase, "identity" if phase == "check" else "enrollment")
+        _, action, _ = round_of(body, form["CallSid"], number, phase, "enrollment" if phase == "enroll" else "identity")
         return post(base_url, action, {**form, "SpeechResult": words, "Confidence": "0.9"}, token)[1]
 
     # The Voice Agent's handoff, and a User with nothing to replace.
@@ -2196,17 +2202,50 @@ def reenrollment_checks(base_url: str, token: str) -> None:
             f"failed check: {body}")
     require(reference() == near, "a failed check changed the reference")
 
-    # A different voice after a passed check: the new answers do not match the old reference.
-    set_reference(far)
-    form = call("CA_REENROLL_SWAP")
+    # A Voice Transfer: a different voice after a passed check (the new answers do not match the
+    # old reference) hears what continuing gives it, and the current voice must agree.
+    def transfer(sid: str, confirm_sample: int, refresh: bool = False) -> str:
+        set_reference(far)
+        form = call(sid)
+        _, body = post(base_url, "/voice/reenrollment", form, token)
+        for number in range(1, 4):
+            body = answer(body, form, number, "check", 3.0, 8000)
+        for number in range(4, 9):
+            body = answer(body, form, number, "enroll", 3.0, 6000)
+        require("That's a different voice from your current profile. Continuing gives this account to the new voice, "
+                "with its files, memory, and connected accounts." in body and "say stop." in body
+                and re.search(r"phase=confirm&amp;silent=0&amp;judged=0&amp;start=8&amp;ref=[0-9a-f]{16}&amp;round=9&amp;", body),
+                f"transfer confirmation: {body}")
+        require(reference() == far, "the reference changed before the current voice agreed")
+        if refresh:
+            # Another call set the same reference just now: the write itself enforces once a day.
+            d1_local(f"UPDATE voice_references SET enrolled_at = unixepoch() WHERE user_id = {uid}")
+        return answer(body, form, 9, "confirm", 3.0, confirm_sample)
+
+    body = transfer("CA_REENROLL_REFUSE", 3000)
+    require(body == f'<Response><Say voice="Polly.Joanna">Voice not matched. Your voice profile is unchanged. Back to Dogwalk.</Say>{connect}',
+            f"unconfirmed transfer: {body}")
+    require(reference() == far, "an unconfirmed transfer changed the reference")
+    require(d1_local("SELECT COUNT(*) AS n FROM challenge_rounds WHERE call_sid = 'CA_REENROLL_REFUSE'")[0]["n"] == 0, "transfer rows kept")
+    body = transfer("CA_REENROLL_SWAP", 8000)
+    require(body == f'<Response><Say voice="Polly.Joanna">Strong voice match. Thanks. This account now answers to the new voice. '
+            f'Back to Dogwalk.</Say>{connect}', f"confirmed transfer: {body}")
+    vector = json.loads(reference() or "[]")
+    require(len(vector) == 192 and all(abs(v - 192 ** -0.5) < 1e-9 for v in vector), f"transferred reference: {vector[:3]}")
+    # Twilio retries the confirmation's result after the commit cleared the rounds: the caller
+    # still hears the transfer, never "unchanged", and the return note is not overwritten.
+    retried = post(base_url, last_result[0], {"From": phone, "CallSid": "CA_REENROLL_SWAP", "AccountSid": TEST_ACCOUNT}, token)[1]
+    require(retried == f'<Response><Say voice="Polly.Joanna">This account now answers to the new voice. Back to Dogwalk.</Say>{connect}',
+            f"retried transfer result: {retried}")
+
+    # Once a day: the reference just changed, so another Re-enrollment stops before its check.
+    form = call("CA_REENROLL_SOON")
     _, body = post(base_url, "/voice/reenrollment", form, token)
-    for number in range(1, 4):
-        body = answer(body, form, number, "check", 3.0, 8000)
-    for number in range(4, 9):
-        body = answer(body, form, number, "enroll", 3.0, 6000)
-    require("Those answers didn't sound like your current profile. Your voice profile is unchanged." in body and body.endswith(connect),
-            f"discontinuous re-enrollment: {body}")
-    require(reference() == far, "a discontinuous re-enrollment changed the reference")
+    require(body == '<Response><Say voice="Polly.Joanna">Your voice profile was set in the last day, and it can change only once a day. '
+            f'Try again tomorrow. Your voice profile is unchanged. Back to Dogwalk.</Say>{connect}', f"re-enrollment too soon: {body}")
+    body = transfer("CA_REENROLL_COOL", 8000, refresh=True)
+    require(body == f'<Response><Say voice="Polly.Joanna">Re-enrollment stopped. Back to Dogwalk.</Say>{connect}', f"write-time cooldown: {body}")
+    require(reference() == far, "a replacement inside the day overwrote the reference")
 
     # Stop during enrollment cancels it, keeping no collected embedding.
     set_reference(near)
@@ -2237,7 +2276,7 @@ def reenrollment_checks(base_url: str, token: str) -> None:
     rows = d1_local("SELECT source, event, detail FROM call_activity WHERE call_sid LIKE 'CA_REENROLL%' AND event LIKE 'reenrollment.%' ORDER BY id")
     require(rows and all(row["source"] == "access" for row in rows), f"re-enrollment activity source: {rows[:2]}")
     results = [json.loads(row["detail"])["outcome"] for row in rows if row["event"] == "reenrollment.result"]
-    require(results == ["reenrolled", "failed", "discontinuous", "stopped", "lost_reference"], f"re-enrollment results: {results}")
+    require(results == ["reenrolled", "failed", "failed", "transferred", "too_soon", "lost_reference", "stopped", "lost_reference"], f"re-enrollment results: {results}")
     # Each call's end, as the reconnected Voice Agent's call_started reports it: outcome names only.
     notes = {row["call_sid"]: json.loads(row["returned_from"]) for row in
              d1_local("SELECT call_sid, returned_from FROM voice_calls WHERE call_sid LIKE 'CA_REENROLL%'")}
@@ -2245,13 +2284,21 @@ def reenrollment_checks(base_url: str, token: str) -> None:
         "CA_REENROLL_NONE": {"flow": "reenrollment", "outcome": "unavailable", "reason": "no_voice_reference"},
         "CA_REENROLL": {"flow": "reenrollment", "outcome": "reenrolled"},
         "CA_REENROLL_MISS": {"flow": "reenrollment", "outcome": "failed"},
-        "CA_REENROLL_SWAP": {"flow": "reenrollment", "outcome": "discontinuous"},
+        "CA_REENROLL_REFUSE": {"flow": "reenrollment", "outcome": "failed"},
+        "CA_REENROLL_SWAP": {"flow": "reenrollment", "outcome": "transferred"},
+        "CA_REENROLL_SOON": {"flow": "reenrollment", "outcome": "too_soon"},
+        "CA_REENROLL_COOL": {"flow": "reenrollment", "outcome": "lost_reference"},
         "CA_REENROLL_STOP": {"flow": "reenrollment", "outcome": "stopped"},
         "CA_REENROLL_RACE": {"flow": "reenrollment", "outcome": "lost_reference"},
     }, f"re-enrollment return notes: {notes}")
     require(not any({"phrase", "transcript", "embedding"} & json.loads(row["detail"]).keys() for row in rows),
             "Call Activity kept re-enrollment speech")
-    require({"reenrollment.unavailable", "reenrollment.started", "reenrollment.round", "reenrollment.checked"} <= {row["event"] for row in rows},
+    # The Opening's profile notice reads reenrollment.replaced, committed with each replacement only.
+    replaced = {(row["call_sid"], json.loads(row["detail"])["outcome"]) for row in
+                d1_local("SELECT call_sid, detail FROM call_activity WHERE event = 'reenrollment.replaced' AND call_sid LIKE 'CA_REENROLL%'")}
+    require(replaced == {("CA_REENROLL", "reenrolled"), ("CA_REENROLL_SWAP", "transferred")}, f"replacement notice records: {replaced}")
+    require({"reenrollment.unavailable", "reenrollment.started", "reenrollment.round", "reenrollment.checked", "reenrollment.transfer"}
+            <= {row["event"] for row in rows},
             f"re-enrollment events: {sorted({row['event'] for row in rows})}")
     set_reference("[0.5, 0.5]")
 STRANGER_PHONE = "+15555550124"

@@ -116,7 +116,8 @@ Three voice matches are one factor sampled three times, not three factors.
 ## Current state (2026-11-14)
 
 Re-verify these before relying on them; they describe the code at commit
-`1da7666`, plus the Upload Access Element (issue #63, 2026-11-14).
+`1da7666`, plus the Upload Access Element (issue #63, 2026-11-14), plus Voice
+Transfer, the once-a-day Voice Reference limit, and the Opening notices (2026-11-27).
 
 ### Authentication
 
@@ -128,7 +129,18 @@ Re-verify these before relying on them; they describe the code at commit
   (`ROAMING_ADMISSION = "on"` in `cf_worker/wrangler.toml`). Three matched
   challenges admit for the rest of the call; failures pause a Handle (3 per day)
   and a calling number (5 per day).
-- **Re-enrollment enforces** its own check even while Home is in shadow mode.
+- **Re-enrollment enforces** its own check even while Home is in shadow mode. It is
+  reachable from a Home call or a Roaming-admitted call, replaces a Voice Reference at
+  most once a day (counted from `voice_references.enrolled_at`, which first enrollment also
+  sets), and a different voice becomes a **Voice Transfer**: the current voice must pass one
+  more challenge after hearing that the new voice gets the whole account. For three days
+  after a replacement, every Opening says so, derived from a Call Activity event committed with the replacement, not a
+  consumable flag (`cf_worker/src/reenrollment.ts`, `voiceProfileNotice` in
+  `cf_worker/src/voice_session.ts`).
+- **The Roaming notice** is marked told only on a call whose own voice check matched, so a
+  spoofed Home call without a matching voice check hears it but cannot clear it. Until a
+  matched call, every Home call repeats it (a frequent caller on the name path, whose short
+  answers often go unscored, may hear the same notice several times).
 - **STIR/SHAKEN** attestation is recorded and spoken in the Opening, never enforced.
 - **No speaker re-check after admission.** Admission is keyed to the call
   (`voice_calls.identity`), consistent with decision 2.
@@ -174,7 +186,7 @@ Re-verify these before relying on them; they describe the code at commit
 | Access Grant: Terminal, Desktop, Preview, SSH Access, Download, Upload | Drawn on a board during a call; opened by a click on that Display while the Sandbox runs | 1 h default, up to 12 h on request; ends with its Display or `revoke_access`; Terminal and SSH give a full shell with `sudo`; Upload is a capped write path into `~/uploads/` that accepts files after the call | Yes |
 | Invitation | `create_invitation` voice tool | 24 h, single use; `revoke_invitation` exists | Yes |
 | Handle rename | `offer_handles`, `set_handle` | Permanent; old Handle quarantined 90 days | Yes |
-| Re-enrollment | `start_reenrollment`, own enforced check | Permanent | Yes |
+| Re-enrollment or Voice Transfer | `start_reenrollment`, own enforced check; a transfer is confirmed by the current voice; once a day | Permanent | Yes |
 | Anything the Agent writes | An Agent with shell and `sudo` (SSH keys, tokens, tunnels) | Until the Sandbox is replaced | Yes |
 
 Access Grants are the largest gap: for up to twelve hours after a call, an
@@ -336,6 +348,21 @@ Accepted for one operator-managed deployment whose only Users are invited:
   the page, and reach the Session Orchestrator's context as part of the
   harness event: a prompt-injection channel bounded by the name rules and the
   failure cap. Accepted on the same terms as a Whiteboard Answer's free text.
+- A spoofed Home number reaches Challenge Practice, which speaks a level for up to ten
+  scored rounds per run, with no limit on runs and no notice to the User: an oracle for
+  tuning a voice converter against the Voice Reference. Accepted because Practice is how
+  genuine Users learn how well they are recognized, and an attacker with a working
+  converter needs no oracle; revisit when Home enforcement makes the oracle the only way in.
+- Voice Transfer means a caller who can pass as the current voice (three challenges and one
+  more) can give the account to their own voice in one call, locking the owner out of
+  Roaming. The once-a-day limit stops walking the reference in small steps, not this. The
+  owner still reaches the account from Home while Home is in shadow mode, hears the
+  transfer in the Opening for three days, and recovers through the operator. This widens
+  the already-accepted cloning risk from access to takeover.
+- When the current voice is gone and cannot agree (a sudden illness), no voice path
+  transfers the account: the operator deletes the Voice Reference and decides what to do
+  about the Home, so the next Home call enrolls whoever calls. Home enforcement would make
+  this the only way for a caretaker to take over; keep a non-voice way in at Home.
 - An Agent with `sudo` can create durable access, spend the inference budget, and
   likely self-approve Permission Requests. The Sandbox is the trust boundary, and
   everything inside it is trusted equally.
@@ -382,7 +409,7 @@ These are mirrored briefly under Open Questions in `DOMAIN.md`.
    two or three concrete ceremonies against the driving scenario (criteria fixed
    in advance, including setup and recovery burden) is a prerequisite for
    enforcing the Identity Check on Home calls or changing the ceremony.
-3. What does first-call enrollment establish, and how do Re-enrollment and
+3. What does first-call enrollment establish, and how do Re-enrollment, Voice Transfer, and
    re-invitation avoid becoming weaker side doors?
 4. Which durable-access operations can be separated from ordinary Sandbox work?
    Candidates: pairing or granting access only on a call whose Identity Check

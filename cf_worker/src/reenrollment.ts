@@ -1,18 +1,28 @@
 // Re-enrollment (DOMAIN.md, Access Control): the User-started ritual that replaces their Voice
 // Reference. The Voice Agent's start_reenrollment tool leaves a 'reenrollment' handoff, so
 // /voice/after-live redirects here, and every path ends by redirecting to /voice, which
-// reconnects the Voice Agent. Two phases, in deterministic TwiML with no model:
+// reconnects the Voice Agent. Up to three phases, in deterministic TwiML with no model:
 //
 // - check: Identity Challenges against the current Voice Reference, as many as Roaming takes,
 //   and every one must match. This check is enforced even while the Identity Check is in shadow
 //   mode: Re-enrollment replaces the credential every later check is scored against, so it must
 //   never be weaker than what it protects. A shadow Home check admits anyone holding the Home
 //   phone, and an enforcing Roaming check asks three matches from any phone, so this asks both:
-//   an admitted call (today, a Home call) and three matches. One "Voice not matched." ends it.
+//   an admitted call (Home, or admitted by Roaming) and three matches. One "Voice not matched."
+//   ends it.
 // - enroll: first-call enrollment's answers (identity_check.ts), embedded and collected in the
-//   new setting. The new reference must still match the old one (the same threshold as a
-//   challenge), so a different speaker cannot take over after someone else passed the check.
-//   Then it replaces the old one outright: earlier enrollment does not blend in.
+//   new setting. When the new reference still matches the old one (the same threshold as a
+//   challenge), it replaces the old one outright: earlier enrollment does not blend in.
+// - confirm: a Voice Transfer. When the new answers do not match the old reference, they are a
+//   different voice, which may be intended (a caretaker handing an account back to a recovered
+//   patient). The caller hears what continuing gives the new voice, and the current voice
+//   must pass one more challenge against the old reference, so it was still there after hearing
+//   the consequence. Then the new reference replaces the old one.
+//
+// A Voice Reference is replaced at most once a day (REPLACE_INTERVAL_SECONDS), so it cannot be
+// walked by repeated replacements in one call, and the User's Openings tell them for a few days
+// after it changes (voice_session.ts, voiceProfileNotice), from a reenrollment.replaced event
+// committed with the replacement.
 //
 // Rounds have the Identity Challenge's shape and rules (challenge_rounds.ts) and share the
 // Identity Check's streams and cues (/voice/identity/stream, tone, received); only the Gather
@@ -28,18 +38,22 @@ import type { Env } from "./types";
 
 // Configuration, not domain rules. Rounds, judged or not, before a phase gives up: wrong phrases
 // and thin speech never count as failures, so these bound a line that never yields a judgment.
-const MAX_ROUNDS: Record<Phase, number> = { check: 8, enroll: 10 };
+const MAX_ROUNDS: Record<Phase, number> = { check: 8, enroll: 10, confirm: 4 };
+/** The least time between replacements of a Voice Reference (enrolled_at, which first enrollment also sets). */
+export const REPLACE_INTERVAL_SECONDS = 86400;
 // Empty transcripts in a row before Re-enrollment gives up.
 const MAX_SILENT_ROUNDS = 2;
 
-type Phase = "check" | "enroll";
-const ritualOf = (phase: Phase): Ritual => (phase === "check" ? "identity" : "enrollment");
+type Phase = "check" | "enroll" | "confirm";
+const ritualOf = (phase: Phase): Ritual => (phase === "enroll" ? "enrollment" : "identity");
 type Log = (event: string, detail: Record<string, unknown>) => Promise<void>;
 
 const RETURN = '<Redirect method="POST">/voice</Redirect>';
 const UNCHANGED = "Your voice profile is unchanged.";
 
-interface Subject { id: number; identity_hash: string; embedding_space: string | null; embedding: string | null; version: string }
+interface Subject {
+  id: number; identity_hash: string; embedding_space: string | null; embedding: string | null; recent: number; version: string;
+}
 
 /**
  * This Voice Call's User and their Voice Reference, as callUser resolves the User. version is a
@@ -48,10 +62,10 @@ interface Subject { id: number; identity_hash: string; embedding_space: string |
  */
 async function callSubject(env: Env, callSid: string): Promise<Subject | null> {
   const row = await env.DB.prepare(
-    `SELECT u.id, u.identity_hash, vr.embedding_space, vr.embedding
+    `SELECT u.id, u.identity_hash, vr.embedding_space, vr.embedding, COALESCE(vr.enrolled_at > unixepoch() - ?, 0) AS recent
        FROM voice_calls c JOIN users u ON u.id = c.user_id LEFT JOIN voice_references vr ON vr.user_id = u.id
       WHERE c.call_sid = ? AND u.reaped_at IS NULL`,
-  ).bind(callSid).first<Omit<Subject, "version">>();
+  ).bind(REPLACE_INTERVAL_SECONDS, callSid).first<Omit<Subject, "version">>();
   if (!row) return null;
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${row.embedding_space}\n${row.embedding}`));
   const version = [...new Uint8Array(digest).slice(0, 8)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -64,7 +78,7 @@ interface Progress { phase: Phase; silent: number; judged: number; start: number
 function progressOf(url: URL): Progress | null {
   const phase = url.searchParams.get("phase");
   const ref = url.searchParams.get("ref") ?? "";
-  if ((phase !== "check" && phase !== "enroll") || !/^[0-9a-f]{16}$/.test(ref)) return null;
+  if ((phase !== "check" && phase !== "enroll" && phase !== "confirm") || !/^[0-9a-f]{16}$/.test(ref)) return null;
   const count = (name: string) => Number(url.searchParams.get(name) ?? "0") || 0;
   return { phase, silent: count("silent"), judged: count("judged"), start: count("start"), ref };
 }
@@ -102,8 +116,8 @@ async function nextRound(
   subject: Subject, spoken: string,
 ): Promise<string> {
   if (outOfRounds(round, progress)) {
-    if (progress.phase === "enroll") return finish(env, callSid, log, subject, spoken);
-    return end(env, callSid, log, { phase: "check", user_id: subject.id, outcome: "undecided", judged: progress.judged },
+    if (progress.phase === "enroll") return finish(env, ctx, url, callSid, account, log, round, subject, spoken);
+    return end(env, callSid, log, { phase: progress.phase, user_id: subject.id, outcome: "undecided", judged: progress.judged },
       `${spoken} That's all for now. ${UNCHANGED}`);
   }
   return (spoken ? Say(spoken) : "") + await roundTwiml(env, ctx, url, callSid, account, round + 1, progress, subject);
@@ -124,6 +138,11 @@ export async function startReenrollment(env: Env, ctx: ExecutionContext, url: UR
     await log("reenrollment.unavailable", { reason: env.SPEAKER ? "no_account" : "no_verifier" });
     await noteReturn(env, callSid, "reenrollment", "unavailable", env.SPEAKER ? "no_account" : "no_verifier");
     return Say("Voice re-enrollment is not available right now. Back to Dogwalk.") + RETURN;
+  }
+  if (subject.recent) {
+    await log("reenrollment.result", { phase: "check", user_id: subject.id, outcome: "too_soon" });
+    await noteReturn(env, callSid, "reenrollment", "too_soon");
+    return Say(`Your voice profile was set in the last day, and it can change only once a day. Try again tomorrow. ${UNCHANGED} Back to Dogwalk.`) + RETURN;
   }
   // Rows outlive a call that hung up mid-round; any start clears those too.
   await clearRounds(env, callSid);
@@ -154,6 +173,8 @@ export async function handleReenrollmentHeard(env: Env, ctx: ExecutionContext, u
     && isAccountSid(account)) return toResult;
   if (!row || !subject?.embedding || row.ritual !== ritual || row.user_id !== subject.id || row.state !== "listening" || row.take !== take
     || !isAccountSid(account)) {
+    const done = await committed(env, callSid);
+    if (done) return stop + done;
     return stop + await end(env, callSid, log, { phase: progress.phase, outcome: "lost_round" }, `Re-enrollment stopped. ${UNCHANGED}`);
   }
   if (subject.version !== progress.ref) return stop + await lostReference(env, callSid, log, progress, subject);
@@ -212,6 +233,8 @@ export async function handleReenrollmentResult(env: Env, ctx: ExecutionContext, 
   const subject = await callSubject(env, callSid);
   const { row, wait_ms } = await awaitScore(env, callSid, round);
   if (!subject?.embedding || !row || row.ritual !== ritual || row.user_id !== subject.id || (row.state !== "scoring" && row.state !== "scored")) {
+    const done = await committed(env, callSid);
+    if (done) return done;
     return end(env, callSid, log, { phase: progress.phase, outcome: "lost_round" }, `Re-enrollment stopped. ${UNCHANGED}`);
   }
   if (subject.version !== progress.ref) return lostReference(env, callSid, log, progress, subject);
@@ -235,8 +258,15 @@ export async function handleReenrollmentResult(env: Env, ctx: ExecutionContext, 
     return next(ritual === "enrollment" ? "I didn't get enough of that one. Here's another." : "Not enough to judge. Here's another.");
   }
   if (verdict.outcome === "collected") {
-    if (progress.judged + 1 >= ENROLL_ANSWERS) return finish(env, callSid, log, subject, "");
+    if (progress.judged + 1 >= ENROLL_ANSWERS) return finish(env, ctx, url, callSid, account, log, round, subject, "");
     return next(enrollmentMark(progress.judged + 1), progress.judged + 1);
+  }
+  // The transfer's confirmation: the current voice agrees, or nothing changes.
+  if (progress.phase === "confirm") {
+    if (verdict.outcome === "no_match") {
+      return end(env, callSid, log, { phase: "confirm", user_id: subject.id, outcome: "failed" }, `${verdict.spoken} ${UNCHANGED}`);
+    }
+    return replace(env, callSid, log, subject, "transferred", `${verdict.spoken} Thanks. This account now answers to the new voice.`);
   }
   // The check: one miss ends it, so every judged round has matched.
   if (verdict.outcome === "no_match") {
@@ -255,6 +285,19 @@ const lostReference = (env: Env, callSid: string, log: Log, progress: Progress, 
   end(env, callSid, log, { phase: progress.phase, user_id: subject.id, outcome: "lost_reference" },
     "Your voice profile changed during this call, so I've left it as it is now.");
 
+/**
+ * A replacement this call already committed, from its reenrollment.replaced receipt: a retried
+ * webhook after the rounds were cleared must not tell the caller that nothing changed.
+ */
+async function committed(env: Env, callSid: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    "SELECT json_extract(detail, '$.outcome') AS outcome FROM call_activity WHERE call_sid = ? AND event = 'reenrollment.replaced' LIMIT 1",
+  ).bind(callSid).first<{ outcome: string }>();
+  if (!row) return null;
+  return Say(row.outcome === "transferred" ? "This account now answers to the new voice. Back to Dogwalk."
+    : "Your new voice profile replaces the old one. Back to Dogwalk.") + RETURN;
+}
+
 /** Cosine similarity of two embeddings, or null when they cannot be compared. */
 function cosine(a: number[], b: number[]): number | null {
   if (a.length !== b.length || a.length === 0) return null;
@@ -265,30 +308,70 @@ function cosine(a: number[], b: number[]): number | null {
 }
 
 /**
- * Replace the Voice Reference with the mean of the collected answers, if there are enough and the
- * new reference still matches the old one. The update is conditioned on the old reference, so a
- * concurrent replacement is never overwritten with one checked against something else.
+ * The collected answers' mean replaces the Voice Reference when it still matches the old one;
+ * a different voice in the same embedding space goes on to the transfer's confirmation instead.
  */
-async function finish(env: Env, callSid: string, log: Log, subject: Subject, spoken: string): Promise<string> {
+async function finish(
+  env: Env, ctx: ExecutionContext, url: URL, callSid: string, account: string, log: Log, round: number, subject: Subject, spoken: string,
+): Promise<string> {
   const { space, embeddings } = await collectedAnswers(env, callSid, subject.id);
   const lead = spoken ? `${spoken} ` : "";
   if (embeddings.length < MIN_ENROLL_ANSWERS) {
     return end(env, callSid, log, { phase: "enroll", user_id: subject.id, outcome: "enrollment_failed", answers: embeddings.length },
       `${lead}I couldn't hear enough to learn your voice. ${UNCHANGED}`);
   }
-  const reference = meanEmbedding(embeddings);
-  const continuity = space === subject.embedding_space ? cosine(reference, JSON.parse(subject.embedding!)) : null;
-  if (continuity === null || continuity < MATCH_COSINE) {
+  const continuity = space === subject.embedding_space ? cosine(meanEmbedding(embeddings), JSON.parse(subject.embedding!)) : null;
+  if (continuity === null) {
+    // Another embedding space cannot be compared, or confirmed against the old reference.
     return end(env, callSid, log, { phase: "enroll", user_id: subject.id, outcome: "discontinuous", answers: embeddings.length,
-      continuity, same_space: space === subject.embedding_space }, `${lead}Those answers didn't sound like your current profile. ${UNCHANGED}`);
+      continuity, same_space: false }, `${lead}Those answers can't be compared with your current profile. ${UNCHANGED}`);
   }
-  const replaced = await env.DB.prepare(
-    `UPDATE voice_references SET embedding_space = ?, embedding = ?, enrolled_at = unixepoch()
-      WHERE user_id = ? AND embedding_space = ? AND embedding = ?`,
-  ).bind(space, JSON.stringify(reference), subject.id, subject.embedding_space, subject.embedding).run();
+  if (continuity >= MATCH_COSINE) {
+    return replace(env, callSid, log, subject, "reenrolled", `${lead}Thanks. Your new voice profile replaces the old one.`, continuity);
+  }
+  // Handing the account to another voice takes a full enrollment, never the three-answer fallback.
+  if (embeddings.length < ENROLL_ANSWERS) {
+    return end(env, callSid, log, { phase: "enroll", user_id: subject.id, outcome: "enrollment_failed", answers: embeddings.length },
+      `${lead}That sounded like a different voice, and handing over the account needs all ${ENROLL_ANSWERS} sentences. ${UNCHANGED}`);
+  }
+  // The collected answers stay in challenge_rounds until the confirmation decides.
+  await log("reenrollment.transfer", { user_id: subject.id, answers: embeddings.length, continuity });
+  const progress: Progress = { phase: "confirm", silent: 0, judged: 0, start: round, ref: subject.version };
+  return Say(`${lead}That's a different voice from your current profile. Continuing gives this account to the new voice, ` +
+    "with its files, memory, and connected accounts. To agree, the current owner repeats one more sentence after the tone. " +
+    "To keep things as they are, say stop.") + await roundTwiml(env, ctx, url, callSid, account, round + 1, progress, subject);
+}
+
+/**
+ * Replace the Voice Reference with the mean of the collected answers. The update is conditioned
+ * on the old reference, so a concurrent replacement is never overwritten with one checked against
+ * something else, and on the old one being at least a day old.
+ */
+async function replace(
+  env: Env, callSid: string, log: Log, subject: Subject, outcome: "reenrolled" | "transferred", spoken: string, continuity?: number,
+): Promise<string> {
+  const { space, embeddings } = await collectedAnswers(env, callSid, subject.id);
+  if (embeddings.length < MIN_ENROLL_ANSWERS) {
+    return end(env, callSid, log, { phase: "enroll", user_id: subject.id, outcome: "lost_round" }, `Re-enrollment stopped. ${UNCHANGED}`);
+  }
+  const reference = meanEmbedding(embeddings);
+  // The User's Openings learn of the change from reenrollment.replaced (voice_session.ts,
+  // voiceProfileNotice), so it commits with the replacement, in one transaction, and only when
+  // the replacement changed a row; the reenrollment.result that end() logs stays best-effort.
+  const [replaced] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE voice_references SET embedding_space = ?, embedding = ?, enrolled_at = unixepoch()
+        WHERE user_id = ? AND embedding_space = ? AND embedding = ? AND enrolled_at <= unixepoch() - ?`,
+    ).bind(space, JSON.stringify(reference), subject.id, subject.embedding_space, subject.embedding, REPLACE_INTERVAL_SECONDS),
+    env.DB.prepare(
+      `INSERT INTO call_activity (call_sid, ts, source, direction, event, detail)
+       SELECT ?, unixepoch(), 'access', 'internal', 'reenrollment.replaced', ? WHERE changes() = 1`,
+    ).bind(callSid, JSON.stringify({ user_id: subject.id, outcome })),
+  ]);
   if (!replaced.meta.changes) {
-    return end(env, callSid, log, { phase: "enroll", user_id: subject.id, outcome: "lost_reference" }, `${lead}Re-enrollment stopped.`);
+    return end(env, callSid, log, { phase: "enroll", user_id: subject.id, outcome: "lost_reference" }, "Re-enrollment stopped.");
   }
-  return end(env, callSid, log, { phase: "enroll", user_id: subject.id, outcome: "reenrolled", answers: embeddings.length, continuity },
-    `${lead}Thanks. Your new voice profile replaces the old one.`);
+  const detail = outcome === "reenrolled" ? { continuity } : {};
+  return end(env, callSid, log, { phase: outcome === "reenrolled" ? "enroll" : "confirm", user_id: subject.id, outcome,
+    answers: embeddings.length, ...detail }, spoken);
 }
