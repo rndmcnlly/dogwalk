@@ -8,3 +8,7 @@ logs/
 __pycache__/
 .ruff_cache/
 dist/
+
+# Local, per-machine state
+.local/
+.openchamber/
