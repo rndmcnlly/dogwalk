@@ -21,7 +21,8 @@
 //
 // A Voice Reference is replaced at most once a day (REPLACE_INTERVAL_SECONDS), so it cannot be
 // walked by repeated replacements in one call, and the User's Openings tell them for a few days
-// after it changes (voice_session.ts, voiceProfileNotice).
+// after it changes (voice_session.ts, voiceProfileNotice), from a reenrollment.replaced event
+// committed with the replacement.
 //
 // Rounds have the Identity Challenge's shape and rules (challenge_rounds.ts) and share the
 // Identity Check's streams and cues (/voice/identity/stream, tone, received); only the Gather
@@ -332,10 +333,19 @@ async function replace(
     return end(env, callSid, log, { phase: "enroll", user_id: subject.id, outcome: "lost_round" }, `Re-enrollment stopped. ${UNCHANGED}`);
   }
   const reference = meanEmbedding(embeddings);
-  const replaced = await env.DB.prepare(
-    `UPDATE voice_references SET embedding_space = ?, embedding = ?, enrolled_at = unixepoch()
-      WHERE user_id = ? AND embedding_space = ? AND embedding = ? AND enrolled_at <= unixepoch() - ?`,
-  ).bind(space, JSON.stringify(reference), subject.id, subject.embedding_space, subject.embedding, REPLACE_INTERVAL_SECONDS).run();
+  // The User's Openings learn of the change from reenrollment.replaced (voice_session.ts,
+  // voiceProfileNotice), so it commits with the replacement, in one transaction, and only when
+  // the replacement changed a row; the reenrollment.result that end() logs stays best-effort.
+  const [replaced] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE voice_references SET embedding_space = ?, embedding = ?, enrolled_at = unixepoch()
+        WHERE user_id = ? AND embedding_space = ? AND embedding = ? AND enrolled_at <= unixepoch() - ?`,
+    ).bind(space, JSON.stringify(reference), subject.id, subject.embedding_space, subject.embedding, REPLACE_INTERVAL_SECONDS),
+    env.DB.prepare(
+      `INSERT INTO call_activity (call_sid, ts, source, direction, event, detail)
+       SELECT ?, unixepoch(), 'access', 'internal', 'reenrollment.replaced', ? WHERE changes() = 1`,
+    ).bind(callSid, JSON.stringify({ user_id: subject.id, outcome })),
+  ]);
   if (!replaced.meta.changes) {
     return end(env, callSid, log, { phase: "enroll", user_id: subject.id, outcome: "lost_reference" }, "Re-enrollment stopped.");
   }

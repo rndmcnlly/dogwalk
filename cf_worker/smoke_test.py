@@ -2278,6 +2278,10 @@ def reenrollment_checks(base_url: str, token: str) -> None:
     }, f"re-enrollment return notes: {notes}")
     require(not any({"phrase", "transcript", "embedding"} & json.loads(row["detail"]).keys() for row in rows),
             "Call Activity kept re-enrollment speech")
+    # The Opening's profile notice reads reenrollment.replaced, committed with each replacement only.
+    replaced = {(row["call_sid"], json.loads(row["detail"])["outcome"]) for row in
+                d1_local("SELECT call_sid, detail FROM call_activity WHERE event = 'reenrollment.replaced' AND call_sid LIKE 'CA_REENROLL%'")}
+    require(replaced == {("CA_REENROLL", "reenrolled"), ("CA_REENROLL_SWAP", "transferred")}, f"replacement notice records: {replaced}")
     require({"reenrollment.unavailable", "reenrollment.started", "reenrollment.round", "reenrollment.checked", "reenrollment.transfer"}
             <= {row["event"] for row in rows},
             f"re-enrollment events: {sorted({row['event'] for row in rows})}")

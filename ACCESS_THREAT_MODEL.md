@@ -134,7 +134,7 @@ Transfer, the once-a-day Voice Reference limit, and the Opening notices (2026-11
   most once a day (counted from `voice_references.enrolled_at`, which first enrollment also
   sets), and a different voice becomes a **Voice Transfer**: the current voice must pass one
   more challenge after hearing that the new voice gets the whole account. For three days
-  after a replacement, every Opening says so, derived from Call Activity rather than a
+  after a replacement, every Opening says so, derived from a Call Activity event committed with the replacement, not a
   consumable flag (`cf_worker/src/reenrollment.ts`, `voiceProfileNotice` in
   `cf_worker/src/voice_session.ts`).
 - **The Roaming notice** is marked told only on a call whose own voice check matched, so a

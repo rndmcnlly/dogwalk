@@ -328,7 +328,9 @@ Transfer. Any other end (stop, silence, too few answers, a verifier error, a
 reference in another embedding space) leaves the Voice Reference unchanged, and
 the caller hears so. For three days after a replacement, the User's Openings
 say that their voice profile was replaced, or given to a different voice, and
-when; this is derived from Call Activity on every call, so no call can consume it. A User without a Voice Reference has nothing to replace and gets
+when; this is derived on every call from a Call Activity event that commits in
+the same transaction as the replacement, so no call can consume it and no
+failed log write can lose it. A User without a Voice Reference has nothing to replace and gets
 first-call enrollment on their next Home call instead. Like a Voice Reference
 itself, Re-enrollment keeps no audio, and its collected embeddings are deleted
 when it ends.

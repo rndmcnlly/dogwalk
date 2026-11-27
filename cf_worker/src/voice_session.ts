@@ -4443,14 +4443,13 @@ export class VoiceSession {
   }
 
   // A replacement of this User's Voice Reference in the last few days, by Re-enrollment or a
-  // Voice Transfer (reenrollment.ts), as one clause of the Opening. Derived from Call Activity on
-  // every call, never marked told, so nobody can consume it; a change made on this call is not news.
+  // Voice Transfer (reenrollment.ts), as one clause of the Opening. Derived on every call from the
+  // reenrollment.replaced event, which commits with the replacement itself, never marked told, so nobody can consume it; a change made on this call is not news.
   private async voiceProfileNotice(): Promise<string | null> {
     if (!this.userId || !this.callSid) return null;
     const row = await this.env.DB.prepare(
       `SELECT a.ts, json_extract(a.detail, '$.outcome') AS outcome FROM voice_calls c JOIN call_activity a ON a.call_sid = c.call_sid
-        WHERE c.user_id = ? AND c.call_sid != ? AND a.event = 'reenrollment.result' AND a.ts > unixepoch() - ?
-          AND json_extract(a.detail, '$.outcome') IN ('reenrolled', 'transferred')
+        WHERE c.user_id = ? AND c.call_sid != ? AND a.event = 'reenrollment.replaced' AND a.ts > unixepoch() - ?
         ORDER BY a.ts DESC LIMIT 1`,
     ).bind(this.userId, this.callSid, VOICE_PROFILE_NOTICE_SECONDS).first<{ ts: number; outcome: string }>();
     return row ? voiceProfileClause(row.outcome, Math.floor(Date.now() / 1000) - row.ts) : null;

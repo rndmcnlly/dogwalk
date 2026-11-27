@@ -3346,7 +3346,7 @@ async def run_unobserved_end(restart) -> None:
 INSERT INTO voice_calls (call_sid, phone_number, status, started_at, last_activity_at, user_id)
 SELECT 'CA_VOICE_PROFILE', '{TEST_PHONE}', 'completed', unixepoch() - 86500, unixepoch() - 86400, id FROM users WHERE home_phone = '{TEST_PHONE}';
 INSERT INTO call_activity (call_sid, ts, source, direction, event, detail)
-VALUES ('CA_VOICE_PROFILE', unixepoch() - 86460, 'access', 'internal', 'reenrollment.result', '{{"phase":"confirm","outcome":"transferred"}}');
+VALUES ('CA_VOICE_PROFILE', unixepoch() - 86460, 'access', 'internal', 'reenrollment.replaced', '{{"outcome":"transferred"}}');
 INSERT INTO roaming_attempts (call_sid, user_id, phone_number, started_at, failures)
 SELECT 'CA_ROAM_FAIL3', id, '+15555550188', unixepoch() - 60, 1 FROM users WHERE home_phone = '{TEST_PHONE}';""")
     async with mocks.serving():
